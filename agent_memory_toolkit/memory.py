@@ -1,6 +1,6 @@
 """AgentMemory: A class for managing agent memories locally and (eventually) in Cosmos DB."""
 
-import uuid
+import uuid, os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -97,6 +97,7 @@ class AgentMemory:
         ai_foundry_credential: Optional["TokenCredential"] = None,
         ai_foundry_api_key: Optional[str] = None,
         embedding_model: str = "text-embedding-3-large",
+        embedding_dimensions: Optional[int] = None,
         adf_endpoint: Optional[str] = None,
         adf_key: Optional[str] = None,
         use_default_credential: bool = True,
@@ -131,6 +132,9 @@ class AgentMemory:
         self.ai_foundry_credential = ai_foundry_credential
         self.ai_foundry_api_key = ai_foundry_api_key
         self.embedding_model = embedding_model
+        self.embedding_dimensions = embedding_dimensions or int(
+            os.environ.get("EMBEDDING_DIMENSIONS", "0") or "0"
+        ) or None
         self._embeddings_client = None
 
         # Azure Durable Functions configuration
@@ -457,10 +461,13 @@ class AgentMemory:
                     azure_ad_token_provider=token_provider,
                 )
 
-        response = self._embeddings_client.embeddings.create(
-            input=[text],
-            model=self.embedding_model,
-        )
+        kwargs: dict[str, Any] = {
+            "input": [text],
+            "model": self.embedding_model,
+        }
+        if self.embedding_dimensions:
+            kwargs["dimensions"] = self.embedding_dimensions
+        response = self._embeddings_client.embeddings.create(**kwargs)
         return response.data[0].embedding
 
     # ------------------------------------------------------------------

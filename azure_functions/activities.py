@@ -51,10 +51,11 @@ def _get_embeddings_client():
 
         endpoint = os.environ["AI_FOUNDRY_ENDPOINT"]
         api_key = os.environ.get("AI_FOUNDRY_API_KEY")
+        api_version = os.environ.get("AI_FOUNDRY_API_VERSION", "2024-12-01-preview")
 
         if api_key:
             _embeddings_client = AzureOpenAI(
-                api_version="2024-12-01-preview",
+                api_version=api_version,
                 azure_endpoint=endpoint,
                 api_key=api_key,
             )
@@ -66,7 +67,7 @@ def _get_embeddings_client():
                 "https://cognitiveservices.azure.com/.default",
             )
             _embeddings_client = AzureOpenAI(
-                api_version="2024-12-01-preview",
+                api_version=api_version,
                 azure_endpoint=endpoint,
                 azure_ad_token_provider=token_provider,
             )
@@ -84,10 +85,11 @@ def _get_chat_client():
 
         endpoint = os.environ["AI_FOUNDRY_ENDPOINT"]
         api_key = os.environ.get("AI_FOUNDRY_API_KEY")
+        api_version = os.environ.get("AI_FOUNDRY_API_VERSION", "2024-12-01-preview")
 
         if api_key:
             _chat_client = AzureOpenAI(
-                api_version="2024-12-01-preview",
+                api_version=api_version,
                 azure_endpoint=endpoint,
                 api_key=api_key,
             )
@@ -99,7 +101,7 @@ def _get_chat_client():
                 "https://cognitiveservices.azure.com/.default",
             )
             _chat_client = AzureOpenAI(
-                api_version="2024-12-01-preview",
+                api_version=api_version,
                 azure_endpoint=endpoint,
                 azure_ad_token_provider=token_provider,
             )

@@ -1,6 +1,6 @@
 """AsyncAgentMemory: Async version of AgentMemory using azure.cosmos.aio and AsyncAzureOpenAI."""
 
-import uuid
+import uuid, os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -28,6 +28,7 @@ class AsyncAgentMemory:
         ai_foundry_credential: Optional["TokenCredential"] = None,
         ai_foundry_api_key: Optional[str] = None,
         embedding_model: str = "text-embedding-3-large",
+        embedding_dimensions: Optional[int] = None,
         adf_endpoint: Optional[str] = None,
         adf_key: Optional[str] = None,
         use_default_credential: bool = True,
@@ -57,6 +58,9 @@ class AsyncAgentMemory:
         self.ai_foundry_credential = ai_foundry_credential
         self.ai_foundry_api_key = ai_foundry_api_key
         self.embedding_model = embedding_model
+        self.embedding_dimensions = embedding_dimensions or int(
+            _os.environ.get("EMBEDDING_DIMENSIONS", "0") or "0"
+        ) or None
         self._embeddings_client = None
 
         self.adf_endpoint = adf_endpoint
@@ -292,9 +296,13 @@ class AsyncAgentMemory:
                     azure_ad_token_provider=token_provider,
                 )
 
-        response = await self._embeddings_client.embeddings.create(
-            input=[text], model=self.embedding_model,
-        )
+        kwargs: dict[str, Any] = {
+            "input": [text],
+            "model": self.embedding_model,
+        }
+        if self.embedding_dimensions:
+            kwargs["dimensions"] = self.embedding_dimensions
+        response = await self._embeddings_client.embeddings.create(**kwargs)
         return response.data[0].embedding
 
     # ------------------------------------------------------------------

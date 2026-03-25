@@ -3,12 +3,18 @@
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
-    "COSMOS_DB_ENDPOINT": "https://<your-account>.documents.azure.com:443/",
+    "languageWorkers:python:defaultExecutablePath": "/Users/jcodella/github/AgentMemoryToolkit/azure_functions/.venv/bin/python",
+
+    "COSMOS_DB_ENDPOINT": "https://<cosmos-endpoint>.documents.azure.com:443/",
     "COSMOS_DB_DATABASE": "ai_memory",
     "COSMOS_DB_CONTAINER": "memories",
-    "AI_FOUNDRY_ENDPOINT": "https://<your-project>.services.ai.azure.com/",
-    "EMBEDDING_MODEL": "text-embedding-3-large",
-    "EMBEDDING_DIMENSIONS": "1536",
-    "LLM_MODEL": "gpt-5-mini"
+
+    "SUMMARIZE_EVERY_N_MESSAGES": "0",
+
+    "AI_FOUNDRY_ENDPOINT": "https://<foundry-endpoint>.openai.azure.com/",
+    "AI_FOUNDRY_LLM": "gpt-5-nano",
+    "AI_FOUNDRY_EMBEDDING_MODEL": "text-embedding-3-large",
+    "EMBEDDING_DIMENSION": "1536",
+    "AI_FOUNDRY_API_VERSION": "2024-12-01-preview"
   }
 }

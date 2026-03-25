@@ -147,12 +147,14 @@ def generate_embeddings(payload: dict) -> list:
     Returns a list of floats (the embedding vector).
     """
     text = payload["text"]
-    model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+    model = os.environ.get("AI_FOUNDRY_EMBEDDING_MODEL", "text-embedding-3-large")
 
+    dimensions = int(os.environ.get("EMBEDDING_DIMENSION", "1536"))
     client = _get_embeddings_client()
     response = client.embeddings.create(
         input=[text],
         model=model,
+        dimensions=dimensions,
     )
     return response.data[0].embedding
 
@@ -222,7 +224,7 @@ def generate_thread_summary(payload: dict) -> dict:
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     recent_k = payload.get("recent_k")
-    model = os.environ.get("LLM_MODEL", "gpt-4o")
+    model = os.environ.get("LLM_MODEL", "gpt-5-nano")
     container = _get_cosmos_container()
 
     # ---- 1. Check for an existing thread summary ----
@@ -309,11 +311,13 @@ def generate_thread_summary(payload: dict) -> dict:
     summary_text = response.choices[0].message.content
 
     # ---- 6. Generate embedding ----
-    embedding_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+    embedding_model = os.environ.get("AI_FOUNDRY_EMBEDDING_MODEL", "text-embedding-3-large")
+    dimensions = int(os.environ.get("EMBEDDING_DIMENSION", "1536"))
     emb_client = _get_embeddings_client()
     emb_response = emb_client.embeddings.create(
         input=[summary_text],
         model=embedding_model,
+        dimensions=dimensions,
     )
     summary_embedding = emb_response.data[0].embedding
 
@@ -370,7 +374,7 @@ def extract_facts(payload: dict) -> dict:
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     recent_k = payload.get("recent_k")
-    model = os.environ.get("LLM_MODEL", "gpt-4o")
+    model = os.environ.get("AI_FOUNDRY_LLM", "gpt-5-nano")
 
     # ---- 1. Query Cosmos DB ----
     container = _get_cosmos_container()
@@ -434,7 +438,8 @@ def extract_facts(payload: dict) -> dict:
         fact_lines = [facts_text.strip()]
 
     # ---- 5. Generate embeddings and store each fact ----
-    embedding_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+    embedding_model = os.environ.get("AI_FOUNDRY_EMBEDDING_MODEL", "text-embedding-3-large")
+    dimensions = int(os.environ.get("EMBEDDING_DIMENSION", "1536"))
     emb_client = _get_embeddings_client()
     now = datetime.now(timezone.utc).isoformat()
     facts_docs = []
@@ -443,6 +448,7 @@ def extract_facts(payload: dict) -> dict:
         emb_response = emb_client.embeddings.create(
             input=[fact],
             model=embedding_model,
+            dimensions=dimensions,
         )
         fact_doc = {
             "id": str(uuid.uuid4()),
@@ -490,7 +496,7 @@ def generate_user_summary(payload: dict) -> dict:
     user_id = payload["user_id"]
     thread_ids = payload.get("thread_ids")
     recent_k = payload.get("recent_k")
-    model = os.environ.get("LLM_MODEL", "gpt-4o")
+    model = os.environ.get("AI_FOUNDRY_LLM", "gpt-5-nano")
     container = _get_cosmos_container()
 
     # ---- 1. Check for an existing user summary ----
@@ -598,11 +604,13 @@ def generate_user_summary(payload: dict) -> dict:
     summary_text = response.choices[0].message.content
 
     # ---- 6. Generate embedding ----
-    embedding_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+    embedding_model = os.environ.get("AI_FOUNDRY_EMBEDDING_MODEL", "text-embedding-3-large")
+    dimensions = int(os.environ.get("EMBEDDING_DIMENSION", "1536"))
     emb_client = _get_embeddings_client()
     emb_response = emb_client.embeddings.create(
         input=[summary_text],
         model=embedding_model,
+        dimensions=dimensions,
     )
     summary_embedding = emb_response.data[0].embedding
 

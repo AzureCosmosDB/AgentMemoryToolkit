@@ -1,0 +1,31 @@
+# Environment
+.env
+local.settings.json
+
+# agents
+.agents/
+.agent/
+.claude/
+skills/
+skills-lock.json
+
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/settings.json
+.vscode/
+
+# macOS
+.DS_Store

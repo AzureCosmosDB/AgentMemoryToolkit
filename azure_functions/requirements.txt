@@ -1,0 +1,5 @@
+azure-functions
+azure-functions-durable
+azure-cosmos
+azure-identity
+openai

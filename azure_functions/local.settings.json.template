@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "COSMOS_DB_ENDPOINT": "https://<your-account>.documents.azure.com:443/",
+    "COSMOS_DB_DATABASE": "ai_memory",
+    "COSMOS_DB_CONTAINER": "memories",
+    "AI_FOUNDRY_ENDPOINT": "https://<your-project>.services.ai.azure.com/",
+    "EMBEDDING_MODEL": "text-embedding-3-large",
+    "EMBEDDING_DIMENSIONS": "1536",
+    "LLM_MODEL": "gpt-5-mini"
+  }
+}

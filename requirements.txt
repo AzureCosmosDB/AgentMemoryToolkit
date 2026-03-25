@@ -1,0 +1,4 @@
+azure-cosmos
+azure-identity
+openai
+aiohttp

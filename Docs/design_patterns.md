@@ -12,7 +12,7 @@ Write a turn memory every time a user or agent message is produced. If the appli
 
 ```python
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit import AsyncAgentMemory
+from agent_memory_toolkit.aio import AsyncAgentMemory
 
 mem = AsyncAgentMemory(
     cosmos_endpoint=COSMOS_ENDPOINT,

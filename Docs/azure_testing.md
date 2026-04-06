@@ -22,12 +22,12 @@ You need:
 
 - an Azure subscription
 - `az login`
-- Python 3.10+
+- Python 3.11+
 - Azure Functions Core Tools v4
 - dependencies installed:
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 pip install -r azure_functions/requirements.txt
 ```
 
@@ -190,7 +190,7 @@ memory.connect_cosmos()
 import os
 from dotenv import load_dotenv
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit import AsyncAgentMemory
+from agent_memory_toolkit.aio import AsyncAgentMemory
 
 load_dotenv()
 

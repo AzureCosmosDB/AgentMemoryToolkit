@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent_memory_toolkit*"]
+
+[project]
+name = "agent-memory-toolkit"
+version = "0.1.0"
+description = "A Python library for storing, retrieving, and transforming AI agent memories backed by Azure Cosmos DB"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = [
+    "azure-cosmos>=4.15.0",
+    "azure-identity>=1.17",
+    "openai>=1.40",
+    "aiohttp>=3.9",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.12",
+    "ruff>=0.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires live Azure services",
+    "e2e: requires full pipeline (Cosmos + ADF + AI)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.coverage.run]
+source = ["agent_memory_toolkit"]

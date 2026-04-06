@@ -10,7 +10,7 @@ This guide covers the shortest path to running the library locally, then validat
 
 | Tool | Install command | Purpose |
 |------|-----------------|---------|
-| Python 3.10+ | `brew install python@3.12` | Runtime |
+| Python 3.11+ | `brew install python@3.13` | Runtime |
 | Azure CLI | `brew install azure-cli` | `az login` for `DefaultAzureCredential` |
 | Azure Functions Core Tools v4 | `brew install azure-functions-core-tools@4` | Run Functions locally |
 | Azurite | `npm install -g azurite` | Local storage emulator for Functions |
@@ -19,7 +19,7 @@ This guide covers the shortest path to running the library locally, then validat
 ### Python packages
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 pip install -r azure_functions/requirements.txt
 ```
 
@@ -168,7 +168,7 @@ for r in results:
 import os, uuid
 from dotenv import load_dotenv
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit import AsyncAgentMemory
+from agent_memory_toolkit.aio import AsyncAgentMemory
 
 load_dotenv()
 
@@ -217,7 +217,7 @@ azurite --silent --location /tmp/azurite --debug /tmp/azurite/debug.log
 
 ```bash
 cd azure_functions
-pip install -r requirements.txt
+pip install -r azure_functions/requirements.txt
 func start
 ```
 
@@ -324,7 +324,7 @@ User summaries also update incrementally when one already exists.
 
 | Problem | Fix |
 |---------|-----|
-| `ImportError: azure.identity` | Run `pip install -r requirements.txt` |
+| `ImportError: azure.identity` | Run `pip install -e ".[dev]"` |
 | `DefaultAzureCredential` fails | Run `az login` and confirm the active subscription |
 | Cosmos 403 | Check Cosmos DB RBAC and wait for propagation |
 | `func: command not found` | Install Azure Functions Core Tools v4 |
@@ -334,6 +334,3 @@ User summaries also update incrementally when one already exists.
 | Function 401 in Azure | Set `ADF_KEY` or pass `?code=<key>` |
 
 For full cloud deployment and validation, see `Docs/azure_testing.md`.
-| Functions host can't connect to storage | Make sure Azurite is running before starting `func start` |
-| Embeddings 401/403 | Confirm the "Cognitive Services OpenAI User" role is assigned to your identity on the AI resource |
-| Functions 401 Unauthorized | The HTTP trigger requires a function key. Pass it as `?code=<key>` in the URL or set `ADF_KEY` in `.env`. See "Get the function key" above. |

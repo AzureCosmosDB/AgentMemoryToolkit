@@ -1,7 +1,7 @@
 # Azure Cosmos DB Agent Memory Toolkit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Azure Cosmos DB](https://img.shields.io/badge/Azure-Cosmos%20DB-0078D4?logo=microsoft-azure)](https://azure.microsoft.com/en-us/products/cosmos-db/)
 [![Follow on X](https://img.shields.io/twitter/follow/AzureCosmosDB?style=social)](https://twitter.com/AzureCosmosDB)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Azure%20Cosmos%20DB-0077B5?logo=linkedin)](https://www.linkedin.com/showcase/azure-cosmos-db/)
@@ -71,11 +71,24 @@ Agent Memory Toolkit is a Python library and Azure-backed reference implementati
 ## Project Structure
 
 ```
-agent_memory_toolkit/          Python library — AgentMemory (sync) + AsyncAgentMemory (async)
+agent_memory_toolkit/          Python library — sync API
+  memory.py                    AgentMemory orchestrator
+  cosmos_memory_client.py      CosmosMemoryStore — Cosmos DB CRUD + vector search
+  embeddings.py                EmbeddingsClient — Azure OpenAI embeddings
+  processing.py                ProcessingClient — Durable Functions polling
+  models.py                    Pydantic data models (MemoryRecord, enums)
+  exceptions.py                Custom exception hierarchy
+  _query_builder.py            Shared query builder (private)
+  aio/                         Async API (mirrors azure.cosmos.aio convention)
+    memory.py                  AsyncAgentMemory
+    cosmos_memory_client.py    AsyncCosmosMemoryStore
+    embeddings.py              AsyncEmbeddingsClient
+    processing.py              AsyncProcessingClient
 azure_functions/               Durable Functions — orchestrator, activities, HTTP trigger
   prompts/                     LLM system prompts — summarize, facts, user_summary + update variants
 Samples/                       Demo notebooks — sync (Demo.ipynb) + async (Demo_async.ipynb)
 Docs/                          Documentation — concepts, local testing, Azure deployment
+tests/                         Unit tests (pytest) — 184 tests, 87% coverage
 ```
 
 ---
@@ -85,7 +98,10 @@ Docs/                          Documentation — concepts, local testing, Azure 
 ### 1. Install
 
 ```bash
-pip install -r requirements.txt
+pip install .
+
+# With dev/test dependencies
+pip install ".[dev]"
 ```
 
 ### 2. Local-only (no Azure)
@@ -156,7 +172,11 @@ result = memory.generate_user_summary(user_id="user-001")
 summary = memory.get_user_summary(user_id="user-001")
 ```
 
-> The async API (`AsyncAgentMemory`) is identical — just `await` each call.
+> The async API (`AsyncAgentMemory`) is identical — just `await` each call. Import from the `aio` subpackage:
+>
+> ```python
+> from agent_memory_toolkit.aio import AsyncAgentMemory
+> ```
 
 ---
 

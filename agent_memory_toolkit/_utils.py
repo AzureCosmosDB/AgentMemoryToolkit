@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
-from .exceptions import ConfigurationError, MemoryNotFoundError, ValidationError
+from .exceptions import ConfigurationError, ValidationError
 
 # ---------------------------------------------------------------------------
 # Validation constants

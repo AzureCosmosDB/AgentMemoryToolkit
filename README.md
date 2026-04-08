@@ -8,22 +8,22 @@
 [![YouTube](https://img.shields.io/badge/YouTube-Azure%20Cosmos%20DB-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@AzureCosmosDB)
 
 
-Agent Memory Toolkit is a Python library and Azure-backed reference implementation for storing, retrieving, and transforming agent memories over time. It combines a simple SDK for local and Cosmos DB operations with Durable Functions pipelines that generate thread summaries, extract facts, and build cross-thread user profiles. The toolkit is designed for agent applications that need both raw conversation history and higher-value derived memory that can be searched semantically later. It provides matching sync (`AgentMemory`) and async (`AsyncAgentMemory`) APIs so the same memory model can be used in scripts, services, notebooks, and larger agent systems.
+Agent Memory Toolkit is a Python library and Azure-backed reference implementation for storing, retrieving, and transforming agent memories over time. It combines a simple SDK for local and Cosmos DB operations with Durable Functions pipelines that generate thread summaries, extract facts, and build cross-thread user profiles. The toolkit is designed for agent applications that need both raw conversation history and higher-value derived memory that can be searched semantically later. It provides matching sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs so the same memory model can be used in scripts, services, notebooks, and larger agent systems.
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                            YOUR AGENTIC APP                                │
-│                  Uses AgentMemory / AsyncAgentMemory                       │
-└────────────────────────────────┬───────────────────────────────────────────┘
-                                 │
-                                 ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                   AGENT MEMORY TOOLKIT (Python SDK)                        │
-│                                                                            │
-│  • Local in-memory CRUD                                                    │
-│  • Cosmos DB storage and retrieval                                         │
-│  • Calls into Azure Durable Functions for memory processing                │
-└───────────────────────┬────────────────────────────────────────────┬───────┘
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│                                  YOUR AGENTIC APP                                    │
+│                   Uses CosmosMemoryClient / AsyncCosmosMemoryClient                  │
+└─────────────────────────────────────────┬────────────────────────────────────────────┘
+                                          │
+                                          ▼
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│                        AGENT MEMORY TOOLKIT (Python SDK)                             │
+│                                                                                      │
+│  • Local in-memory CRUD                                                              │
+│  • Cosmos DB storage and retrieval                                                   │
+│  • Calls into Azure Durable Functions for memory processing                          │
+└──────────────────────────────────────────┬──────────────────────────────┬────────────┘
                         │                                            │
                         │ read / write                               │ Invoke processing pipeline
                         ▼                                            ▼
@@ -72,23 +72,22 @@ Agent Memory Toolkit is a Python library and Azure-backed reference implementati
 
 ```
 agent_memory_toolkit/          Python library — sync API
-  memory.py                    AgentMemory orchestrator
-  cosmos_memory_client.py      CosmosMemoryStore — Cosmos DB CRUD + vector search
-  embeddings.py                EmbeddingsClient — Azure OpenAI embeddings
-  processing.py                ProcessingClient — Durable Functions polling
+  cosmos_memory_client.py      CosmosMemoryClient — local CRUD, Cosmos DB, embeddings, processing
+  embeddings.py                EmbeddingsClient — Azure OpenAI embeddings (internal)
+  processing.py                ProcessingClient — Durable Functions polling (internal)
   models.py                    Pydantic data models (MemoryRecord, enums)
   exceptions.py                Custom exception hierarchy
   _query_builder.py            Shared query builder (private)
+  _utils.py                    Shared helpers (private)
   aio/                         Async API (mirrors azure.cosmos.aio convention)
-    memory.py                  AsyncAgentMemory
-    cosmos_memory_client.py    AsyncCosmosMemoryStore
-    embeddings.py              AsyncEmbeddingsClient
-    processing.py              AsyncProcessingClient
+    cosmos_memory_client.py    AsyncCosmosMemoryClient
+    embeddings.py              AsyncEmbeddingsClient (internal)
+    processing.py              AsyncProcessingClient (internal)
 azure_functions/               Durable Functions — orchestrator, activities, HTTP trigger
   prompts/                     LLM system prompts — summarize, facts, user_summary + update variants
-Samples/                       Demo notebooks — sync (Demo.ipynb) + async (Demo_async.ipynb)
+Samples/                       Demo notebooks + sample scripts
 Docs/                          Documentation — concepts, local testing, Azure deployment
-tests/                         Unit tests (pytest) — 184 tests, 87% coverage
+tests/                         Unit + integration tests (pytest)
 ```
 
 ---
@@ -108,9 +107,9 @@ pip install ".[dev]"
 
 ```python
 import uuid
-from agent_memory_toolkit import AgentMemory
+from agent_memory_toolkit import CosmosMemoryClient
 
-memory = AgentMemory(use_default_credential=False)
+memory = CosmosMemoryClient(use_default_credential=False)
 thread_id = str(uuid.uuid4())
 memory.add_local(user_id="user-001", role="user", thread_id=thread_id, content="Hello world")
 print(memory.get_local())
@@ -126,11 +125,11 @@ cp .env.template .env   # fill in endpoint values
 import os, uuid
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
-from agent_memory_toolkit import AgentMemory
+from agent_memory_toolkit import CosmosMemoryClient
 
 load_dotenv()
 
-memory = AgentMemory(
+memory = CosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
@@ -141,8 +140,7 @@ memory = AgentMemory(
     use_default_credential=True,
     cosmos_credential=DefaultAzureCredential(),
 )
-memory.create_memory_store()
-memory.connect_cosmos()
+# Constructor auto-creates the database and container if they don't exist.
 
 # Add directly to Cosmos
 thread_id = str(uuid.uuid4())
@@ -172,10 +170,10 @@ result = memory.generate_user_summary(user_id="user-001")
 summary = memory.get_user_summary(user_id="user-001")
 ```
 
-> The async API (`AsyncAgentMemory`) is identical — just `await` each call. Import from the `aio` subpackage:
+> The async API (`AsyncCosmosMemoryClient`) is identical — just `await` each call. Import from the `aio` subpackage:
 >
 > ```python
-> from agent_memory_toolkit.aio import AsyncAgentMemory
+> from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
 > ```
 
 ---

@@ -1,10 +1,11 @@
-"""Async Cosmos DB client for the Agent Memory Toolkit.
+"""AsyncCosmosMemoryClient: async variant of CosmosMemoryClient.
 
-Provides :class:`AsyncCosmosMemoryStore` which uses
-``azure.cosmos.aio.CosmosClient`` for non-blocking operations.
+Consolidates the former ``AsyncAgentMemory`` orchestrator and
+``AsyncCosmosMemoryStore`` into a single class that owns local CRUD,
+async Cosmos DB connection/CRUD, embedding-based search, and Azure
+Durable Functions processing.
 
-Embedding generation is **not** this module's responsibility; callers must
-supply pre-computed vectors to :meth:`vector_search`.
+Uses ``azure.cosmos.aio.CosmosClient`` for non-blocking Cosmos operations.
 """
 
 from __future__ import annotations
@@ -16,89 +17,298 @@ from typing import Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
 from agent_memory_toolkit._utils import (
+    VALID_ROLES,
+    VALID_TYPES,
     _build_memory_query_builder,
     _container_policies,
+    _make_memory,
+    _resolve_embedding_dimensions,
     _validate_connection,
     _validate_hybrid_search,
 )
+from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
+from agent_memory_toolkit.aio.processing import AsyncProcessingClient
 from agent_memory_toolkit.exceptions import (
     CosmosNotConnectedError,
     CosmosOperationError,
     MemoryNotFoundError,
+    ValidationError,
 )
 from agent_memory_toolkit.models import MemoryRecord
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Async client
-# ---------------------------------------------------------------------------
+class AsyncCosmosMemoryClient:
+    """Async variant of :class:`CosmosMemoryClient`.
 
+    * Cosmos DB operations use ``azure.cosmos.aio``
+    * Embeddings use ``openai.AsyncAzureOpenAI``
+    * Processing uses ``aiohttp``
+    * Local operations remain synchronous (in-memory list)
 
-class AsyncCosmosMemoryStore:
-    """Async Cosmos DB client for the Agent Memory Toolkit.
+    Supports the async context-manager protocol::
 
-    Uses ``azure.cosmos.aio.CosmosClient`` for non-blocking operations.
+        async with AsyncCosmosMemoryClient() as mem:
+            await mem.connect_cosmos()
+            ...
+
+    Parameters are identical to :class:`CosmosMemoryClient`.
     """
 
     def __init__(
         self,
-        endpoint: str | None = None,
-        credential: Any = None,
-        database: str = "ai_memory",
-        container: str = "memories",
+        cosmos_endpoint: Optional[str] = None,
+        cosmos_credential: Optional[Any] = None,
+        cosmos_database: Optional[str] = None,
+        cosmos_container: Optional[str] = None,
+        ai_foundry_endpoint: Optional[str] = None,
+        ai_foundry_credential: Optional[Any] = None,
+        ai_foundry_api_key: Optional[str] = None,
+        embedding_model: str = "text-embedding-3-large",
+        embedding_dimensions: Optional[int] = None,
+        adf_endpoint: Optional[str] = None,
+        adf_key: Optional[str] = None,
+        use_default_credential: bool = True,
     ) -> None:
-        self._endpoint = endpoint
-        self._credential = credential
-        self._database = database
-        self._container = container
+        # Local store
+        self.local_memory: list[dict[str, Any]] = []
+
+        # Store kwargs directly
+        self._cosmos_endpoint = cosmos_endpoint
+        self._cosmos_credential = cosmos_credential
+        self._cosmos_database = cosmos_database or "ai_memory"
+        self._cosmos_container = cosmos_container or "memories"
+
+        self._ai_foundry_endpoint = ai_foundry_endpoint
+        self._ai_foundry_credential = ai_foundry_credential
+        self._ai_foundry_api_key = ai_foundry_api_key
+        self._embedding_model = embedding_model
+        self._embedding_dimensions = _resolve_embedding_dimensions(embedding_dimensions)
+
+        self._adf_endpoint = adf_endpoint
+        self._adf_key = adf_key
+
+        # Resolve credentials via async DefaultAzureCredential when needed
+        self._owns_credential = False
+        if use_default_credential:
+            needs_cosmos = self._cosmos_credential is None
+            needs_embed = self._ai_foundry_credential is None
+            if needs_cosmos or needs_embed:
+                try:
+                    from azure.identity.aio import DefaultAzureCredential
+                    _default = DefaultAzureCredential()
+                    self._owns_credential = True
+                except ImportError:
+                    _default = None
+                if needs_cosmos:
+                    self._cosmos_credential = _default
+                if needs_embed:
+                    self._ai_foundry_credential = _default
+
+        # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
         self._container_client: Any = None
 
-    # -- context manager ----------------------------------------------------
+        # Composed sub-clients
+        self._embeddings_client = AsyncEmbeddingsClient(
+            endpoint=self._ai_foundry_endpoint,
+            credential=self._ai_foundry_credential,
+            api_key=self._ai_foundry_api_key,
+            model=self._embedding_model,
+            dimensions=self._embedding_dimensions,
+        )
+        self._processing_client = AsyncProcessingClient(
+            endpoint=self._adf_endpoint,
+            key=self._adf_key,
+        )
 
-    async def __aenter__(self) -> AsyncCosmosMemoryStore:
+        logger.info("AsyncCosmosMemoryClient initialized")
+
+    # ------------------------------------------------------------------
+    # Read-only properties
+    # ------------------------------------------------------------------
+
+    @property
+    def adf_endpoint(self) -> str | None:
+        """The Azure Durable Functions endpoint URL."""
+        return self._adf_endpoint
+
+    @property
+    def adf_key(self) -> str | None:
+        """The Azure Durable Functions key."""
+        return self._adf_key
+
+    # ------------------------------------------------------------------
+    # Async context manager
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> "AsyncCosmosMemoryClient":
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.close()
 
     async def close(self) -> None:
-        """Close the underlying async Cosmos client."""
+        """Close all underlying async clients."""
         if self._cosmos_client is not None:
             await self._cosmos_client.close()
             self._cosmos_client = None
             self._container_client = None
-            logger.info("Async Cosmos client closed")
+        await self._embeddings_client.close()
+        await self._processing_client.close()
+        if self._owns_credential and self._cosmos_credential is not None:
+            close = getattr(self._cosmos_credential, "close", None)
+            if close is not None:
+                await close()
+        logger.info("AsyncCosmosMemoryClient closed")
 
-    # -- connection ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Local operations (synchronous - in-memory list)
+    # ------------------------------------------------------------------
 
-    async def connect(self) -> None:
-        """Create an async :class:`CosmosClient` and obtain the container.
+    def add_local(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        memory_type: str = "turn",
+        agent_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        """Add a new memory to the local store."""
+        memory = _make_memory(
+            user_id=user_id,
+            role=role,
+            content=content,
+            memory_type=memory_type,
+            agent_id=agent_id,
+            metadata=metadata,
+            thread_id=thread_id,
+        )
+        self.local_memory.append(memory)
+        logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
+
+    def get_local(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve memories from the local store.
+
+        All filter parameters are optional. When none are provided every
+        memory is returned. Filters are combined with AND logic.
+        """
+        logger.debug(
+            "get_local memory_id=%s user_id=%s role=%s type=%s",
+            memory_id, user_id, role, memory_type,
+        )
+        results = self.local_memory
+
+        if memory_id is not None:
+            results = [m for m in results if m["id"] == memory_id]
+        if user_id is not None:
+            results = [m for m in results if m["user_id"] == user_id]
+        if role is not None:
+            results = [m for m in results if m["role"] == role]
+        if memory_type is not None:
+            results = [m for m in results if m["type"] == memory_type]
+
+        return results
+
+    def update_local(
+        self,
+        memory_id: str,
+        content: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Update an existing memory in the local store.
+
+        Only the fields that are provided (not ``None``) will be updated.
 
         Raises
         ------
-        ConfigurationError
-            If required fields are missing.
-        CosmosOperationError
-            If the connection fails.
+        MemoryNotFoundError
+            If no memory with the given id exists.
+        ValidationError
+            If an invalid role or memory_type is provided.
         """
+        for memory in self.local_memory:
+            if memory["id"] == memory_id:
+                if content is not None:
+                    memory["content"] = content
+                if role is not None:
+                    if role not in VALID_ROLES:
+                        raise ValidationError(f"role must be one of {VALID_ROLES}, got '{role}'")
+                    memory["role"] = role
+                if memory_type is not None:
+                    if memory_type not in VALID_TYPES:
+                        raise ValidationError(f"type must be one of {VALID_TYPES}, got '{memory_type}'")
+                    memory["type"] = memory_type
+                if metadata is not None:
+                    memory["metadata"] = metadata
+                memory["updated_at"] = datetime.now(timezone.utc).isoformat()
+                return
+
+        raise MemoryNotFoundError(memory_id=memory_id)
+
+    def delete_local(self, memory_id: str) -> None:
+        """Delete a memory from the local store by id.
+
+        Raises
+        ------
+        MemoryNotFoundError
+            If no memory with the given id exists.
+        """
+        for i, memory in enumerate(self.local_memory):
+            if memory["id"] == memory_id:
+                self.local_memory.pop(i)
+                return
+
+        raise MemoryNotFoundError(memory_id=memory_id)
+
+    # ------------------------------------------------------------------
+    # Cosmos DB connection (async)
+    # ------------------------------------------------------------------
+
+    async def connect_cosmos(
+        self,
+        endpoint: Optional[str] = None,
+        credential: Optional[Any] = None,
+        database: Optional[str] = None,
+        container: Optional[str] = None,
+    ) -> None:
+        """Establish an async connection to a Cosmos DB container.
+
+        Parameters override whatever was set in ``__init__``.  After this
+        call the Cosmos CRUD methods are ready to use.
+        """
+        self._cosmos_endpoint = endpoint or self._cosmos_endpoint
+        self._cosmos_credential = credential or self._cosmos_credential
+        self._cosmos_database = database or self._cosmos_database
+        self._cosmos_container = container or self._cosmos_container
+
         _validate_connection(
-            self._endpoint, self._credential, self._database, self._container
+            self._cosmos_endpoint, self._cosmos_credential,
+            self._cosmos_database, self._cosmos_container,
         )
 
         try:
             from azure.cosmos.aio import CosmosClient
 
             client = CosmosClient(
-                self._endpoint, credential=self._credential
+                self._cosmos_endpoint, credential=self._cosmos_credential
             )
-            db = client.get_database_client(self._database)
-            container = db.get_container_client(self._container)
+            db = client.get_database_client(self._cosmos_database)
+            container_handle = db.get_container_client(self._cosmos_container)
 
             self._cosmos_client = client
-            self._container_client = container
+            self._container_client = container_handle
         except Exception as exc:
             raise CosmosOperationError(
                 f"Failed to connect to Cosmos DB (async): {exc}"
@@ -106,29 +316,42 @@ class AsyncCosmosMemoryStore:
 
         logger.info(
             "Async connected to Cosmos DB %s/%s",
-            self._database,
-            self._container,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
-    async def create_store(
+    async def create_memory_store(
         self,
-        embedding_dimensions: int = 1536,
-        embedding_data_type: str = "float32",
-        distance_function: str = "cosine",
-        full_text_language: str = "en-US",
+        database: Optional[str] = None,
+        container: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        credential: Optional[Any] = None,
+        embedding_dimensions: Optional[int] = None,
+        embedding_data_type: Optional[str] = None,
+        distance_function: Optional[str] = None,
+        full_text_language: Optional[str] = None,
         autoscale_max_ru: int = 1000,
     ) -> None:
-        """Create the database and container (async), then set the container handle.
+        """Create the Cosmos DB database and container for memories (async).
+
+        After successful creation the instance is connected and ready
+        for CRUD operations.
 
         The container is provisioned with:
 
         * Hierarchical partition key ``[/user_id, /thread_id]``
         * ``quantizedFlat`` vector index on ``/embedding``
         * Full-text index on ``/content``
-        * Autoscale throughput (max RU)
+        * Autoscale throughput (max RU from *autoscale_max_ru*)
         """
+        self._cosmos_endpoint = endpoint or self._cosmos_endpoint
+        self._cosmos_credential = credential or self._cosmos_credential
+        self._cosmos_database = database or self._cosmos_database
+        self._cosmos_container = container or self._cosmos_container
+
         _validate_connection(
-            self._endpoint, self._credential, self._database, self._container
+            self._cosmos_endpoint, self._cosmos_credential,
+            self._cosmos_database, self._cosmos_container,
         )
 
         try:
@@ -136,26 +359,25 @@ class AsyncCosmosMemoryStore:
             from azure.cosmos.aio import CosmosClient
 
             client = CosmosClient(
-                self._endpoint, credential=self._credential
+                self._cosmos_endpoint, credential=self._cosmos_credential
             )
 
             db = await client.create_database_if_not_exists(
-                id=self._database
+                id=self._cosmos_database
             )
 
             partition_key = PartitionKey(
                 path=["/user_id", "/thread_id"], kind="MultiHash"
             )
-
             vec_policy, idx_policy, ft_policy = _container_policies(
-                embedding_dimensions=embedding_dimensions,
-                embedding_data_type=embedding_data_type,
-                distance_function=distance_function,
-                full_text_language=full_text_language,
+                embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
+                embedding_data_type=embedding_data_type or "float32",
+                distance_function=distance_function or "cosine",
+                full_text_language=full_text_language or "en-US",
             )
 
-            container = await db.create_container_if_not_exists(
-                id=self._container,
+            container_handle = await db.create_container_if_not_exists(
+                id=self._cosmos_container,
                 partition_key=partition_key,
                 indexing_policy=idx_policy,
                 vector_embedding_policy=vec_policy,
@@ -165,7 +387,7 @@ class AsyncCosmosMemoryStore:
                 ),
             )
             self._cosmos_client = client
-            self._container_client = container
+            self._container_client = container_handle
         except Exception as exc:
             raise CosmosOperationError(
                 f"Failed to create memory store (async): {exc}"
@@ -173,20 +395,40 @@ class AsyncCosmosMemoryStore:
 
         logger.info(
             "Async created memory store %s/%s",
-            self._database,
-            self._container,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
-    def _require_connected(self) -> None:
-        """Raise if no active container client."""
+    async def _require_cosmos(self) -> None:
+        """Raise if Cosmos DB is not connected."""
         if self._container_client is None:
             raise CosmosNotConnectedError()
 
-    # -- upsert -------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Cosmos DB CRUD operations (async)
+    # ------------------------------------------------------------------
 
-    async def upsert(self, record: MemoryRecord) -> None:
-        """Upsert a single :class:`MemoryRecord`."""
-        self._require_connected()
+    async def add_cosmos(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        memory_type: str = "turn",
+        metadata: Optional[dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        """Add a memory to Cosmos DB."""
+        await self._require_cosmos()
+        kwargs: dict[str, Any] = {
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "memory_type": memory_type,
+            "metadata": metadata or {},
+        }
+        if thread_id is not None:
+            kwargs["thread_id"] = thread_id
+        record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
         try:
             await self._container_client.upsert_item(body=body)
@@ -194,22 +436,38 @@ class AsyncCosmosMemoryStore:
             raise CosmosOperationError(
                 f"Async upsert failed for record {record.id}: {exc}"
             ) from exc
-        logger.info("Async upserted record %s", record.id)
+        logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
 
-    async def upsert_batch(
-        self, records: list[MemoryRecord], batch_size: int = 25
-    ) -> None:
-        """Upsert multiple records using ``asyncio.gather`` in batches."""
-        self._require_connected()
+    async def push_to_cosmos(self, batch_size: int = 25) -> None:
+        """Insert all local memories into Cosmos DB in concurrent batches.
+
+        Each local memory is inserted as-is, preserving its existing
+        ``id``, ``thread_id``, timestamps, and metadata.
+        """
+        await self._require_cosmos()
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0")
+        logger.info(
+            "push_to_cosmos count=%d batch_size=%d",
+            len(self.local_memory),
+            batch_size,
+        )
+        records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
 
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            tasks = [self.upsert(record) for record in batch]
-            await asyncio.gather(*tasks)
+            tasks = [
+                self._container_client.upsert_item(body=r.to_cosmos_dict())
+                for r in batch
+            ]
+            try:
+                await asyncio.gather(*tasks)
+            except Exception as exc:
+                raise CosmosOperationError(
+                    f"Async push_to_cosmos batch upsert failed: {exc}"
+                ) from exc
 
         logger.info("Async upserted batch of %d records", len(records))
-
-    # -- queries ------------------------------------------------------------
 
     async def get_memories(
         self,
@@ -220,12 +478,12 @@ class AsyncCosmosMemoryStore:
         memory_type: Optional[str] = None,
         recent_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Query memories with optional filters.
-
-        Returns raw dicts.  When *recent_k* is given the newest *k*
-        documents are returned in chronological (oldest-first) order.
-        """
-        self._require_connected()
+        """Retrieve memories from Cosmos DB with optional filters."""
+        await self._require_cosmos()
+        logger.debug(
+            "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
+            memory_id, user_id, thread_id, role, memory_type, recent_k,
+        )
 
         qb = _build_memory_query_builder(
             memory_id=memory_id,
@@ -258,70 +516,12 @@ class AsyncCosmosMemoryStore:
 
         if recent_k is not None:
             results.reverse()
+
+        if not results:
+            logger.warning("get_memories returned empty results")
         return results
 
-    async def get_thread(
-        self,
-        thread_id: str,
-        user_id: Optional[str] = None,
-        memory_type: Optional[str] = None,
-        recent_k: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        """Retrieve an entire thread, oldest-first."""
-        self._require_connected()
-
-        qb = _QueryBuilder()
-        qb.add_filter("c.thread_id", "@thread_id", thread_id)
-        qb.add_filter("c.user_id", "@user_id", user_id)
-        qb.add_filter("c.type", "@memory_type", memory_type)
-
-        where = qb.build_where()
-        parameters = qb.get_parameters()
-
-        query = f"SELECT * FROM c{where} ORDER BY c.created_at DESC"
-        logger.debug("async get_thread query: %s", query)
-
-        try:
-            items_iter = self._container_client.query_items(
-                query=query, parameters=parameters
-            )
-            items = [item async for item in items_iter]
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"async get_thread query failed: {exc}"
-            ) from exc
-
-        if recent_k is not None:
-            items = items[:recent_k]
-        items.reverse()
-        return items
-
-    async def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
-        """Retrieve user-summary documents, newest-first."""
-        self._require_connected()
-
-        query = (
-            "SELECT c.id, c.user_id, c.thread_id, c.role, c.type, "
-            "c.content, c.metadata, c.created_at "
-            "FROM c WHERE c.user_id = @user_id AND c.type = 'user_summary' "
-            "ORDER BY c.created_at DESC"
-        )
-        parameters = [{"name": "@user_id", "value": user_id}]
-        logger.debug("async get_user_summary query: %s", query)
-
-        try:
-            items_iter = self._container_client.query_items(
-                query=query, parameters=parameters
-            )
-            return [item async for item in items_iter]
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"async get_user_summary query failed: {exc}"
-            ) from exc
-
-    # -- update / delete ----------------------------------------------------
-
-    async def update(
+    async def update_cosmos(
         self,
         memory_id: str,
         content: Optional[str] = None,
@@ -329,16 +529,16 @@ class AsyncCosmosMemoryStore:
         memory_type: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Update fields on an existing memory document.
+        """Update a memory in Cosmos DB.
 
         Raises
         ------
         MemoryNotFoundError
-            If the document does not exist.
+            If no document with *memory_id* exists.
         CosmosOperationError
             If the underlying Cosmos DB operation fails.
         """
-        self._require_connected()
+        await self._require_cosmos()
 
         try:
             items_iter = self._container_client.query_items(
@@ -374,17 +574,17 @@ class AsyncCosmosMemoryStore:
 
         logger.info("Async updated record %s", memory_id)
 
-    async def delete(self, memory_id: str, user_id: str, thread_id: str) -> None:
-        """Delete a memory document.
+    async def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
+        """Delete a memory from Cosmos DB.
 
         Raises
         ------
         MemoryNotFoundError
-            If no matching document exists.
+            If no matching document is found.
         CosmosOperationError
             If the underlying Cosmos DB operation fails.
         """
-        self._require_connected()
+        await self._require_cosmos()
 
         try:
             items_iter = self._container_client.query_items(
@@ -420,31 +620,45 @@ class AsyncCosmosMemoryStore:
 
         logger.info("Async deleted record %s", memory_id)
 
-    # -- vector search ------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Search (async)
+    # ------------------------------------------------------------------
 
-    async def vector_search(
+    async def search_cosmos(
         self,
-        query_vector: list[float],
+        search_terms: str,
+        memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
         role: Optional[str] = None,
         memory_type: Optional[str] = None,
         thread_id: Optional[str] = None,
         hybrid_search: bool = False,
-        search_terms: Optional[str] = None,
         top_k: int = 5,
     ) -> list[dict[str, Any]]:
-        """Run a vector (or hybrid) similarity search.
+        """Search memories in Cosmos DB using vector similarity.
 
-        Parameters
-        ----------
-        query_vector : list[float]
-            Pre-computed embedding vector.
-        search_terms : str, optional
-            Raw text for the full-text component of a hybrid search.
-            Required when *hybrid_search* is ``True``.
+        1. Embeds *search_terms* via the configured embedding model.
+        2. Runs a vector similarity query against the Cosmos DB container.
+        3. Optionally filters by the remaining keyword parameters.
+        4. Returns up to *top_k* results ordered by similarity.
         """
-        self._require_connected()
+        await self._require_cosmos()
         _validate_hybrid_search(hybrid_search, search_terms)
+        if not search_terms or not search_terms.strip():
+            raise ValidationError("search_terms must be a non-empty string")
+
+        logger.info(
+            "search_cosmos terms_len=%d top_k=%d hybrid_search=%s",
+            len(search_terms),
+            top_k,
+            hybrid_search,
+        )
+        logger.debug(
+            "search_cosmos search_terms=%s",
+            search_terms[:50] + "..." if len(search_terms) > 50 else search_terms,
+        )
+
+        query_vector = await self._embeddings_client.generate(search_terms)
 
         qb = _build_memory_query_builder(
             user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id
@@ -477,7 +691,79 @@ class AsyncCosmosMemoryStore:
         if hybrid_search:
             parameters.append({"name": "@key_terms", "value": search_terms or ""})
 
-        logger.debug("async vector_search query: %s", query)
+        logger.debug("async search_cosmos query: %s", query)
+
+        try:
+            items_iter = self._container_client.query_items(
+                query=query, parameters=parameters
+            )
+            results = [item async for item in items_iter]
+        except Exception as exc:
+            raise CosmosOperationError(
+                f"async vector_search failed: {exc}"
+            ) from exc
+
+        # Post-filter by memory_id (not supported directly by vector search)
+        if memory_id is not None:
+            results = [r for r in results if r.get("id") == memory_id]
+        if not results:
+            logger.warning(
+                "search_cosmos returned empty results (terms_len=%d)",
+                len(search_terms),
+            )
+        return results
+
+    async def get_thread(
+        self,
+        thread_id: str,
+        user_id: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve an entire thread from Cosmos DB.
+
+        Returns memories sorted in chronological order (oldest first).
+        """
+        await self._require_cosmos()
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.type", "@memory_type", memory_type)
+
+        where = qb.build_where()
+        parameters = qb.get_parameters()
+
+        query = f"SELECT * FROM c{where} ORDER BY c.created_at DESC"
+        logger.debug("async get_thread query: %s", query)
+
+        try:
+            items_iter = self._container_client.query_items(
+                query=query, parameters=parameters
+            )
+            items = [item async for item in items_iter]
+        except Exception as exc:
+            raise CosmosOperationError(
+                f"async get_thread query failed: {exc}"
+            ) from exc
+
+        if recent_k is not None:
+            items = items[:recent_k]
+        items.reverse()
+        return items
+
+    async def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
+        """Retrieve user summary documents from Cosmos DB, newest first."""
+        await self._require_cosmos()
+
+        query = (
+            "SELECT c.id, c.user_id, c.thread_id, c.role, c.type, "
+            "c.content, c.metadata, c.created_at "
+            "FROM c WHERE c.user_id = @user_id AND c.type = 'user_summary' "
+            "ORDER BY c.created_at DESC"
+        )
+        parameters = [{"name": "@user_id", "value": user_id}]
+        logger.debug("async get_user_summary query: %s", query)
 
         try:
             items_iter = self._container_client.query_items(
@@ -486,5 +772,71 @@ class AsyncCosmosMemoryStore:
             return [item async for item in items_iter]
         except Exception as exc:
             raise CosmosOperationError(
-                f"async vector_search failed: {exc}"
+                f"async get_user_summary query failed: {exc}"
             ) from exc
+
+    # ------------------------------------------------------------------
+    # Processing (Azure Durable Functions, async)
+    # ------------------------------------------------------------------
+
+    async def generate_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Trigger the Azure Durable Function to generate a thread summary (async)."""
+        logger.info(
+            "generate_thread_summary started user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return await self._processing_client.generate_thread_summary(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+
+    async def extract_facts(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Trigger the Azure Durable Function to extract facts (async)."""
+        logger.info(
+            "extract_facts started user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return await self._processing_client.extract_facts(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
+
+    async def generate_user_summary(
+        self,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+        recent_k: Optional[int] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Trigger the Azure Durable Function to generate a cross-thread user summary (async)."""
+        logger.info("generate_user_summary started user_id=%s", user_id)
+        return await self._processing_client.generate_user_summary(
+            user_id=user_id,
+            thread_ids=thread_ids,
+            recent_k=recent_k,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )

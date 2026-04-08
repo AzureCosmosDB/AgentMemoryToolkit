@@ -1,10 +1,14 @@
 """Shared test fixtures for Agent Memory Toolkit tests."""
 
+import os
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Sample data factories
@@ -80,3 +84,77 @@ def mock_credential():
     cred = MagicMock()
     cred.get_token.return_value = MagicMock(token="fake-token", expires_on=9999999999)
     return cred
+
+
+# ---------------------------------------------------------------------------
+# Integration-test fixtures
+# ---------------------------------------------------------------------------
+
+INTEGRATION_ENABLED = os.environ.get("AGENT_MEMORY_RUN_INTEGRATION", "").lower() == "true"
+
+
+@pytest.fixture(scope="session")
+def cosmos_endpoint():
+    """Cosmos DB endpoint from env vars (integration tests)."""
+    return os.environ.get("COSMOS_DB_ENDPOINT", "")
+
+
+@pytest.fixture(scope="session")
+def cosmos_database():
+    """Cosmos DB database name for integration tests."""
+    return os.environ.get("COSMOS_DB_DATABASE", "ai_memory_integration_test")
+
+
+@pytest.fixture(scope="session")
+def cosmos_container():
+    """Cosmos DB container name for integration tests."""
+    return os.environ.get("COSMOS_DB_CONTAINER", "memories_integration_test")
+
+
+@pytest.fixture(scope="session")
+def ai_foundry_endpoint():
+    """Azure OpenAI endpoint from env vars."""
+    return os.environ.get("AI_FOUNDRY_ENDPOINT", "")
+
+
+@pytest.fixture(scope="session")
+def ai_foundry_api_key():
+    """Azure OpenAI API key from env vars."""
+    return os.environ.get("AI_FOUNDRY_API_KEY", "")
+
+
+@pytest.fixture(scope="session")
+def adf_endpoint():
+    """Azure Durable Functions endpoint from env vars."""
+    return os.environ.get("ADF_ENDPOINT", "")
+
+
+@pytest.fixture(scope="session")
+def adf_key():
+    """Azure Durable Functions key from env vars."""
+    return os.environ.get("ADF_KEY", "")
+
+
+@pytest.fixture(scope="session")
+def embedding_model():
+    """Embedding model deployment name."""
+    return os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+
+
+@pytest.fixture(scope="session")
+def embedding_dimensions():
+    """Embedding dimensions from env vars."""
+    raw = os.environ.get("EMBEDDING_DIMENSIONS", "1536")
+    return int(raw) if raw else 1536
+
+
+@pytest.fixture
+def unique_user_id():
+    """Unique user ID to isolate integration test data."""
+    return f"integ-test-user-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def unique_thread_id():
+    """Unique thread ID to isolate integration test data."""
+    return str(uuid.uuid4())

@@ -385,9 +385,7 @@ class TestDeleteCosmos:
 
         await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
 
-        container.delete_item.assert_awaited_once_with(
-            item="m1", partition_key=["u1", "t1"]
-        )
+        container.delete_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
 
     async def test_not_found(self):
         mem, container = _connected_client()
@@ -442,9 +440,7 @@ class TestSearchCosmos:
         mem._embeddings_client = AsyncMock()
         mem._embeddings_client.generate = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
-        results = await mem.search_cosmos(
-            search_terms="weather", user_id="u1", top_k=3
-        )
+        results = await mem.search_cosmos(search_terms="weather", user_id="u1", top_k=3)
 
         assert len(results) == 1
         mem._embeddings_client.generate.assert_awaited_once_with("weather")

@@ -112,9 +112,7 @@ def _cleanup_user(agent_memory: CosmosMemoryClient, user_id: str):
 class TestAddTurnsAndGenerateThreadSummary:
     """Scenario 1: add turns → generate thread summary → verify."""
 
-    def test_add_turns_and_generate_thread_summary(
-        self, agent_memory, unique_user_id, unique_thread_id
-    ):
+    def test_add_turns_and_generate_thread_summary(self, agent_memory, unique_user_id, unique_thread_id):
         user_id = unique_user_id
         thread_id = unique_thread_id
         try:
@@ -161,9 +159,7 @@ class TestAddTurnsAndGenerateThreadSummary:
 class TestAddTurnsAndExtractFacts:
     """Scenario 2: add turns with factual info → extract facts → verify."""
 
-    def test_add_turns_and_extract_facts(
-        self, agent_memory, unique_user_id, unique_thread_id
-    ):
+    def test_add_turns_and_extract_facts(self, agent_memory, unique_user_id, unique_thread_id):
         user_id = unique_user_id
         thread_id = unique_thread_id
         try:
@@ -196,9 +192,7 @@ class TestAddTurnsAndExtractFacts:
                 user_id=user_id,
                 memory_type="fact",
             )
-            assert len(facts) >= 1, (
-                "Expected at least 1 extracted fact about Seattle / Microsoft"
-            )
+            assert len(facts) >= 1, "Expected at least 1 extracted fact about Seattle / Microsoft"
         finally:
             _cleanup_user(agent_memory, user_id)
 
@@ -206,16 +200,16 @@ class TestAddTurnsAndExtractFacts:
 class TestMultipleThreadsGenerateUserSummary:
     """Scenario 3: two threads → generate user summary → verify."""
 
-    def test_multiple_threads_generate_user_summary(
-        self, agent_memory, unique_user_id
-    ):
+    def test_multiple_threads_generate_user_summary(self, agent_memory, unique_user_id):
         user_id = unique_user_id
         t1 = str(uuid.uuid4())
         t2 = str(uuid.uuid4())
         try:
             # Thread 1: cooking topic
             _add_turns(
-                agent_memory, user_id, t1,
+                agent_memory,
+                user_id,
+                t1,
                 [
                     ("user", "I love Italian cooking, especially pasta."),
                     ("agent", "Italian cuisine is wonderful! Do you make fresh pasta?"),
@@ -224,7 +218,9 @@ class TestMultipleThreadsGenerateUserSummary:
             )
             # Thread 2: fitness topic
             _add_turns(
-                agent_memory, user_id, t2,
+                agent_memory,
+                user_id,
+                t2,
                 [
                     ("user", "I go running every morning before work."),
                     ("agent", "Running is a great habit. How far do you usually run?"),
@@ -257,15 +253,15 @@ class TestMultipleThreadsGenerateUserSummary:
 class TestIncrementalSummaryUpdate:
     """Scenario 4: add turns → summarise → add more turns → re-summarise → verify update."""
 
-    def test_incremental_summary_update(
-        self, agent_memory, unique_user_id, unique_thread_id
-    ):
+    def test_incremental_summary_update(self, agent_memory, unique_user_id, unique_thread_id):
         user_id = unique_user_id
         thread_id = unique_thread_id
         try:
             # -- First batch of turns --
             _add_turns(
-                agent_memory, user_id, thread_id,
+                agent_memory,
+                user_id,
+                thread_id,
                 [
                     ("user", "Tell me about the Eiffel Tower."),
                     ("agent", "The Eiffel Tower is a wrought-iron lattice tower in Paris, France."),
@@ -283,14 +279,18 @@ class TestIncrementalSummaryUpdate:
             time.sleep(2)
 
             first_summaries = agent_memory.get_memories(
-                user_id=user_id, thread_id=thread_id, memory_type="summary",
+                user_id=user_id,
+                thread_id=thread_id,
+                memory_type="summary",
             )
             assert len(first_summaries) >= 1, "First summary should exist"
             first_content = first_summaries[0].get("content", "")
 
             # -- Second batch of turns --
             _add_turns(
-                agent_memory, user_id, thread_id,
+                agent_memory,
+                user_id,
+                thread_id,
                 [
                     ("user", "How tall is it exactly?"),
                     ("agent", "The Eiffel Tower is approximately 330 metres tall, including antennas."),
@@ -308,7 +308,9 @@ class TestIncrementalSummaryUpdate:
             time.sleep(2)
 
             updated_summaries = agent_memory.get_memories(
-                user_id=user_id, thread_id=thread_id, memory_type="summary",
+                user_id=user_id,
+                thread_id=thread_id,
+                memory_type="summary",
             )
             assert len(updated_summaries) >= 1, "Updated summary should exist"
             updated_content = updated_summaries[0].get("content", "")
@@ -319,9 +321,7 @@ class TestIncrementalSummaryUpdate:
             second_updated = updated_summaries[0].get("updated_at", "")
             content_changed = updated_content != first_content
             timestamp_changed = second_updated != first_updated
-            assert content_changed or timestamp_changed, (
-                "Expected the summary to be updated after adding new turns"
-            )
+            assert content_changed or timestamp_changed, "Expected the summary to be updated after adding new turns"
         finally:
             _cleanup_memories(agent_memory, user_id, thread_id)
 
@@ -336,7 +336,9 @@ class TestIncrementalUserSummary:
         try:
             # Thread 1: gardening
             _add_turns(
-                agent_memory, user_id, t1,
+                agent_memory,
+                user_id,
+                t1,
                 [
                     ("user", "I grow tomatoes and basil in my backyard garden."),
                     ("agent", "Home gardening is rewarding! Do you compost as well?"),
@@ -355,7 +357,9 @@ class TestIncrementalUserSummary:
 
             # Thread 2: photography
             _add_turns(
-                agent_memory, user_id, t2,
+                agent_memory,
+                user_id,
+                t2,
                 [
                     ("user", "I love landscape photography, especially during golden hour."),
                     ("agent", "Golden hour light is stunning! What camera do you use?"),
@@ -374,9 +378,7 @@ class TestIncrementalUserSummary:
 
             user_summaries = agent_memory.get_user_summary(user_id)
             assert len(user_summaries) >= 1, "Expected at least 1 user_summary"
-            combined_content = " ".join(
-                s.get("content", "") for s in user_summaries
-            ).lower()
+            combined_content = " ".join(s.get("content", "") for s in user_summaries).lower()
             # The final summary should reference both topics.
             assert "garden" in combined_content or "tomato" in combined_content or "basil" in combined_content, (
                 "User summary should mention gardening topic"
@@ -393,14 +395,14 @@ class TestIncrementalUserSummary:
 class TestSearchSummariesAndFacts:
     """Scenario 6: add turns → extract facts → generate summary → search."""
 
-    def test_search_summaries_and_facts(
-        self, agent_memory, unique_user_id, unique_thread_id
-    ):
+    def test_search_summaries_and_facts(self, agent_memory, unique_user_id, unique_thread_id):
         user_id = unique_user_id
         thread_id = unique_thread_id
         try:
             _add_turns(
-                agent_memory, user_id, thread_id,
+                agent_memory,
+                user_id,
+                thread_id,
                 [
                     ("user", "I have a golden retriever named Buddy."),
                     ("agent", "Golden retrievers are great family dogs! How old is Buddy?"),
@@ -434,9 +436,7 @@ class TestSearchSummariesAndFacts:
                 user_id=user_id,
                 top_k=5,
             )
-            assert len(vector_results) >= 1, (
-                "Vector search for 'golden retriever dog' should return at least 1 result"
-            )
+            assert len(vector_results) >= 1, "Vector search for 'golden retriever dog' should return at least 1 result"
 
             # -- Hybrid search --
             hybrid_results = agent_memory.search_cosmos(
@@ -445,8 +445,6 @@ class TestSearchSummariesAndFacts:
                 hybrid_search=True,
                 top_k=5,
             )
-            assert len(hybrid_results) >= 1, (
-                "Hybrid search for 'Buddy the dog park' should return at least 1 result"
-            )
+            assert len(hybrid_results) >= 1, "Hybrid search for 'Buddy the dog park' should return at least 1 result"
         finally:
             _cleanup_user(agent_memory, user_id)

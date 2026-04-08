@@ -91,9 +91,7 @@ class MemoryRecord(BaseModel):
                 return MemoryRole(v)
             except ValueError:
                 valid = ", ".join(r.value for r in MemoryRole)
-                raise ValueError(
-                    f"role must be one of {{{valid}}}, got '{v}'"
-                )
+                raise ValueError(f"role must be one of {{{valid}}}, got '{v}'")
         return v
 
     @field_validator("memory_type", mode="before")
@@ -104,9 +102,7 @@ class MemoryRecord(BaseModel):
                 return MemoryType(v)
             except ValueError:
                 valid = ", ".join(t.value for t in MemoryType)
-                raise ValueError(
-                    f"type must be one of {{{valid}}}, got '{v}'"
-                )
+                raise ValueError(f"type must be one of {{{valid}}}, got '{v}'")
         return v
 
     # -- serialization helpers -----------------------------------------------

@@ -97,6 +97,7 @@ class AsyncCosmosMemoryClient:
             if needs_cosmos or needs_embed:
                 try:
                     from azure.identity.aio import DefaultAzureCredential
+
                     _default = DefaultAzureCredential()
                     self._owns_credential = True
                 except ImportError:
@@ -204,7 +205,10 @@ class AsyncCosmosMemoryClient:
         """
         logger.debug(
             "get_local memory_id=%s user_id=%s role=%s type=%s",
-            memory_id, user_id, role, memory_type,
+            memory_id,
+            user_id,
+            role,
+            memory_type,
         )
         results = self.local_memory
 
@@ -294,25 +298,23 @@ class AsyncCosmosMemoryClient:
         self._cosmos_container = container or self._cosmos_container
 
         _validate_connection(
-            self._cosmos_endpoint, self._cosmos_credential,
-            self._cosmos_database, self._cosmos_container,
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
         try:
             from azure.cosmos.aio import CosmosClient
 
-            client = CosmosClient(
-                self._cosmos_endpoint, credential=self._cosmos_credential
-            )
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
             db = client.get_database_client(self._cosmos_database)
             container_handle = db.get_container_client(self._cosmos_container)
 
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Failed to connect to Cosmos DB (async): {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Failed to connect to Cosmos DB (async): {exc}") from exc
 
         logger.info(
             "Async connected to Cosmos DB %s/%s",
@@ -350,25 +352,21 @@ class AsyncCosmosMemoryClient:
         self._cosmos_container = container or self._cosmos_container
 
         _validate_connection(
-            self._cosmos_endpoint, self._cosmos_credential,
-            self._cosmos_database, self._cosmos_container,
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
         try:
             from azure.cosmos import PartitionKey, ThroughputProperties
             from azure.cosmos.aio import CosmosClient
 
-            client = CosmosClient(
-                self._cosmos_endpoint, credential=self._cosmos_credential
-            )
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
 
-            db = await client.create_database_if_not_exists(
-                id=self._cosmos_database
-            )
+            db = await client.create_database_if_not_exists(id=self._cosmos_database)
 
-            partition_key = PartitionKey(
-                path=["/user_id", "/thread_id"], kind="MultiHash"
-            )
+            partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
             vec_policy, idx_policy, ft_policy = _container_policies(
                 embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
                 embedding_data_type=embedding_data_type or "float32",
@@ -389,9 +387,7 @@ class AsyncCosmosMemoryClient:
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Failed to create memory store (async): {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Failed to create memory store (async): {exc}") from exc
 
         logger.info(
             "Async created memory store %s/%s",
@@ -433,9 +429,7 @@ class AsyncCosmosMemoryClient:
         try:
             await self._container_client.upsert_item(body=body)
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Async upsert failed for record {record.id}: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Async upsert failed for record {record.id}: {exc}") from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
 
     async def push_to_cosmos(self, batch_size: int = 25) -> None:
@@ -456,16 +450,11 @@ class AsyncCosmosMemoryClient:
 
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            tasks = [
-                self._container_client.upsert_item(body=r.to_cosmos_dict())
-                for r in batch
-            ]
+            tasks = [self._container_client.upsert_item(body=r.to_cosmos_dict()) for r in batch]
             try:
                 await asyncio.gather(*tasks)
             except Exception as exc:
-                raise CosmosOperationError(
-                    f"Async push_to_cosmos batch upsert failed: {exc}"
-                ) from exc
+                raise CosmosOperationError(f"Async push_to_cosmos batch upsert failed: {exc}") from exc
 
         logger.info("Async upserted batch of %d records", len(records))
 
@@ -482,7 +471,12 @@ class AsyncCosmosMemoryClient:
         await self._require_cosmos()
         logger.debug(
             "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
-            memory_id, user_id, thread_id, role, memory_type, recent_k,
+            memory_id,
+            user_id,
+            thread_id,
+            role,
+            memory_type,
+            recent_k,
         )
 
         qb = _build_memory_query_builder(
@@ -510,9 +504,7 @@ class AsyncCosmosMemoryClient:
             )
             results = [item async for item in items_iter]
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async get_memories query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async get_memories query failed: {exc}") from exc
 
         if recent_k is not None:
             results.reverse()
@@ -547,9 +539,7 @@ class AsyncCosmosMemoryClient:
             )
             docs = [item async for item in items_iter]
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async update query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async update query failed: {exc}") from exc
 
         if not docs:
             raise MemoryNotFoundError(memory_id=memory_id)
@@ -568,9 +558,7 @@ class AsyncCosmosMemoryClient:
         try:
             await self._container_client.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async update replace failed for {memory_id}: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async update replace failed for {memory_id}: {exc}") from exc
 
         logger.info("Async updated record %s", memory_id)
 
@@ -589,8 +577,7 @@ class AsyncCosmosMemoryClient:
         try:
             items_iter = self._container_client.query_items(
                 query=(
-                    "SELECT TOP 1 c.id FROM c WHERE c.id = @id "
-                    "AND c.thread_id = @thread_id AND c.user_id = @user_id"
+                    "SELECT TOP 1 c.id FROM c WHERE c.id = @id AND c.thread_id = @thread_id AND c.user_id = @user_id"
                 ),
                 parameters=[
                     {"name": "@id", "value": memory_id},
@@ -600,23 +587,15 @@ class AsyncCosmosMemoryClient:
             )
             docs = [item async for item in items_iter]
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async delete lookup failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async delete lookup failed: {exc}") from exc
 
         if not docs:
-            raise MemoryNotFoundError(
-                memory_id=memory_id, user_id=user_id, thread_id=thread_id
-            )
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
 
         try:
-            await self._container_client.delete_item(
-                item=memory_id, partition_key=[user_id, thread_id]
-            )
+            await self._container_client.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async delete failed for {memory_id}: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async delete failed for {memory_id}: {exc}") from exc
 
         logger.info("Async deleted record %s", memory_id)
 
@@ -660,19 +639,14 @@ class AsyncCosmosMemoryClient:
 
         query_vector = await self._embeddings_client.generate(search_terms)
 
-        qb = _build_memory_query_builder(
-            user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id
-        )
+        qb = _build_memory_query_builder(user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id)
         where = qb.build_where()
         parameters = qb.get_parameters()
 
         order_by = "ORDER BY VectorDistance(c.embedding, @embedding)"
         if hybrid_search:
             order_by = (
-                "ORDER BY RANK RRF("
-                "VectorDistance(c.embedding, @embedding), "
-                "FullTextScore(c.content, @key_terms)"
-                ")"
+                "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), FullTextScore(c.content, @key_terms))"
             )
 
         query = (
@@ -694,14 +668,10 @@ class AsyncCosmosMemoryClient:
         logger.debug("async search_cosmos query: %s", query)
 
         try:
-            items_iter = self._container_client.query_items(
-                query=query, parameters=parameters
-            )
+            items_iter = self._container_client.query_items(query=query, parameters=parameters)
             results = [item async for item in items_iter]
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async vector_search failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async vector_search failed: {exc}") from exc
 
         # Post-filter by memory_id (not supported directly by vector search)
         if memory_id is not None:
@@ -738,14 +708,10 @@ class AsyncCosmosMemoryClient:
         logger.debug("async get_thread query: %s", query)
 
         try:
-            items_iter = self._container_client.query_items(
-                query=query, parameters=parameters
-            )
+            items_iter = self._container_client.query_items(query=query, parameters=parameters)
             items = [item async for item in items_iter]
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async get_thread query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async get_thread query failed: {exc}") from exc
 
         if recent_k is not None:
             items = items[:recent_k]
@@ -766,14 +732,10 @@ class AsyncCosmosMemoryClient:
         logger.debug("async get_user_summary query: %s", query)
 
         try:
-            items_iter = self._container_client.query_items(
-                query=query, parameters=parameters
-            )
+            items_iter = self._container_client.query_items(query=query, parameters=parameters)
             return [item async for item in items_iter]
         except Exception as exc:
-            raise CosmosOperationError(
-                f"async get_user_summary query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"async get_user_summary query failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Processing (Azure Durable Functions, async)

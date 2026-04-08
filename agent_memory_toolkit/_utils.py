@@ -149,6 +149,4 @@ def _validate_hybrid_search(
 ) -> None:
     """Raise :class:`ValidationError` if hybrid search is requested without search terms."""
     if hybrid_search and not search_terms:
-        raise ValidationError(
-            "search_terms is required when hybrid_search is True"
-        )
+        raise ValidationError("search_terms is required when hybrid_search is True")

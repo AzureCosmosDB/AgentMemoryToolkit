@@ -78,10 +78,12 @@ async def test_invoke_immediate_completion(client_with_session):
 async def test_invoke_polls_until_completed(client_with_session):
     client, session = client_with_session
 
-    start_resp = _mock_response({
-        "id": "inst-1",
-        "statusQueryGetUri": "https://status/inst-1",
-    })
+    start_resp = _mock_response(
+        {
+            "id": "inst-1",
+            "statusQueryGetUri": "https://status/inst-1",
+        }
+    )
     poll_running = _mock_response({"runtimeStatus": "Running"})
     poll_completed = _mock_response({"runtimeStatus": "Completed", "output": "ok"})
 
@@ -106,14 +108,18 @@ async def test_invoke_polls_until_completed(client_with_session):
 async def test_invoke_failed(client_with_session):
     client, session = client_with_session
 
-    start_resp = _mock_response({
-        "id": "inst-2",
-        "statusQueryGetUri": "https://status/inst-2",
-    })
-    poll_failed = _mock_response({
-        "runtimeStatus": "Failed",
-        "output": "something went wrong",
-    })
+    start_resp = _mock_response(
+        {
+            "id": "inst-2",
+            "statusQueryGetUri": "https://status/inst-2",
+        }
+    )
+    poll_failed = _mock_response(
+        {
+            "runtimeStatus": "Failed",
+            "output": "something went wrong",
+        }
+    )
 
     session.post = MagicMock(return_value=MockAsyncContextManager(start_resp))
     session.get = MagicMock(
@@ -141,10 +147,12 @@ async def test_invoke_timeout():
     session.close = AsyncMock()
     client._session = session
 
-    start_resp = _mock_response({
-        "id": "inst-3",
-        "statusQueryGetUri": "https://status/inst-3",
-    })
+    start_resp = _mock_response(
+        {
+            "id": "inst-3",
+            "statusQueryGetUri": "https://status/inst-3",
+        }
+    )
     poll_running = _mock_response({"runtimeStatus": "Running"})
 
     session.post = MagicMock(return_value=MockAsyncContextManager(start_resp))
@@ -176,9 +184,7 @@ async def test_generate_thread_summary_payload(client_with_session):
     start_resp = _mock_response({"runtimeStatus": "Completed", "output": "summary"})
     session.post = MagicMock(return_value=MockAsyncContextManager(start_resp))
 
-    result = await client.generate_thread_summary(
-        user_id="u1", thread_id="t1", recent_k=5
-    )
+    result = await client.generate_thread_summary(user_id="u1", thread_id="t1", recent_k=5)
     assert result["runtimeStatus"] == "Completed"
 
     # Check the JSON payload sent to session.post
@@ -238,9 +244,7 @@ async def test_close_noop_when_no_session():
 
 
 async def test_context_manager():
-    client = AsyncProcessingClient(
-        endpoint="https://func.azurewebsites.net", key="k"
-    )
+    client = AsyncProcessingClient(endpoint="https://func.azurewebsites.net", key="k")
     session = MagicMock()
     session.closed = False
     session.close = AsyncMock()

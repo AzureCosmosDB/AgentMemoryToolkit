@@ -45,12 +45,8 @@ def _urlopen_response(body: dict) -> MagicMock:
 class TestInvokeOrchestrator:
     @patch("urllib.request.urlopen")
     def test_immediate_completion(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "inst-1", "statusQueryGetUri": "https://status/1"}
-        )
-        poll_resp = _urlopen_response(
-            {"runtimeStatus": "Completed", "output": {"ok": True}}
-        )
+        start_resp = _urlopen_response({"id": "inst-1", "statusQueryGetUri": "https://status/1"})
+        poll_resp = _urlopen_response({"runtimeStatus": "Completed", "output": {"ok": True}})
         mock_urlopen.side_effect = [start_resp, poll_resp]
 
         client = _make_client()
@@ -62,14 +58,10 @@ class TestInvokeOrchestrator:
 
     @patch("urllib.request.urlopen")
     def test_polls_multiple_times(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "inst-2", "statusQueryGetUri": "https://status/2"}
-        )
+        start_resp = _urlopen_response({"id": "inst-2", "statusQueryGetUri": "https://status/2"})
         running_resp_1 = _urlopen_response({"runtimeStatus": "Running"})
         running_resp_2 = _urlopen_response({"runtimeStatus": "Running"})
-        done_resp = _urlopen_response(
-            {"runtimeStatus": "Completed", "output": "done"}
-        )
+        done_resp = _urlopen_response({"runtimeStatus": "Completed", "output": "done"})
         mock_urlopen.side_effect = [
             start_resp,
             running_resp_1,
@@ -85,12 +77,8 @@ class TestInvokeOrchestrator:
 
     @patch("urllib.request.urlopen")
     def test_failed_status(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "inst-3", "statusQueryGetUri": "https://status/3"}
-        )
-        fail_resp = _urlopen_response(
-            {"runtimeStatus": "Failed", "output": "something broke"}
-        )
+        start_resp = _urlopen_response({"id": "inst-3", "statusQueryGetUri": "https://status/3"})
+        fail_resp = _urlopen_response({"runtimeStatus": "Failed", "output": "something broke"})
         mock_urlopen.side_effect = [start_resp, fail_resp]
 
         client = _make_client()
@@ -99,9 +87,7 @@ class TestInvokeOrchestrator:
 
     @patch("urllib.request.urlopen")
     def test_timeout(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "inst-4", "statusQueryGetUri": "https://status/4"}
-        )
+        start_resp = _urlopen_response({"id": "inst-4", "statusQueryGetUri": "https://status/4"})
         # Always return Running to force timeout
         running_resp = _urlopen_response({"runtimeStatus": "Running"})
         mock_urlopen.side_effect = [start_resp] + [running_resp] * 100
@@ -131,9 +117,7 @@ class TestInvokeOrchestrator:
     @patch("urllib.request.urlopen")
     def test_no_status_uri_returns_start_response(self, mock_urlopen):
         # When no statusQueryGetUri is present, return the start response directly
-        start_resp = _urlopen_response(
-            {"runtimeStatus": "Completed", "output": "immediate"}
-        )
+        start_resp = _urlopen_response({"runtimeStatus": "Completed", "output": "immediate"})
         mock_urlopen.side_effect = [start_resp]
 
         client = _make_client()
@@ -151,12 +135,8 @@ class TestInvokeOrchestrator:
 class TestGenerateThreadSummary:
     @patch("urllib.request.urlopen")
     def test_payload_has_thread_summary_flag(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "ts-1", "statusQueryGetUri": "https://status/ts-1"}
-        )
-        done_resp = _urlopen_response(
-            {"runtimeStatus": "Completed", "output": "summary"}
-        )
+        start_resp = _urlopen_response({"id": "ts-1", "statusQueryGetUri": "https://status/ts-1"})
+        done_resp = _urlopen_response({"runtimeStatus": "Completed", "output": "summary"})
         mock_urlopen.side_effect = [start_resp, done_resp]
 
         client = _make_client()
@@ -174,12 +154,8 @@ class TestGenerateThreadSummary:
 class TestExtractFacts:
     @patch("urllib.request.urlopen")
     def test_payload_has_extract_facts_flag(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "ef-1", "statusQueryGetUri": "https://status/ef-1"}
-        )
-        done_resp = _urlopen_response(
-            {"runtimeStatus": "Completed", "output": "facts"}
-        )
+        start_resp = _urlopen_response({"id": "ef-1", "statusQueryGetUri": "https://status/ef-1"})
+        done_resp = _urlopen_response({"runtimeStatus": "Completed", "output": "facts"})
         mock_urlopen.side_effect = [start_resp, done_resp]
 
         client = _make_client()
@@ -194,18 +170,12 @@ class TestExtractFacts:
 class TestGenerateUserSummary:
     @patch("urllib.request.urlopen")
     def test_payload_has_user_summary_flag_and_thread_ids(self, mock_urlopen):
-        start_resp = _urlopen_response(
-            {"id": "us-1", "statusQueryGetUri": "https://status/us-1"}
-        )
-        done_resp = _urlopen_response(
-            {"runtimeStatus": "Completed", "output": "user_summary"}
-        )
+        start_resp = _urlopen_response({"id": "us-1", "statusQueryGetUri": "https://status/us-1"})
+        done_resp = _urlopen_response({"runtimeStatus": "Completed", "output": "user_summary"})
         mock_urlopen.side_effect = [start_resp, done_resp]
 
         client = _make_client()
-        result = client.generate_user_summary(
-            user_id="u1", thread_ids=["t1", "t2"]
-        )
+        result = client.generate_user_summary(user_id="u1", thread_ids=["t1", "t2"])
 
         req_obj = mock_urlopen.call_args_list[0][0][0]
         body = json.loads(req_obj.data.decode("utf-8"))

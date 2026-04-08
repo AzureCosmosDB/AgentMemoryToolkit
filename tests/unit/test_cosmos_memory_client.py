@@ -215,13 +215,16 @@ class TestAutoCreateOnInit:
         mock_client.create_database_if_not_exists.return_value = mock_db
         mock_db.create_container_if_not_exists.return_value = mock_container
 
-        with patch.dict("sys.modules", {
-            "azure.cosmos": MagicMock(
-                CosmosClient=mock_cosmos_cls,
-                PartitionKey=MagicMock(),
-                ThroughputProperties=MagicMock(),
-            ),
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls,
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
             mem = _make_client(
                 cosmos_endpoint="https://fake.documents.azure.com:443/",
                 cosmos_credential="fake-key",
@@ -252,13 +255,16 @@ class TestCreateMemoryStore:
         # Start local-only, then create store explicitly
         mem = _make_client()
 
-        with patch.dict("sys.modules", {
-            "azure.cosmos": MagicMock(
-                CosmosClient=mock_cosmos_cls,
-                PartitionKey=MagicMock(),
-                ThroughputProperties=MagicMock(),
-            ),
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls,
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
             mem.create_memory_store(
                 endpoint="https://fake.documents.azure.com:443/",
                 credential="fake-key",
@@ -420,9 +426,7 @@ class TestDeleteCosmos:
 
         mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
 
-        container.delete_item.assert_called_once_with(
-            item="m1", partition_key=["u1", "t1"]
-        )
+        container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
 
     def test_not_found(self):
         mem, container = _connected_client()

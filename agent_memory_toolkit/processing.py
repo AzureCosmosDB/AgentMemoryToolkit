@@ -108,20 +108,14 @@ class ProcessingClient:
         logger.debug("POST %s with payload %s", url, payload)
 
         data = _json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-        )
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req) as resp:
                 start_response: dict[str, Any] = _json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise ProcessingError(
-                f"Failed to start orchestration: HTTP {exc.code} {exc.reason}"
-            ) from exc
+            raise ProcessingError(f"Failed to start orchestration: HTTP {exc.code} {exc.reason}") from exc
         except urllib.error.URLError as exc:
-            raise ProcessingError(
-                f"Failed to reach orchestration endpoint: {exc.reason}"
-            ) from exc
+            raise ProcessingError(f"Failed to reach orchestration endpoint: {exc.reason}") from exc
 
         status_url = start_response.get("statusQueryGetUri")
         if not status_url:
@@ -140,13 +134,9 @@ class ProcessingClient:
                 with urllib.request.urlopen(status_req) as resp:
                     status: dict[str, Any] = _json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
-                raise ProcessingError(
-                    f"Failed to poll orchestration status: HTTP {exc.code} {exc.reason}"
-                ) from exc
+                raise ProcessingError(f"Failed to poll orchestration status: HTTP {exc.code} {exc.reason}") from exc
             except urllib.error.URLError as exc:
-                raise ProcessingError(
-                    f"Failed to reach orchestration status endpoint: {exc.reason}"
-                ) from exc
+                raise ProcessingError(f"Failed to reach orchestration status endpoint: {exc.reason}") from exc
 
             runtime_status = status.get("runtimeStatus", "")
             logger.debug("Poll runtimeStatus=%s", runtime_status)
@@ -154,9 +144,7 @@ class ProcessingClient:
             if runtime_status in _TERMINAL_STATUSES:
                 if runtime_status == "Failed":
                     error_detail = status.get("output") or status.get("customStatus")
-                    raise ProcessingError(
-                        f"Orchestration failed: {error_detail}"
-                    )
+                    raise ProcessingError(f"Orchestration failed: {error_detail}")
                 logger.info("Orchestration completed with status=%s", runtime_status)
                 return status
 

@@ -121,9 +121,7 @@ class AsyncProcessingClient:
                 resp.raise_for_status()
                 start_response: dict[str, Any] = await resp.json()
         except aiohttp.ClientError as exc:
-            raise ProcessingError(
-                f"Failed to start orchestration: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to start orchestration: {exc}") from exc
 
         status_url = start_response.get("statusQueryGetUri")
         if not status_url:
@@ -143,9 +141,7 @@ class AsyncProcessingClient:
                     resp.raise_for_status()
                     status: dict[str, Any] = await resp.json()
             except aiohttp.ClientError as exc:
-                raise ProcessingError(
-                    f"Failed to poll orchestration status: {exc}"
-                ) from exc
+                raise ProcessingError(f"Failed to poll orchestration status: {exc}") from exc
 
             runtime_status = status.get("runtimeStatus", "")
             logger.debug("Poll runtimeStatus=%s", runtime_status)
@@ -153,9 +149,7 @@ class AsyncProcessingClient:
             if runtime_status in _TERMINAL_STATUSES:
                 if runtime_status == "Failed":
                     error_detail = status.get("output") or status.get("customStatus")
-                    raise ProcessingError(
-                        f"Orchestration failed: {error_detail}"
-                    )
+                    raise ProcessingError(f"Orchestration failed: {error_detail}")
                 logger.info("Orchestration completed with status=%s", runtime_status)
                 return status
 

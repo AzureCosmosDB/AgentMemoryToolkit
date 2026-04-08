@@ -14,13 +14,16 @@ load_dotenv()
 # Sample data factories
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def sample_user_id():
     return "test-user-001"
 
+
 @pytest.fixture
 def sample_thread_id():
     return str(uuid.uuid4())
+
 
 @pytest.fixture
 def sample_memory_dict(sample_user_id, sample_thread_id):
@@ -35,6 +38,7 @@ def sample_memory_dict(sample_user_id, sample_thread_id):
         "metadata": {},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
 
 @pytest.fixture
 def sample_memory_dicts(sample_user_id, sample_thread_id):
@@ -73,10 +77,12 @@ def sample_memory_dicts(sample_user_id, sample_thread_id):
         },
     ]
 
+
 @pytest.fixture
 def sample_embedding():
     """A fake embedding vector (10 dimensions for speed)."""
     return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
 
 @pytest.fixture
 def mock_credential():

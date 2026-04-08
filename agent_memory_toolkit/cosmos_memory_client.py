@@ -110,6 +110,7 @@ class CosmosMemoryClient:
             if needs_cosmos or needs_embed:
                 try:
                     from azure.identity import DefaultAzureCredential
+
                     _default = DefaultAzureCredential()
                 except ImportError:
                     _default = None
@@ -214,7 +215,10 @@ class CosmosMemoryClient:
         """
         logger.debug(
             "get_local memory_id=%s user_id=%s role=%s type=%s",
-            memory_id, user_id, role, memory_type,
+            memory_id,
+            user_id,
+            role,
+            memory_type,
         )
         results = self.local_memory
 
@@ -304,25 +308,23 @@ class CosmosMemoryClient:
         self._cosmos_container = container or self._cosmos_container
 
         _validate_connection(
-            self._cosmos_endpoint, self._cosmos_credential,
-            self._cosmos_database, self._cosmos_container,
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
         try:
             from azure.cosmos import CosmosClient
 
-            client = CosmosClient(
-                self._cosmos_endpoint, credential=self._cosmos_credential
-            )
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
             db = client.get_database_client(self._cosmos_database)
             container_handle = db.get_container_client(self._cosmos_container)
 
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Failed to connect to Cosmos DB: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Failed to connect to Cosmos DB: {exc}") from exc
 
         logger.info(
             "Connected to Cosmos DB %s/%s",
@@ -360,22 +362,20 @@ class CosmosMemoryClient:
         self._cosmos_container = container or self._cosmos_container
 
         _validate_connection(
-            self._cosmos_endpoint, self._cosmos_credential,
-            self._cosmos_database, self._cosmos_container,
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
         try:
             from azure.cosmos import CosmosClient, PartitionKey, ThroughputProperties
 
-            client = CosmosClient(
-                self._cosmos_endpoint, credential=self._cosmos_credential
-            )
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
 
             db = client.create_database_if_not_exists(id=self._cosmos_database)
 
-            partition_key = PartitionKey(
-                path=["/user_id", "/thread_id"], kind="MultiHash"
-            )
+            partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
             vec_policy, idx_policy, ft_policy = _container_policies(
                 embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
                 embedding_data_type=embedding_data_type or "float32",
@@ -396,9 +396,7 @@ class CosmosMemoryClient:
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Failed to create memory store: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Failed to create memory store: {exc}") from exc
 
         logger.info(
             "Created memory store %s/%s",
@@ -440,9 +438,7 @@ class CosmosMemoryClient:
         try:
             self._container_client.upsert_item(body=body)
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Upsert failed for record {record.id}: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
 
     def push_to_cosmos(self, batch_size: int = 25) -> None:
@@ -473,9 +469,7 @@ class CosmosMemoryClient:
                 try:
                     self._container_client.upsert_item(body=body)
                 except Exception as exc:
-                    raise CosmosOperationError(
-                        f"Upsert failed for record {record.id}: {exc}"
-                    ) from exc
+                    raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("Upserted batch of %d records", len(records))
 
     def get_memories(
@@ -501,7 +495,12 @@ class CosmosMemoryClient:
         self._require_cosmos()
         logger.debug(
             "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
-            memory_id, user_id, thread_id, role, memory_type, recent_k,
+            memory_id,
+            user_id,
+            thread_id,
+            role,
+            memory_type,
+            recent_k,
         )
 
         qb = _build_memory_query_builder(
@@ -531,9 +530,7 @@ class CosmosMemoryClient:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"get_memories query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"get_memories query failed: {exc}") from exc
 
         if recent_k is not None:
             items.reverse()
@@ -570,9 +567,7 @@ class CosmosMemoryClient:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"update query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"update query failed: {exc}") from exc
 
         if not results:
             raise MemoryNotFoundError(memory_id=memory_id)
@@ -591,9 +586,7 @@ class CosmosMemoryClient:
         try:
             self._container_client.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
-            raise CosmosOperationError(
-                f"update replace failed for {memory_id}: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"update replace failed for {memory_id}: {exc}") from exc
 
         logger.info("Updated record %s", memory_id)
 
@@ -625,23 +618,15 @@ class CosmosMemoryClient:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"delete lookup failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"delete lookup failed: {exc}") from exc
 
         if not results:
-            raise MemoryNotFoundError(
-                memory_id=memory_id, user_id=user_id, thread_id=thread_id
-            )
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
 
         try:
-            self._container_client.delete_item(
-                item=memory_id, partition_key=[user_id, thread_id]
-            )
+            self._container_client.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
-            raise CosmosOperationError(
-                f"delete failed for {memory_id}: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"delete failed for {memory_id}: {exc}") from exc
 
         logger.info("Deleted record %s", memory_id)
 
@@ -685,19 +670,14 @@ class CosmosMemoryClient:
 
         query_vector = self._embeddings_client.generate(search_terms)
 
-        qb = _build_memory_query_builder(
-            user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id
-        )
+        qb = _build_memory_query_builder(user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id)
         where = qb.build_where()
         parameters = qb.get_parameters()
 
         order_by = "ORDER BY VectorDistance(c.embedding, @embedding)"
         if hybrid_search:
             order_by = (
-                "ORDER BY RANK RRF("
-                "VectorDistance(c.embedding, @embedding), "
-                "FullTextScore(c.content, @key_terms)"
-                ")"
+                "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), FullTextScore(c.content, @key_terms))"
             )
 
         query = (
@@ -727,9 +707,7 @@ class CosmosMemoryClient:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"vector_search failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"vector_search failed: {exc}") from exc
 
         # Post-filter by memory_id (not supported directly by vector search)
         if memory_id is not None:
@@ -774,9 +752,7 @@ class CosmosMemoryClient:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"get_thread query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"get_thread query failed: {exc}") from exc
 
         if recent_k is not None:
             items = items[:recent_k]
@@ -805,9 +781,7 @@ class CosmosMemoryClient:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"get_user_summary query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"get_user_summary query failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Processing (Azure Durable Functions)

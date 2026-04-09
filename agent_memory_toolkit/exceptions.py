@@ -37,9 +37,7 @@ class CosmosNotConnectedError(AgentMemoryError):
     """Raised when a Cosmos DB operation is attempted without an active connection."""
 
     def __init__(self, message: str | None = None):
-        super().__init__(
-            message or "Cosmos DB is not connected. Call connect_cosmos() first."
-        )
+        super().__init__(message or "Cosmos DB is not connected. Call connect_cosmos() first.")
 
 
 class CosmosOperationError(AgentMemoryError):

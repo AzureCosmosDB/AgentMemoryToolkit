@@ -65,9 +65,7 @@ class AsyncEmbeddingsClient:
             return self._client
 
         if not self._endpoint:
-            raise ConfigurationError(
-                "An embedding endpoint is required", parameter="endpoint"
-            )
+            raise ConfigurationError("An embedding endpoint is required", parameter="endpoint")
 
         from openai import AsyncAzureOpenAI
 
@@ -85,9 +83,7 @@ class AsyncEmbeddingsClient:
                 )
             from azure.identity.aio import get_bearer_token_provider
 
-            token_provider = get_bearer_token_provider(
-                self._credential, _TOKEN_SCOPE
-            )
+            token_provider = get_bearer_token_provider(self._credential, _TOKEN_SCOPE)
             self._client = AsyncAzureOpenAI(
                 api_version=self._api_version,
                 azure_endpoint=self._endpoint,
@@ -150,9 +146,7 @@ class AsyncEmbeddingsClient:
         try:
             response = await client.embeddings.create(**kwargs)
         except Exception as exc:
-            raise EmbeddingError(
-                f"Batch embedding generation failed: {exc}"
-            ) from exc
+            raise EmbeddingError(f"Batch embedding generation failed: {exc}") from exc
 
         sorted_data = sorted(response.data, key=lambda d: d.index)
         return [item.embedding for item in sorted_data]

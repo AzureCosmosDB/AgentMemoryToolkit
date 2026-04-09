@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
-from .exceptions import ConfigurationError, MemoryNotFoundError, ValidationError
+from .exceptions import ConfigurationError, ValidationError
 
 # ---------------------------------------------------------------------------
 # Validation constants
@@ -149,6 +149,4 @@ def _validate_hybrid_search(
 ) -> None:
     """Raise :class:`ValidationError` if hybrid search is requested without search terms."""
     if hybrid_search and not search_terms:
-        raise ValidationError(
-            "search_terms is required when hybrid_search is True"
-        )
+        raise ValidationError("search_terms is required when hybrid_search is True")

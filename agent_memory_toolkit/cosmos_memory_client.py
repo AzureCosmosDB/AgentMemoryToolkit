@@ -1,11 +1,8 @@
-"""Cosmos DB client layer for the Agent Memory Toolkit.
+"""CosmosMemoryClient: unified local and cloud agent memory management.
 
-Provides :class:`CosmosMemoryStore` — a synchronous client that owns **all**
-Cosmos DB interaction logic: connection, container creation, CRUD, and
-vector search.
-
-Embedding generation is **not** this module's responsibility; callers must
-supply pre-computed vectors to :meth:`vector_search`.
+Consolidates the former ``AgentMemory`` orchestrator and ``CosmosMemoryStore``
+into a single class that owns local CRUD, Cosmos DB connection/CRUD,
+embedding-based search, and Azure Durable Functions processing.
 """
 
 from __future__ import annotations
@@ -16,118 +13,341 @@ from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
 from ._utils import (
+    VALID_ROLES,
+    VALID_TYPES,
     _build_memory_query_builder,
     _container_policies,
+    _make_memory,
+    _resolve_embedding_dimensions,
     _validate_connection,
     _validate_hybrid_search,
 )
+from .embeddings import EmbeddingsClient
 from .exceptions import (
     CosmosNotConnectedError,
     CosmosOperationError,
     MemoryNotFoundError,
+    ValidationError,
 )
 from .models import MemoryRecord
+from .processing import ProcessingClient
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Sync client
-# ---------------------------------------------------------------------------
+class CosmosMemoryClient:
+    """Manages agent memories with local storage and Cosmos DB.
 
-
-class CosmosMemoryStore:
-    """Synchronous Cosmos DB client for memory CRUD and vector search.
+    Authentication uses ``azure-identity`` by default.  If no explicit
+    credential is passed for Cosmos DB or AI Foundry, a
+    ``DefaultAzureCredential`` is created automatically.
 
     Parameters
     ----------
-    endpoint:
-        Cosmos DB account endpoint URL.
-    credential:
-        Azure ``TokenCredential`` or key string for authentication.
-    database:
-        Name of the Cosmos DB database.  Defaults to ``"ai_memory"``.
-    container:
-        Name of the Cosmos DB container.  Defaults to ``"memories"``.
+    cosmos_endpoint : str, optional
+        The Cosmos DB account endpoint URL.
+    cosmos_credential : TokenCredential, optional
+        Azure credential for Cosmos DB.
+    cosmos_database : str, optional
+        Cosmos DB database name.
+    cosmos_container : str, optional
+        Cosmos DB container name.
+    ai_foundry_endpoint : str, optional
+        Azure OpenAI endpoint URL for embeddings.
+    ai_foundry_credential : TokenCredential, optional
+        Azure credential for the AI Foundry endpoint.
+    ai_foundry_api_key : str, optional
+        API key for Azure OpenAI (takes precedence over credential).
+    embedding_model : str, optional
+        Embedding model deployment name (default ``text-embedding-3-large``).
+    embedding_dimensions : int, optional
+        Dimensionality of embedding vectors.
+    adf_endpoint : str, optional
+        Base URL for the Azure Durable Functions API.
+    adf_key : str, optional
+        Function-level key for authenticating to the Azure Function.
+    use_default_credential : bool, optional
+        Automatically create ``DefaultAzureCredential`` when ``True``.
     """
 
     def __init__(
         self,
-        endpoint: str | None = None,
-        credential: Any = None,
-        database: str = "ai_memory",
-        container: str = "memories",
+        cosmos_endpoint: Optional[str] = None,
+        cosmos_credential: Optional[Any] = None,
+        cosmos_database: Optional[str] = None,
+        cosmos_container: Optional[str] = None,
+        ai_foundry_endpoint: Optional[str] = None,
+        ai_foundry_credential: Optional[Any] = None,
+        ai_foundry_api_key: Optional[str] = None,
+        embedding_model: str = "text-embedding-3-large",
+        embedding_dimensions: Optional[int] = None,
+        adf_endpoint: Optional[str] = None,
+        adf_key: Optional[str] = None,
+        use_default_credential: bool = True,
     ) -> None:
-        self._endpoint = endpoint
-        self._credential = credential
-        self._database = database
-        self._container = container
+        # Local store
+        self.local_memory: list[dict[str, Any]] = []
+
+        # Store kwargs directly
+        self._cosmos_endpoint = cosmos_endpoint
+        self._cosmos_credential = cosmos_credential
+        self._cosmos_database = cosmos_database or "ai_memory"
+        self._cosmos_container = cosmos_container or "memories"
+
+        self._ai_foundry_endpoint = ai_foundry_endpoint
+        self._ai_foundry_credential = ai_foundry_credential
+        self._ai_foundry_api_key = ai_foundry_api_key
+        self._embedding_model = embedding_model
+        self._embedding_dimensions = _resolve_embedding_dimensions(embedding_dimensions)
+
+        self._adf_endpoint = adf_endpoint
+        self._adf_key = adf_key
+
+        # Resolve credentials via DefaultAzureCredential when needed
+        if use_default_credential:
+            needs_cosmos = self._cosmos_credential is None
+            needs_embed = self._ai_foundry_credential is None
+            if needs_cosmos or needs_embed:
+                try:
+                    from azure.identity import DefaultAzureCredential
+
+                    _default = DefaultAzureCredential()
+                except ImportError:
+                    _default = None
+                if needs_cosmos:
+                    self._cosmos_credential = _default
+                if needs_embed:
+                    self._ai_foundry_credential = _default
+
+        # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
         self._container_client: Any = None
 
-    # -- context manager ----------------------------------------------------
+        # Composed sub-clients
+        self._embeddings_client = EmbeddingsClient(
+            endpoint=self._ai_foundry_endpoint,
+            credential=self._ai_foundry_credential,
+            api_key=self._ai_foundry_api_key,
+            model=self._embedding_model,
+            dimensions=self._embedding_dimensions,
+        )
+        self._processing_client = ProcessingClient(
+            endpoint=self._adf_endpoint,
+            key=self._adf_key,
+        )
 
-    def __enter__(self) -> CosmosMemoryStore:
+        # Auto-connect and create store when Cosmos endpoint is provided
+        if self._cosmos_endpoint:
+            self.create_memory_store()
+
+        logger.info("CosmosMemoryClient initialized")
+
+    # ------------------------------------------------------------------
+    # Context manager / cleanup
+    # ------------------------------------------------------------------
+
+    def __enter__(self) -> CosmosMemoryClient:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
     def close(self) -> None:
-        """Close the underlying Cosmos client."""
+        """Close the underlying Cosmos client and release resources."""
         if self._cosmos_client is not None:
             self._cosmos_client.close()
             self._cosmos_client = None
             self._container_client = None
             logger.info("Cosmos client closed")
 
-    # -- connection ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Read-only properties
+    # ------------------------------------------------------------------
 
-    def connect(self) -> None:
-        """Create a :class:`CosmosClient` and obtain the container handle.
+    @property
+    def adf_endpoint(self) -> str | None:
+        """The Azure Durable Functions endpoint URL."""
+        return self._adf_endpoint
+
+    @property
+    def adf_key(self) -> str | None:
+        """The Azure Durable Functions key."""
+        return self._adf_key
+
+    # ------------------------------------------------------------------
+    # Local operations
+    # ------------------------------------------------------------------
+
+    def add_local(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        memory_type: str = "turn",
+        agent_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        """Add a new memory to the local store."""
+        memory = _make_memory(
+            user_id=user_id,
+            role=role,
+            content=content,
+            memory_type=memory_type,
+            agent_id=agent_id,
+            metadata=metadata,
+            thread_id=thread_id,
+        )
+        self.local_memory.append(memory)
+        logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
+
+    def get_local(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve memories from the local store.
+
+        All filter parameters are optional. When none are provided every
+        memory is returned. Filters are combined with AND logic.
+        """
+        logger.debug(
+            "get_local memory_id=%s user_id=%s role=%s type=%s",
+            memory_id,
+            user_id,
+            role,
+            memory_type,
+        )
+        results = self.local_memory
+
+        if memory_id is not None:
+            results = [m for m in results if m["id"] == memory_id]
+        if user_id is not None:
+            results = [m for m in results if m["user_id"] == user_id]
+        if role is not None:
+            results = [m for m in results if m["role"] == role]
+        if memory_type is not None:
+            results = [m for m in results if m["type"] == memory_type]
+
+        return results
+
+    def update_local(
+        self,
+        memory_id: str,
+        content: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Update an existing memory in the local store.
+
+        Only the fields that are provided (not ``None``) will be updated.
 
         Raises
         ------
-        ConfigurationError
-            If any required configuration field is missing.
-        CosmosOperationError
-            If the connection to Cosmos DB fails.
+        MemoryNotFoundError
+            If no memory with the given id exists.
+        ValidationError
+            If an invalid role or memory_type is provided.
         """
+        for memory in self.local_memory:
+            if memory["id"] == memory_id:
+                if content is not None:
+                    memory["content"] = content
+                if role is not None:
+                    if role not in VALID_ROLES:
+                        raise ValidationError(f"role must be one of {VALID_ROLES}, got '{role}'")
+                    memory["role"] = role
+                if memory_type is not None:
+                    if memory_type not in VALID_TYPES:
+                        raise ValidationError(f"type must be one of {VALID_TYPES}, got '{memory_type}'")
+                    memory["type"] = memory_type
+                if metadata is not None:
+                    memory["metadata"] = metadata
+                memory["updated_at"] = datetime.now(timezone.utc).isoformat()
+                return
+
+        raise MemoryNotFoundError(memory_id=memory_id)
+
+    def delete_local(self, memory_id: str) -> None:
+        """Delete a memory from the local store by id.
+
+        Raises
+        ------
+        MemoryNotFoundError
+            If no memory with the given id exists.
+        """
+        for i, memory in enumerate(self.local_memory):
+            if memory["id"] == memory_id:
+                self.local_memory.pop(i)
+                return
+
+        raise MemoryNotFoundError(memory_id=memory_id)
+
+    # ------------------------------------------------------------------
+    # Cosmos DB connection
+    # ------------------------------------------------------------------
+
+    def connect_cosmos(
+        self,
+        endpoint: Optional[str] = None,
+        credential: Optional[Any] = None,
+        database: Optional[str] = None,
+        container: Optional[str] = None,
+    ) -> None:
+        """Establish a connection to a Cosmos DB container.
+
+        Parameters override whatever was set in ``__init__``.  After this
+        call the Cosmos CRUD methods are ready to use.
+        """
+        self._cosmos_endpoint = endpoint or self._cosmos_endpoint
+        self._cosmos_credential = credential or self._cosmos_credential
+        self._cosmos_database = database or self._cosmos_database
+        self._cosmos_container = container or self._cosmos_container
+
         _validate_connection(
-            self._endpoint, self._credential, self._database, self._container
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
         try:
             from azure.cosmos import CosmosClient
 
-            client = CosmosClient(
-                self._endpoint, credential=self._credential
-            )
-            db = client.get_database_client(self._database)
-            container = db.get_container_client(self._container)
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            db = client.get_database_client(self._cosmos_database)
+            container_handle = db.get_container_client(self._cosmos_container)
 
             self._cosmos_client = client
-            self._container_client = container
+            self._container_client = container_handle
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Failed to connect to Cosmos DB: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Failed to connect to Cosmos DB: {exc}") from exc
 
         logger.info(
             "Connected to Cosmos DB %s/%s",
-            self._database,
-            self._container,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
-    def create_store(
+    def create_memory_store(
         self,
-        embedding_dimensions: int = 1536,
-        embedding_data_type: str = "float32",
-        distance_function: str = "cosine",
-        full_text_language: str = "en-US",
+        database: Optional[str] = None,
+        container: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        credential: Optional[Any] = None,
+        embedding_dimensions: Optional[int] = None,
+        embedding_data_type: Optional[str] = None,
+        distance_function: Optional[str] = None,
+        full_text_language: Optional[str] = None,
         autoscale_max_ru: int = 1000,
     ) -> None:
-        """Create the database and container, then connect.
+        """Create the Cosmos DB database and container for memories.
+
+        After successful creation the instance is connected and ready
+        for CRUD operations.
 
         The container is provisioned with:
 
@@ -135,39 +355,36 @@ class CosmosMemoryStore:
         * ``quantizedFlat`` vector index on ``/embedding``
         * Full-text index on ``/content``
         * Autoscale throughput (max RU from *autoscale_max_ru*)
-
-        Raises
-        ------
-        ConfigurationError
-            If required fields are missing.
-        CosmosOperationError
-            If the Cosmos DB operation fails.
         """
+        self._cosmos_endpoint = endpoint or self._cosmos_endpoint
+        self._cosmos_credential = credential or self._cosmos_credential
+        self._cosmos_database = database or self._cosmos_database
+        self._cosmos_container = container or self._cosmos_container
+
         _validate_connection(
-            self._endpoint, self._credential, self._database, self._container
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
         try:
             from azure.cosmos import CosmosClient, PartitionKey, ThroughputProperties
 
-            client = CosmosClient(
-                self._endpoint, credential=self._credential
-            )
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
 
-            db = client.create_database_if_not_exists(id=self._database)
+            db = client.create_database_if_not_exists(id=self._cosmos_database)
 
-            partition_key = PartitionKey(
-                path=["/user_id", "/thread_id"], kind="MultiHash"
-            )
+            partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
             vec_policy, idx_policy, ft_policy = _container_policies(
-                embedding_dimensions=embedding_dimensions,
-                embedding_data_type=embedding_data_type,
-                distance_function=distance_function,
-                full_text_language=full_text_language,
+                embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
+                embedding_data_type=embedding_data_type or "float32",
+                distance_function=distance_function or "cosine",
+                full_text_language=full_text_language or "en-US",
             )
 
-            container = db.create_container_if_not_exists(
-                id=self._container,
+            container_handle = db.create_container_if_not_exists(
+                id=self._cosmos_container,
                 partition_key=partition_key,
                 indexing_policy=idx_policy,
                 vector_embedding_policy=vec_policy,
@@ -177,45 +394,83 @@ class CosmosMemoryStore:
                 ),
             )
             self._cosmos_client = client
-            self._container_client = container
+            self._container_client = container_handle
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Failed to create memory store: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"Failed to create memory store: {exc}") from exc
 
         logger.info(
             "Created memory store %s/%s",
-            self._database,
-            self._container,
+            self._cosmos_database,
+            self._cosmos_container,
         )
 
-    def _require_connected(self) -> None:
-        """Raise if no active container client."""
+    def _require_cosmos(self) -> None:
+        """Raise if Cosmos DB is not connected."""
         if self._container_client is None:
             raise CosmosNotConnectedError()
 
-    # -- upsert -------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Cosmos DB CRUD operations
+    # ------------------------------------------------------------------
 
-    def upsert(self, record: MemoryRecord) -> None:
-        """Upsert a single :class:`MemoryRecord` into Cosmos DB."""
-        self._require_connected()
+    def add_cosmos(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        memory_type: str = "turn",
+        metadata: Optional[dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        """Add a memory to Cosmos DB."""
+        self._require_cosmos()
+        kwargs: dict[str, Any] = {
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "memory_type": memory_type,
+            "metadata": metadata or {},
+        }
+        if thread_id is not None:
+            kwargs["thread_id"] = thread_id
+        record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
         try:
             self._container_client.upsert_item(body=body)
         except Exception as exc:
-            raise CosmosOperationError(
-                f"Upsert failed for record {record.id}: {exc}"
-            ) from exc
-        logger.info("Upserted record %s", record.id)
+            raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
+        logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
 
-    def upsert_batch(self, records: list[MemoryRecord]) -> None:
-        """Upsert multiple records sequentially."""
-        self._require_connected()
-        for record in records:
-            self.upsert(record)
+    def push_to_cosmos(self, batch_size: int = 25) -> None:
+        """Insert all local memories into Cosmos DB.
+
+        Each local memory is inserted as-is, preserving its existing
+        ``id``, ``thread_id``, timestamps, and metadata.
+
+        Parameters
+        ----------
+        batch_size : int
+            Number of records per batch (for error isolation). All batches
+            run sequentially. Defaults to 25.
+        """
+        self._require_cosmos()
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0")
+        logger.info(
+            "push_to_cosmos count=%d batch_size=%d",
+            len(self.local_memory),
+            batch_size,
+        )
+        records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
+        for start in range(0, len(records), batch_size):
+            batch = records[start : start + batch_size]
+            for record in batch:
+                body = record.to_cosmos_dict()
+                try:
+                    self._container_client.upsert_item(body=body)
+                except Exception as exc:
+                    raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("Upserted batch of %d records", len(records))
-
-    # -- queries ------------------------------------------------------------
 
     def get_memories(
         self,
@@ -226,13 +481,27 @@ class CosmosMemoryStore:
         memory_type: Optional[str] = None,
         recent_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Query memories with optional filters.
+        """Retrieve memories from Cosmos DB with optional filters.
 
-        Returns raw dicts (callers convert to :class:`MemoryRecord` if needed).
-        When *recent_k* is given the newest *k* documents are returned in
-        chronological (oldest-first) order.
+        Args:
+            memory_id: Filter by memory id.
+            user_id: Filter by user id.
+            thread_id: Filter by thread id.
+            role: Filter by role.
+            memory_type: Filter by type (raw, summary, fact, etc.).
+            recent_k: If specified, return only the *k* most recent documents
+                (ordered by ``_ts`` descending, then reversed to chronological).
         """
-        self._require_connected()
+        self._require_cosmos()
+        logger.debug(
+            "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
+            memory_id,
+            user_id,
+            thread_id,
+            role,
+            memory_type,
+            recent_k,
+        )
 
         qb = _build_memory_query_builder(
             memory_id=memory_id,
@@ -261,13 +530,194 @@ class CosmosMemoryStore:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"get_memories query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"get_memories query failed: {exc}") from exc
 
         if recent_k is not None:
             items.reverse()
+
+        if not items:
+            logger.warning("get_memories returned empty results")
         return items
+
+    def update_cosmos(
+        self,
+        memory_id: str,
+        content: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Update a memory in Cosmos DB.
+
+        Raises
+        ------
+        MemoryNotFoundError
+            If no document with *memory_id* exists.
+        CosmosOperationError
+            If the underlying Cosmos DB operation fails.
+        """
+        self._require_cosmos()
+
+        try:
+            results = list(
+                self._container_client.query_items(
+                    query="SELECT * FROM c WHERE c.id = @id",
+                    parameters=[{"name": "@id", "value": memory_id}],
+                    enable_cross_partition_query=True,
+                )
+            )
+        except Exception as exc:
+            raise CosmosOperationError(f"update query failed: {exc}") from exc
+
+        if not results:
+            raise MemoryNotFoundError(memory_id=memory_id)
+
+        doc = results[0]
+        if content is not None:
+            doc["content"] = content
+        if role is not None:
+            doc["role"] = role
+        if memory_type is not None:
+            doc["type"] = memory_type
+        if metadata is not None:
+            doc["metadata"] = metadata
+        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            self._container_client.replace_item(item=doc["id"], body=doc)
+        except Exception as exc:
+            raise CosmosOperationError(f"update replace failed for {memory_id}: {exc}") from exc
+
+        logger.info("Updated record %s", memory_id)
+
+    def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
+        """Delete a memory from Cosmos DB.
+
+        Raises
+        ------
+        MemoryNotFoundError
+            If no matching document is found.
+        CosmosOperationError
+            If the underlying Cosmos DB operation fails.
+        """
+        self._require_cosmos()
+
+        try:
+            results = list(
+                self._container_client.query_items(
+                    query=(
+                        "SELECT TOP 1 c.id FROM c WHERE c.id = @id "
+                        "AND c.thread_id = @thread_id AND c.user_id = @user_id"
+                    ),
+                    parameters=[
+                        {"name": "@id", "value": memory_id},
+                        {"name": "@thread_id", "value": thread_id},
+                        {"name": "@user_id", "value": user_id},
+                    ],
+                    enable_cross_partition_query=True,
+                )
+            )
+        except Exception as exc:
+            raise CosmosOperationError(f"delete lookup failed: {exc}") from exc
+
+        if not results:
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
+
+        try:
+            self._container_client.delete_item(item=memory_id, partition_key=[user_id, thread_id])
+        except Exception as exc:
+            raise CosmosOperationError(f"delete failed for {memory_id}: {exc}") from exc
+
+        logger.info("Deleted record %s", memory_id)
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
+    def search_cosmos(
+        self,
+        search_terms: str,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        hybrid_search: bool = False,
+        top_k: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Search memories in Cosmos DB using vector similarity.
+
+        1. Embeds *search_terms* via the configured embedding model.
+        2. Runs a vector similarity query against the Cosmos DB container.
+        3. Optionally filters by the remaining keyword parameters.
+        4. Returns up to *top_k* results ordered by similarity.
+        """
+        self._require_cosmos()
+        _validate_hybrid_search(hybrid_search, search_terms)
+        if not search_terms or not search_terms.strip():
+            raise ValidationError("search_terms must be a non-empty string")
+
+        logger.info(
+            "search_cosmos terms_len=%d top_k=%d hybrid_search=%s",
+            len(search_terms),
+            top_k,
+            hybrid_search,
+        )
+        logger.debug(
+            "search_cosmos search_terms=%s",
+            search_terms[:50] + "..." if len(search_terms) > 50 else search_terms,
+        )
+
+        query_vector = self._embeddings_client.generate(search_terms)
+
+        qb = _build_memory_query_builder(user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id)
+        where = qb.build_where()
+        parameters = qb.get_parameters()
+
+        order_by = "ORDER BY VectorDistance(c.embedding, @embedding)"
+        if hybrid_search:
+            order_by = (
+                "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), FullTextScore(c.content, @key_terms))"
+            )
+
+        query = (
+            f"SELECT TOP @top_k c.id, c.user_id, c.role, c.type, c.content, "
+            f"c.metadata, c.created_at "
+            f"FROM c{where} "
+            f"{order_by}"
+        )
+
+        parameters.extend(
+            [
+                {"name": "@top_k", "value": top_k},
+                {"name": "@embedding", "value": query_vector},
+            ]
+        )
+        if hybrid_search:
+            parameters.append({"name": "@key_terms", "value": search_terms or ""})
+
+        logger.debug("search_cosmos query: %s", query)
+
+        try:
+            results = list(
+                self._container_client.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except Exception as exc:
+            raise CosmosOperationError(f"vector_search failed: {exc}") from exc
+
+        # Post-filter by memory_id (not supported directly by vector search)
+        if memory_id is not None:
+            results = [r for r in results if r.get("id") == memory_id]
+        if not results:
+            logger.warning(
+                "search_cosmos returned empty results (terms_len=%d)",
+                len(search_terms),
+            )
+        return results
 
     def get_thread(
         self,
@@ -276,8 +726,11 @@ class CosmosMemoryStore:
         memory_type: Optional[str] = None,
         recent_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve an entire thread, oldest-first."""
-        self._require_connected()
+        """Retrieve an entire thread from Cosmos DB.
+
+        Returns memories sorted in chronological order (oldest first).
+        """
+        self._require_cosmos()
 
         qb = _QueryBuilder()
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
@@ -299,9 +752,7 @@ class CosmosMemoryStore:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"get_thread query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"get_thread query failed: {exc}") from exc
 
         if recent_k is not None:
             items = items[:recent_k]
@@ -309,8 +760,8 @@ class CosmosMemoryStore:
         return items
 
     def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
-        """Retrieve user-summary documents, newest-first."""
-        self._require_connected()
+        """Retrieve user summary documents from Cosmos DB, newest first."""
+        self._require_cosmos()
 
         query = (
             "SELECT c.id, c.user_id, c.thread_id, c.role, c.type, "
@@ -330,185 +781,70 @@ class CosmosMemoryStore:
                 )
             )
         except Exception as exc:
-            raise CosmosOperationError(
-                f"get_user_summary query failed: {exc}"
-            ) from exc
+            raise CosmosOperationError(f"get_user_summary query failed: {exc}") from exc
 
-    # -- update / delete ----------------------------------------------------
+    # ------------------------------------------------------------------
+    # Processing (Azure Durable Functions)
+    # ------------------------------------------------------------------
 
-    def update(
+    def generate_thread_summary(
         self,
-        memory_id: str,
-        content: Optional[str] = None,
-        role: Optional[str] = None,
-        memory_type: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """Update fields on an existing memory document.
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Trigger the Azure Durable Function to generate a thread summary."""
+        logger.info(
+            "generate_thread_summary started user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return self._processing_client.generate_thread_summary(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+            poll_interval=poll_interval,
+            timeout=timeout,
+        )
 
-        Raises
-        ------
-        MemoryNotFoundError
-            If no document with *memory_id* exists.
-        CosmosOperationError
-            If the underlying Cosmos DB operation fails.
-        """
-        self._require_connected()
-
-        try:
-            results = list(
-                self._container_client.query_items(
-                    query="SELECT * FROM c WHERE c.id = @id",
-                    parameters=[{"name": "@id", "value": memory_id}],
-                    enable_cross_partition_query=True,
-                )
-            )
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"update query failed: {exc}"
-            ) from exc
-
-        if not results:
-            raise MemoryNotFoundError(memory_id=memory_id)
-
-        doc = results[0]
-        if content is not None:
-            doc["content"] = content
-        if role is not None:
-            doc["role"] = role
-        if memory_type is not None:
-            doc["type"] = memory_type
-        if metadata is not None:
-            doc["metadata"] = metadata
-        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-        try:
-            self._container_client.replace_item(item=doc["id"], body=doc)
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"update replace failed for {memory_id}: {exc}"
-            ) from exc
-
-        logger.info("Updated record %s", memory_id)
-
-    def delete(self, memory_id: str, user_id: str, thread_id: str) -> None:
-        """Delete a memory document.
-
-        Raises
-        ------
-        MemoryNotFoundError
-            If no matching document is found.
-        CosmosOperationError
-            If the underlying Cosmos DB operation fails.
-        """
-        self._require_connected()
-
-        try:
-            results = list(
-                self._container_client.query_items(
-                    query=(
-                        "SELECT TOP 1 c.id FROM c WHERE c.id = @id "
-                        "AND c.thread_id = @thread_id AND c.user_id = @user_id"
-                    ),
-                    parameters=[
-                        {"name": "@id", "value": memory_id},
-                        {"name": "@thread_id", "value": thread_id},
-                        {"name": "@user_id", "value": user_id},
-                    ],
-                    enable_cross_partition_query=True,
-                )
-            )
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"delete lookup failed: {exc}"
-            ) from exc
-
-        if not results:
-            raise MemoryNotFoundError(
-                memory_id=memory_id, user_id=user_id, thread_id=thread_id
-            )
-
-        try:
-            self._container_client.delete_item(
-                item=memory_id, partition_key=[user_id, thread_id]
-            )
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"delete failed for {memory_id}: {exc}"
-            ) from exc
-
-        logger.info("Deleted record %s", memory_id)
-
-    # -- vector search ------------------------------------------------------
-
-    def vector_search(
+    def extract_facts(
         self,
-        query_vector: list[float],
-        user_id: Optional[str] = None,
-        role: Optional[str] = None,
-        memory_type: Optional[str] = None,
-        thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
-        search_terms: Optional[str] = None,
-        top_k: int = 5,
-    ) -> list[dict[str, Any]]:
-        """Run a vector (or hybrid) similarity search.
-
-        Parameters
-        ----------
-        query_vector : list[float]
-            Pre-computed embedding vector.
-        search_terms : str, optional
-            Raw text for the full-text component of a hybrid search.
-            Required when *hybrid_search* is ``True``.
-        """
-        self._require_connected()
-        _validate_hybrid_search(hybrid_search, search_terms)
-
-        qb = _build_memory_query_builder(
-            user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Trigger the Azure Durable Function to extract facts from a thread."""
+        logger.info(
+            "extract_facts started user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
         )
-        where = qb.build_where()
-        parameters = qb.get_parameters()
-
-        order_by = "ORDER BY VectorDistance(c.embedding, @embedding)"
-        if hybrid_search:
-            order_by = (
-                "ORDER BY RANK RRF("
-                "VectorDistance(c.embedding, @embedding), "
-                "FullTextScore(c.content, @key_terms)"
-                ")"
-            )
-
-        query = (
-            f"SELECT TOP @top_k c.id, c.user_id, c.role, c.type, c.content, "
-            f"c.metadata, c.created_at "
-            f"FROM c{where} "
-            f"{order_by}"
+        return self._processing_client.extract_facts(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+            poll_interval=poll_interval,
+            timeout=timeout,
         )
 
-        parameters.extend(
-            [
-                {"name": "@top_k", "value": top_k},
-                {"name": "@embedding", "value": query_vector},
-            ]
+    def generate_user_summary(
+        self,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+        recent_k: Optional[int] = None,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Trigger the Azure Durable Function to generate a cross-thread user summary."""
+        logger.info("generate_user_summary started user_id=%s", user_id)
+        return self._processing_client.generate_user_summary(
+            user_id=user_id,
+            thread_ids=thread_ids,
+            recent_k=recent_k,
+            poll_interval=poll_interval,
+            timeout=timeout,
         )
-        if hybrid_search:
-            parameters.append({"name": "@key_terms", "value": search_terms or ""})
-
-        logger.debug("vector_search query: %s", query)
-
-        try:
-            items = list(
-                self._container_client.query_items(
-                    query=query,
-                    parameters=parameters,
-                    enable_cross_partition_query=True,
-                )
-            )
-        except Exception as exc:
-            raise CosmosOperationError(
-                f"vector_search failed: {exc}"
-            ) from exc
-
-        return items

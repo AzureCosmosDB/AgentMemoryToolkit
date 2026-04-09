@@ -13,6 +13,7 @@ from agent_memory_toolkit.exceptions import ConfigurationError, EmbeddingError
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_client(**overrides) -> EmbeddingsClient:
     defaults = dict(
         endpoint="https://fake.openai.azure.com",
@@ -56,9 +57,7 @@ class TestGenerate:
     def test_success(self, MockAOAI, sample_embedding):
         mock_client = MagicMock()
         MockAOAI.return_value = mock_client
-        mock_client.embeddings.create.return_value = _mock_embedding_response(
-            sample_embedding
-        )
+        mock_client.embeddings.create.return_value = _mock_embedding_response(sample_embedding)
 
         client = _make_client()
         result = client.generate("hello world")
@@ -70,9 +69,7 @@ class TestGenerate:
     def test_lazy_init_reuses_client(self, MockAOAI, sample_embedding):
         mock_client = MagicMock()
         MockAOAI.return_value = mock_client
-        mock_client.embeddings.create.return_value = _mock_embedding_response(
-            sample_embedding
-        )
+        mock_client.embeddings.create.return_value = _mock_embedding_response(sample_embedding)
 
         client = _make_client()
         client.generate("first")
@@ -86,9 +83,7 @@ class TestGenerate:
     def test_with_api_key(self, MockAOAI, sample_embedding):
         mock_client = MagicMock()
         MockAOAI.return_value = mock_client
-        mock_client.embeddings.create.return_value = _mock_embedding_response(
-            sample_embedding
-        )
+        mock_client.embeddings.create.return_value = _mock_embedding_response(sample_embedding)
 
         client = _make_client(api_key="my-key", credential=None)
         client.generate("text")
@@ -98,14 +93,10 @@ class TestGenerate:
 
     @patch("azure.identity.get_bearer_token_provider")
     @patch("openai.AzureOpenAI")
-    def test_with_credential(
-        self, MockAOAI, mock_get_token, sample_embedding, mock_credential
-    ):
+    def test_with_credential(self, MockAOAI, mock_get_token, sample_embedding, mock_credential):
         mock_client = MagicMock()
         MockAOAI.return_value = mock_client
-        mock_client.embeddings.create.return_value = _mock_embedding_response(
-            sample_embedding
-        )
+        mock_client.embeddings.create.return_value = _mock_embedding_response(sample_embedding)
         mock_get_token.return_value = lambda: "token"
 
         client = _make_client(api_key=None, credential=mock_credential)
@@ -146,9 +137,7 @@ class TestGenerate:
     def test_with_dimensions(self, MockAOAI, sample_embedding):
         mock_client = MagicMock()
         MockAOAI.return_value = mock_client
-        mock_client.embeddings.create.return_value = _mock_embedding_response(
-            sample_embedding
-        )
+        mock_client.embeddings.create.return_value = _mock_embedding_response(sample_embedding)
 
         client = _make_client(dimensions=256)
         client.generate("text")

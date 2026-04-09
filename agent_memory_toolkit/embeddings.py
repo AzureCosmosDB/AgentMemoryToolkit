@@ -66,9 +66,7 @@ class EmbeddingsClient:
             return self._client
 
         if not self._endpoint:
-            raise ConfigurationError(
-                "An embedding endpoint is required", parameter="endpoint"
-            )
+            raise ConfigurationError("An embedding endpoint is required", parameter="endpoint")
 
         from openai import AzureOpenAI
 
@@ -149,9 +147,7 @@ class EmbeddingsClient:
         try:
             response = client.embeddings.create(**kwargs)
         except Exception as exc:
-            raise EmbeddingError(
-                f"Batch embedding generation failed: {exc}"
-            ) from exc
+            raise EmbeddingError(f"Batch embedding generation failed: {exc}") from exc
 
         # The API returns results with an ``index`` field; sort to guarantee
         # the caller receives embeddings in the same order as the input.

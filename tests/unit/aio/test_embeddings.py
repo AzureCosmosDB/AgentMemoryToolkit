@@ -42,9 +42,7 @@ def client():
 async def test_generate_success(client):
     expected = [0.1, 0.2, 0.3]
     mock_openai = MagicMock()
-    mock_openai.embeddings.create = AsyncMock(
-        return_value=_make_embedding_response([expected])
-    )
+    mock_openai.embeddings.create = AsyncMock(return_value=_make_embedding_response([expected]))
     client._client = mock_openai
 
     result = await client.generate("hello")
@@ -67,9 +65,7 @@ async def test_generate_lazy_init():
 
     mock_cls = MagicMock()
     mock_instance = MagicMock()
-    mock_instance.embeddings.create = AsyncMock(
-        return_value=_make_embedding_response([[1.0, 2.0]])
-    )
+    mock_instance.embeddings.create = AsyncMock(return_value=_make_embedding_response([[1.0, 2.0]]))
     mock_cls.return_value = mock_instance
 
     with patch("openai.AsyncAzureOpenAI", mock_cls):
@@ -92,9 +88,7 @@ async def test_generate_api_key_auth():
     )
     mock_cls = MagicMock()
     mock_instance = MagicMock()
-    mock_instance.embeddings.create = AsyncMock(
-        return_value=_make_embedding_response([[1.0]])
-    )
+    mock_instance.embeddings.create = AsyncMock(return_value=_make_embedding_response([[1.0]]))
     mock_cls.return_value = mock_instance
 
     with patch("openai.AsyncAzureOpenAI", mock_cls):
@@ -114,15 +108,14 @@ async def test_generate_credential_auth():
 
     mock_cls = MagicMock()
     mock_instance = MagicMock()
-    mock_instance.embeddings.create = AsyncMock(
-        return_value=_make_embedding_response([[2.0]])
-    )
+    mock_instance.embeddings.create = AsyncMock(return_value=_make_embedding_response([[2.0]]))
     mock_cls.return_value = mock_instance
 
     mock_token_provider = MagicMock()
-    with patch("openai.AsyncAzureOpenAI", mock_cls), \
-         patch("azure.identity.aio.get_bearer_token_provider",
-               return_value=mock_token_provider):
+    with (
+        patch("openai.AsyncAzureOpenAI", mock_cls),
+        patch("azure.identity.aio.get_bearer_token_provider", return_value=mock_token_provider),
+    ):
         await client.generate("x")
 
     call_kwargs = mock_cls.call_args.kwargs
@@ -231,9 +224,7 @@ async def test_close_noop_when_no_client():
 
 async def test_context_manager():
     mock_openai = AsyncMock()
-    client = AsyncEmbeddingsClient(
-        endpoint="https://fake.openai.azure.com/", api_key="k"
-    )
+    client = AsyncEmbeddingsClient(endpoint="https://fake.openai.azure.com/", api_key="k")
     client._client = mock_openai
 
     async with client as c:

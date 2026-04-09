@@ -1,198 +1,347 @@
-"""Unit tests for CosmosMemoryStore (sync Cosmos DB client)."""
+"""Unit tests for CosmosMemoryClient (unified sync client)."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryStore
+from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
 from agent_memory_toolkit.exceptions import (
-    ConfigurationError,
     CosmosNotConnectedError,
-    CosmosOperationError,
     MemoryNotFoundError,
+    ValidationError,
 )
-from agent_memory_toolkit.models import MemoryRecord
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_store(
-    endpoint: str | None = "https://fake.documents.azure.com",
-    credential: str | None = "fake-key",
-    database: str = "ai_memory",
-    container: str = "memories",
-) -> CosmosMemoryStore:
-    return CosmosMemoryStore(
-        endpoint=endpoint,
-        credential=credential,
-        database=database,
-        container=container,
-    )
 
-
-def _connected_store() -> tuple[CosmosMemoryStore, MagicMock]:
-    """Return a store with a mocked container client already wired up."""
-    store = _make_store()
-    container = MagicMock()
-    store._container_client = container
-    return store, container
-
-
-def _make_record(**overrides) -> MemoryRecord:
-    defaults = dict(
-        id=str(uuid.uuid4()),
-        user_id="u1",
-        thread_id="t1",
-        role="user",
-        content="hello",
-    )
+def _make_client(**overrides) -> CosmosMemoryClient:
+    """Build a CosmosMemoryClient with credential auto-resolution disabled."""
+    defaults: dict = {"use_default_credential": False}
     defaults.update(overrides)
-    return MemoryRecord(**defaults)
+    return CosmosMemoryClient(**defaults)
 
 
-# ---------------------------------------------------------------------------
-# connect()
-# ---------------------------------------------------------------------------
+def _connected_client() -> tuple[CosmosMemoryClient, MagicMock]:
+    """Return a client with a mocked container client already wired up."""
+    client = _make_client()
+    container = MagicMock()
+    client._container_client = container
+    return client, container
 
 
-class TestConnect:
-    @patch("azure.cosmos.CosmosClient")
-    def test_connect_success(self, MockCosmosClient):
-        mock_client = MagicMock()
-        mock_db = MagicMock()
-        mock_container = MagicMock()
-        MockCosmosClient.return_value = mock_client
-        mock_client.get_database_client.return_value = mock_db
-        mock_db.get_container_client.return_value = mock_container
+def _make_doc(**overrides) -> dict:
+    defaults = {
+        "id": str(uuid.uuid4()),
+        "user_id": "u1",
+        "thread_id": "t1",
+        "role": "user",
+        "type": "turn",
+        "content": "hello",
+        "metadata": {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    defaults.update(overrides)
+    return defaults
 
-        store = _make_store()
-        store.connect()
 
-        MockCosmosClient.assert_called_once_with(
-            "https://fake.documents.azure.com", credential="fake-key"
+# ===================================================================
+# Constructor
+# ===================================================================
+
+
+class TestConstructor:
+    def test_default_credential_created_when_flag_true(self):
+        """use_default_credential=True creates a DefaultAzureCredential."""
+        sentinel = MagicMock(name="default-cred")
+        mock_module = MagicMock()
+        mock_module.DefaultAzureCredential.return_value = sentinel
+
+        with patch.dict("sys.modules", {"azure.identity": mock_module}):
+            mem = CosmosMemoryClient(use_default_credential=True)
+            mock_module.DefaultAzureCredential.assert_called_once()
+            assert mem._cosmos_credential is sentinel
+            assert mem._ai_foundry_credential is sentinel
+
+    def test_no_credential_when_flag_false(self):
+        """use_default_credential=False leaves credentials as None."""
+        mem = _make_client()
+        assert mem._cosmos_credential is None
+        assert mem._ai_foundry_credential is None
+
+
+# ===================================================================
+# Local CRUD
+# ===================================================================
+
+
+class TestAddLocal:
+    def test_add_local_valid(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="hello")
+
+        assert len(mem.local_memory) == 1
+        m = mem.local_memory[0]
+        assert m["user_id"] == "u1"
+        assert m["role"] == "user"
+        assert m["content"] == "hello"
+        assert m["type"] == "turn"
+        assert "id" in m
+        assert "created_at" in m
+
+    def test_add_local_all_fields(self):
+        mem = _make_client()
+        mem.add_local(
+            user_id="u1",
+            role="agent",
+            content="hi",
+            memory_type="summary",
+            agent_id="a1",
+            metadata={"k": "v"},
+            thread_id="t1",
         )
-        mock_client.get_database_client.assert_called_once_with("ai_memory")
-        mock_db.get_container_client.assert_called_once_with("memories")
-        assert store._container_client is mock_container
 
-    def test_connect_missing_endpoint(self):
-        store = _make_store(endpoint=None)
-        with pytest.raises(ConfigurationError) as exc_info:
-            store.connect()
-        assert exc_info.value.parameter == "endpoint"
+        m = mem.local_memory[0]
+        assert m["role"] == "agent"
+        assert m["type"] == "summary"
+        assert m["metadata"] == {"k": "v"}
+        assert m["thread_id"] == "t1"
 
-    def test_connect_missing_credential(self):
-        store = _make_store(credential=None)
-        with pytest.raises(ConfigurationError) as exc_info:
-            store.connect()
-        assert exc_info.value.parameter == "credential"
+    def test_add_local_invalid_role(self):
+        mem = _make_client()
+        with pytest.raises(ValidationError, match="role must be one of"):
+            mem.add_local(user_id="u1", role="invalid", content="hi")
 
-
-# ---------------------------------------------------------------------------
-# _require_connected()
-# ---------------------------------------------------------------------------
+    def test_add_local_invalid_type(self):
+        mem = _make_client()
+        with pytest.raises(ValidationError, match="type must be one of"):
+            mem.add_local(user_id="u1", role="user", content="hi", memory_type="bad")
 
 
-class TestRequireConnected:
-    def test_raises_when_not_connected(self):
-        store = _make_store()
-        with pytest.raises(CosmosNotConnectedError):
-            store._require_connected()
+class TestGetLocal:
+    def test_get_local_no_filters(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="a")
+        mem.add_local(user_id="u2", role="agent", content="b")
+
+        results = mem.get_local()
+        assert len(results) == 2
+
+    def test_get_local_with_filters(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="a", memory_type="turn")
+        mem.add_local(user_id="u1", role="agent", content="b", memory_type="turn")
+        mem.add_local(user_id="u2", role="user", content="c", memory_type="summary")
+
+        results = mem.get_local(user_id="u1", role="user", memory_type="turn")
+        assert len(results) == 1
+        assert results[0]["content"] == "a"
+
+    def test_get_local_by_id(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="target")
+        mem.add_local(user_id="u1", role="user", content="other")
+        mid = mem.local_memory[0]["id"]
+
+        results = mem.get_local(memory_id=mid)
+        assert len(results) == 1
+        assert results[0]["content"] == "target"
 
 
-# ---------------------------------------------------------------------------
-# create_store()
-# ---------------------------------------------------------------------------
+class TestUpdateLocal:
+    def test_update_local_success(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="old")
+        mid = mem.local_memory[0]["id"]
+
+        mem.update_local(mid, content="new", metadata={"k": "v"})
+
+        m = mem.local_memory[0]
+        assert m["content"] == "new"
+        assert m["metadata"] == {"k": "v"}
+        assert "updated_at" in m
+
+    def test_update_local_not_found(self):
+        mem = _make_client()
+        with pytest.raises(MemoryNotFoundError):
+            mem.update_local("nonexistent-id", content="x")
+
+    def test_update_local_partial(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="old")
+        mid = mem.local_memory[0]["id"]
+
+        mem.update_local(mid, role="agent", metadata={"k": "v"})
+
+        m = mem.local_memory[0]
+        assert m["role"] == "agent"
+        assert m["metadata"] == {"k": "v"}
+        assert m["content"] == "old"  # unchanged
 
 
-class TestCreateStore:
-    @patch("azure.cosmos.CosmosClient")
-    def test_create_store_success(self, MockCosmosClient):
+class TestDeleteLocal:
+    def test_delete_local_success(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="x")
+        mid = mem.local_memory[0]["id"]
+
+        mem.delete_local(mid)
+        assert len(mem.local_memory) == 0
+
+    def test_delete_local_not_found(self):
+        mem = _make_client()
+        with pytest.raises(MemoryNotFoundError):
+            mem.delete_local("nonexistent-id")
+
+
+# ===================================================================
+# Cosmos connection
+# ===================================================================
+
+
+class TestAutoCreateOnInit:
+    def test_auto_creates_store_when_endpoint_provided(self):
+        """Constructor calls create_memory_store() when cosmos_endpoint is set."""
+        mock_cosmos_cls = MagicMock()
         mock_client = MagicMock()
         mock_db = MagicMock()
         mock_container = MagicMock()
-        MockCosmosClient.return_value = mock_client
+        mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
         mock_db.create_container_if_not_exists.return_value = mock_container
 
-        store = _make_store()
-        store.create_store(embedding_dimensions=256)
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls,
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            mem = _make_client(
+                cosmos_endpoint="https://fake.documents.azure.com:443/",
+                cosmos_credential="fake-key",
+            )
 
-        mock_client.create_database_if_not_exists.assert_called_once_with(
-            id="ai_memory"
-        )
+        assert mem._container_client is mock_container
+        mock_client.create_database_if_not_exists.assert_called_once()
+
+
+class TestRequireCosmos:
+    def test_require_cosmos_before_connect(self):
+        mem = _make_client()
+        with pytest.raises(CosmosNotConnectedError):
+            mem._require_cosmos()
+
+
+class TestCreateMemoryStore:
+    def test_create_memory_store_with_custom_dimensions(self):
+        """Explicit create_memory_store() call with custom embedding dimensions."""
+        mock_cosmos_cls = MagicMock()
+        mock_client = MagicMock()
+        mock_db = MagicMock()
+        mock_container = MagicMock()
+        mock_cosmos_cls.return_value = mock_client
+        mock_client.create_database_if_not_exists.return_value = mock_db
+        mock_db.create_container_if_not_exists.return_value = mock_container
+
+        # Start local-only, then create store explicitly
+        mem = _make_client()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls,
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            mem.create_memory_store(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+                embedding_dimensions=256,
+            )
+
+        mock_client.create_database_if_not_exists.assert_called_once()
         call_kwargs = mock_db.create_container_if_not_exists.call_args
-        assert call_kwargs.kwargs["id"] == "memories"
-
-        # Verify vector embedding policy includes correct dimensions
         vec_policy = call_kwargs.kwargs["vector_embedding_policy"]
         assert vec_policy["vectorEmbeddings"][0]["dimensions"] == 256
-
-        # Verify full-text policy
         ft_policy = call_kwargs.kwargs["full_text_policy"]
         assert ft_policy["defaultLanguage"] == "en-US"
-
-        assert store._container_client is mock_container
-
-
-# ---------------------------------------------------------------------------
-# upsert / upsert_batch
-# ---------------------------------------------------------------------------
+        assert mem._container_client is mock_container
 
 
-class TestUpsert:
-    def test_upsert_success(self):
-        store, container = _connected_store()
-        rec = _make_record()
-        store.upsert(rec)
+# ===================================================================
+# Cosmos CRUD (mock _container_client)
+# ===================================================================
+
+
+class TestAddCosmos:
+    def test_add_cosmos(self):
+        mem, container = _connected_client()
+        mem.add_cosmos(user_id="u1", role="user", content="hello")
+
         container.upsert_item.assert_called_once()
         body = container.upsert_item.call_args.kwargs["body"]
-        assert body["id"] == rec.id
         assert body["content"] == "hello"
+        assert body["user_id"] == "u1"
+        assert body["role"] == "user"
 
-    def test_upsert_not_connected(self):
-        store = _make_store()
+    def test_add_cosmos_not_connected(self):
+        mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
-            store.upsert(_make_record())
-
-    def test_upsert_cosmos_error(self):
-        store, container = _connected_store()
-        container.upsert_item.side_effect = RuntimeError("boom")
-        with pytest.raises(CosmosOperationError):
-            store.upsert(_make_record())
-
-    def test_upsert_batch(self):
-        store, container = _connected_store()
-        records = [_make_record(id=f"r{i}") for i in range(3)]
-        store.upsert_batch(records)
-        assert container.upsert_item.call_count == 3
+            mem.add_cosmos(user_id="u1", role="user", content="hi")
 
 
-# ---------------------------------------------------------------------------
-# get_memories()
-# ---------------------------------------------------------------------------
+class TestPushToCosmos:
+    def test_push_to_cosmos(self):
+        mem, container = _connected_client()
+        mem.add_local(user_id="u1", role="user", content="a")
+        mem.add_local(user_id="u1", role="agent", content="b")
+
+        mem.push_to_cosmos()
+
+        assert container.upsert_item.call_count == 2
+
+    def test_push_to_cosmos_not_connected(self):
+        mem = _make_client()
+        mem.add_local(user_id="u1", role="user", content="a")
+        with pytest.raises(CosmosNotConnectedError):
+            mem.push_to_cosmos()
+
+    def test_push_to_cosmos_invalid_batch_size(self):
+        mem, _ = _connected_client()
+        with pytest.raises(ValueError, match="batch_size must be greater than 0"):
+            mem.push_to_cosmos(batch_size=0)
 
 
 class TestGetMemories:
-    def test_no_filters(self, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict]
+    def test_no_filters(self):
+        mem, container = _connected_client()
+        doc = _make_doc()
+        container.query_items.return_value = [doc]
 
-        result = store.get_memories()
+        result = mem.get_memories()
 
         call_kwargs = container.query_items.call_args.kwargs
         assert "WHERE" not in call_kwargs["query"]
-        assert result == [sample_memory_dict]
+        assert result == [doc]
 
-    def test_all_filters(self, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict]
+    def test_with_filters(self):
+        mem, container = _connected_client()
+        doc = _make_doc()
+        container.query_items.return_value = [doc]
 
-        store.get_memories(
+        mem.get_memories(
             memory_id="m1",
             user_id="u1",
             thread_id="t1",
@@ -211,63 +360,50 @@ class TestGetMemories:
         assert "@role" in param_names
         assert "@memory_type" in param_names
 
-    def test_recent_k(self, sample_memory_dict):
-        store, container = _connected_store()
-        # Simulate docs returned in DESC order
-        doc1 = {**sample_memory_dict, "id": "old"}
-        doc2 = {**sample_memory_dict, "id": "new"}
+    def test_recent_k(self):
+        mem, container = _connected_client()
+        doc1 = _make_doc(id="old")
+        doc2 = _make_doc(id="new")
         container.query_items.return_value = [doc2, doc1]
 
-        result = store.get_memories(recent_k=2)
+        result = mem.get_memories(recent_k=2)
 
         call_kwargs = container.query_items.call_args.kwargs
         query = call_kwargs["query"]
         assert "TOP @recent_k" in query
         assert "ORDER BY c._ts DESC" in query
-        # Result should be reversed to chronological
+        # Reversed to chronological
         assert result[0]["id"] == "old"
         assert result[1]["id"] == "new"
 
 
-# ---------------------------------------------------------------------------
-# get_thread()
-# ---------------------------------------------------------------------------
-
-
 class TestGetThread:
     def test_basic(self, sample_memory_dicts):
-        store, container = _connected_store()
+        mem, container = _connected_client()
         container.query_items.return_value = list(reversed(sample_memory_dicts))
 
-        result = store.get_thread(thread_id="t1")
+        result = mem.get_thread(thread_id="t1")
 
         call_kwargs = container.query_items.call_args.kwargs
-        assert "@thread_id" in call_kwargs["query"] or any(
-            p["name"] == "@thread_id" for p in call_kwargs["parameters"]
-        )
-        # Should be reversed to chronological
+        params = call_kwargs["parameters"]
+        assert any(p["name"] == "@thread_id" for p in params)
         assert len(result) == 3
 
     def test_with_recent_k(self, sample_memory_dicts):
-        store, container = _connected_store()
-        # Return 3 docs (DESC order), get_thread truncates + reverses
+        mem, container = _connected_client()
         container.query_items.return_value = list(reversed(sample_memory_dicts))
 
-        result = store.get_thread(thread_id="t1", recent_k=2)
+        result = mem.get_thread(thread_id="t1", recent_k=2)
         assert len(result) == 2
 
 
-# ---------------------------------------------------------------------------
-# update()
-# ---------------------------------------------------------------------------
+class TestUpdateCosmos:
+    def test_success(self):
+        mem, container = _connected_client()
+        doc = _make_doc(id="m1")
+        container.query_items.return_value = [doc.copy()]
 
-
-class TestUpdate:
-    def test_success(self, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict.copy()]
-
-        store.update(memory_id=sample_memory_dict["id"], content="updated")
+        mem.update_cosmos(memory_id="m1", content="updated")
 
         container.replace_item.assert_called_once()
         body = container.replace_item.call_args.kwargs["body"]
@@ -275,71 +411,74 @@ class TestUpdate:
         assert "updated_at" in body
 
     def test_not_found(self):
-        store, container = _connected_store()
+        mem, container = _connected_client()
         container.query_items.return_value = []
 
         with pytest.raises(MemoryNotFoundError):
-            store.update(memory_id="no-such-id", content="x")
+            mem.update_cosmos(memory_id="no-such-id", content="x")
 
 
-# ---------------------------------------------------------------------------
-# delete()
-# ---------------------------------------------------------------------------
+class TestDeleteCosmos:
+    def test_success(self):
+        mem, container = _connected_client()
+        doc = _make_doc(id="m1", user_id="u1", thread_id="t1")
+        container.query_items.return_value = [doc]
 
+        mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
 
-class TestDelete:
-    def test_success(self, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict]
-
-        store.delete(
-            memory_id=sample_memory_dict["id"],
-            user_id=sample_memory_dict["user_id"],
-            thread_id=sample_memory_dict["thread_id"],
-        )
-
-        container.delete_item.assert_called_once_with(
-            item=sample_memory_dict["id"],
-            partition_key=[
-                sample_memory_dict["user_id"],
-                sample_memory_dict["thread_id"],
-            ],
-        )
+        container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
 
     def test_not_found(self):
-        store, container = _connected_store()
+        mem, container = _connected_client()
         container.query_items.return_value = []
 
         with pytest.raises(MemoryNotFoundError):
-            store.delete(memory_id="nope", user_id="u1", thread_id="t1")
+            mem.delete_cosmos(memory_id="nope", user_id="u1", thread_id="t1")
 
 
-# ---------------------------------------------------------------------------
-# vector_search()
-# ---------------------------------------------------------------------------
+class TestGetUserSummary:
+    def test_filters_by_type(self):
+        mem, container = _connected_client()
+        doc = _make_doc(type="user_summary")
+        container.query_items.return_value = [doc]
 
-
-class TestVectorSearch:
-    def test_vector_only(self, sample_embedding, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict]
-
-        result = store.vector_search(query_vector=sample_embedding, top_k=3)
+        result = mem.get_user_summary(user_id="u1")
 
         call_kwargs = container.query_items.call_args.kwargs
-        query = call_kwargs["query"]
-        assert "VectorDistance" in query
-        assert "RRF" not in query
-        assert result == [sample_memory_dict]
+        assert "user_summary" in call_kwargs["query"]
+        assert result == [doc]
 
-    def test_hybrid(self, sample_embedding, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict]
 
-        store.vector_search(
-            query_vector=sample_embedding,
-            hybrid_search=True,
+# ===================================================================
+# Search
+# ===================================================================
+
+
+class TestSearchCosmos:
+    def test_search_cosmos(self):
+        mem, container = _connected_client()
+        container.query_items.return_value = [_make_doc()]
+
+        mem._embeddings_client = MagicMock()
+        mem._embeddings_client.generate.return_value = [0.1, 0.2, 0.3]
+
+        result = mem.search_cosmos(search_terms="weather", user_id="u1", top_k=3)
+
+        mem._embeddings_client.generate.assert_called_once_with("weather")
+        call_kwargs = container.query_items.call_args.kwargs
+        assert "VectorDistance" in call_kwargs["query"]
+        assert len(result) == 1
+
+    def test_search_hybrid(self):
+        mem, container = _connected_client()
+        container.query_items.return_value = [_make_doc()]
+
+        mem._embeddings_client = MagicMock()
+        mem._embeddings_client.generate.return_value = [0.1, 0.2]
+
+        mem.search_cosmos(
             search_terms="weather Seattle",
+            hybrid_search=True,
             top_k=5,
         )
 
@@ -347,39 +486,95 @@ class TestVectorSearch:
         query = call_kwargs["query"]
         assert "RANK RRF" in query
         assert "FullTextScore" in query
-        params = call_kwargs["parameters"]
-        key_terms_param = [p for p in params if p["name"] == "@key_terms"]
-        assert key_terms_param[0]["value"] == "weather Seattle"
 
-    def test_with_filters(self, sample_embedding, sample_memory_dict):
-        store, container = _connected_store()
-        container.query_items.return_value = [sample_memory_dict]
+    def test_search_not_connected(self):
+        mem = _make_client()
+        with pytest.raises(CosmosNotConnectedError):
+            mem.search_cosmos(search_terms="test")
 
-        store.vector_search(
-            query_vector=sample_embedding,
+    def test_search_empty_terms(self):
+        mem, _ = _connected_client()
+        with pytest.raises(ValidationError, match="search_terms must be a non-empty string"):
+            mem.search_cosmos(search_terms="")
+
+    def test_search_whitespace_only_terms(self):
+        mem, _ = _connected_client()
+        with pytest.raises(ValidationError, match="search_terms must be a non-empty string"):
+            mem.search_cosmos(search_terms="   ")
+
+
+# ===================================================================
+# Processing delegation
+# ===================================================================
+
+
+class TestGenerateThreadSummary:
+    def test_generate_thread_summary(self):
+        mem = _make_client()
+        mock_proc = MagicMock()
+        mock_proc.generate_thread_summary.return_value = {"status": "ok"}
+        mem._processing_client = mock_proc
+
+        result = mem.generate_thread_summary(user_id="u1", thread_id="t1")
+
+        mock_proc.generate_thread_summary.assert_called_once_with(
             user_id="u1",
-            role="user",
+            thread_id="t1",
+            recent_k=None,
+            poll_interval=2.0,
+            timeout=120.0,
         )
-
-        call_kwargs = container.query_items.call_args.kwargs
-        query = call_kwargs["query"]
-        assert "WHERE" in query
+        assert result == {"status": "ok"}
 
 
-# ---------------------------------------------------------------------------
-# get_user_summary()
-# ---------------------------------------------------------------------------
+# ===================================================================
+# Guard clause
+# ===================================================================
 
 
-class TestGetUserSummary:
-    def test_filters_by_type(self, sample_memory_dict):
-        store, container = _connected_store()
-        summary_doc = {**sample_memory_dict, "type": "user_summary"}
-        container.query_items.return_value = [summary_doc]
+class TestCosmosGuard:
+    def test_get_memories_without_connect(self):
+        mem = _make_client()
+        with pytest.raises(CosmosNotConnectedError):
+            mem.get_memories()
 
-        result = store.get_user_summary(user_id="u1")
+    def test_cosmos_ops_without_connect(self):
+        mem = _make_client()
+        with pytest.raises(CosmosNotConnectedError):
+            mem.get_thread(thread_id="t1")
+        with pytest.raises(CosmosNotConnectedError):
+            mem.update_cosmos(memory_id="m1")
+        with pytest.raises(CosmosNotConnectedError):
+            mem.delete_cosmos(memory_id="m1", thread_id="t1", user_id="u1")
 
-        call_kwargs = container.query_items.call_args.kwargs
-        query = call_kwargs["query"]
-        assert "user_summary" in query
-        assert result == [summary_doc]
+
+# ===================================================================
+# close() and context manager
+# ===================================================================
+
+
+class TestClose:
+    def test_close_with_cosmos(self):
+        mem, _ = _connected_client()
+        mock_cosmos = MagicMock()
+        mem._cosmos_client = mock_cosmos
+
+        mem.close()
+
+        mock_cosmos.close.assert_called_once()
+        assert mem._cosmos_client is None
+        assert mem._container_client is None
+
+    def test_close_without_cosmos(self):
+        mem = _make_client()
+        mem.close()  # should not raise
+
+    def test_context_manager(self):
+        mem, _ = _connected_client()
+        mock_cosmos = MagicMock()
+        mem._cosmos_client = mock_cosmos
+
+        with mem as m:
+            assert m is mem
+
+        mock_cosmos.close.assert_called_once()

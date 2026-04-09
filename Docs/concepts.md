@@ -114,6 +114,59 @@ Prompts for summarization and fact extraction live in `azure_functions/prompts/`
 
 ---
 
+## Automatic Processing (Change Feed)
+
+In addition to on-demand processing via the SDK, the toolkit includes a Cosmos DB change feed trigger that **automatically** starts processing orchestrations when enough new turns have been written.
+
+```
+memories container
+      │  (change feed)
+      ▼
+on_memory_change trigger
+      │
+      ├── count turns per (user_id, thread_id)
+      │   └── crosses threshold? ──► start thread_summary / extract_facts
+      │
+      └── count turns per user_id
+          └── crosses threshold? ──► start user_summary
+```
+
+### How it works
+
+1. The change feed trigger watches the `memories` container for new documents.
+2. Only documents with `type == "turn"` are counted (summaries, facts, and user summaries are ignored).
+3. A `counters` container tracks how many turns have been seen per scope using ETag-based optimistic concurrency.
+4. When a counter crosses a configured threshold, the corresponding Durable Functions orchestration is started automatically.
+
+### Threshold settings
+
+| Setting | Scope | Default |
+|---------|-------|---------|
+| `THREAD_SUMMARY_EVERY_N` | Per `(user_id, thread_id)` | `0` (disabled) |
+| `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)` | `0` (disabled) |
+| `USER_SUMMARY_EVERY_N` | Per `user_id` (across all threads) | `0` (disabled) |
+
+Set any value to `0` to disable that processing type. For example, setting `THREAD_SUMMARY_EVERY_N=5` generates a thread summary every 5 new turns in each thread.
+
+### Required containers
+
+| Container | Partition Key | Purpose |
+|-----------|---------------|---------|
+| `memories` | `/user_id`, `/thread_id` (hierarchical) | Existing memory store |
+| `counters` | `/user_id` | Message count tracking |
+| `leases` | `/id` | Auto-created by the trigger for change feed checkpointing |
+
+### Push vs. pull
+
+| Mode | Trigger | Use case |
+|------|---------|----------|
+| **On-demand (pull)** | SDK call (`generate_thread_summary()`, etc.) | Explicit control over when processing happens |
+| **Automatic (push)** | Change feed trigger | Fire-and-forget — processing happens in the background as turns are written |
+
+Both modes use the same Durable Functions orchestrator and activities, so prompts, incremental update logic, and stored outputs are identical.
+
+---
+
 ## Local vs. Cloud Storage
 
 | Backend | Use Case | Persistence |

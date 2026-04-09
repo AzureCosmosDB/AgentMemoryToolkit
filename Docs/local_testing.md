@@ -34,6 +34,8 @@ You need these before Cosmos DB or LLM-backed features will work:
 
 The toolkit can create the database and container for you with `create_memory_store()`.
 
+For automatic change feed processing, you also need a `counters` container in the same database (partition key: `/user_id`). A `leases` container is created automatically by the Azure Functions runtime.
+
 ### RBAC
 
 Grant your identity:
@@ -82,6 +84,20 @@ ADF_KEY=
 ```
 
 The Functions runtime uses `azure_functions/local.settings.json`, not `.env`, so mirror the same values there.
+
+### Change feed settings (optional)
+
+In `azure_functions/local.settings.json`, add these to enable automatic processing:
+
+```json
+"COSMOS_DB_CONNECTION__accountEndpoint": "https://<your-account>.documents.azure.com:443/",
+"COSMOS_DB_COUNTERS_CONTAINER": "counters",
+"THREAD_SUMMARY_EVERY_N": "5",
+"FACT_EXTRACTION_EVERY_N": "3",
+"USER_SUMMARY_EVERY_N": "10"
+```
+
+Set any threshold to `"0"` to disable that processing type. See `azure_functions/local.settings.json.template` for the full template.
 
 ---
 
@@ -231,6 +247,7 @@ Expected functions include:
 - `extract_facts`
 - `generate_user_summary`
 - `http_start`
+- `on_memory_change` (change feed trigger — only active when `COSMOS_DB_CONNECTION__accountEndpoint` is set)
 
 ### Function keys
 
@@ -311,6 +328,58 @@ User summaries also update incrementally when one already exists.
 
 ---
 
+## 6. Test Change Feed Auto-Processing
+
+If you have configured the change feed settings above, you can test automatic processing.
+
+### Prerequisites
+
+1. Create the `counters` container in the same database:
+
+```bash
+az cosmosdb sql container create \
+  --account-name <your-cosmos-account> \
+  --resource-group <your-rg> \
+  --database-name ai_memory \
+  --name counters \
+  --partition-key-path /user_id
+```
+
+2. Ensure `local.settings.json` has the change feed settings (see [Change feed settings](#change-feed-settings-optional) above).
+
+3. Restart the Functions host (`func start`).
+
+### Test steps
+
+1. Set a low threshold for testing, e.g. `THREAD_SUMMARY_EVERY_N=3`.
+2. Write turns to Cosmos (via the SDK or `curl`) until the threshold is crossed.
+3. Watch the Functions host logs — you should see the orchestrator being started automatically.
+
+```python
+import uuid
+
+thread_id = str(uuid.uuid4())
+for i in range(3):
+    memory.add_cosmos(
+        user_id="user-001",
+        thread_id=thread_id,
+        role="user",
+        content=f"Turn {i+1} for change feed test",
+    )
+```
+
+4. After a few seconds, the change feed trigger should pick up the new turns, increment the counter, cross the threshold, and start a thread summary orchestration.
+5. Verify the summary was created:
+
+```python
+result = memory.get_memories(user_id="user-001", thread_id=thread_id, memory_type="summary")
+print(result)
+```
+
+> **Note:** The change feed has a small polling delay (a few seconds by default). Derived memories may not appear immediately.
+
+---
+
 ## VS Code Debugging
 
 1. Start Azurite.
@@ -332,5 +401,8 @@ User summaries also update incrementally when one already exists.
 | Functions cannot access storage | Start Azurite before `func start` |
 | OpenAI 401/403 | Check `Cognitive Services OpenAI User` role |
 | Function 401 in Azure | Set `ADF_KEY` or pass `?code=<key>` |
+| Change feed trigger not firing | Verify `COSMOS_DB_CONNECTION__accountEndpoint` is set and matches your Cosmos account |
+| `counters` container not found | Create the container with partition key `/user_id` (see [Section 6](#6-test-change-feed-auto-processing)) |
+| Auto-processing not starting | Check that threshold settings are > 0 and the Functions host shows `on_memory_change` at startup |
 
 For full cloud deployment and validation, see `Docs/azure_testing.md`.

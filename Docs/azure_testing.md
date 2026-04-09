@@ -111,6 +111,37 @@ az functionapp config appsettings set \
     LLM_MODEL="gpt-5-mini"
 ```
 
+### Change feed settings (optional)
+
+To enable automatic processing via the change feed trigger, add these settings:
+
+```bash
+az functionapp config appsettings set \
+  --name <function-app-name> \
+  --resource-group <resource-group> \
+  --settings \
+    COSMOS_DB_CONNECTION__accountEndpoint="https://<cosmos-account-name>.documents.azure.com:443/" \
+    COSMOS_DB_COUNTERS_CONTAINER="counters" \
+    THREAD_SUMMARY_EVERY_N="5" \
+    FACT_EXTRACTION_EVERY_N="3" \
+    USER_SUMMARY_EVERY_N="10"
+```
+
+Set any threshold to `"0"` to disable that processing type.
+
+Create the `counters` container:
+
+```bash
+az cosmosdb sql container create \
+  --account-name <cosmos-account-name> \
+  --resource-group <resource-group> \
+  --database-name ai_memory \
+  --name counters \
+  --partition-key-path /user_id
+```
+
+The `leases` container is created automatically by the Azure Functions runtime.
+
 If you use function-key auth for the HTTP trigger, keep the key for the client as `ADF_KEY`.
 
 ---
@@ -234,6 +265,7 @@ Bring the environment up in this order:
 9. test `generate_thread_summary()`
 10. test `extract_facts()` — verify single-line fact output
 11. test `generate_user_summary()` / `get_user_summary()`
+12. (if change feed is enabled) test automatic processing — write turns and verify derived memories appear
 
 This keeps failures isolated and easier to diagnose.
 
@@ -264,6 +296,32 @@ print(memory.generate_user_summary(user_id="user-1"))
 
 Thread summaries and user summaries update incrementally: repeated calls merge only new memories into the existing derived document.
 
+### Change feed auto-processing
+
+If you configured the change feed settings, verify automatic processing:
+
+```python
+import uuid
+
+# Use a threshold of 3 (THREAD_SUMMARY_EVERY_N=3) for testing
+thread_id = str(uuid.uuid4())
+for i in range(3):
+    memory.add_cosmos(
+        user_id="user-1",
+        thread_id=thread_id,
+        role="user",
+        content=f"Turn {i+1} for change feed validation",
+    )
+
+# Wait a few seconds for the change feed to trigger, then check:
+import time
+time.sleep(10)
+results = memory.get_memories(user_id="user-1", thread_id=thread_id, memory_type="summary")
+print(results)  # Should contain an auto-generated summary
+```
+
+Check the Function App logs to confirm the `on_memory_change` trigger fired and the orchestrator completed.
+
 ### Verify stored results
 
 ```python
@@ -293,6 +351,8 @@ Common issues:
 | Durable Function starts but fails | Missing app settings or downstream RBAC |
 | `No memories found` | No turn memories exist, or all candidate turns predate the existing summary |
 | Search is slow | Embedding latency, index choice, or region mismatch |
+| Change feed trigger not firing | Verify `COSMOS_DB_CONNECTION__accountEndpoint` is set and the `counters` container exists |
+| Auto-processing not starting | Check threshold settings are > 0 in Function App configuration |
 
 Recommended checks:
 

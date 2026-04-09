@@ -6,8 +6,14 @@
     "languageWorkers:python:defaultExecutablePath": "/Users/jcodella/github/AgentMemoryToolkit/azure_functions/.venv/bin/python",
 
     "COSMOS_DB_ENDPOINT": "https://<cosmos-endpoint>.documents.azure.com:443/",
+    "COSMOS_DB_CONNECTION__accountEndpoint": "https://<cosmos-endpoint>.documents.azure.com:443/",
     "COSMOS_DB_DATABASE": "ai_memory",
     "COSMOS_DB_CONTAINER": "memories",
+    "COSMOS_DB_COUNTERS_CONTAINER": "counters",
+
+    "THREAD_SUMMARY_EVERY_N": "0",
+    "FACT_EXTRACTION_EVERY_N": "0",
+    "USER_SUMMARY_EVERY_N": "0",
 
     "SUMMARIZE_EVERY_N_MESSAGES": "0",
 

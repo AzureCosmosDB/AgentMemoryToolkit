@@ -1,7 +1,8 @@
 # Environment
 .env
 local.settings.json
-.github/
+.github/prompts/
+.github/skills/
 
 # agents
 .agents/

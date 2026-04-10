@@ -1,6 +1,7 @@
 # Environment
 .env
 local.settings.json
+.github/
 
 # agents
 .agents/

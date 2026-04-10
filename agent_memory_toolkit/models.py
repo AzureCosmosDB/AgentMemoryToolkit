@@ -36,6 +36,7 @@ class MemoryType(str, Enum):
     summary = "summary"
     fact = "fact"
     user_summary = "user_summary"
+    counter = "counter"
 
 
 # ---------------------------------------------------------------------------

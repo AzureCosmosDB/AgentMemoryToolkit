@@ -122,39 +122,59 @@ class TestIncrementCounterBy:
 
         return container
 
-    @patch("function_app._get_counters_container")
+    @patch("function_app._get_cosmos_container")
     def test_successful_increment(self, mock_get_container):
-        existing = {"id": "thread_counter_alice_chat42", "user_id": "alice", "count": 7, "_etag": "etag-1"}
+        existing = {
+            "id": "thread_counter_alice_chat42",
+            "user_id": "alice",
+            "thread_id": "chat42",
+            "type": "counter",
+            "count": 7,
+            "_etag": "etag-1",
+            "created_at": "2026-04-09T00:00:00+00:00",
+        }
         container = self._make_mock_container(existing_doc=existing)
         mock_get_container.return_value = container
 
-        old, new = increment_counter_by("thread_counter_alice_chat42", "alice", 3)
+        old, new = increment_counter_by("thread_counter_alice_chat42", "alice", "chat42", 3)
         assert old == 7
         assert new == 10
         container.upsert_item.assert_called_once()
         call_kwargs = container.upsert_item.call_args
         assert call_kwargs[1]["etag"] == "etag-1"
         assert call_kwargs[1]["match_condition"] == "IfMatch"
+        assert call_kwargs[1]["body"]["thread_id"] == "chat42"
+        assert call_kwargs[1]["body"]["type"] == "counter"
 
-    @patch("function_app._get_counters_container")
+    @patch("function_app._get_cosmos_container")
     def test_first_time_creation(self, mock_get_container):
         container = self._make_mock_container(existing_doc=None)
         mock_get_container.return_value = container
 
-        old, new = increment_counter_by("thread_counter_bob_chat1", "bob", 5)
+        old, new = increment_counter_by("thread_counter_bob_chat1", "bob", "chat1", 5)
         assert old == 0
         assert new == 5
         container.upsert_item.assert_called_once()
         call_body = container.upsert_item.call_args[1].get("body") or container.upsert_item.call_args[0][0]
         assert call_body["count"] == 5
+        assert call_body["thread_id"] == "chat1"
+        assert call_body["type"] == "counter"
 
-    @patch("function_app._get_counters_container")
+    @patch("function_app._get_cosmos_container")
     def test_etag_conflict_retry(self, mock_get_container):
-        existing = {"id": "ctr", "user_id": "alice", "count": 10, "_etag": "old-etag"}
+        existing = {
+            "id": "ctr",
+            "user_id": "alice",
+            "thread_id": "chat1",
+            "type": "counter",
+            "count": 10,
+            "_etag": "old-etag",
+            "created_at": "2026-04-09T00:00:00+00:00",
+        }
         container = self._make_mock_container(existing_doc=existing, etag_conflict_times=1)
         mock_get_container.return_value = container
 
-        old, new = increment_counter_by("ctr", "alice", 2)
+        old, new = increment_counter_by("ctr", "alice", "chat1", 2)
         # After retry, it reads the updated doc (count=11) and increments by 2
         assert old == 11
         assert new == 13
@@ -181,6 +201,7 @@ class TestOnMemoryChange:
             {"type": "summary", "user_id": "alice", "thread_id": "t1"},
             {"type": "fact", "user_id": "alice", "thread_id": "t1"},
             {"type": "user_summary", "user_id": "alice", "thread_id": "__user_summary__"},
+            {"type": "counter", "user_id": "alice", "thread_id": "__counters__"},
         ]
         starter = AsyncMock()
 
@@ -210,12 +231,17 @@ class TestOnMemoryChange:
         # 2 thread-scope increments + 1 user-scope increment = 3 total
         assert mock_increment.call_count == 3
         calls = mock_increment.call_args_list
-        thread_call_args = {c[0][0]: c[0][2] for c in calls if c[0][0].startswith("thread_")}
+        thread_call_args = {c[0][0]: c[0][3] for c in calls if c[0][0].startswith("thread_")}
         assert thread_call_args["thread_counter_alice_t1"] == 2
         assert thread_call_args["thread_counter_alice_t2"] == 1
-        # User-scope call: alice with total 3 turns
-        user_call_args = {c[0][0]: c[0][2] for c in calls if c[0][0].startswith("user_")}
+        thread_partition_args = {c[0][0]: c[0][2] for c in calls if c[0][0].startswith("thread_")}
+        assert thread_partition_args["thread_counter_alice_t1"] == "t1"
+        assert thread_partition_args["thread_counter_alice_t2"] == "t2"
+        # User-scope call: alice with total 3 turns and synthetic counter partition.
+        user_call_args = {c[0][0]: c[0][3] for c in calls if c[0][0].startswith("user_")}
         assert user_call_args["user_counter_alice"] == 3
+        user_partition_args = {c[0][0]: c[0][2] for c in calls if c[0][0].startswith("user_")}
+        assert user_partition_args["user_counter_alice"] == "__counters__"
 
     @pytest.mark.asyncio
     @patch("function_app.increment_counter_by")

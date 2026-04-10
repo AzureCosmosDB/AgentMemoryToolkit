@@ -187,7 +187,7 @@ summary = memory.get_user_summary(user_id="user-001")
 | **Azure OpenAI / AI Foundry** | Embedding model + chat model for summarization / fact extraction |
 | **Azure Functions** | Durable Functions orchestrator and activity functions |
 
-Automatic change feed processing also requires a `counters` container (partition key `/user_id`) and a `leases` container (auto-created). See [concepts.md](Docs/concepts.md#automatic-processing-change-feed) for details.
+Automatic change feed processing stores lightweight `counter` documents in the `memories` container and also uses a `leases` container (auto-created). See [concepts.md](Docs/concepts.md#automatic-processing-change-feed) for details.
 
 All services use **Entra ID** auth via `DefaultAzureCredential`.
 

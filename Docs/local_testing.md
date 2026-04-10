@@ -34,7 +34,7 @@ You need these before Cosmos DB or LLM-backed features will work:
 
 The toolkit can create the database and container for you with `create_memory_store()`.
 
-For automatic change feed processing, you also need a `counters` container in the same database (partition key: `/user_id`). A `leases` container is created automatically by the Azure Functions runtime.
+For automatic change feed processing, the function stores lightweight `type="counter"` documents in the `memories` container. A `leases` container is created automatically by the Azure Functions runtime.
 
 ### RBAC
 
@@ -90,8 +90,7 @@ The Functions runtime uses `azure_functions/local.settings.json`, not `.env`, so
 In `azure_functions/local.settings.json`, add these to enable automatic processing:
 
 ```json
-"COSMOS_DB_CONNECTION__accountEndpoint": "https://<your-account>.documents.azure.com:443/",
-"COSMOS_DB_COUNTERS_CONTAINER": "counters",
+"COSMOS_DB__accountEndpoint": "https://<your-account>.documents.azure.com:443/",
 "THREAD_SUMMARY_EVERY_N": "5",
 "FACT_EXTRACTION_EVERY_N": "3",
 "USER_SUMMARY_EVERY_N": "10"
@@ -247,7 +246,7 @@ Expected functions include:
 - `extract_facts`
 - `generate_user_summary`
 - `http_start`
-- `on_memory_change` (change feed trigger — only active when `COSMOS_DB_CONNECTION__accountEndpoint` is set)
+- `on_memory_change` (change feed trigger — only active when `COSMOS_DB__accountEndpoint` is set)
 
 ### Function keys
 
@@ -334,20 +333,9 @@ If you have configured the change feed settings above, you can test automatic pr
 
 ### Prerequisites
 
-1. Create the `counters` container in the same database:
+1. Ensure `local.settings.json` has the change feed settings (see [Change feed settings](#change-feed-settings-optional) above).
 
-```bash
-az cosmosdb sql container create \
-  --account-name <your-cosmos-account> \
-  --resource-group <your-rg> \
-  --database-name ai_memory \
-  --name counters \
-  --partition-key-path /user_id
-```
-
-2. Ensure `local.settings.json` has the change feed settings (see [Change feed settings](#change-feed-settings-optional) above).
-
-3. Restart the Functions host (`func start`).
+2. Restart the Functions host (`func start`).
 
 ### Test steps
 
@@ -401,8 +389,8 @@ print(result)
 | Functions cannot access storage | Start Azurite before `func start` |
 | OpenAI 401/403 | Check `Cognitive Services OpenAI User` role |
 | Function 401 in Azure | Set `ADF_KEY` or pass `?code=<key>` |
-| Change feed trigger not firing | Verify `COSMOS_DB_CONNECTION__accountEndpoint` is set and matches your Cosmos account |
-| `counters` container not found | Create the container with partition key `/user_id` (see [Section 6](#6-test-change-feed-auto-processing)) |
+| Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and matches your Cosmos account |
+| Counter updates fail | Verify the function can write `type="counter"` documents into the `memories` container |
 | Auto-processing not starting | Check that threshold settings are > 0 and the Functions host shows `on_memory_change` at startup |
 
 For full cloud deployment and validation, see `Docs/azure_testing.md`.

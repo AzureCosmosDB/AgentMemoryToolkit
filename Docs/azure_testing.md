@@ -120,25 +120,13 @@ az functionapp config appsettings set \
   --name <function-app-name> \
   --resource-group <resource-group> \
   --settings \
-    COSMOS_DB_CONNECTION__accountEndpoint="https://<cosmos-account-name>.documents.azure.com:443/" \
-    COSMOS_DB_COUNTERS_CONTAINER="counters" \
+    COSMOS_DB__accountEndpoint="https://<cosmos-account-name>.documents.azure.com:443/" \
     THREAD_SUMMARY_EVERY_N="5" \
     FACT_EXTRACTION_EVERY_N="3" \
     USER_SUMMARY_EVERY_N="10"
 ```
 
 Set any threshold to `"0"` to disable that processing type.
-
-Create the `counters` container:
-
-```bash
-az cosmosdb sql container create \
-  --account-name <cosmos-account-name> \
-  --resource-group <resource-group> \
-  --database-name ai_memory \
-  --name counters \
-  --partition-key-path /user_id
-```
 
 The `leases` container is created automatically by the Azure Functions runtime.
 
@@ -351,7 +339,7 @@ Common issues:
 | Durable Function starts but fails | Missing app settings or downstream RBAC |
 | `No memories found` | No turn memories exist, or all candidate turns predate the existing summary |
 | Search is slow | Embedding latency, index choice, or region mismatch |
-| Change feed trigger not firing | Verify `COSMOS_DB_CONNECTION__accountEndpoint` is set and the `counters` container exists |
+| Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and the function can write `type="counter"` documents into `memories` |
 | Auto-processing not starting | Check threshold settings are > 0 in Function App configuration |
 
 Recommended checks:

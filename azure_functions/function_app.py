@@ -22,13 +22,9 @@ orchestrations when configurable message count thresholds are crossed.
 
 Required application settings:
 
-  COSMOS_DB_CONNECTION__accountEndpoint
+  COSMOS_DB__accountEndpoint
       The Cosmos DB account endpoint URL used by the change feed trigger
-      binding (identity-based connection).
-
-  COSMOS_DB_COUNTERS_CONTAINER
-      Name of the Cosmos DB container for message counters (default: ``"counters"``).
-      Must be in the same database with partition key ``/user_id``.
+      binding (identity-based connection) and all Cosmos container clients.
 
 Processing threshold settings (set to ``"0"`` to disable):
 
@@ -44,21 +40,19 @@ Processing threshold settings (set to ``"0"`` to disable):
 Required Cosmos DB containers:
 
   - ``memories`` – existing container for memory documents
-  - ``counters`` – new container for message counters (partition key: ``/user_id``)
   - ``leases``   – auto-created by the trigger for change feed checkpointing
 """
 
 import logging
 import os
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import azure.functions as func
 import azure.durable_functions as df
-from azure.cosmos import CosmosClient
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
-from azure.identity import DefaultAzureCredential
 
-from activities import bp as activities_bp
+from activities import _get_cosmos_container, bp as activities_bp
 
 logger = logging.getLogger(__name__)
 
@@ -70,52 +64,33 @@ df_app.register_functions(activities_bp)
 # Shared helpers for change feed trigger
 # =====================================================================
 
-_counters_container = None
-_credential = None
+USER_COUNTER_THREAD_ID = "__counters__"
 
 
-def _get_credential():
-    """Return a shared ``DefaultAzureCredential``."""
-    global _credential
-    if _credential is None:
-        _credential = DefaultAzureCredential()
-    return _credential
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def _get_counters_container():
-    """Return the Cosmos DB counters container client, connecting on first call."""
-    global _counters_container
-    if _counters_container is None:
-        endpoint = os.environ["COSMOS_DB_ENDPOINT"]
-        database = os.environ["COSMOS_DB_DATABASE"]
-        container_name = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counters")
-        logger.info(
-            "Connecting to counters container endpoint=%s database=%s container=%s",
-            f"...{endpoint[-8:]}", database, container_name,
-        )
-        client = CosmosClient(endpoint, credential=_get_credential())
-        db = client.get_database_client(database)
-        _counters_container = db.get_container_client(container_name)
-    return _counters_container
-
-
-def increment_counter_by(counter_id: str, user_id: str, count: int) -> tuple[int, int]:
+def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: int) -> tuple[int, int]:
     """Atomically increment a counter document by *count* using ETag concurrency.
 
     Returns ``(old_count, new_count)``.  Creates the counter document if it
     does not exist.  Retries up to 3 times on ETag conflicts (HTTP 412).
     """
-    container = _get_counters_container()
+    container = _get_cosmos_container()
     max_retries = 3
+    partition_key = [user_id, thread_id]
 
     for attempt in range(max_retries):
         # ---- Read current counter (or default to 0) ----
         old_count = 0
         etag = None
+        existing_doc = None
         try:
-            doc = container.read_item(item=counter_id, partition_key=user_id)
+            doc = container.read_item(item=counter_id, partition_key=partition_key)
             old_count = doc.get("count", 0)
             etag = doc.get("_etag")
+            existing_doc = doc
         except CosmosResourceNotFoundError:
             pass  # first time — will create
         except CosmosHttpResponseError:
@@ -125,7 +100,16 @@ def increment_counter_by(counter_id: str, user_id: str, count: int) -> tuple[int
         new_doc = {
             "id": counter_id,
             "user_id": user_id,
+            "thread_id": thread_id,
+            "role": "system",
+            "type": "counter",
+            "content": "",
+            "metadata": {
+                "counter_scope": "user" if thread_id == USER_COUNTER_THREAD_ID else "thread",
+            },
             "count": new_count,
+            "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
         }
 
         # ---- Upsert with ETag if we had an existing doc ----
@@ -346,6 +330,8 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     user_counts: dict[str, int] = defaultdict(int)
 
     for doc in documents:
+        # Counter documents now live in the memories container, but only raw
+        # conversation turns should affect thresholds or trigger work.
         if doc.get("type") != "turn":
             continue
 
@@ -369,7 +355,7 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     # ---- Step 2: Thread-scoped counters and threshold checks ----
     for (user_id, thread_id), batch_count in thread_counts.items():
         old_count, new_count = increment_counter_by(
-            f"thread_counter_{user_id}_{thread_id}", user_id, batch_count,
+            f"thread_counter_{user_id}_{thread_id}", user_id, thread_id, batch_count,
         )
 
         if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
@@ -403,7 +389,7 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     # ---- Step 3: User-scoped counters and threshold checks ----
     for user_id, batch_count in user_counts.items():
         old_count, new_count = increment_counter_by(
-            f"user_counter_{user_id}", user_id, batch_count,
+            f"user_counter_{user_id}", user_id, USER_COUNTER_THREAD_ID, batch_count,
         )
 
         if n_user > 0 and crosses_threshold(old_count, new_count, n_user):
@@ -422,7 +408,7 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
 
 @df_app.cosmos_db_trigger(
     arg_name="documents",
-    connection="COSMOS_DB_CONNECTION",
+    connection="COSMOS_DB",
     database_name="ai_memory",
     container_name="memories",
     lease_container_name="leases",

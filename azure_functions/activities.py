@@ -123,7 +123,7 @@ def _get_cosmos_container():
     """Return the Cosmos DB container client, connecting on first call."""
     global _cosmos_container
     if _cosmos_container is None:
-        endpoint = os.environ["COSMOS_DB_ENDPOINT"]
+        endpoint = os.environ["COSMOS_DB__accountEndpoint"]
         database = os.environ["COSMOS_DB_DATABASE"]
         container = os.environ["COSMOS_DB_CONTAINER"]
         logger.info(

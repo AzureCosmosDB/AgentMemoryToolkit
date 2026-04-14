@@ -78,16 +78,12 @@ class TestIncrementCounterBy:
         else:
             from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-            container.read_item.side_effect = CosmosResourceNotFoundError(
-                status_code=404, message="Not found"
-            )
+            container.read_item.side_effect = CosmosResourceNotFoundError(status_code=404, message="Not found")
 
         if etag_conflict_times > 0:
             from azure.cosmos.exceptions import CosmosHttpResponseError
 
-            conflict_exc = CosmosHttpResponseError(
-                status_code=412, message="Precondition failed"
-            )
+            conflict_exc = CosmosHttpResponseError(status_code=412, message="Precondition failed")
             conflict_exc.status_code = 412
 
             call_count = {"n": 0}
@@ -110,9 +106,7 @@ class TestIncrementCounterBy:
                     return original_doc
                 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-                raise CosmosResourceNotFoundError(
-                    status_code=404, message="Not found"
-                )
+                raise CosmosResourceNotFoundError(status_code=404, message="Not found")
 
             container.upsert_item.side_effect = upsert_side_effect
             container.read_item.side_effect = read_side_effect
@@ -191,11 +185,14 @@ class TestOnMemoryChange:
 
     @pytest.mark.asyncio
     @patch("function_app.increment_counter_by", new_callable=AsyncMock)
-    @patch.dict(os.environ, {
-        "THREAD_SUMMARY_EVERY_N": "5",
-        "FACT_EXTRACTION_EVERY_N": "3",
-        "USER_SUMMARY_EVERY_N": "10",
-    })
+    @patch.dict(
+        os.environ,
+        {
+            "THREAD_SUMMARY_EVERY_N": "5",
+            "FACT_EXTRACTION_EVERY_N": "3",
+            "USER_SUMMARY_EVERY_N": "10",
+        },
+    )
     async def test_filters_non_turn_documents(self, mock_increment):
         docs = [
             {"type": "summary", "user_id": "alice", "thread_id": "t1"},
@@ -210,11 +207,14 @@ class TestOnMemoryChange:
 
     @pytest.mark.asyncio
     @patch("function_app.increment_counter_by", new_callable=AsyncMock)
-    @patch.dict(os.environ, {
-        "THREAD_SUMMARY_EVERY_N": "5",
-        "FACT_EXTRACTION_EVERY_N": "0",
-        "USER_SUMMARY_EVERY_N": "0",
-    })
+    @patch.dict(
+        os.environ,
+        {
+            "THREAD_SUMMARY_EVERY_N": "5",
+            "FACT_EXTRACTION_EVERY_N": "0",
+            "USER_SUMMARY_EVERY_N": "0",
+        },
+    )
     async def test_groups_by_thread_scope(self, mock_increment):
         docs = [
             {"type": "turn", "user_id": "alice", "thread_id": "t1"},
@@ -239,11 +239,14 @@ class TestOnMemoryChange:
 
     @pytest.mark.asyncio
     @patch("function_app.increment_counter_by", new_callable=AsyncMock)
-    @patch.dict(os.environ, {
-        "THREAD_SUMMARY_EVERY_N": "5",
-        "FACT_EXTRACTION_EVERY_N": "0",
-        "USER_SUMMARY_EVERY_N": "0",
-    })
+    @patch.dict(
+        os.environ,
+        {
+            "THREAD_SUMMARY_EVERY_N": "5",
+            "FACT_EXTRACTION_EVERY_N": "0",
+            "USER_SUMMARY_EVERY_N": "0",
+        },
+    )
     async def test_starts_orchestration_on_threshold_crossing(self, mock_increment):
         docs = [
             {"type": "turn", "user_id": "alice", "thread_id": "t1"},
@@ -265,11 +268,14 @@ class TestOnMemoryChange:
 
     @pytest.mark.asyncio
     @patch("function_app.increment_counter_by", new_callable=AsyncMock)
-    @patch.dict(os.environ, {
-        "THREAD_SUMMARY_EVERY_N": "0",
-        "FACT_EXTRACTION_EVERY_N": "0",
-        "USER_SUMMARY_EVERY_N": "0",
-    })
+    @patch.dict(
+        os.environ,
+        {
+            "THREAD_SUMMARY_EVERY_N": "0",
+            "FACT_EXTRACTION_EVERY_N": "0",
+            "USER_SUMMARY_EVERY_N": "0",
+        },
+    )
     async def test_all_disabled_skips_processing(self, mock_increment):
         docs = [
             {"type": "turn", "user_id": "alice", "thread_id": "t1"},
@@ -282,11 +288,14 @@ class TestOnMemoryChange:
 
     @pytest.mark.asyncio
     @patch("function_app.increment_counter_by", new_callable=AsyncMock)
-    @patch.dict(os.environ, {
-        "THREAD_SUMMARY_EVERY_N": "0",
-        "FACT_EXTRACTION_EVERY_N": "0",
-        "USER_SUMMARY_EVERY_N": "10",
-    })
+    @patch.dict(
+        os.environ,
+        {
+            "THREAD_SUMMARY_EVERY_N": "0",
+            "FACT_EXTRACTION_EVERY_N": "0",
+            "USER_SUMMARY_EVERY_N": "10",
+        },
+    )
     async def test_user_summary_threshold(self, mock_increment):
         docs = [
             {"type": "turn", "user_id": "alice", "thread_id": "t1"},

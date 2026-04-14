@@ -240,9 +240,7 @@ class TestCreateMemoryStore:
         mock_db = AsyncMock()
         mock_memories_container = MagicMock()
         mock_counter_container = MagicMock()
-        mock_throughput_cls = MagicMock(
-            side_effect=lambda **kwargs: type("Throughput", (), kwargs)()
-        )
+        mock_throughput_cls = MagicMock(side_effect=lambda **kwargs: type("Throughput", (), kwargs)())
 
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists = AsyncMock(return_value=mock_db)

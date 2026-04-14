@@ -254,9 +254,7 @@ class TestCreateMemoryStore:
         mock_db = MagicMock()
         mock_memories_container = MagicMock()
         mock_counter_container = MagicMock()
-        mock_throughput_cls = MagicMock(
-            side_effect=lambda **kwargs: type("Throughput", (), kwargs)()
-        )
+        mock_throughput_cls = MagicMock(side_effect=lambda **kwargs: type("Throughput", (), kwargs)())
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
         mock_db.create_container_if_not_exists.side_effect = [

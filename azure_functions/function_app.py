@@ -344,68 +344,73 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
         thread_counts[(user_id, thread_id)] += 1
         user_counts[user_id] += 1
 
-    if not thread_counts and not user_counts:
-        return  # no turn documents in this batch
+    thread_counters_enabled = (n_thread > 0 or n_facts > 0)
+    user_counters_enabled = (n_user > 0)
+    enabled_thread_groups = len(thread_counts) if thread_counters_enabled else 0
+    enabled_user_groups = len(user_counts) if user_counters_enabled else 0
+
+    if enabled_thread_groups == 0 and enabled_user_groups == 0:
+        return  # no turn documents in this batch for enabled counter processing
 
     logger.info(
         "on_memory_change: processing batch thread_groups=%d user_groups=%d",
-        len(thread_counts), len(user_counts),
+        enabled_thread_groups, enabled_user_groups,
     )
 
     # ---- Step 2: Thread-scoped counters and threshold checks ----
-    for (user_id, thread_id), batch_count in thread_counts.items():
-        old_count, new_count = increment_counter_by(
-            f"thread_counter_{user_id}_{thread_id}", user_id, thread_id, batch_count,
-        )
-
-        if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
-            logger.info(
-                "on_memory_change: triggering thread_summary user_id=%s thread_id=%s count=%d",
-                user_id, thread_id, new_count,
-            )
-            await starter.start_new(
-                "memory_orchestrator",
-                client_input={
-                    "thread_summary_only": True,
-                    "user_id": user_id,
-                    "thread_id": thread_id,
-                },
+    if thread_counters_enabled:
+        for (user_id, thread_id), batch_count in thread_counts.items():
+            old_count, new_count = increment_counter_by(
+                f"thread_counter_{user_id}_{thread_id}", user_id, thread_id, batch_count,
             )
 
-        if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
-            logger.info(
-                "on_memory_change: triggering extract_facts user_id=%s thread_id=%s count=%d",
-                user_id, thread_id, new_count,
-            )
-            await starter.start_new(
-                "memory_orchestrator",
-                client_input={
-                    "extract_facts_only": True,
-                    "user_id": user_id,
-                    "thread_id": thread_id,
-                },
-            )
+            if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
+                logger.info(
+                    "on_memory_change: triggering thread_summary user_id=%s thread_id=%s count=%d",
+                    user_id, thread_id, new_count,
+                )
+                await starter.start_new(
+                    "memory_orchestrator",
+                    client_input={
+                        "thread_summary_only": True,
+                        "user_id": user_id,
+                        "thread_id": thread_id,
+                    },
+                )
+
+            if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
+                logger.info(
+                    "on_memory_change: triggering extract_facts user_id=%s thread_id=%s count=%d",
+                    user_id, thread_id, new_count,
+                )
+                await starter.start_new(
+                    "memory_orchestrator",
+                    client_input={
+                        "extract_facts_only": True,
+                        "user_id": user_id,
+                        "thread_id": thread_id,
+                    },
+                )
 
     # ---- Step 3: User-scoped counters and threshold checks ----
-    for user_id, batch_count in user_counts.items():
-        old_count, new_count = increment_counter_by(
-            f"user_counter_{user_id}", user_id, USER_COUNTER_THREAD_ID, batch_count,
-        )
-
-        if n_user > 0 and crosses_threshold(old_count, new_count, n_user):
-            logger.info(
-                "on_memory_change: triggering user_summary user_id=%s count=%d",
-                user_id, new_count,
-            )
-            await starter.start_new(
-                "memory_orchestrator",
-                client_input={
-                    "user_summary_only": True,
-                    "user_id": user_id,
-                },
+    if user_counters_enabled:
+        for user_id, batch_count in user_counts.items():
+            old_count, new_count = increment_counter_by(
+                f"user_counter_{user_id}", user_id, USER_COUNTER_THREAD_ID, batch_count,
             )
 
-
+            if crosses_threshold(old_count, new_count, n_user):
+                logger.info(
+                    "on_memory_change: triggering user_summary user_id=%s count=%d",
+                    user_id, new_count,
+                )
+                await starter.start_new(
+                    "memory_orchestrator",
+                    client_input={
+                        "user_summary_only": True,
+                        "user_id": user_id,
+                    },
+                )
 @df_app.cosmos_db_trigger(
     arg_name="documents",
     connection="COSMOS_DB",

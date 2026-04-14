@@ -26,6 +26,15 @@ Required application settings:
       The Cosmos DB account endpoint URL used by the change feed trigger
       binding (identity-based connection) and all Cosmos container clients.
 
+  COSMOS_DB_DATABASE
+      The Cosmos DB database name used by the trigger and container clients.
+
+  COSMOS_DB_CONTAINER
+      The memories container watched by the change feed trigger.
+
+  COSMOS_DB_LEASE_CONTAINER
+      The lease container used by the trigger for checkpointing.
+
 Processing threshold settings (set to ``"0"`` to disable):
 
   THREAD_SUMMARY_EVERY_N
@@ -52,7 +61,7 @@ import azure.functions as func
 import azure.durable_functions as df
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
-from activities import _get_cosmos_container, bp as activities_bp
+from activities import _get_cosmos_counter_container, bp as activities_bp
 
 logger = logging.getLogger(__name__)
 
@@ -65,19 +74,22 @@ df_app.register_functions(activities_bp)
 # =====================================================================
 
 USER_COUNTER_THREAD_ID = "__counters__"
+CHANGE_FEED_DATABASE = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
+CHANGE_FEED_CONTAINER = os.environ.get("COSMOS_DB_CONTAINER", "memories")
+CHANGE_FEED_LEASE_CONTAINER = os.environ.get("COSMOS_DB_LEASE_CONTAINER", "leases")
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: int) -> tuple[int, int]:
+async def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: int) -> tuple[int, int]:
     """Atomically increment a counter document by *count* using ETag concurrency.
 
     Returns ``(old_count, new_count)``.  Creates the counter document if it
     does not exist.  Retries up to 3 times on ETag conflicts (HTTP 412).
     """
-    container = _get_cosmos_container()
+    container = await _get_cosmos_counter_container()
     max_retries = 3
     partition_key = [user_id, thread_id]
 
@@ -87,7 +99,7 @@ def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: i
         etag = None
         existing_doc = None
         try:
-            doc = container.read_item(item=counter_id, partition_key=partition_key)
+            doc = await container.read_item(item=counter_id, partition_key=partition_key)
             old_count = doc.get("count", 0)
             etag = doc.get("_etag")
             existing_doc = doc
@@ -101,12 +113,6 @@ def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: i
             "id": counter_id,
             "user_id": user_id,
             "thread_id": thread_id,
-            "role": "system",
-            "type": "counter",
-            "content": "",
-            "metadata": {
-                "counter_scope": "user" if thread_id == USER_COUNTER_THREAD_ID else "thread",
-            },
             "count": new_count,
             "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
             "updated_at": _utc_now_iso(),
@@ -115,13 +121,13 @@ def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: i
         # ---- Upsert with ETag if we had an existing doc ----
         try:
             if etag is not None:
-                container.upsert_item(
+                await container.upsert_item(
                     body=new_doc,
                     etag=etag,
                     match_condition="IfMatch",
                 )
             else:
-                container.upsert_item(body=new_doc)
+                await container.upsert_item(body=new_doc)
             return (old_count, new_count)
         except CosmosHttpResponseError as exc:
             if exc.status_code == 412 and attempt < max_retries - 1:
@@ -336,8 +342,8 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     user_counts: dict[str, int] = defaultdict(int)
 
     for doc in documents:
-        # Counter documents now live in the memories container, but only raw
-        # conversation turns should affect thresholds or trigger work.
+        # Counter writes land in the separate counter container, so only raw
+        # conversation turns from the memories container affect thresholds.
         if doc.get("type") != "turn":
             continue
 
@@ -366,7 +372,7 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     # ---- Step 2: Thread-scoped counters and threshold checks ----
     if thread_counters_enabled:
         for (user_id, thread_id), batch_count in thread_counts.items():
-            old_count, new_count = increment_counter_by(
+            old_count, new_count = await increment_counter_by(
                 f"thread_counter_{user_id}_{thread_id}", user_id, thread_id, batch_count,
             )
 
@@ -401,7 +407,7 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     # ---- Step 3: User-scoped counters and threshold checks ----
     if user_counters_enabled:
         for user_id, batch_count in user_counts.items():
-            old_count, new_count = increment_counter_by(
+            old_count, new_count = await increment_counter_by(
                 f"user_counter_{user_id}", user_id, USER_COUNTER_THREAD_ID, batch_count,
             )
 
@@ -420,9 +426,9 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
 @df_app.cosmos_db_trigger(
     arg_name="documents",
     connection="COSMOS_DB",
-    database_name="ai_memory",
-    container_name="memories",
-    lease_container_name="leases",
+    database_name=CHANGE_FEED_DATABASE,
+    container_name=CHANGE_FEED_CONTAINER,
+    lease_container_name=CHANGE_FEED_LEASE_CONTAINER,
     create_lease_container_if_not_exists=True,
 )
 @df_app.durable_client_input(client_name="starter")

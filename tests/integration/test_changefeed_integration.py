@@ -1,7 +1,7 @@
 """Integration tests for the change feed trigger and counter management.
 
 These tests exercise the end-to-end flow: inserting turn documents,
-verifying counters increment inside the memories container, and verifying
+verifying counters increment inside the counter container, and verifying
 orchestrations are started at threshold crossings.
 
 Enable by setting::
@@ -9,7 +9,7 @@ Enable by setting::
     AGENT_MEMORY_RUN_INTEGRATION=true
 
 Requires a running Azure Functions host with the change feed trigger
-configured and Cosmos DB containers (memories, leases) provisioned.
+configured and Cosmos DB containers (memories, counter, leases) provisioned.
 """
 
 import os
@@ -34,19 +34,21 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def cosmos_clients():
-    """Create a Cosmos DB container client for memories."""
+    """Create Cosmos DB container clients for memories and counters."""
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
 
     endpoint = os.environ["COSMOS_DB__accountEndpoint"]
     database_name = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
     memories_container_name = os.environ.get("COSMOS_DB_CONTAINER", "memories")
+    counter_container_name = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")
 
     credential = DefaultAzureCredential()
     client = CosmosClient(endpoint, credential=credential)
     db = client.get_database_client(database_name)
     memories = db.get_container_client(memories_container_name)
-    return memories
+    counters = db.get_container_client(counter_container_name)
+    return memories, counters
 
 
 @pytest.fixture
@@ -79,12 +81,12 @@ class TestChangeFeedIntegration:
         memories_container.upsert_item(body=doc)
         return doc
 
-    def _read_counter(self, memories_container, counter_id, user_id, thread_id):
+    def _read_counter(self, counter_container, counter_id, user_id, thread_id):
         """Read a counter document, returning None if not found."""
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         try:
-            return memories_container.read_item(
+            return counter_container.read_item(
                 item=counter_id, partition_key=[user_id, thread_id]
             )
         except CosmosResourceNotFoundError:
@@ -97,7 +99,7 @@ class TestChangeFeedIntegration:
         documents and then polls the memories container for up to 60 seconds
         waiting for the change feed to process them.
         """
-        memories = cosmos_clients
+        memories, counters = cosmos_clients
         user_id = unique_ids["user_id"]
         thread_id = unique_ids["thread_id"]
         counter_id = f"thread_counter_{user_id}_{thread_id}"
@@ -110,7 +112,7 @@ class TestChangeFeedIntegration:
         deadline = time.time() + 60
         counter_doc = None
         while time.time() < deadline:
-            counter_doc = self._read_counter(memories, counter_id, user_id, thread_id)
+            counter_doc = self._read_counter(counters, counter_id, user_id, thread_id)
             if counter_doc and counter_doc.get("count", 0) >= 3:
                 break
             time.sleep(3)

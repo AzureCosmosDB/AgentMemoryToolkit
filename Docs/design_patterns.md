@@ -322,7 +322,7 @@ Instead of calling `generate_thread_summary()`, `extract_facts()`, or `generate_
 
 When a new turn is written to the `memories` container, the change feed trigger:
 
-1. Increments a `type="counter"` document in the `memories` container for each relevant scope.
+1. Increments a counter document in the dedicated `counter` container for each relevant scope.
 2. Checks whether the counter has crossed a configured threshold.
 3. Starts the appropriate Durable Functions orchestration if the threshold is crossed.
 
@@ -340,11 +340,10 @@ Set any value to `0` to disable that processing type. All three default to `0` (
 
 ### Required infrastructure
 
-The change feed trigger needs one additional Cosmos DB container beyond the existing `memories` container:
+The change feed trigger needs two additional Cosmos DB containers beyond the existing `memories` container:
 
+- **`counter`** — stores lightweight per-thread and per-user message counters used for threshold checks
 - **`leases`** — auto-created by the Azure Functions runtime for change feed checkpointing
-
-Counter state is stored as lightweight `type="counter"` documents in the `memories` container.
 
 The `COSMOS_DB__accountEndpoint` setting must also be configured for the identity-based change feed binding.
 

@@ -135,7 +135,7 @@ on_memory_change trigger
 
 1. The change feed trigger watches the `memories` container for new documents.
 2. Only documents with `type == "turn"` are counted (summaries, facts, and user summaries are ignored).
-3. `counter` documents in the `memories` container track how many turns have been seen per scope using ETag-based optimistic concurrency.
+3. Documents in the dedicated `counter` container track how many turns have been seen per scope using ETag-based optimistic concurrency.
 4. When a counter crosses a configured threshold, the corresponding Durable Functions orchestration is started automatically.
 
 ### Threshold settings
@@ -153,7 +153,7 @@ Set any value to `0` to disable that processing type. For example, setting `THRE
 | Container | Partition Key | Purpose |
 |-----------|---------------|---------|
 | `memories` | `/user_id`, `/thread_id` (hierarchical) | Existing memory store |
-| `memories` (`type="counter"` docs) | `/user_id`, `/thread_id` (hierarchical) | Message count tracking |
+| `counter` | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing |
 | `leases` | `/id` | Auto-created by the trigger for change feed checkpointing |
 
 ### Push vs. pull

@@ -32,9 +32,9 @@ You need these before Cosmos DB or LLM-backed features will work:
 1. **Cosmos DB for NoSQL**
 2. **Azure AI Services / Azure OpenAI** with an embedding model and a chat model
 
-The toolkit can create the database and container for you with `create_memory_store()`.
+The toolkit can create the database and both containers for you with `create_memory_store()`.
 
-For automatic change feed processing, the function stores lightweight `type="counter"` documents in the `memories` container. A `leases` container is created automatically by the Azure Functions runtime.
+For automatic change feed processing, the function stores lightweight counter documents in a dedicated `counter` container. A `leases` container is created automatically by the Azure Functions runtime.
 
 ### RBAC
 
@@ -91,6 +91,7 @@ In `azure_functions/local.settings.json`, add these to enable automatic processi
 
 ```json
 "COSMOS_DB__accountEndpoint": "https://<your-account>.documents.azure.com:443/",
+"COSMOS_DB_COUNTERS_CONTAINER": "counter",
 "THREAD_SUMMARY_EVERY_N": "5",
 "FACT_EXTRACTION_EVERY_N": "3",
 "USER_SUMMARY_EVERY_N": "10"
@@ -390,7 +391,7 @@ print(result)
 | OpenAI 401/403 | Check `Cognitive Services OpenAI User` role |
 | Function 401 in Azure | Set `ADF_KEY` or pass `?code=<key>` |
 | Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and matches your Cosmos account |
-| Counter updates fail | Verify the function can write `type="counter"` documents into the `memories` container |
+| Counter updates fail | Verify the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
 | Auto-processing not starting | Check that threshold settings are > 0 and the Functions host shows `on_memory_change` at startup |
 
 For full cloud deployment and validation, see `Docs/azure_testing.md`.

@@ -232,6 +232,54 @@ class TestConnectCosmos:
         assert mem._container_client is mock_container
 
 
+class TestCreateMemoryStore:
+    async def test_create_memory_store_with_counter_container(self):
+        mem = _make_client()
+        mock_cosmos_cls = MagicMock()
+        mock_client = MagicMock()
+        mock_db = AsyncMock()
+        mock_memories_container = MagicMock()
+        mock_counter_container = MagicMock()
+        mock_throughput_cls = MagicMock(
+            side_effect=lambda **kwargs: type("Throughput", (), kwargs)()
+        )
+
+        mock_cosmos_cls.return_value = mock_client
+        mock_client.create_database_if_not_exists = AsyncMock(return_value=mock_db)
+        mock_db.create_container_if_not_exists = AsyncMock(
+            side_effect=[mock_memories_container, mock_counter_container]
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos.aio": MagicMock(CosmosClient=mock_cosmos_cls),
+                "azure.cosmos": MagicMock(
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=mock_throughput_cls,
+                ),
+            },
+        ):
+            await mem.create_memory_store(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+                embedding_dimensions=256,
+                counter_autoscale_max_ru=1000,
+            )
+
+        mock_client.create_database_if_not_exists.assert_awaited_once()
+        memories_call = mock_db.create_container_if_not_exists.await_args_list[0]
+        counter_call = mock_db.create_container_if_not_exists.await_args_list[1]
+        vec_policy = memories_call.kwargs["vector_embedding_policy"]
+        assert vec_policy["vectorEmbeddings"][0]["dimensions"] == 256
+        ft_policy = memories_call.kwargs["full_text_policy"]
+        assert ft_policy["defaultLanguage"] == "en-US"
+        assert counter_call.kwargs["id"] == "counter"
+        assert counter_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
+        assert "vector_embedding_policy" not in counter_call.kwargs
+        assert mem._container_client is mock_memories_container
+
+
 class TestRequireCosmos:
     async def test_require_cosmos_before_connect(self):
         mem = _make_client()

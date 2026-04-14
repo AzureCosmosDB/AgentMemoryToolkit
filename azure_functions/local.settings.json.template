@@ -8,6 +8,8 @@
     "COSMOS_DB__accountEndpoint": "https://<cosmos-endpoint>.documents.azure.com:443/",
     "COSMOS_DB_DATABASE": "ai_memory",
     "COSMOS_DB_CONTAINER": "memories",
+    "COSMOS_DB_LEASE_CONTAINER": "leases",
+    "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 
     "THREAD_SUMMARY_EVERY_N": "0",
     "FACT_EXTRACTION_EVERY_N": "0",

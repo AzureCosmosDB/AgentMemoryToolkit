@@ -121,6 +121,7 @@ az functionapp config appsettings set \
   --resource-group <resource-group> \
   --settings \
     COSMOS_DB__accountEndpoint="https://<cosmos-account-name>.documents.azure.com:443/" \
+    COSMOS_DB_COUNTERS_CONTAINER="counter" \
     THREAD_SUMMARY_EVERY_N="5" \
     FACT_EXTRACTION_EVERY_N="3" \
     USER_SUMMARY_EVERY_N="10"
@@ -339,7 +340,7 @@ Common issues:
 | Durable Function starts but fails | Missing app settings or downstream RBAC |
 | `No memories found` | No turn memories exist, or all candidate turns predate the existing summary |
 | Search is slow | Embedding latency, index choice, or region mismatch |
-| Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and the function can write `type="counter"` documents into `memories` |
+| Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
 | Auto-processing not starting | Check threshold settings are > 0 in Function App configuration |
 
 Recommended checks:

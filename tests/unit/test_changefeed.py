@@ -2,7 +2,7 @@
 
 import os
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -10,7 +10,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "azure_functions"))
 
 from function_app import crosses_threshold, increment_counter_by, process_changefeed_batch
-
 
 # =====================================================================
 # crosses_threshold

@@ -142,7 +142,13 @@ def increment_counter_by(counter_id: str, user_id: str, thread_id: str, count: i
 
 
 def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:
-    """Return True if any multiple of *n* was crossed in the range (old, new]."""
+    """Return True if any multiple of *n* was crossed in the range (old, new].
+
+    Raises:
+        ValueError: If ``n`` is not a positive integer threshold.
+    """
+    if n <= 0:
+        raise ValueError("n must be > 0")
     return old_count // n != new_count // n
 
 

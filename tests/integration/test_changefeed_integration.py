@@ -74,9 +74,7 @@ class TestChangeFeedIntegration:
             "content": f"Test message {uuid.uuid4().hex[:6]}",
             "metadata": {},
             "embedding": [0.0] * 10,
-            "created_at": __import__("datetime").datetime.now(
-                __import__("datetime").timezone.utc
-            ).isoformat(),
+            "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
         memories_container.upsert_item(body=doc)
         return doc
@@ -86,9 +84,7 @@ class TestChangeFeedIntegration:
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         try:
-            return counter_container.read_item(
-                item=counter_id, partition_key=[user_id, thread_id]
-            )
+            return counter_container.read_item(item=counter_id, partition_key=[user_id, thread_id])
         except CosmosResourceNotFoundError:
             return None
 
@@ -118,9 +114,6 @@ class TestChangeFeedIntegration:
             time.sleep(3)
 
         assert counter_doc is not None, (
-            f"Counter {counter_id} was not created within 60s. "
-            "Is the change feed trigger running?"
+            f"Counter {counter_id} was not created within 60s. Is the change feed trigger running?"
         )
-        assert counter_doc["count"] >= 3, (
-            f"Expected counter >= 3, got {counter_doc['count']}"
-        )
+        assert counter_doc["count"] >= 3, f"Expected counter >= 3, got {counter_doc['count']}"

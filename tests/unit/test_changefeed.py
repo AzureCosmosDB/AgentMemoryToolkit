@@ -137,7 +137,11 @@ class TestIncrementCounterBy:
         mock_get_container.return_value = container
 
         old, new = await increment_counter_by(
-            "thread_counter_alice_chat42", "alice", "chat42", 3, batch_max_lsn=42,
+            "thread_counter_alice_chat42",
+            "alice",
+            "chat42",
+            3,
+            batch_max_lsn=42,
         )
         assert old == 7
         assert new == 10
@@ -159,7 +163,11 @@ class TestIncrementCounterBy:
         mock_get_container.return_value = container
 
         old, new = await increment_counter_by(
-            "thread_counter_bob_chat1", "bob", "chat1", 5, batch_max_lsn=10,
+            "thread_counter_bob_chat1",
+            "bob",
+            "chat1",
+            5,
+            batch_max_lsn=10,
         )
         assert old == 0
         assert new == 5
@@ -510,7 +518,11 @@ class TestIncrementCounterByReplay:
         mock_get_container.return_value = container
 
         old, new = await increment_counter_by(
-            "thread_counter_alice_t1", "alice", "t1", 3, batch_max_lsn=42,
+            "thread_counter_alice_t1",
+            "alice",
+            "t1",
+            3,
+            batch_max_lsn=42,
         )
 
         # Returns cached (pre-batch count, current count) without writing
@@ -539,7 +551,11 @@ class TestIncrementCounterByReplay:
         mock_get_container.return_value = container
 
         old, new = await increment_counter_by(
-            "thread_counter_alice_t1", "alice", "t1", 3, batch_max_lsn=99,
+            "thread_counter_alice_t1",
+            "alice",
+            "t1",
+            3,
+            batch_max_lsn=99,
         )
 
         # Normal increment: 8 + 3 = 11

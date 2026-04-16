@@ -86,6 +86,7 @@ await mem.delete_cosmos(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID)
 - **End of conversation** — after the user closes a session or a support ticket is resolved.
 - **Long-running thread** — when a thread exceeds a token budget (e.g. > 50 turns) and you need a compact representation for context.
 - **Periodic background job** — on a schedule to keep summaries up to date for active threads.
+- **Automatic (change feed)** — set `THREAD_SUMMARY_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
 
 Summaries are incremental: if one already exists for the thread, only newer turns are merged in.
 
@@ -111,6 +112,7 @@ The summary is stored automatically in Cosmos with id `summary_user-1_thread-abc
 - **After each meaningful exchange** — extract facts from the latest turns so they are available for retrieval immediately.
 - **End of conversation** — capture all discrete preferences, decisions, and requirements from the thread.
 - **Before a planning step** — in multi-agent workflows, extract facts before handing context to a planner agent.
+- **Automatic (change feed)** — set `FACT_EXTRACTION_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
 
 Each fact is stored as its own document with its own embedding, making it ideal for fine-grained semantic search.
 
@@ -133,6 +135,7 @@ result = await mem.extract_facts(
 - **Cross-session onboarding** — at the start of a new thread, generate (or update) the user summary so the agent has context from all prior conversations.
 - **After a thread summary is created** — chain it: summarize the thread, then update the user summary.
 - **On a schedule** — for users with many threads, run periodically to keep the profile current.
+- **Automatic (change feed)** — set `USER_SUMMARY_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
 
 User summaries are also incremental. The pipeline merges only new thread data into the existing profile.
 
@@ -311,6 +314,50 @@ await mem.generate_user_summary(
 
 ---
 
+## 8. Automatic Processing with Change Feed
+
+Instead of calling `generate_thread_summary()`, `extract_facts()`, or `generate_user_summary()` explicitly, you can let the Cosmos DB change feed trigger fire them automatically in the background.
+
+### How it works
+
+When a new turn is written to the `memories` container, the change feed trigger:
+
+1. Increments a counter document in the dedicated `counter` container for each relevant scope.
+2. Checks whether the counter has crossed a configured threshold.
+3. Starts the appropriate Durable Functions orchestration if the threshold is crossed.
+
+### Configuration
+
+Set these application settings (in `local.settings.json` locally or Function App settings in Azure):
+
+| Setting | Scope | Effect |
+|---------|-------|--------|
+| `THREAD_SUMMARY_EVERY_N=5` | Per `(user_id, thread_id)` | Summarize the thread every 5 turns |
+| `FACT_EXTRACTION_EVERY_N=3` | Per `(user_id, thread_id)` | Extract facts every 3 turns |
+| `USER_SUMMARY_EVERY_N=10` | Per `user_id` | Update user profile every 10 turns across all threads |
+
+Set any value to `0` to disable that processing type. All three default to `0` (disabled).
+
+### Required infrastructure
+
+The change feed trigger needs two additional Cosmos DB containers beyond the existing `memories` container:
+
+- **`counter`** — stores lightweight per-thread and per-user message counters used for threshold checks
+- **`leases`** — auto-created by the Azure Functions runtime for change feed checkpointing
+
+The `COSMOS_DB__accountEndpoint` setting must also be configured for the identity-based change feed binding.
+
+### When to use automatic vs. on-demand
+
+| Approach | Best for |
+|----------|----------|
+| **On-demand** | Full control, testing, one-off processing, chaining operations |
+| **Automatic** | Always-on background processing, fire-and-forget, production workloads |
+
+Both approaches use the same orchestrator and activities, so the output is identical.
+
+---
+
 ## Quick Reference
 
 | Operation | Method | When |
@@ -321,7 +368,7 @@ await mem.generate_user_summary(
 | Delete a memory | `delete_cosmos` | Remove incorrect or sensitive data |
 | Get a thread | `get_thread` | Load recent conversation context |
 | Semantic search | `search_cosmos` | Find relevant facts or summaries for a prompt |
-| Summarize a thread | `generate_thread_summary` | End of conversation or periodically |
-| Extract facts | `extract_facts` | After key exchanges or end of conversation |
-| Summarize a user | `generate_user_summary` | Cross-session profiling, after thread summaries |
+| Summarize a thread | `generate_thread_summary` | End of conversation, periodically, or automatic via change feed |
+| Extract facts | `extract_facts` | After key exchanges, end of conversation, or automatic via change feed |
+| Summarize a user | `generate_user_summary` | Cross-session profiling, after thread summaries, or automatic via change feed |
 | Get user summary | `get_user_summary` | Start of a new session |

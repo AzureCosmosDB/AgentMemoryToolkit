@@ -1,6 +1,8 @@
 # Environment
 .env
 local.settings.json
+.github/prompts/
+.github/skills/
 
 # agents
 .agents/
@@ -8,6 +10,9 @@ local.settings.json
 .claude/
 skills/
 skills-lock.json
+openspec/
+openspec*
+
 
 
 # Python
@@ -19,6 +24,7 @@ build/
 *.egg
 .venv/
 venv/
+.pytest_cache/
 
 # Jupyter Notebook
 .ipynb_checkpoints/

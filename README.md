@@ -8,7 +8,7 @@
 [![YouTube](https://img.shields.io/badge/YouTube-Azure%20Cosmos%20DB-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@AzureCosmosDB)
 
 
-Agent Memory Toolkit is a Python library and Azure-backed reference implementation for storing, retrieving, and transforming agent memories over time. It combines a simple SDK for local and Cosmos DB operations with Durable Functions pipelines that generate thread summaries, extract facts, and build cross-thread user profiles. The toolkit is designed for agent applications that need both raw conversation history and higher-value derived memory that can be searched semantically later. It provides matching sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs so the same memory model can be used in scripts, services, notebooks, and larger agent systems.
+Agent Memory Toolkit is a Python library and Azure-backed reference implementation for storing, retrieving, and transforming agent memories over time. It combines a simple SDK for local and Cosmos DB operations with Durable Functions pipelines that generate thread summaries, extract facts, and build cross-thread user profiles. The toolkit also supports automatic processing via a Cosmos DB change feed trigger that fires these pipelines in the background when configurable message count thresholds are crossed. The toolkit is designed for agent applications that need both raw conversation history and higher-value derived memory that can be searched semantically later. It provides matching sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs so the same memory model can be used in scripts, services, notebooks, and larger agent systems.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
@@ -35,10 +35,10 @@ Agent Memory Toolkit is a Python library and Azure-backed reference implementati
 │  • summaries                      │◄─── memory management ───►│  • fact extraction               │
 │  • facts                          │                           │  • user summaries                │
 │  • user summaries                 │                           │                                  │
-│                                   │                           │ Reads raw memories and           │
-│  Supports query, vector, text     │                           │ writes processed memories back.  │
-│  search over stored memories.     │                           └──────────────────┬───────────────┘
-└───────────────────────┬───────────┘                                              │
+│                                   │                           │ On-demand (SDK) or automatic     │
+│  Supports query, vector, text     │    change feed trigger    │ (Cosmos DB change feed trigger). │
+│  search over stored memories.     │───────────────────────────►│                                  │
+└───────────────────────┬───────────┘                           └──────────────────┬───────────────┘
                         │             embeddings and LLM-based processing          │
                         └──────────────────────┬───────────────────────────────────┘
                                                ▼
@@ -63,6 +63,7 @@ Agent Memory Toolkit is a Python library and Azure-backed reference implementati
 | **Fact extraction** | `extract_facts()` — discrete, independently searchable assertions from a thread |
 | **User summaries** | `generate_user_summary()` — cross-thread user profile, incrementally updated |
 | **Incremental updates** | Thread and user summaries use point-read + time-filtering to merge new data with existing summaries |
+| **Automatic processing** | Cosmos DB change feed trigger fires thread summaries, fact extraction, and user summaries when configurable message count thresholds are crossed |
 | **Externalized prompts** | LLM prompts live in editable Markdown files (`azure_functions/prompts/`) |
 | **Entra ID auth** | `DefaultAzureCredential` everywhere — `az login`, managed identities |
 
@@ -185,6 +186,8 @@ summary = memory.get_user_summary(user_id="user-001")
 | **Cosmos DB for NoSQL** | Memory store with hierarchical partition key, vector index, full-text index |
 | **Azure OpenAI / AI Foundry** | Embedding model + chat model for summarization / fact extraction |
 | **Azure Functions** | Durable Functions orchestrator and activity functions |
+
+Automatic change feed processing stores lightweight counter documents in a dedicated `counter` container and also uses a `leases` container (auto-created). See [concepts.md](Docs/concepts.md#automatic-processing-change-feed) for details.
 
 All services use **Entra ID** auth via `DefaultAzureCredential`.
 

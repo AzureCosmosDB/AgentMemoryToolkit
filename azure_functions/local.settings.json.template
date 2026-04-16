@@ -5,11 +5,16 @@
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "languageWorkers:python:defaultExecutablePath": "/Users/jcodella/github/AgentMemoryToolkit/azure_functions/.venv/bin/python",
 
-    "COSMOS_DB_ENDPOINT": "https://<cosmos-endpoint>.documents.azure.com:443/",
+    "COSMOS_DB__accountEndpoint": "https://<cosmos-endpoint>.documents.azure.com:443/",
     "COSMOS_DB_DATABASE": "ai_memory",
     "COSMOS_DB_CONTAINER": "memories",
+    "COSMOS_DB_LEASE_CONTAINER": "leases",
+    "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 
-    "SUMMARIZE_EVERY_N_MESSAGES": "0",
+    "THREAD_SUMMARY_EVERY_N": "0",
+    "FACT_EXTRACTION_EVERY_N": "0",
+    "USER_SUMMARY_EVERY_N": "0",
+
 
     "AI_FOUNDRY_ENDPOINT": "https://<foundry-endpoint>.openai.azure.com/",
     "AI_FOUNDRY_LLM": "gpt-5-nano",

@@ -6,10 +6,10 @@ This folder contains the main project documentation for Agent Memory Toolkit.
 
 | Document | Purpose |
 |----------|---------|
-| [concepts.md](concepts.md) | Explains the core memory model, including memory types (turn, summary, fact, user summary), threads, roles, and the processing pipeline. |
-| [local_testing.md](local_testing.md) | Covers local setup, environment configuration, RBAC, Cosmos provisioning, and running the toolkit and Azure Functions locally. |
-| [azure_testing.md](azure_testing.md) | Covers Azure deployment, cloud configuration, required services, and validation steps for running the toolkit in Azure. |
-| [design_patterns.md](design_patterns.md) | Shows when and how to call CRUD operations, summarization, fact extraction, and memory retrieval in chat and multi-agent applications. |
+| [concepts.md](concepts.md) | Explains the core memory model, including memory types (turn, summary, fact, user summary), threads, roles, the processing pipeline, and automatic change feed processing. |
+| [local_testing.md](local_testing.md) | Covers local setup, environment configuration, RBAC, Cosmos provisioning, running the toolkit and Azure Functions locally, and testing change feed auto-processing. |
+| [azure_testing.md](azure_testing.md) | Covers Azure deployment, cloud configuration, required services, change feed settings, and validation steps for running the toolkit in Azure. |
+| [design_patterns.md](design_patterns.md) | Shows when and how to call CRUD operations, summarization, fact extraction, and memory retrieval in chat and multi-agent applications, including automatic processing via the change feed. |
 
 ## Recommended Reading Order
 

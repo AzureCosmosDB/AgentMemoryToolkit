@@ -13,9 +13,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import azure.durable_functions as df
-from azure.cosmos import CosmosClient
+from azure.cosmos.aio import CosmosClient
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
-from azure.identity import DefaultAzureCredential
+from azure.identity.aio import DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,10 @@ def _load_prompt(filename: str) -> str:
 # Lazily initialised singletons
 # ---------------------------------------------------------------------------
 
+_cosmos_client = None
+_cosmos_database_client = None
 _cosmos_container = None
+_cosmos_counter_container = None
 _credential = None
 _openai_client = None
 
@@ -119,21 +122,47 @@ def _get_credential():
     return _credential
 
 
-def _get_cosmos_container():
-    """Return the Cosmos DB container client, connecting on first call."""
+async def _get_cosmos_database_client():
+    """Return the Cosmos DB database client, connecting on first call."""
+    global _cosmos_client, _cosmos_database_client
+    if _cosmos_database_client is None:
+        endpoint = os.environ.get("COSMOS_DB__accountEndpoint") or os.environ.get("COSMOS_DB_ENDPOINT")
+        if not endpoint:
+            raise ValueError(
+                "Cosmos DB endpoint not configured. "
+                "Set COSMOS_DB__accountEndpoint (required for change feed trigger) "
+                "or COSMOS_DB_ENDPOINT."
+            )
+        database = os.environ["COSMOS_DB_DATABASE"]
+        logger.info(
+            "Connecting to Cosmos DB endpoint=%s database=%s",
+            f"...{endpoint[-8:]}", database,
+        )
+        _cosmos_client = CosmosClient(endpoint, credential=_get_credential())
+        _cosmos_database_client = _cosmos_client.get_database_client(database)
+    return _cosmos_database_client
+
+
+async def _get_cosmos_container():
+    """Return the main memories container client, connecting on first call."""
     global _cosmos_container
     if _cosmos_container is None:
-        endpoint = os.environ["COSMOS_DB_ENDPOINT"]
-        database = os.environ["COSMOS_DB_DATABASE"]
         container = os.environ["COSMOS_DB_CONTAINER"]
-        logger.info(
-            "Connecting to Cosmos DB endpoint=%s database=%s container=%s",
-            f"...{endpoint[-8:]}", database, container,
-        )
-        client = CosmosClient(endpoint, credential=_get_credential())
-        db = client.get_database_client(database)
-        _cosmos_container = db.get_container_client(container)
+        logger.info("Using Cosmos memories container=%s", container)
+        db_client = await _get_cosmos_database_client()
+        _cosmos_container = db_client.get_container_client(container)
     return _cosmos_container
+
+
+async def _get_cosmos_counter_container():
+    """Return the dedicated counter container client, connecting on first call."""
+    global _cosmos_counter_container
+    if _cosmos_counter_container is None:
+        container = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")
+        logger.info("Using Cosmos counter container=%s", container)
+        db_client = await _get_cosmos_database_client()
+        _cosmos_counter_container = db_client.get_container_client(container)
+    return _cosmos_counter_container
 
 
 def _get_openai_client():
@@ -158,10 +187,12 @@ def _get_openai_client():
                 api_key=api_key,
             )
         else:
+            from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
             from azure.identity import get_bearer_token_provider
 
+            sync_credential = SyncDefaultAzureCredential()
             token_provider = get_bearer_token_provider(
-                _get_credential(),
+                sync_credential,
                 "https://cognitiveservices.azure.com/.default",
             )
             _openai_client = AzureOpenAI(
@@ -347,7 +378,7 @@ def _generate_embeddings_batch(
 
 
 @bp.activity_trigger(input_name="payload")
-def load_memories(payload: dict) -> list:
+async def load_memories(payload: dict) -> list:
     """Load all memories for a given thread_id from Cosmos DB.
 
     Input::
@@ -360,16 +391,14 @@ def load_memories(payload: dict) -> list:
     logger.info("load_memories started thread_id=%s", thread_id)
 
     try:
-        container = _get_cosmos_container()
+        container = await _get_cosmos_container()
         query = "SELECT * FROM c WHERE c.thread_id = @thread_id"
         parameters = [{"name": "@thread_id", "value": thread_id}]
 
-        items = container.query_items(
+        results = [item async for item in container.query_items(
             query=query,
             parameters=parameters,
-            enable_cross_partition_query=True,
-        )
-        results = list(items)
+        )]
     except CosmosHttpResponseError as exc:
         logger.error("load_memories Cosmos query failed: %s", exc, exc_info=True)
         raise
@@ -387,7 +416,7 @@ def load_memories(payload: dict) -> list:
 
 
 @bp.activity_trigger(input_name="payload")
-def generate_embeddings(payload: dict) -> list:
+async def generate_embeddings(payload: dict) -> list:
     """Generate a vector embedding for the given text.
 
     Input::
@@ -413,7 +442,7 @@ def generate_embeddings(payload: dict) -> list:
 
 
 @bp.activity_trigger(input_name="payload")
-def store_results(payload: dict) -> dict:
+async def store_results(payload: dict) -> dict:
     """Store (upsert) a memory document in Cosmos DB.
 
     Input::
@@ -445,8 +474,8 @@ def store_results(payload: dict) -> dict:
     }
 
     try:
-        container = _get_cosmos_container()
-        container.upsert_item(body=doc)
+        container = await _get_cosmos_container()
+        await container.upsert_item(body=doc)
     except CosmosHttpResponseError as exc:
         logger.error("store_results upsert failed id=%s: %s", doc["id"], exc, exc_info=True)
         raise
@@ -461,7 +490,7 @@ def store_results(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
-def generate_thread_summary(payload: dict) -> dict:
+async def generate_thread_summary(payload: dict) -> dict:
     """Generate or incrementally update a thread summary using an LLM.
 
     If a summary already exists for the thread, only memories created
@@ -489,7 +518,7 @@ def generate_thread_summary(payload: dict) -> dict:
     )
 
     try:
-        container = _get_cosmos_container()
+        container = await _get_cosmos_container()
     except CosmosHttpResponseError as exc:
         logger.error("generate_thread_summary Cosmos connection failed: %s", exc, exc_info=True)
         raise
@@ -498,7 +527,7 @@ def generate_thread_summary(payload: dict) -> dict:
     existing_summary = None
     summary_id = f"summary_{user_id}_{thread_id}"
     try:
-        existing_summary = container.read_item(
+        existing_summary = await container.read_item(
             item=summary_id,
             partition_key=[user_id, thread_id],
         )
@@ -525,11 +554,10 @@ def generate_thread_summary(payload: dict) -> dict:
         parameters.append({"name": "@since", "value": since})
 
     try:
-        items = list(container.query_items(
+        items = [item async for item in container.query_items(
             query=query,
             parameters=parameters,
-            enable_cross_partition_query=True,
-        ))
+        )]
     except CosmosHttpResponseError as exc:
         logger.error("generate_thread_summary query failed: %s", exc, exc_info=True)
         raise
@@ -605,7 +633,7 @@ def generate_thread_summary(payload: dict) -> dict:
     }
 
     try:
-        container.upsert_item(body=summary_doc)
+        await container.upsert_item(body=summary_doc)
     except CosmosHttpResponseError as exc:
         logger.error("generate_thread_summary upsert failed: %s", exc, exc_info=True)
         raise
@@ -620,7 +648,7 @@ def generate_thread_summary(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
-def extract_facts(payload: dict) -> dict:
+async def extract_facts(payload: dict) -> dict:
     """Extract facts from a user's thread memories using an LLM.
 
     Input::
@@ -648,7 +676,7 @@ def extract_facts(payload: dict) -> dict:
 
     # ---- 1. Query Cosmos DB ----
     try:
-        container = _get_cosmos_container()
+        container = await _get_cosmos_container()
         query = (
             "SELECT * FROM c "
             "WHERE c.user_id = @user_id AND c.thread_id = @thread_id"
@@ -657,11 +685,10 @@ def extract_facts(payload: dict) -> dict:
             {"name": "@user_id", "value": user_id},
             {"name": "@thread_id", "value": thread_id},
         ]
-        items = list(container.query_items(
+        items = [item async for item in container.query_items(
             query=query,
             parameters=parameters,
-            enable_cross_partition_query=True,
-        ))
+        )]
     except CosmosHttpResponseError as exc:
         logger.error("extract_facts Cosmos query failed: %s", exc, exc_info=True)
         raise
@@ -727,7 +754,7 @@ def extract_facts(payload: dict) -> dict:
         }
 
         try:
-            container.upsert_item(body=fact_doc)
+            await container.upsert_item(body=fact_doc)
         except CosmosHttpResponseError as exc:
             logger.error("extract_facts upsert failed fact_id=%s: %s", fact_doc["id"], exc, exc_info=True)
             raise
@@ -744,7 +771,7 @@ def extract_facts(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
-def generate_user_summary(payload: dict) -> dict:
+async def generate_user_summary(payload: dict) -> dict:
     """Generate or incrementally update a cross-thread user summary.
 
     If a user summary already exists, only memories created *after* the
@@ -768,7 +795,7 @@ def generate_user_summary(payload: dict) -> dict:
     logger.info("generate_user_summary started user_id=%s model=%s", user_id, model)
 
     try:
-        container = _get_cosmos_container()
+        container = await _get_cosmos_container()
     except CosmosHttpResponseError as exc:
         logger.error("generate_user_summary Cosmos connection failed: %s", exc, exc_info=True)
         raise
@@ -776,7 +803,7 @@ def generate_user_summary(payload: dict) -> dict:
     # ---- 1. Check for an existing user summary ----
     existing_summary = None
     try:
-        existing_summary = container.read_item(
+        existing_summary = await container.read_item(
             item=f"user_summary_{user_id}",
             partition_key=[user_id, "__user_summary__"],
         )
@@ -807,11 +834,10 @@ def generate_user_summary(payload: dict) -> dict:
             parameters.append({"name": f"@tid{i}", "value": tid})
 
     try:
-        items = list(container.query_items(
+        items = [item async for item in container.query_items(
             query=query,
             parameters=parameters,
-            enable_cross_partition_query=True,
-        ))
+        )]
     except CosmosHttpResponseError as exc:
         logger.error("generate_user_summary query failed: %s", exc, exc_info=True)
         raise
@@ -902,7 +928,7 @@ def generate_user_summary(payload: dict) -> dict:
     }
 
     try:
-        container.upsert_item(body=summary_doc)
+        await container.upsert_item(body=summary_doc)
     except CosmosHttpResponseError as exc:
         logger.error("generate_user_summary upsert failed: %s", exc, exc_info=True)
         raise

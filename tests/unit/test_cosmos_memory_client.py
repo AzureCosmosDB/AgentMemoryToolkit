@@ -210,10 +210,14 @@ class TestAutoCreateOnInit:
         mock_cosmos_cls = MagicMock()
         mock_client = MagicMock()
         mock_db = MagicMock()
-        mock_container = MagicMock()
+        mock_memories_container = MagicMock()
+        mock_counter_container = MagicMock()
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
-        mock_db.create_container_if_not_exists.return_value = mock_container
+        mock_db.create_container_if_not_exists.side_effect = [
+            mock_memories_container,
+            mock_counter_container,
+        ]
 
         with patch.dict(
             "sys.modules",
@@ -230,8 +234,9 @@ class TestAutoCreateOnInit:
                 cosmos_credential="fake-key",
             )
 
-        assert mem._container_client is mock_container
+        assert mem._container_client is mock_memories_container
         mock_client.create_database_if_not_exists.assert_called_once()
+        assert mock_db.create_container_if_not_exists.call_count == 2
 
 
 class TestRequireCosmos:
@@ -247,10 +252,15 @@ class TestCreateMemoryStore:
         mock_cosmos_cls = MagicMock()
         mock_client = MagicMock()
         mock_db = MagicMock()
-        mock_container = MagicMock()
+        mock_memories_container = MagicMock()
+        mock_counter_container = MagicMock()
+        mock_throughput_cls = MagicMock(side_effect=lambda **kwargs: type("Throughput", (), kwargs)())
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
-        mock_db.create_container_if_not_exists.return_value = mock_container
+        mock_db.create_container_if_not_exists.side_effect = [
+            mock_memories_container,
+            mock_counter_container,
+        ]
 
         # Start local-only, then create store explicitly
         mem = _make_client()
@@ -261,7 +271,7 @@ class TestCreateMemoryStore:
                 "azure.cosmos": MagicMock(
                     CosmosClient=mock_cosmos_cls,
                     PartitionKey=MagicMock(),
-                    ThroughputProperties=MagicMock(),
+                    ThroughputProperties=mock_throughput_cls,
                 ),
             },
         ):
@@ -269,15 +279,20 @@ class TestCreateMemoryStore:
                 endpoint="https://fake.documents.azure.com:443/",
                 credential="fake-key",
                 embedding_dimensions=256,
+                counter_autoscale_max_ru=1000,
             )
 
         mock_client.create_database_if_not_exists.assert_called_once()
-        call_kwargs = mock_db.create_container_if_not_exists.call_args
-        vec_policy = call_kwargs.kwargs["vector_embedding_policy"]
+        memories_call = mock_db.create_container_if_not_exists.call_args_list[0]
+        counter_call = mock_db.create_container_if_not_exists.call_args_list[1]
+        vec_policy = memories_call.kwargs["vector_embedding_policy"]
         assert vec_policy["vectorEmbeddings"][0]["dimensions"] == 256
-        ft_policy = call_kwargs.kwargs["full_text_policy"]
+        ft_policy = memories_call.kwargs["full_text_policy"]
         assert ft_policy["defaultLanguage"] == "en-US"
-        assert mem._container_client is mock_container
+        assert counter_call.kwargs["id"] == "counter"
+        assert counter_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
+        assert "vector_embedding_policy" not in counter_call.kwargs
+        assert mem._container_client is mock_memories_container
 
 
 # ===================================================================

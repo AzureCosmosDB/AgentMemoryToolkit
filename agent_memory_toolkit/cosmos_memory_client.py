@@ -336,6 +336,7 @@ class CosmosMemoryClient:
         self,
         database: Optional[str] = None,
         container: Optional[str] = None,
+        counter_container: str = "counter",
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
         embedding_dimensions: Optional[int] = None,
@@ -343,18 +344,23 @@ class CosmosMemoryClient:
         distance_function: Optional[str] = None,
         full_text_language: Optional[str] = None,
         autoscale_max_ru: int = 1000,
+        counter_autoscale_max_ru: int = 1000,
     ) -> None:
         """Create the Cosmos DB database and container for memories.
 
         After successful creation the instance is connected and ready
         for CRUD operations.
 
-        The container is provisioned with:
+        The memories container is provisioned with:
 
         * Hierarchical partition key ``[/user_id, /thread_id]``
         * ``quantizedFlat`` vector index on ``/embedding``
         * Full-text index on ``/content``
         * Autoscale throughput (max RU from *autoscale_max_ru*)
+
+        A separate counter container is also provisioned with the same
+        partition key and autoscale throughput capped by
+        *counter_autoscale_max_ru*.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
         self._cosmos_credential = credential or self._cosmos_credential
@@ -393,15 +399,23 @@ class CosmosMemoryClient:
                     auto_scale_max_throughput=autoscale_max_ru,
                 ),
             )
+            db.create_container_if_not_exists(
+                id=counter_container,
+                partition_key=partition_key,
+                offer_throughput=ThroughputProperties(
+                    auto_scale_max_throughput=counter_autoscale_max_ru,
+                ),
+            )
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:
             raise CosmosOperationError(f"Failed to create memory store: {exc}") from exc
 
         logger.info(
-            "Created memory store %s/%s",
+            "Created memory store %s/%s with counter container %s",
             self._cosmos_database,
             self._cosmos_container,
+            counter_container,
         )
 
     def _require_cosmos(self) -> None:

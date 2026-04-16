@@ -38,7 +38,7 @@ def cosmos_clients():
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
 
-    endpoint = os.environ["COSMOS_DB__accountEndpoint"]
+    endpoint = os.environ.get("COSMOS_DB__accountEndpoint") or os.environ.get("COSMOS_DB_ENDPOINT")
     database_name = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
     memories_container_name = os.environ.get("COSMOS_DB_CONTAINER", "memories")
     counter_container_name = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")

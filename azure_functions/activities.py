@@ -126,7 +126,13 @@ async def _get_cosmos_database_client():
     """Return the Cosmos DB database client, connecting on first call."""
     global _cosmos_client, _cosmos_database_client
     if _cosmos_database_client is None:
-        endpoint = os.environ["COSMOS_DB__accountEndpoint"]
+        endpoint = os.environ.get("COSMOS_DB__accountEndpoint") or os.environ.get("COSMOS_DB_ENDPOINT")
+        if not endpoint:
+            raise ValueError(
+                "Cosmos DB endpoint not configured. "
+                "Set COSMOS_DB__accountEndpoint (required for change feed trigger) "
+                "or COSMOS_DB_ENDPOINT."
+            )
         database = os.environ["COSMOS_DB_DATABASE"]
         logger.info(
             "Connecting to Cosmos DB endpoint=%s database=%s",

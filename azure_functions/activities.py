@@ -187,7 +187,8 @@ def _get_openai_client():
                 api_key=api_key,
             )
         else:
-            from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential, get_bearer_token_provider
+            from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+            from azure.identity import get_bearer_token_provider
 
             sync_credential = SyncDefaultAzureCredential()
             token_provider = get_bearer_token_provider(

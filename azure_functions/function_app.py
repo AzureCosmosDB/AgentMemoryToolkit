@@ -59,12 +59,13 @@ import os
 from collections import defaultdict
 from datetime import datetime, timezone
 
-import azure.functions as func
 import azure.durable_functions as df
+import azure.functions as func
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
-from activities import _get_cosmos_counter_container, bp as activities_bp
+from activities import _get_cosmos_counter_container
+from activities import bp as activities_bp
 
 logger = logging.getLogger(__name__)
 
@@ -197,10 +198,10 @@ async def increment_counter_by(
                         continue
                     if create_exc.status_code == 409:
                         logger.warning(
-                            "Counter create conflict exhausted retries counter_id=%s, skipping",
+                            "Counter create conflict exhausted retries counter_id=%s, re-raising for batch retry",
                             counter_id,
                         )
-                        return (old_count, old_count)
+                        raise
                     raise
             return (old_count, new_count)
         except CosmosHttpResponseError as exc:
@@ -549,6 +550,8 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
             f"Failed to start {len(orchestration_errors)} orchestration(s); "
             "raising to retry the change feed batch"
         ) from orchestration_errors[0]
+
+
 @df_app.cosmos_db_trigger(
     arg_name="documents",
     connection="COSMOS_DB",

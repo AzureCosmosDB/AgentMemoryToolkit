@@ -73,7 +73,6 @@ class TestChangeFeedIntegration:
             "type": "turn",
             "content": f"Test message {uuid.uuid4().hex[:6]}",
             "metadata": {},
-            "embedding": [0.0] * 10,
             "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
         memories_container.upsert_item(body=doc)

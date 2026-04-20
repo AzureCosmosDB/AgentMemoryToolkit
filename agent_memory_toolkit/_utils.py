@@ -78,8 +78,7 @@ def _resolve_cosmos_throughput_mode(val: Optional[str]) -> str:
     if raw not in {"serverless", "autoscale"}:
         raise ConfigurationError(
             message=(
-                "Invalid configuration for cosmos_throughput_mode: "
-                f"expected 'serverless' or 'autoscale', got '{raw}'"
+                f"Invalid configuration for cosmos_throughput_mode: expected 'serverless' or 'autoscale', got '{raw}'"
             ),
             parameter="cosmos_throughput_mode",
         )
@@ -95,18 +94,12 @@ def _resolve_cosmos_autoscale_max_ru(val: Optional[int]) -> int:
         parsed = int(raw)
     except ValueError as exc:
         raise ConfigurationError(
-            message=(
-                "Invalid configuration for cosmos_autoscale_max_ru: "
-                f"expected an integer, got '{raw}'"
-            ),
+            message=(f"Invalid configuration for cosmos_autoscale_max_ru: expected an integer, got '{raw}'"),
             parameter="cosmos_autoscale_max_ru",
         ) from exc
     if parsed <= 0:
         raise ConfigurationError(
-            message=(
-                "Invalid configuration for cosmos_autoscale_max_ru: "
-                f"expected a positive integer, got '{raw}'"
-            ),
+            message=(f"Invalid configuration for cosmos_autoscale_max_ru: expected a positive integer, got '{raw}'"),
             parameter="cosmos_autoscale_max_ru",
         )
     return parsed

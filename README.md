@@ -134,6 +134,10 @@ memory = CosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
+    cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
+    cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
+    cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT", "http://localhost:7071/api"),
@@ -141,7 +145,9 @@ memory = CosmosMemoryClient(
     use_default_credential=True,
     cosmos_credential=DefaultAzureCredential(),
 )
-# Constructor auto-creates the database and container if they don't exist.
+# Constructor auto-creates the database and required containers if they don't exist.
+# `serverless` is the default throughput mode. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale`
+# to provision memories, counter, and lease containers with a shared autoscale RU cap.
 
 # Add directly to Cosmos
 thread_id = str(uuid.uuid4())
@@ -187,7 +193,7 @@ summary = memory.get_user_summary(user_id="user-001")
 | **Azure OpenAI / AI Foundry** | Embedding model + chat model for summarization / fact extraction |
 | **Azure Functions** | Durable Functions orchestrator and activity functions |
 
-Automatic change feed processing stores lightweight counter documents in a dedicated `counter` container and also uses a `leases` container (auto-created). See [concepts.md](Docs/concepts.md#automatic-processing-change-feed) for details.
+Automatic change feed processing stores lightweight counter documents in a dedicated `counter` container and also uses a `leases` container that is provisioned by `create_memory_store()`. Throughput defaults to `serverless`; set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to the memories, counter, and lease containers. See [concepts.md](Docs/concepts.md#automatic-processing-change-feed) for details.
 
 All services use **Entra ID** auth via `DefaultAzureCredential`.
 

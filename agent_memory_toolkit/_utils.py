@@ -69,6 +69,61 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> Optional[int]:
     return parsed if parsed else None
 
 
+def _resolve_cosmos_throughput_mode(val: Optional[str]) -> str:
+    """Resolve throughput mode from explicit value or env var.
+
+    Allowed values are ``serverless`` and ``autoscale``.
+    """
+    raw = (val or os.environ.get("COSMOS_DB_THROUGHPUT_MODE") or "serverless").strip().lower()
+    if raw not in {"serverless", "autoscale"}:
+        raise ConfigurationError(
+            message=(
+                "Invalid configuration for cosmos_throughput_mode: "
+                f"expected 'serverless' or 'autoscale', got '{raw}'"
+            ),
+            parameter="cosmos_throughput_mode",
+        )
+    return raw
+
+
+def _resolve_cosmos_autoscale_max_ru(val: Optional[int]) -> int:
+    """Resolve autoscale max RU from explicit value or env var."""
+    if val is not None:
+        return val
+    raw = (os.environ.get("COSMOS_DB_AUTOSCALE_MAX_RU") or "1000").strip()
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(
+            message=(
+                "Invalid configuration for cosmos_autoscale_max_ru: "
+                f"expected an integer, got '{raw}'"
+            ),
+            parameter="cosmos_autoscale_max_ru",
+        ) from exc
+    if parsed <= 0:
+        raise ConfigurationError(
+            message=(
+                "Invalid configuration for cosmos_autoscale_max_ru: "
+                f"expected a positive integer, got '{raw}'"
+            ),
+            parameter="cosmos_autoscale_max_ru",
+        )
+    return parsed
+
+
+def _cosmos_container_offer_throughput(
+    *,
+    throughput_mode: str,
+    autoscale_max_ru: int,
+    throughput_properties_cls: Any,
+) -> Any:
+    """Return Cosmos offer throughput kwargs for the selected mode."""
+    if throughput_mode == "serverless":
+        return None
+    return throughput_properties_cls(auto_scale_max_throughput=autoscale_max_ru)
+
+
 # ---------------------------------------------------------------------------
 # Connection / query helpers (shared by sync & async Cosmos clients)
 # ---------------------------------------------------------------------------

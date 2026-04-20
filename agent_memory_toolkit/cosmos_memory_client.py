@@ -16,8 +16,11 @@ from ._utils import (
     VALID_ROLES,
     VALID_TYPES,
     _build_memory_query_builder,
+    _cosmos_container_offer_throughput,
     _container_policies,
     _make_memory,
+    _resolve_cosmos_autoscale_max_ru,
+    _resolve_cosmos_throughput_mode,
     _resolve_embedding_dimensions,
     _validate_connection,
     _validate_hybrid_search,
@@ -76,6 +79,10 @@ class CosmosMemoryClient:
         cosmos_credential: Optional[Any] = None,
         cosmos_database: Optional[str] = None,
         cosmos_container: Optional[str] = None,
+        cosmos_counter_container: Optional[str] = None,
+        cosmos_lease_container: Optional[str] = None,
+        cosmos_throughput_mode: Optional[str] = None,
+        cosmos_autoscale_max_ru: Optional[int] = None,
         ai_foundry_endpoint: Optional[str] = None,
         ai_foundry_credential: Optional[Any] = None,
         ai_foundry_api_key: Optional[str] = None,
@@ -93,6 +100,12 @@ class CosmosMemoryClient:
         self._cosmos_credential = cosmos_credential
         self._cosmos_database = cosmos_database or "ai_memory"
         self._cosmos_container = cosmos_container or "memories"
+        self._cosmos_counter_container = (
+            cosmos_counter_container or "counter"
+        )
+        self._cosmos_lease_container = cosmos_lease_container or "leases"
+        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
+        self._cosmos_autoscale_max_ru = _resolve_cosmos_autoscale_max_ru(cosmos_autoscale_max_ru)
 
         self._ai_foundry_endpoint = ai_foundry_endpoint
         self._ai_foundry_credential = ai_foundry_credential
@@ -336,15 +349,16 @@ class CosmosMemoryClient:
         self,
         database: Optional[str] = None,
         container: Optional[str] = None,
-        counter_container: str = "counter",
+        counter_container: Optional[str] = None,
+        lease_container: Optional[str] = None,
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
         embedding_dimensions: Optional[int] = None,
         embedding_data_type: Optional[str] = None,
         distance_function: Optional[str] = None,
         full_text_language: Optional[str] = None,
-        autoscale_max_ru: int = 1000,
-        counter_autoscale_max_ru: int = 1000,
+        throughput_mode: Optional[str] = None,
+        autoscale_max_ru: Optional[int] = None,
     ) -> None:
         """Create the Cosmos DB database and container for memories.
 
@@ -356,16 +370,25 @@ class CosmosMemoryClient:
         * Hierarchical partition key ``[/user_id, /thread_id]``
         * ``quantizedFlat`` vector index on ``/embedding``
         * Full-text index on ``/content``
-        * Autoscale throughput (max RU from *autoscale_max_ru*)
+        * Throughput behavior controlled by *throughput_mode*
 
-        A separate counter container is also provisioned with the same
-        partition key and autoscale throughput capped by
-        *counter_autoscale_max_ru*.
+        Separate counter and lease containers are also provisioned.
+        In ``serverless`` mode no RU/s throughput is specified.
+        In ``autoscale`` mode all required containers use the same
+        autoscale max RU from *autoscale_max_ru*.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
         self._cosmos_credential = credential or self._cosmos_credential
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
+        self._cosmos_counter_container = counter_container or self._cosmos_counter_container
+        self._cosmos_lease_container = lease_container or self._cosmos_lease_container
+        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(
+            throughput_mode or self._cosmos_throughput_mode
+        )
+        self._cosmos_autoscale_max_ru = _resolve_cosmos_autoscale_max_ru(
+            autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru
+        )
 
         _validate_connection(
             self._cosmos_endpoint,
@@ -382,40 +405,56 @@ class CosmosMemoryClient:
             db = client.create_database_if_not_exists(id=self._cosmos_database)
 
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
+            lease_partition_key = PartitionKey(path="/id")
             vec_policy, idx_policy, ft_policy = _container_policies(
                 embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
                 embedding_data_type=embedding_data_type or "float32",
                 distance_function=distance_function or "cosine",
                 full_text_language=full_text_language or "en-US",
             )
+            offer_throughput = _cosmos_container_offer_throughput(
+                throughput_mode=self._cosmos_throughput_mode,
+                autoscale_max_ru=self._cosmos_autoscale_max_ru,
+                throughput_properties_cls=ThroughputProperties,
+            )
 
-            container_handle = db.create_container_if_not_exists(
-                id=self._cosmos_container,
-                partition_key=partition_key,
-                indexing_policy=idx_policy,
-                vector_embedding_policy=vec_policy,
-                full_text_policy=ft_policy,
-                offer_throughput=ThroughputProperties(
-                    auto_scale_max_throughput=autoscale_max_ru,
-                ),
-            )
-            db.create_container_if_not_exists(
-                id=counter_container,
-                partition_key=partition_key,
-                offer_throughput=ThroughputProperties(
-                    auto_scale_max_throughput=counter_autoscale_max_ru,
-                ),
-            )
+            memory_kwargs = {
+                "id": self._cosmos_container,
+                "partition_key": partition_key,
+                "indexing_policy": idx_policy,
+                "vector_embedding_policy": vec_policy,
+                "full_text_policy": ft_policy,
+            }
+            if offer_throughput is not None:
+                memory_kwargs["offer_throughput"] = offer_throughput
+            container_handle = db.create_container_if_not_exists(**memory_kwargs)
+
+            counter_kwargs = {
+                "id": self._cosmos_counter_container,
+                "partition_key": partition_key,
+            }
+            if offer_throughput is not None:
+                counter_kwargs["offer_throughput"] = offer_throughput
+            db.create_container_if_not_exists(**counter_kwargs)
+
+            lease_kwargs = {
+                "id": self._cosmos_lease_container,
+                "partition_key": lease_partition_key,
+            }
+            if offer_throughput is not None:
+                lease_kwargs["offer_throughput"] = offer_throughput
+            db.create_container_if_not_exists(**lease_kwargs)
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:
             raise CosmosOperationError(f"Failed to create memory store: {exc}") from exc
 
         logger.info(
-            "Created memory store %s/%s with counter container %s",
+            "Created memory store %s/%s with counter container %s and lease container %s",
             self._cosmos_database,
             self._cosmos_container,
-            counter_container,
+            self._cosmos_counter_container,
+            self._cosmos_lease_container,
         )
 
     def _require_cosmos(self) -> None:

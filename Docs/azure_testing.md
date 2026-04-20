@@ -1,6 +1,6 @@
 # Deploying and Testing Agent Memory Toolkit in Azure
 
-This guide covers the minimum Azure resources, deployment steps, and validation order for running the toolkit in Azure.
+This guide covers the minimum Azure resources, deployment steps, throughput settings, and validation order for running the toolkit in Azure.
 
 ---
 
@@ -71,7 +71,7 @@ az cosmosdb create \
   --resource-group <resource-group>
 ```
 
-The toolkit can create the database and container later via `create_memory_store()`.
+The toolkit can create the database and required containers later via `create_memory_store()`.
 
 ---
 
@@ -104,12 +104,17 @@ az functionapp config appsettings set \
     COSMOS_DB_ENDPOINT="https://<cosmos-account-name>.documents.azure.com:443/" \
     COSMOS_DB_DATABASE="ai_memory" \
     COSMOS_DB_CONTAINER="memories" \
+    COSMOS_DB_COUNTERS_CONTAINER="counter" \
+    COSMOS_DB_LEASE_CONTAINER="leases" \
+    COSMOS_DB_THROUGHPUT_MODE="serverless" \
     COSMOS_DB_AUTOSCALE_MAX_RU="1000" \
     AI_FOUNDRY_ENDPOINT="https://<openai-account-name>.openai.azure.com/" \
     EMBEDDING_MODEL="text-embedding-3-large" \
     EMBEDDING_DIMENSIONS="1536" \
     LLM_MODEL="gpt-5-mini"
 ```
+
+`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
 
 ### Change feed settings (optional)
 
@@ -122,6 +127,9 @@ az functionapp config appsettings set \
   --settings \
     COSMOS_DB__accountEndpoint="https://<cosmos-account-name>.documents.azure.com:443/" \
     COSMOS_DB_COUNTERS_CONTAINER="counter" \
+    COSMOS_DB_LEASE_CONTAINER="leases" \
+    COSMOS_DB_THROUGHPUT_MODE="serverless" \
+    COSMOS_DB_AUTOSCALE_MAX_RU="1000" \
     THREAD_SUMMARY_EVERY_N="5" \
     FACT_EXTRACTION_EVERY_N="3" \
     USER_SUMMARY_EVERY_N="10"
@@ -129,7 +137,7 @@ az functionapp config appsettings set \
 
 Set any threshold to `"0"` to disable that processing type.
 
-The `leases` container is created automatically by the Azure Functions runtime.
+The `leases` container is provisioned by `create_memory_store()` alongside the `memories` and `counter` containers, so the Function App should be configured to use that existing lease container.
 
 If you use function-key auth for the HTTP trigger, keep the key for the client as `ADF_KEY`.
 
@@ -161,6 +169,9 @@ Update `.env` to point at Azure instead of localhost:
 COSMOS_DB_ENDPOINT=https://<cosmos-account-name>.documents.azure.com:443/
 COSMOS_DB_DATABASE=ai_memory
 COSMOS_DB_CONTAINER=memories
+COSMOS_DB_COUNTERS_CONTAINER=counter
+COSMOS_DB_LEASE_CONTAINER=leases
+COSMOS_DB_THROUGHPUT_MODE=serverless
 COSMOS_DB_AUTOSCALE_MAX_RU=1000
 
 AI_FOUNDRY_ENDPOINT=https://<openai-account-name>.openai.azure.com/
@@ -192,6 +203,10 @@ memory = AgentMemory(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
+    cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
+    cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
+    cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT"),
@@ -218,6 +233,10 @@ memory = AsyncAgentMemory(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
+    cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
+    cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
+    cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT"),
@@ -235,7 +254,7 @@ await memory.connect_cosmos(
 await memory.create_memory_store()
 ```
 
-This provisions the hierarchical partition key (`user_id`, `thread_id`), vector index, full-text index, and autoscale throughput.
+This provisions the `memories`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all three containers.
 
 ---
 

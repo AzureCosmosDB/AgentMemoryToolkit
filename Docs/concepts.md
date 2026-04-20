@@ -154,7 +154,16 @@ Set any value to `0` to disable that processing type. For example, setting `THRE
 |-----------|---------------|---------|
 | `memories` | `/user_id`, `/thread_id` (hierarchical) | Existing memory store |
 | `counter` | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing |
-| `leases` | `/id` | Auto-created by the trigger for change feed checkpointing |
+| `leases` | `/id` | Change feed checkpointing container created by `create_memory_store()` |
+
+### Throughput configuration
+
+The toolkit provisions all required Cosmos containers under one shared throughput mode:
+
+- `serverless` is the default. The toolkit creates the `memories`, `counter`, and `leases` containers without specifying RU/s.
+- `autoscale` applies the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all three containers.
+
+This keeps the change feed dependencies aligned with the main memory store instead of letting the Functions trigger create the lease container independently.
 
 ### Push vs. pull
 

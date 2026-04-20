@@ -558,7 +558,7 @@ async def process_changefeed_batch(documents: list[dict], starter) -> None:
     database_name=CHANGE_FEED_DATABASE,
     container_name=CHANGE_FEED_CONTAINER,
     lease_container_name=CHANGE_FEED_LEASE_CONTAINER,
-    create_lease_container_if_not_exists=True,
+    create_lease_container_if_not_exists=False,
 )
 @df_app.durable_client_input(client_name="starter")
 async def on_memory_change(documents: func.DocumentList, starter) -> None:

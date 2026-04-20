@@ -72,6 +72,9 @@ Minimum `.env` values:
 COSMOS_DB_ENDPOINT=https://<your-account>.documents.azure.com:443/
 COSMOS_DB_DATABASE=ai_memory
 COSMOS_DB_CONTAINER=memories
+COSMOS_DB_COUNTERS_CONTAINER=counter
+COSMOS_DB_LEASE_CONTAINER=leases
+COSMOS_DB_THROUGHPUT_MODE=serverless
 COSMOS_DB_AUTOSCALE_MAX_RU=1000
 
 AI_FOUNDRY_ENDPOINT=https://<your-project>.services.ai.azure.com/
@@ -85,6 +88,8 @@ ADF_KEY=
 
 The Functions runtime uses `azure_functions/local.settings.json`, not `.env`, so mirror the same values there.
 
+`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the required Cosmos containers without specifying RU/s. If you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the toolkit provisions the memories, counter, and lease containers with the shared max RU/s value from `COSMOS_DB_AUTOSCALE_MAX_RU`.
+
 ### Change feed settings (optional)
 
 In `azure_functions/local.settings.json`, add these to enable automatic processing:
@@ -92,6 +97,9 @@ In `azure_functions/local.settings.json`, add these to enable automatic processi
 ```json
 "COSMOS_DB__accountEndpoint": "https://<your-account>.documents.azure.com:443/",
 "COSMOS_DB_COUNTERS_CONTAINER": "counter",
+"COSMOS_DB_LEASE_CONTAINER": "leases",
+"COSMOS_DB_THROUGHPUT_MODE": "serverless",
+"COSMOS_DB_AUTOSCALE_MAX_RU": "1000",
 "THREAD_SUMMARY_EVERY_N": "5",
 "FACT_EXTRACTION_EVERY_N": "3",
 "USER_SUMMARY_EVERY_N": "10"
@@ -153,6 +161,10 @@ memory = AgentMemory(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
+    cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
+    cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
+    cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT", "http://localhost:7071/api"),
@@ -192,6 +204,10 @@ memory = AsyncAgentMemory(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
+    cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
+    cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
+    cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT", "http://localhost:7071/api"),
@@ -217,7 +233,7 @@ for r in results:
 await memory.close()
 ```
 
-`create_memory_store()` creates the database/container and configures the hierarchical partition key (`user_id`, `thread_id`), vector index, full-text index, and autoscale throughput.
+`create_memory_store()` creates the database and required containers, configures the hierarchical partition key (`user_id`, `thread_id`) for memories and counters, uses `/id` for the lease container, and applies either serverless or autoscale throughput based on `COSMOS_DB_THROUGHPUT_MODE`.
 
 ---
 

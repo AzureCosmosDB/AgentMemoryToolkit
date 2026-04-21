@@ -19,7 +19,7 @@ from ._utils import (
     _container_policies,
     _cosmos_container_offer_throughput,
     _make_memory,
-    _resolve_cosmos_autoscale_max_ru,
+    _resolve_cosmos_provisioning_autoscale_max_ru,
     _resolve_cosmos_throughput_mode,
     _resolve_embedding_dimensions,
     _validate_connection,
@@ -103,7 +103,10 @@ class CosmosMemoryClient:
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
-        self._cosmos_autoscale_max_ru = _resolve_cosmos_autoscale_max_ru(cosmos_autoscale_max_ru)
+        self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
+            throughput_mode=self._cosmos_throughput_mode,
+            autoscale_max_ru=cosmos_autoscale_max_ru,
+        )
 
         self._ai_foundry_endpoint = ai_foundry_endpoint
         self._ai_foundry_credential = ai_foundry_credential
@@ -381,9 +384,14 @@ class CosmosMemoryClient:
         self._cosmos_container = container or self._cosmos_container
         self._cosmos_counter_container = counter_container or self._cosmos_counter_container
         self._cosmos_lease_container = lease_container or self._cosmos_lease_container
-        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(throughput_mode or self._cosmos_throughput_mode)
-        self._cosmos_autoscale_max_ru = _resolve_cosmos_autoscale_max_ru(
-            autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru
+        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(
+            throughput_mode or self._cosmos_throughput_mode
+        )
+        self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
+            throughput_mode=self._cosmos_throughput_mode,
+            autoscale_max_ru=(
+                autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru
+            ),
         )
 
         _validate_connection(

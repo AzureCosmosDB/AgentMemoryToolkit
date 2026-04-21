@@ -318,25 +318,33 @@ class TestCreateMemoryStore:
             mock_lease_container,
         ]
 
-        mem = _make_client()
+        mem = _make_client(cosmos_throughput_mode="serverless")
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "azure.cosmos": MagicMock(
-                    CosmosClient=mock_cosmos_cls,
-                    PartitionKey=MagicMock(),
-                    ThroughputProperties=MagicMock(),
-                ),
-            },
-        ):
-            mem.create_memory_store(
-                endpoint="https://fake.documents.azure.com:443/",
-                credential="fake-key",
-            )
+        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
+            with patch.dict(
+                "sys.modules",
+                {
+                    "azure.cosmos": MagicMock(
+                        CosmosClient=mock_cosmos_cls,
+                        PartitionKey=MagicMock(),
+                        ThroughputProperties=MagicMock(),
+                    ),
+                },
+            ):
+                mem.create_memory_store(
+                    endpoint="https://fake.documents.azure.com:443/",
+                    credential="fake-key",
+                    throughput_mode="serverless",
+                )
 
         for call in mock_db.create_container_if_not_exists.call_args_list:
             assert "offer_throughput" not in call.kwargs
+
+    def test_constructor_ignores_invalid_autoscale_env_in_serverless_mode(self):
+        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
+            mem = _make_client(cosmos_throughput_mode="serverless")
+
+        assert mem._cosmos_autoscale_max_ru is None
 
     def test_constructor_rejects_invalid_throughput_mode(self):
         with pytest.raises(ConfigurationError, match="expected 'serverless' or 'autoscale'"):

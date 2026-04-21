@@ -284,7 +284,7 @@ class TestCreateMemoryStore:
         assert mem._container_client is mock_memories_container
 
     async def test_create_memory_store_defaults_to_serverless(self):
-        mem = _make_client()
+        mem = _make_client(cosmos_throughput_mode="serverless")
         mock_cosmos_cls = MagicMock()
         mock_client = MagicMock()
         mock_db = AsyncMock()
@@ -298,23 +298,31 @@ class TestCreateMemoryStore:
             side_effect=[mock_memories_container, mock_counter_container, mock_lease_container]
         )
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "azure.cosmos.aio": MagicMock(CosmosClient=mock_cosmos_cls),
-                "azure.cosmos": MagicMock(
-                    PartitionKey=MagicMock(),
-                    ThroughputProperties=MagicMock(),
-                ),
-            },
-        ):
-            await mem.create_memory_store(
-                endpoint="https://fake.documents.azure.com:443/",
-                credential="fake-key",
-            )
+        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
+            with patch.dict(
+                "sys.modules",
+                {
+                    "azure.cosmos.aio": MagicMock(CosmosClient=mock_cosmos_cls),
+                    "azure.cosmos": MagicMock(
+                        PartitionKey=MagicMock(),
+                        ThroughputProperties=MagicMock(),
+                    ),
+                },
+            ):
+                await mem.create_memory_store(
+                    endpoint="https://fake.documents.azure.com:443/",
+                    credential="fake-key",
+                    throughput_mode="serverless",
+                )
 
         for call in mock_db.create_container_if_not_exists.await_args_list:
             assert "offer_throughput" not in call.kwargs
+
+    def test_constructor_ignores_invalid_autoscale_env_in_serverless_mode(self):
+        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
+            mem = _make_client(cosmos_throughput_mode="serverless")
+
+        assert mem._cosmos_autoscale_max_ru is None
 
     def test_constructor_rejects_invalid_throughput_mode(self):
         with pytest.raises(ConfigurationError, match="expected 'serverless' or 'autoscale'"):

@@ -105,15 +105,34 @@ def _resolve_cosmos_autoscale_max_ru(val: Optional[int]) -> int:
     return parsed
 
 
+def _resolve_cosmos_provisioning_autoscale_max_ru(
+    *,
+    throughput_mode: str,
+    autoscale_max_ru: Optional[int],
+) -> Optional[int]:
+    """Resolve autoscale max RU only when autoscale throughput is enabled."""
+    if throughput_mode != "autoscale":
+        return None
+    return _resolve_cosmos_autoscale_max_ru(autoscale_max_ru)
+
+
 def _cosmos_container_offer_throughput(
     *,
     throughput_mode: str,
-    autoscale_max_ru: int,
+    autoscale_max_ru: Optional[int],
     throughput_properties_cls: Any,
 ) -> Any:
     """Return Cosmos offer throughput kwargs for the selected mode."""
     if throughput_mode == "serverless":
         return None
+    if autoscale_max_ru is None:
+        raise ConfigurationError(
+            message=(
+                "Invalid configuration for cosmos_autoscale_max_ru: "
+                "autoscale mode requires a positive integer"
+            ),
+            parameter="cosmos_autoscale_max_ru",
+        )
     return throughput_properties_cls(auto_scale_max_throughput=autoscale_max_ru)
 
 

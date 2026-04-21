@@ -127,10 +127,7 @@ def _cosmos_container_offer_throughput(
         return None
     if autoscale_max_ru is None:
         raise ConfigurationError(
-            message=(
-                "Invalid configuration for cosmos_autoscale_max_ru: "
-                "autoscale mode requires a positive integer"
-            ),
+            message=("Invalid configuration for cosmos_autoscale_max_ru: autoscale mode requires a positive integer"),
             parameter="cosmos_autoscale_max_ru",
         )
     return throughput_properties_cls(auto_scale_max_throughput=autoscale_max_ru)

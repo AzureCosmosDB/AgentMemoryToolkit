@@ -71,11 +71,11 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> Optional[int]:
 
 def _resolve_cosmos_throughput_mode(val: Optional[str]) -> str:
     """Resolve throughput mode from explicit value or env var.
-    
+
     Allowed values are ``serverless`` and ``autoscale``.
     """
     raw = (val if val is not None else os.environ.get("COSMOS_DB_THROUGHPUT_MODE") or "serverless").strip().lower()
-    
+
     if raw not in {"serverless", "autoscale"}:
         raise ConfigurationError(
             message=(
@@ -177,7 +177,7 @@ def _validate_connection(
         raise ConfigurationError(parameter="database")
     if not container:
         raise ConfigurationError(parameter="container")
-    
+
 
 def _build_memory_query_builder(
     *,

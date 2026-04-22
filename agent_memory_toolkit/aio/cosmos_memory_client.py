@@ -17,9 +17,9 @@ from typing import Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
 from agent_memory_toolkit._utils import (
-    _build_container_kwargs,
     VALID_ROLES,
     VALID_TYPES,
+    _build_container_kwargs,
     _build_memory_query_builder,
     _container_policies,
     _cosmos_container_offer_throughput,

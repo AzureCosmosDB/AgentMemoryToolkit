@@ -13,9 +13,9 @@ from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
 from ._utils import (
-    _build_container_kwargs,
     VALID_ROLES,
     VALID_TYPES,
+    _build_container_kwargs,
     _build_memory_query_builder,
     _container_policies,
     _cosmos_container_offer_throughput,
@@ -359,6 +359,7 @@ class CosmosMemoryClient:
         embedding_data_type: Optional[str] = None,
         distance_function: Optional[str] = None,
         full_text_language: Optional[str] = None,
+        throughput_mode: Optional[str] = None,
         autoscale_max_ru: Optional[int] = None,
     ) -> None:
         """Create the Cosmos DB database and container for memories.

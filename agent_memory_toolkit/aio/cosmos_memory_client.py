@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
 from agent_memory_toolkit._utils import (
+    _build_container_kwargs,
     VALID_ROLES,
     VALID_TYPES,
     _build_memory_query_builder,
@@ -88,7 +89,6 @@ class AsyncCosmosMemoryClient:
         self._cosmos_container = cosmos_container or "memories"
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
-        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
         self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
             throughput_mode=self._cosmos_throughput_mode,
             autoscale_max_ru=cosmos_autoscale_max_ru,
@@ -374,7 +374,7 @@ class AsyncCosmosMemoryClient:
         self._cosmos_container = container or self._cosmos_container
         self._cosmos_counter_container = counter_container or self._cosmos_counter_container
         self._cosmos_lease_container = lease_container or self._cosmos_lease_container
-        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(throughput_mode or self._cosmos_throughput_mode)
+        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(throughput_mode if throughput_mode is not None else self._cosmos_throughput_mode)
         self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
             throughput_mode=self._cosmos_throughput_mode,
             autoscale_max_ru=(autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru),
@@ -409,32 +409,32 @@ class AsyncCosmosMemoryClient:
                 throughput_properties_cls=ThroughputProperties,
             )
 
-            memory_kwargs = {
-                "id": self._cosmos_container,
-                "partition_key": partition_key,
-                "indexing_policy": idx_policy,
-                "vector_embedding_policy": vec_policy,
-                "full_text_policy": ft_policy,
-            }
-            if offer_throughput is not None:
-                memory_kwargs["offer_throughput"] = offer_throughput
-            container_handle = await db.create_container_if_not_exists(**memory_kwargs)
+            container_handle = await db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer_throughput,
+                    indexing_policy=idx_policy,
+                    vector_embedding_policy=vec_policy,
+                    full_text_policy=ft_policy,
+                )
+            )
 
-            counter_kwargs = {
-                "id": self._cosmos_counter_container,
-                "partition_key": partition_key,
-            }
-            if offer_throughput is not None:
-                counter_kwargs["offer_throughput"] = offer_throughput
-            await db.create_container_if_not_exists(**counter_kwargs)
+            await db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_counter_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer_throughput,
+                )
+            )
 
-            lease_kwargs = {
-                "id": self._cosmos_lease_container,
-                "partition_key": lease_partition_key,
-            }
-            if offer_throughput is not None:
-                lease_kwargs["offer_throughput"] = offer_throughput
-            await db.create_container_if_not_exists(**lease_kwargs)
+            await db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_lease_container,
+                    partition_key=lease_partition_key,
+                    offer_throughput=offer_throughput,
+                )
+            )
             self._cosmos_client = client
             self._container_client = container_handle
         except Exception as exc:

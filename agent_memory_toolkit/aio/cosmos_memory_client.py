@@ -89,9 +89,7 @@ class AsyncCosmosMemoryClient:
         self._cosmos_container = cosmos_container or "memories"
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
-        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(
-            cosmos_throughput_mode
-        )
+        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
         self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
             throughput_mode=self._cosmos_throughput_mode,

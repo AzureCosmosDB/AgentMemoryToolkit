@@ -122,7 +122,7 @@ def _cosmos_container_offer_throughput(
     autoscale_max_ru: Optional[int],
     throughput_properties_cls: Any,
 ) -> Any:
-    """Return Cosmos offer throughput kwargs for the selected mode."""
+    """Return ``None`` for serverless mode or a throughput properties instance for autoscale mode."""
     if throughput_mode == "serverless":
         return None
     if autoscale_max_ru is None:

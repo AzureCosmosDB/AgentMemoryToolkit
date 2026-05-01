@@ -8,17 +8,21 @@ from agent_memory_toolkit.exceptions import (
     ConfigurationError,
     CosmosNotConnectedError,
     CosmosOperationError,
+    DuplicateMemoryError,
     EmbeddingError,
+    LLMError,
     MemoryNotFoundError,
     OrchestrationTimeoutError,
     ProcessingError,
     ValidationError,
 )
+from agent_memory_toolkit.llm import LLMClient
 from agent_memory_toolkit.models import MemoryRecord, MemoryRole, MemoryType, SearchResult
 
 __all__ = [
     "CosmosMemoryClient",
     "AsyncCosmosMemoryClient",
+    "LLMClient",
     "MemoryRecord",
     "MemoryRole",
     "MemoryType",
@@ -28,7 +32,9 @@ __all__ = [
     "ConfigurationError",
     "CosmosNotConnectedError",
     "CosmosOperationError",
+    "DuplicateMemoryError",
     "EmbeddingError",
+    "LLMError",
     "MemoryNotFoundError",
     "OrchestrationTimeoutError",
     "ProcessingError",

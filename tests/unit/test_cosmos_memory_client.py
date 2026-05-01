@@ -404,7 +404,9 @@ class TestGetMemories:
         result = mem.get_memories()
 
         call_kwargs = container.query_items.call_args.kwargs
-        assert "WHERE" not in call_kwargs["query"]
+        # Default behavior now includes superseded_by filter
+        assert "WHERE" in call_kwargs["query"]
+        assert "superseded_by" in call_kwargs["query"]
         assert result == [doc]
 
     def test_with_filters(self):
@@ -581,19 +583,15 @@ class TestSearchCosmos:
 
 class TestGenerateThreadSummary:
     def test_generate_thread_summary(self):
-        mem = _make_client()
-        mock_proc = MagicMock()
-        mock_proc.generate_thread_summary.return_value = {"status": "ok"}
-        mem._processing_client = mock_proc
+        mem, container = _connected_client()
+        mock_pipeline = MagicMock()
+        mock_pipeline.generate_thread_summary.return_value = {"status": "ok"}
+        mem._pipeline = mock_pipeline
 
         result = mem.generate_thread_summary(user_id="u1", thread_id="t1")
 
-        mock_proc.generate_thread_summary.assert_called_once_with(
-            user_id="u1",
-            thread_id="t1",
-            recent_k=None,
-            poll_interval=2.0,
-            timeout=120.0,
+        mock_pipeline.generate_thread_summary.assert_called_once_with(
+            "u1", "t1", None,
         )
         assert result == {"status": "ok"}
 

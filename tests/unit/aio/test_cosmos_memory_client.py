@@ -586,19 +586,15 @@ class TestSearchCosmos:
 
 class TestGenerateThreadSummary:
     async def test_generate_thread_summary(self):
-        mem = _make_client()
-        mock_proc = AsyncMock()
-        mock_proc.generate_thread_summary = AsyncMock(return_value={"status": "ok"})
-        mem._processing_client = mock_proc
+        mem, container = _connected_client()
+        mock_pipeline = MagicMock()
+        mock_pipeline.generate_thread_summary = MagicMock(return_value={"status": "ok"})
+        mem._pipeline = mock_pipeline
 
         result = await mem.generate_thread_summary(user_id="u1", thread_id="t1")
 
-        mock_proc.generate_thread_summary.assert_awaited_once_with(
-            user_id="u1",
-            thread_id="t1",
-            recent_k=None,
-            poll_interval=2.0,
-            timeout=120.0,
+        mock_pipeline.generate_thread_summary.assert_called_once_with(
+            "u1", "t1", None,
         )
         assert result == {"status": "ok"}
 
@@ -614,7 +610,6 @@ class TestClose:
         mock_cosmos = AsyncMock()
         mem._cosmos_client = mock_cosmos
         mem._embeddings_client = AsyncMock()
-        mem._processing_client = AsyncMock()
 
         await mem.close()
 
@@ -625,7 +620,6 @@ class TestClose:
     async def test_close_without_cosmos(self):
         mem = _make_client()
         mem._embeddings_client = AsyncMock()
-        mem._processing_client = AsyncMock()
         await mem.close()  # should not raise
 
     async def test_context_manager(self):
@@ -633,7 +627,6 @@ class TestClose:
         mock_cosmos = AsyncMock()
         mem._cosmos_client = mock_cosmos
         mem._embeddings_client = AsyncMock()
-        mem._processing_client = AsyncMock()
 
         async with mem as m:
             assert m is mem

@@ -2,8 +2,8 @@
 
 Consolidates the former ``AsyncAgentMemory`` orchestrator and
 ``AsyncCosmosMemoryStore`` into a single class that owns local CRUD,
-async Cosmos DB connection/CRUD, embedding-based search, and Azure
-Durable Functions processing.
+async Cosmos DB connection/CRUD, embedding-based search, and
+LLM-powered processing pipeline.
 
 Uses ``azure.cosmos.aio.CosmosClient`` for non-blocking Cosmos operations.
 """
@@ -31,13 +31,13 @@ from agent_memory_toolkit._utils import (
     _validate_hybrid_search,
 )
 from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
-from agent_memory_toolkit.aio.processing import AsyncProcessingClient
 from agent_memory_toolkit.exceptions import (
     CosmosNotConnectedError,
     CosmosOperationError,
     MemoryNotFoundError,
     ValidationError,
 )
+from agent_memory_toolkit.llm import LLMClient
 from agent_memory_toolkit.models import MemoryRecord
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,8 @@ class AsyncCosmosMemoryClient:
 
     * Cosmos DB operations use ``azure.cosmos.aio``
     * Embeddings use ``openai.AsyncAzureOpenAI``
-    * Processing uses ``aiohttp``
+    * Processing uses ``ProcessingPipeline`` (sync Cosmos internally via a
+      dedicated sync ``ContainerProxy``)
     * Local operations remain synchronous (in-memory list)
 
     Supports the async context-manager protocol::
@@ -75,8 +76,7 @@ class AsyncCosmosMemoryClient:
         ai_foundry_api_key: Optional[str] = None,
         embedding_model: str = "text-embedding-3-large",
         embedding_dimensions: Optional[int] = None,
-        adf_endpoint: Optional[str] = None,
-        adf_key: Optional[str] = None,
+        llm_model: str = "gpt-4o-mini",
         use_default_credential: bool = True,
     ) -> None:
         # Local store
@@ -90,7 +90,6 @@ class AsyncCosmosMemoryClient:
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
-        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
         self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
             throughput_mode=self._cosmos_throughput_mode,
             autoscale_max_ru=cosmos_autoscale_max_ru,
@@ -101,12 +100,12 @@ class AsyncCosmosMemoryClient:
         self._ai_foundry_api_key = ai_foundry_api_key
         self._embedding_model = embedding_model
         self._embedding_dimensions = _resolve_embedding_dimensions(embedding_dimensions)
-
-        self._adf_endpoint = adf_endpoint
-        self._adf_key = adf_key
+        self._llm_model = llm_model
 
         # Resolve credentials via async DefaultAzureCredential when needed
         self._owns_credential = False
+        # Keep a sync credential for the pipeline's sync Cosmos container
+        self._sync_cosmos_credential: Any = cosmos_credential
         if use_default_credential:
             needs_cosmos = self._cosmos_credential is None
             needs_embed = self._ai_foundry_credential is None
@@ -122,6 +121,14 @@ class AsyncCosmosMemoryClient:
                     self._cosmos_credential = _default
                 if needs_embed:
                     self._ai_foundry_credential = _default
+            # Sync credential for pipeline
+            if self._sync_cosmos_credential is None:
+                try:
+                    from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+
+                    self._sync_cosmos_credential = SyncDefaultAzureCredential()
+                except ImportError:
+                    self._sync_cosmos_credential = None
 
         # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
@@ -135,26 +142,19 @@ class AsyncCosmosMemoryClient:
             model=self._embedding_model,
             dimensions=self._embedding_dimensions,
         )
-        self._processing_client = AsyncProcessingClient(
-            endpoint=self._adf_endpoint,
-            key=self._adf_key,
+        self._llm_client = LLMClient(
+            endpoint=self._ai_foundry_endpoint,
+            credential=self._ai_foundry_credential,
+            api_key=self._ai_foundry_api_key,
+            model=self._llm_model,
         )
 
+        # ProcessingPipeline is lazily initialized when Cosmos is connected
+        self._pipeline: Any = None
+        # Sync Cosmos client for the pipeline
+        self._sync_cosmos_client: Any = None
+
         logger.info("AsyncCosmosMemoryClient initialized")
-
-    # ------------------------------------------------------------------
-    # Read-only properties
-    # ------------------------------------------------------------------
-
-    @property
-    def adf_endpoint(self) -> str | None:
-        """The Azure Durable Functions endpoint URL."""
-        return self._adf_endpoint
-
-    @property
-    def adf_key(self) -> str | None:
-        """The Azure Durable Functions key."""
-        return self._adf_key
 
     # ------------------------------------------------------------------
     # Async context manager
@@ -172,8 +172,10 @@ class AsyncCosmosMemoryClient:
             await self._cosmos_client.close()
             self._cosmos_client = None
             self._container_client = None
+        if self._sync_cosmos_client is not None:
+            self._sync_cosmos_client.close()
+            self._sync_cosmos_client = None
         await self._embeddings_client.close()
-        await self._processing_client.close()
         if self._owns_credential and self._cosmos_credential is not None:
             close = getattr(self._cosmos_credential, "close", None)
             if close is not None:
@@ -193,6 +195,9 @@ class AsyncCosmosMemoryClient:
         agent_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         thread_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        ttl: Optional[int] = None,
+        salience: Optional[float] = None,
     ) -> None:
         """Add a new memory to the local store."""
         memory = _make_memory(
@@ -203,6 +208,9 @@ class AsyncCosmosMemoryClient:
             agent_id=agent_id,
             metadata=metadata,
             thread_id=thread_id,
+            tags=tags,
+            ttl=ttl,
+            salience=salience,
         )
         self.local_memory.append(memory)
         logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
@@ -329,6 +337,7 @@ class AsyncCosmosMemoryClient:
 
             self._cosmos_client = client
             self._container_client = container_handle
+            self._init_pipeline()
         except Exception as exc:
             raise CosmosOperationError(f"Failed to connect to Cosmos DB (async): {exc}") from exc
 
@@ -418,6 +427,7 @@ class AsyncCosmosMemoryClient:
                     container_id=self._cosmos_container,
                     partition_key=partition_key,
                     offer_throughput=offer_throughput,
+                    default_ttl=-1,
                     indexing_policy=idx_policy,
                     vector_embedding_policy=vec_policy,
                     full_text_policy=ft_policy,
@@ -441,6 +451,7 @@ class AsyncCosmosMemoryClient:
             )
             self._cosmos_client = client
             self._container_client = container_handle
+            self._init_pipeline()
         except Exception as exc:
             raise CosmosOperationError(f"Failed to create memory store (async): {exc}") from exc
 
@@ -469,6 +480,9 @@ class AsyncCosmosMemoryClient:
         memory_type: str = "turn",
         metadata: Optional[dict[str, Any]] = None,
         thread_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        ttl: Optional[int] = None,
+        salience: Optional[float] = None,
     ) -> None:
         """Add a memory to Cosmos DB."""
         await self._require_cosmos()
@@ -481,6 +495,12 @@ class AsyncCosmosMemoryClient:
         }
         if thread_id is not None:
             kwargs["thread_id"] = thread_id
+        if tags is not None:
+            kwargs["tags"] = tags
+        if ttl is not None:
+            kwargs["ttl"] = ttl
+        if salience is not None:
+            kwargs["salience"] = salience
         record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
         try:
@@ -523,8 +543,28 @@ class AsyncCosmosMemoryClient:
         role: Optional[str] = None,
         memory_type: Optional[str] = None,
         recent_k: Optional[int] = None,
+        tags: Optional[list[str]] = None,
+        any_tags: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        include_superseded: bool = False,
+        min_salience: Optional[float] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve memories from Cosmos DB with optional filters."""
+        """Retrieve memories from Cosmos DB with optional filters.
+
+        Args:
+            memory_id: Filter by memory id.
+            user_id: Filter by user id.
+            thread_id: Filter by thread id.
+            role: Filter by role.
+            memory_type: Filter by type (raw, summary, fact, etc.).
+            recent_k: If specified, return only the *k* most recent documents
+                (ordered by ``_ts`` descending, then reversed to chronological).
+            tags: AND filter — all specified tags must be present.
+            any_tags: OR filter — any of the specified tags must be present.
+            exclude_tags: NOT filter — none of these tags may be present.
+            include_superseded: If False (default), exclude superseded memories.
+            min_salience: Post-filter: only return memories with salience >= this value.
+        """
         await self._require_cosmos()
         logger.debug(
             "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
@@ -543,6 +583,20 @@ class AsyncCosmosMemoryClient:
             role=role,
             memory_type=memory_type,
         )
+
+        # Tag filters
+        if tags:
+            for i, tag in enumerate(tags):
+                qb.add_array_contains("c.tags", f"@tag_{i}", tag)
+        if any_tags:
+            qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
+        if exclude_tags:
+            for i, tag in enumerate(exclude_tags):
+                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
+                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+        if not include_superseded:
+            qb.add_is_null_or_undefined("c.superseded_by")
+
         where = qb.build_where()
         parameters = qb.get_parameters()
 
@@ -565,6 +619,10 @@ class AsyncCosmosMemoryClient:
 
         if recent_k is not None:
             results.reverse()
+
+        # Post-filter by salience
+        if min_salience is not None:
+            results = [i for i in results if (i.get("salience") or 0.0) >= min_salience]
 
         if not results:
             logger.warning("get_memories returned empty results")
@@ -670,6 +728,11 @@ class AsyncCosmosMemoryClient:
         thread_id: Optional[str] = None,
         hybrid_search: bool = False,
         top_k: int = 5,
+        tags: Optional[list[str]] = None,
+        any_tags: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        include_superseded: bool = False,
+        min_salience: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         """Search memories in Cosmos DB using vector similarity.
 
@@ -697,6 +760,20 @@ class AsyncCosmosMemoryClient:
         query_vector = await self._embeddings_client.generate(search_terms)
 
         qb = _build_memory_query_builder(user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id)
+
+        # Tag filters
+        if tags:
+            for i, tag in enumerate(tags):
+                qb.add_array_contains("c.tags", f"@tag_{i}", tag)
+        if any_tags:
+            qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
+        if exclude_tags:
+            for i, tag in enumerate(exclude_tags):
+                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
+                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+        if not include_superseded:
+            qb.add_is_null_or_undefined("c.superseded_by")
+
         where = qb.build_where()
         parameters = qb.get_parameters()
 
@@ -733,6 +810,9 @@ class AsyncCosmosMemoryClient:
         # Post-filter by memory_id (not supported directly by vector search)
         if memory_id is not None:
             results = [r for r in results if r.get("id") == memory_id]
+        # Post-filter by salience
+        if min_salience is not None:
+            results = [r for r in results if (r.get("salience") or 0.0) >= min_salience]
         if not results:
             logger.warning(
                 "search_cosmos returned empty results (terms_len=%d)",
@@ -746,6 +826,9 @@ class AsyncCosmosMemoryClient:
         user_id: Optional[str] = None,
         memory_type: Optional[str] = None,
         recent_k: Optional[int] = None,
+        tags: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
         """Retrieve an entire thread from Cosmos DB.
 
@@ -757,6 +840,17 @@ class AsyncCosmosMemoryClient:
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.type", "@memory_type", memory_type)
+
+        # Tag filters
+        if tags:
+            for i, tag in enumerate(tags):
+                qb.add_array_contains("c.tags", f"@tag_{i}", tag)
+        if exclude_tags:
+            for i, tag in enumerate(exclude_tags):
+                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
+                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+        if not include_superseded:
+            qb.add_is_null_or_undefined("c.superseded_by")
 
         where = qb.build_where()
         parameters = qb.get_parameters()
@@ -795,67 +889,224 @@ class AsyncCosmosMemoryClient:
             raise CosmosOperationError(f"async get_user_summary query failed: {exc}") from exc
 
     # ------------------------------------------------------------------
-    # Processing (Azure Durable Functions, async)
+    # Tag operations
     # ------------------------------------------------------------------
+
+    async def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
+        """Add tags to an existing memory document."""
+        await self._require_cosmos()
+        doc = await self._container_client.read_item(item=memory_id, partition_key=[user_id, thread_id])
+        existing_tags = set(doc.get("tags", []))
+        existing_tags.update(t.strip().lower() for t in tags)
+        doc["tags"] = sorted(existing_tags)
+        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await self._container_client.replace_item(item=memory_id, body=doc)
+
+    async def remove_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
+        """Remove tags from an existing memory document."""
+        await self._require_cosmos()
+        doc = await self._container_client.read_item(item=memory_id, partition_key=[user_id, thread_id])
+        tags_to_remove = {t.strip().lower() for t in tags}
+        doc["tags"] = sorted(set(doc.get("tags", [])) - tags_to_remove)
+        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await self._container_client.replace_item(item=memory_id, body=doc)
+
+    # ------------------------------------------------------------------
+    # Procedural and episodic memory retrieval
+    # ------------------------------------------------------------------
+
+    async def get_procedural_memories(
+        self,
+        user_id: str,
+        priority: Optional[str] = None,
+        category: Optional[str] = None,
+        min_salience: Optional[float] = None,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active procedural memories for a user (thread_id='__procedural__')."""
+        await self._require_cosmos()
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
+        qb.add_filter("c.type", "@type", "procedural")
+        if not include_superseded:
+            qb.add_is_null_or_undefined("c.superseded_by")
+
+        where = qb.build_where()
+        parameters = qb.get_parameters()
+        query = f"SELECT * FROM c{where} ORDER BY c.created_at DESC"
+
+        try:
+            items_iter = self._container_client.query_items(
+                query=query,
+                parameters=parameters,
+            )
+            items = [item async for item in items_iter]
+        except Exception as exc:
+            raise CosmosOperationError(f"async get_procedural_memories query failed: {exc}") from exc
+
+        # Post-filter by salience
+        if min_salience is not None:
+            items = [i for i in items if (i.get("salience") or 0.0) >= min_salience]
+        # Post-filter by priority/category from metadata
+        if priority is not None:
+            items = [i for i in items if i.get("metadata", {}).get("priority") == priority]
+        if category is not None:
+            items = [i for i in items if i.get("metadata", {}).get("category") == category]
+
+        return items
+
+    async def search_episodic_memories(
+        self,
+        user_id: str,
+        search_terms: str,
+        top_k: int = 5,
+        min_salience: Optional[float] = None,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Semantic search across episodic memories for a user."""
+        return await self.search_cosmos(
+            search_terms=search_terms,
+            user_id=user_id,
+            memory_type="episodic",
+            top_k=top_k,
+            min_salience=min_salience,
+            include_superseded=include_superseded,
+        )
+
+    # ------------------------------------------------------------------
+    # Context builders
+    # ------------------------------------------------------------------
+
+    async def build_procedural_context(self, user_id: str) -> str:
+        """Build formatted text for system prompt injection."""
+        memories = await self.get_procedural_memories(user_id)
+        if not memories:
+            return ""
+        lines = ["## Learned User Preferences"]
+        for m in memories:
+            priority = m.get("metadata", {}).get("priority", "should")
+            lines.append(f"- {m['content']} [{priority}]")
+        return "\n".join(lines)
+
+    async def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
+        """Build formatted context of relevant past experiences."""
+        memories = await self.search_episodic_memories(user_id, query, top_k=top_k)
+        if not memories:
+            return ""
+        lines = ["## Relevant Past Experiences"]
+        for i, m in enumerate(memories, 1):
+            domain = m.get("metadata", {}).get("domain", "general")
+            valence = m.get("metadata", {}).get("outcome_valence", "neutral")
+            lines.append(f"{i}. [{domain}] {m['content']} ({valence})")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Processing (LLM pipeline)
+    # ------------------------------------------------------------------
+
+    def _init_pipeline(self) -> None:
+        """Initialize the ProcessingPipeline with a sync container client.
+
+        The ``ProcessingPipeline`` uses synchronous Cosmos DB calls
+        internally, so we create a dedicated sync ``CosmosClient`` /
+        ``ContainerProxy`` alongside the async one.
+        """
+        from agent_memory_toolkit.embeddings import EmbeddingsClient
+        from agent_memory_toolkit.pipeline import ProcessingPipeline
+
+        # Build a sync container for the pipeline
+        try:
+            from azure.cosmos import CosmosClient as SyncCosmosClient
+
+            sync_client = SyncCosmosClient(
+                self._cosmos_endpoint, credential=self._sync_cosmos_credential,
+            )
+            sync_db = sync_client.get_database_client(self._cosmos_database)
+            sync_container = sync_db.get_container_client(self._cosmos_container)
+            self._sync_cosmos_client = sync_client
+        except Exception as exc:
+            logger.warning("Failed to create sync Cosmos client for pipeline: %s", exc)
+            sync_container = None
+
+        # Pipeline needs a sync embeddings client
+        sync_embeddings = EmbeddingsClient(
+            endpoint=self._ai_foundry_endpoint,
+            credential=self._sync_cosmos_credential,
+            api_key=self._ai_foundry_api_key,
+            model=self._embedding_model,
+            dimensions=self._embedding_dimensions,
+        )
+
+        if sync_container is not None:
+            self._pipeline = ProcessingPipeline(
+                cosmos_container=sync_container,
+                llm_client=self._llm_client,
+                embeddings_client=sync_embeddings,
+            )
+
+    def _require_pipeline(self) -> None:
+        """Raise if the processing pipeline is not available."""
+        if self._pipeline is None:
+            raise CosmosNotConnectedError(
+                "Processing pipeline requires Cosmos DB connection. "
+                "Call connect_cosmos() or create_memory_store() first."
+            )
+
+    async def extract_memories(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> dict[str, int]:
+        """Extract facts, procedural, and episodic memories from a thread.
+
+        .. note:: Processing uses the sync pipeline internally.
+        """
+        await self._require_cosmos()
+        self._require_pipeline()
+        return self._pipeline.extract_memories(user_id, thread_id, recent_k)
 
     async def generate_thread_summary(
         self,
         user_id: str,
         thread_id: str,
         recent_k: Optional[int] = None,
-        poll_interval: float = 2.0,
-        timeout: float = 120.0,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        """Trigger the Azure Durable Function to generate a thread summary (async)."""
-        logger.info(
-            "generate_thread_summary started user_id=%s thread_id=%s",
-            user_id,
-            thread_id,
-        )
-        return await self._processing_client.generate_thread_summary(
-            user_id=user_id,
-            thread_id=thread_id,
-            recent_k=recent_k,
-            poll_interval=poll_interval,
-            timeout=timeout,
-        )
+        """Generate a thread summary.
 
-    async def extract_facts(
-        self,
-        user_id: str,
-        thread_id: str,
-        recent_k: Optional[int] = None,
-        poll_interval: float = 2.0,
-        timeout: float = 120.0,
-    ) -> dict[str, Any]:
-        """Trigger the Azure Durable Function to extract facts (async)."""
-        logger.info(
-            "extract_facts started user_id=%s thread_id=%s",
-            user_id,
-            thread_id,
-        )
-        return await self._processing_client.extract_facts(
-            user_id=user_id,
-            thread_id=thread_id,
-            recent_k=recent_k,
-            poll_interval=poll_interval,
-            timeout=timeout,
-        )
+        .. note:: Processing uses the sync pipeline internally.
+        """
+        await self._require_cosmos()
+        self._require_pipeline()
+        return self._pipeline.generate_thread_summary(user_id, thread_id, recent_k)
 
     async def generate_user_summary(
         self,
         user_id: str,
         thread_ids: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
-        poll_interval: float = 2.0,
-        timeout: float = 120.0,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        """Trigger the Azure Durable Function to generate a cross-thread user summary (async)."""
-        logger.info("generate_user_summary started user_id=%s", user_id)
-        return await self._processing_client.generate_user_summary(
-            user_id=user_id,
-            thread_ids=thread_ids,
-            recent_k=recent_k,
-            poll_interval=poll_interval,
-            timeout=timeout,
-        )
+        """Generate a cross-thread user summary.
+
+        .. note:: Processing uses the sync pipeline internally.
+        """
+        await self._require_cosmos()
+        self._require_pipeline()
+        return self._pipeline.generate_user_summary(user_id, thread_ids, recent_k)
+
+    async def deduplicate_facts(
+        self,
+        user_id: str,
+        similarity_threshold: float = 0.9,
+        max_facts: int = 200,
+    ) -> dict[str, int]:
+        """Run LLM-based dedup on user's facts.
+
+        .. note:: Processing uses the sync pipeline internally.
+        """
+        await self._require_cosmos()
+        self._require_pipeline()
+        return self._pipeline.deduplicate_facts(user_id, similarity_threshold, max_facts)

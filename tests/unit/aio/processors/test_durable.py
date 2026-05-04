@@ -17,7 +17,7 @@ async def test_process_thread_returns_empty_result():
     result = await proc.process_thread(user_id="u", thread_id="t", turns=[{"role": "user"}])
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary is None
-    assert result.extracted == []
+    assert result.extracted_counts == {}
     assert result.deduplicated_count == 0
     assert result.elapsed_ms == 0
 

@@ -185,7 +185,12 @@ class TestExtractMemoriesOrchestrator:
         result, _ = _drive(
             gen,
             [
-                {"facts": 2, "procedural": 1, "episodic": 0},  # em_ExtractMemories
+                {
+                    "facts_count": 2,
+                    "procedural_count": 1,
+                    "episodic_count": 0,
+                    "updated_count": 0,
+                },  # em_ExtractMemories
                 {"deduplicated": 1},  # em_DeduplicateFacts
             ],
         )
@@ -195,7 +200,7 @@ class TestExtractMemoriesOrchestrator:
             "em_DeduplicateFacts",
         ]
         assert result["persisted"] is True
-        assert result["extracted"] == {"facts": 2, "procedural": 1, "episodic": 0}
+        assert result["extracted"] == {"facts_count": 2, "procedural_count": 1, "episodic_count": 0, "updated_count": 0}
         assert result["dedup"] == {"deduplicated": 1}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())

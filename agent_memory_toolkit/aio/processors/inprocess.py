@@ -75,18 +75,14 @@ class AsyncInProcessProcessor:
                     deduped_count = dedup[key]
                     break
 
-        extracted_list: list[dict[str, Any]]
-        if isinstance(extracted, list):
-            extracted_list = extracted
-        elif isinstance(extracted, dict):
-            extracted_list = [extracted]
-        else:
-            extracted_list = []
+        extracted_counts: dict[str, int] = (
+            {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
+        )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return ProcessThreadResult(
             thread_summary=thread_summary if isinstance(thread_summary, dict) else None,
-            extracted=extracted_list,
+            extracted_counts=extracted_counts,
             deduplicated_count=deduped_count,
             elapsed_ms=elapsed_ms,
         )

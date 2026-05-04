@@ -38,7 +38,7 @@ class DurableFunctionProcessor:
             thread_id,
             len(turns) if turns else 0,
         )
-        return ProcessThreadResult(thread_summary=None, extracted=[], deduplicated_count=0, elapsed_ms=0)
+        return ProcessThreadResult(thread_summary=None, extracted_counts={}, deduplicated_count=0, elapsed_ms=0)
 
     def generate_user_summary(
         self,

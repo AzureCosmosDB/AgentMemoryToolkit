@@ -16,10 +16,18 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 @dataclass
 class ProcessThreadResult:
-    """Outcome of a single ``process_thread`` invocation."""
+    """Outcome of a single ``process_thread`` invocation.
+
+    ``extracted_counts`` carries the per-type extraction telemetry returned by
+    :meth:`ProcessingPipeline.extract_memories` (e.g.
+    ``{"facts_count": 2, "procedural_count": 1, "episodic_count": 0, "updated_count": 0}``).
+    The actual extracted memory documents are persisted to Cosmos DB by the
+    pipeline; query them back via the SDK's ``get_memories`` if you need the
+    raw docs.
+    """
 
     thread_summary: Optional[dict[str, Any]] = None
-    extracted: list[dict[str, Any]] = field(default_factory=list)
+    extracted_counts: dict[str, int] = field(default_factory=dict)
     deduplicated_count: int = 0
     elapsed_ms: int = 0
 

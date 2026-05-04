@@ -96,17 +96,36 @@ def _make_memory(
     return memory
 
 
-def _resolve_embedding_dimensions(val: Optional[int]) -> Optional[int]:
+def _resolve_embedding_dimensions(val: Optional[int]) -> int:
     """Resolve embedding dimensions from explicit value or ``AI_FOUNDRY_EMBEDDING_DIMENSIONS`` env var.
 
     Defaults to 1536 (the dimension we ship with for ``text-embedding-3-large``
     truncated to 1536, which is the size DiskANN is tuned for in our containers).
+
+    Raises :class:`ConfigurationError` if the env var is set but cannot be
+    parsed as a positive integer.
     """
     if val is not None:
         return val
-    raw = os.environ.get("AI_FOUNDRY_EMBEDDING_DIMENSIONS", "1536") or "1536"
-    parsed = int(raw)
-    return parsed if parsed else 1536
+    raw = os.environ.get("AI_FOUNDRY_EMBEDDING_DIMENSIONS")
+    if raw is None or raw == "":
+        return 1536
+    try:
+        parsed = int(raw)
+    except (ValueError, TypeError) as exc:
+        raise ConfigurationError(
+            message=(
+                f"Invalid configuration for embedding_dimensions: AI_FOUNDRY_EMBEDDING_DIMENSIONS"
+                f" must be a positive integer, got {raw!r}"
+            ),
+            parameter="embedding_dimensions",
+        ) from exc
+    if parsed <= 0:
+        raise ConfigurationError(
+            message=(f"Invalid configuration for embedding_dimensions: must be a positive integer, got {parsed}"),
+            parameter="embedding_dimensions",
+        )
+    return parsed
 
 
 def _resolve_cosmos_throughput_mode(val: Optional[str]) -> str:

@@ -49,21 +49,32 @@ def _parse_threshold(name: str, default: int) -> int:
     """Parse an integer threshold env var.
 
     Returns ``default`` when the env var is unset, empty, or invalid (with a
-    warning logged on invalid input). Use this for the ``*_EVERY_N`` knobs
-    where ``"0"`` is a valid explicit-disable value but a missing setting
-    should fall back to the documented default rather than silently disabling
-    the orchestrator.
+    warning logged on invalid input). Negative values are also rejected and
+    fall back to ``default`` so misconfiguration is explicit instead of
+    silently disabling the orchestrator. Use this for the ``*_EVERY_N`` knobs
+    where ``"0"`` is a valid explicit-disable value but anything else
+    nonsensical should fall back.
     """
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return default
     try:
-        return int(raw)
+        parsed = int(raw)
     except (ValueError, TypeError):
         logger.warning(
             "Invalid value for %s=%r, using default %d", name, raw, default,
         )
         return default
+    if parsed < 0:
+        logger.warning(
+            "Negative value for %s=%r is not allowed; using default %d "
+            "(set to 0 to explicitly disable)",
+            name,
+            raw,
+            default,
+        )
+        return default
+    return parsed
 
 
 def _parse_int(name: str, default: int) -> int:

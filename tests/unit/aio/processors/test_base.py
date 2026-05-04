@@ -23,7 +23,7 @@ def test_async_durable_satisfies_protocol():
 
 
 def test_dataclass_defaults():
-    assert ProcessThreadResult().extracted == []
+    assert ProcessThreadResult().extracted_counts == {}
     assert UserSummaryResult().summary is None
 
 

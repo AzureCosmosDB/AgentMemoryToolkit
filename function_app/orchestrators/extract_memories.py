@@ -64,9 +64,11 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
 def em_ExtractMemories(payload: dict) -> dict:
     """Run the LLM extraction step.
 
-    Returns the per-type counts produced by ``pipeline.extract_memories``
-    (``{"facts": N, "procedural": N, "episodic": N}``-shaped). Salience-based
-    filtering is delegated to the pipeline since it owns the schema.
+    Returns the per-type counts produced by ``pipeline.extract_memories``,
+    shaped like
+    ``{"facts_count": N, "procedural_count": N, "episodic_count": N, "updated_count": N}``.
+    Salience-based filtering is delegated to the pipeline since it owns the
+    schema.
 
     The pipeline loads recent turns internally, so we do NOT pre-load them in
     a separate activity (which would duplicate the query, waste RUs, and open

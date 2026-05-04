@@ -38,9 +38,12 @@ class TestInProcessFlushEndToEnd:
             "type": "summary",
             "content": "Conversation about Paris.",
         }
-        pipeline.extract_memories.return_value = [
-            {"id": "fact-1", "type": "fact", "content": "User likes Paris."},
-        ]
+        pipeline.extract_memories.return_value = {
+            "facts_count": 1,
+            "procedural_count": 0,
+            "episodic_count": 0,
+            "updated_count": 0,
+        }
         pipeline.deduplicate_facts.return_value = {"deduplicated": 0}
 
         processor = InProcessProcessor(pipeline=pipeline)
@@ -60,9 +63,12 @@ class TestInProcessFlushEndToEnd:
             "type": "summary",
             "content": "Conversation about Paris.",
         }
-        assert result.extracted == [
-            {"id": "fact-1", "type": "fact", "content": "User likes Paris."},
-        ]
+        assert result.extracted_counts == {
+            "facts_count": 1,
+            "procedural_count": 0,
+            "episodic_count": 0,
+            "updated_count": 0,
+        }
         client.get_thread.assert_called_once_with(thread_id="thread-paris", user_id="u-paris", memory_type="turn")
         pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
@@ -90,7 +96,7 @@ class TestDurableFlushEndToEnd:
 
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary is None
-        assert result.extracted == []
+        assert result.extracted_counts == {}
         assert result.deduplicated_count == 0
 
         pipeline.generate_thread_summary.assert_not_called()

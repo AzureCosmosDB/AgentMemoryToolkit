@@ -97,14 +97,14 @@ def _make_memory(
 
 
 def _resolve_embedding_dimensions(val: Optional[int]) -> Optional[int]:
-    """Resolve embedding dimensions from explicit value or ``EMBEDDING_DIMENSIONS`` env var.
+    """Resolve embedding dimensions from explicit value or ``AI_FOUNDRY_EMBEDDING_DIMENSIONS`` env var.
 
     Defaults to 1536 (the dimension we ship with for ``text-embedding-3-large``
     truncated to 1536, which is the size DiskANN is tuned for in our containers).
     """
     if val is not None:
         return val
-    raw = os.environ.get("EMBEDDING_DIMENSIONS", "1536") or "1536"
+    raw = os.environ.get("AI_FOUNDRY_EMBEDDING_DIMENSIONS", "1536") or "1536"
     parsed = int(raw)
     return parsed if parsed else 1536
 

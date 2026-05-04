@@ -7,7 +7,7 @@ produces summaries / facts / user profiles asynchronously.
 
 Prerequisites
 -------------
-* ``COSMOS_DB_ENDPOINT`` (and ``COSMOS_KEY`` *or* a logged-in identity) set.
+* ``COSMOS_DB_ENDPOINT`` (and ``COSMOS_DB_KEY`` *or* a logged-in identity) set.
 * The sibling function app deployed and running, configured against the same
   Cosmos account / database / container, with at least one threshold > 0
   (e.g. ``THREAD_SUMMARY_EVERY_N=4``).
@@ -29,7 +29,7 @@ from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
 def main() -> None:
     client = CosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
-        cosmos_key=os.environ.get("COSMOS_KEY"),
+        cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
         cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
         # Hand processing off to the sibling Azure Function app.

@@ -14,7 +14,7 @@
 
     "// --- Azure AI Foundry / Azure OpenAI (MI auth) ---": "",
     "AI_FOUNDRY_ENDPOINT": "https://<foundry>.openai.azure.com/",
-    "CHAT_DEPLOYMENT_NAME": "gpt-4o-mini",
+    "AI_FOUNDRY_CHAT_DEPLOYMENT_NAME": "gpt-4o-mini",
     "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME": "text-embedding-3-large",
 
     "// --- Threshold knobs (set to 0 to disable that orchestrator) ---": "",

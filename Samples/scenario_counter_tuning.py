@@ -24,7 +24,7 @@ state.
 
 Prerequisites
 -------------
-* ``COSMOS_DB_ENDPOINT`` set, plus ``COSMOS_KEY`` *or* a logged-in identity.
+* ``COSMOS_DB_ENDPOINT`` set, plus ``COSMOS_DB_KEY`` *or* a logged-in identity.
 * The sibling function app deployed (``azd up``) and running.
 * App settings tuned, e.g.::
 
@@ -51,7 +51,7 @@ def main() -> None:
 
     client = CosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
-        cosmos_key=os.environ.get("COSMOS_KEY"),
+        cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
         cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
         # Hand processing off to the sibling Azure Function app.

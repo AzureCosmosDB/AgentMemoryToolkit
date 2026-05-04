@@ -248,11 +248,11 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: aiFoundryEndpoint
         }
         {
-          name: 'EMBEDDING_DEPLOYMENT_NAME'
+          name: 'AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME'
           value: embeddingDeploymentName
         }
         {
-          name: 'CHAT_DEPLOYMENT_NAME'
+          name: 'AI_FOUNDRY_CHAT_DEPLOYMENT_NAME'
           value: chatDeploymentName
         }
         {

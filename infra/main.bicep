@@ -193,15 +193,15 @@ output AZURE_LOCATION string = location
 output AZURE_TENANT_ID string = subscription().tenantId
 output RESOURCE_GROUP_NAME string = rg.name
 
-output COSMOS_ENDPOINT string = cosmos.outputs.endpoint
-output COSMOS_DATABASE string = cosmos.outputs.databaseName
-output COSMOS_CONTAINER string = cosmos.outputs.memoriesContainerName
-output COSMOS_ACCOUNT_NAME string = cosmos.outputs.accountName
+output COSMOS_DB_ENDPOINT string = cosmos.outputs.endpoint
+output COSMOS_DB_DATABASE string = cosmos.outputs.databaseName
+output COSMOS_DB_CONTAINER string = cosmos.outputs.memoriesContainerName
+output COSMOS_DB_ACCOUNT_NAME string = cosmos.outputs.accountName
 
 output AI_FOUNDRY_ENDPOINT string = aiFoundry.outputs.endpoint
 output AI_FOUNDRY_ACCOUNT_NAME string = aiFoundry.outputs.accountName
-output EMBEDDING_DEPLOYMENT_NAME string = aiFoundry.outputs.embeddingDeploymentName
-output CHAT_DEPLOYMENT_NAME string = aiFoundry.outputs.chatDeploymentName
+output AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME string = aiFoundry.outputs.embeddingDeploymentName
+output AI_FOUNDRY_CHAT_DEPLOYMENT_NAME string = aiFoundry.outputs.chatDeploymentName
 
 output AZURE_CLIENT_ID string = identity.outputs.clientId
 output AZURE_USER_ASSIGNED_IDENTITY_ID string = identity.outputs.id

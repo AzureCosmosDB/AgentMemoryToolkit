@@ -20,7 +20,7 @@ from agent_memory_toolkit.aio import (
 async def main() -> None:
     client = AsyncCosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
-        cosmos_key=os.environ.get("COSMOS_KEY"),
+        cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
         cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
         # Hand processing off to the sibling Azure Function app.

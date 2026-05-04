@@ -24,6 +24,41 @@ _RETRYABLE_STATUS_CODES = (429, 500, 503)
 _SAMPLING_PARAMS = ("temperature", "top_p", "frequency_penalty", "presence_penalty")
 
 
+def _is_async_credential(credential: Any) -> bool:
+    """Return True if *credential* is an azure.identity *async* TokenCredential.
+
+    The async variants (e.g. ``azure.identity.aio.DefaultAzureCredential``)
+    expose ``get_token`` as a coroutine function. Sync variants expose it as
+    a regular method. We detect with :func:`inspect.iscoroutinefunction` so
+    we don't have to import the async identity package just to do an
+    isinstance check.
+    """
+    import inspect
+
+    get_token = getattr(credential, "get_token", None)
+    return get_token is not None and inspect.iscoroutinefunction(get_token)
+
+
+def _make_sync_token_provider_for_async(credential: Any, scope: str):
+    """Return an async token provider that wraps a *sync* TokenCredential.
+
+    ``AsyncAzureOpenAI`` expects ``azure_ad_token_provider`` to return an
+    awaitable yielding the bearer token. When the caller supplied a sync
+    ``azure.identity.DefaultAzureCredential`` (the common case), we cannot
+    use ``azure.identity.aio.get_bearer_token_provider`` because it
+    ``await``s the credential's ``get_token`` — which is not a coroutine on
+    sync credentials and would raise at runtime.
+
+    Instead we wrap the sync ``get_token`` call in :func:`asyncio.to_thread`
+    so we don't block the event loop, and return the token string directly.
+    """
+
+    async def _provider() -> str:
+        return (await asyncio.to_thread(credential.get_token, scope)).token
+
+    return _provider
+
+
 def _unsupported_param(exc: Exception) -> str | None:
     """If *exc* is a 400 about an unsupported sampling param, return its name."""
     msg = str(exc).lower()
@@ -131,9 +166,23 @@ class ChatClient:
                     "Either api_key or a TokenCredential is required for LLM calls",
                     parameter="credential",
                 )
-            from azure.identity.aio import get_bearer_token_provider
 
-            token_provider = get_bearer_token_provider(self._credential, _TOKEN_SCOPE)
+            # Detect sync vs async credential. Callers commonly pass a sync
+            # ``DefaultAzureCredential`` (from ``azure.identity``) — its
+            # ``get_token`` method is *not* awaitable and will hang the async
+            # client if used with ``azure.identity.aio.get_bearer_token_provider``.
+            # When the credential exposes an ``async def get_token`` we use the
+            # async helper directly; otherwise we adapt the sync credential by
+            # offloading token acquisition to a worker thread.
+            if _is_async_credential(self._credential):
+                from azure.identity.aio import get_bearer_token_provider
+
+                token_provider = get_bearer_token_provider(self._credential, _TOKEN_SCOPE)
+            else:
+                token_provider = _make_sync_token_provider_for_async(
+                    self._credential, _TOKEN_SCOPE
+                )
+
             self._async_client = AsyncAzureOpenAI(
                 api_version=self._api_version,
                 azure_endpoint=self._endpoint,

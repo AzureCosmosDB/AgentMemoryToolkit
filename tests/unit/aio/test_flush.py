@@ -98,7 +98,7 @@ async def test_flush_and_wait_durable_polls_until_summary_appears():
 async def test_flush_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.search_cosmos = AsyncMock(return_value=[])
+    client.get_memories = AsyncMock(return_value=[])
 
     async def _no_sleep(_):
         return None
@@ -107,6 +107,7 @@ async def test_flush_and_wait_durable_returns_false_on_timeout():
         ok = await client.flush_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
+    assert client.get_memories.await_count >= 1
 
 
 def test_constructor_accepts_processor_kwarg():

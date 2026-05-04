@@ -1293,7 +1293,12 @@ class AsyncCosmosMemoryClient:
         Mirrors :meth:`CosmosMemoryClient.flush_and_wait`. For
         :class:`AsyncInProcessProcessor` this is just a flush followed by
         ``True``. For :class:`AsyncDurableFunctionProcessor` this polls
-        ``search_cosmos`` every 0.5s using :func:`asyncio.sleep`.
+        ``get_memories(memory_type="summary", ...)`` every 0.5s using
+        :func:`asyncio.sleep`.
+
+        Polling uses ``get_memories`` (filter-only, no embeddings) so this
+        path does *not* require AI Foundry / embeddings to be configured —
+        the Function App owns all LLM work in the durable backend.
         """
         await self._require_cosmos()
         processor = self._get_processor()
@@ -1304,13 +1309,10 @@ class AsyncCosmosMemoryClient:
 
         await self.flush(user_id=user_id, thread_id=thread_id)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         poll_interval = 0.5
         while loop.time() < deadline:
-            # Use get_memories (filter-only, no embeddings) so flush_and_wait
-            # works even when the client has no AI Foundry endpoint configured
-            # — the Function app owns all LLM work in the durable backend.
             try:
                 results = await self.get_memories(
                     user_id=user_id,

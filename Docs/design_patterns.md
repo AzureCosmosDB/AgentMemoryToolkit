@@ -15,7 +15,7 @@ from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCreden
 from agent_memory_toolkit.aio import AsyncAgentMemory
 
 mem = AsyncAgentMemory(
-    cosmos_endpoint=COSMOS_ENDPOINT,
+    cosmos_endpoint=COSMOS_DB_ENDPOINT,
     cosmos_database="memory",
     cosmos_container="memories",
     ai_foundry_endpoint=AOAI_ENDPOINT,
@@ -26,7 +26,7 @@ mem = AsyncAgentMemory(
     cosmos_credential=AsyncDefaultAzureCredential(),
 )
 await mem.connect_cosmos(
-    endpoint=COSMOS_ENDPOINT,
+    endpoint=COSMOS_DB_ENDPOINT,
     database="memory",
     container="memories",
     credential=AsyncDefaultAzureCredential(),

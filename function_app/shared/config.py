@@ -117,12 +117,11 @@ def get_ai_foundry_endpoint() -> str:
 
 
 def get_chat_deployment_name() -> str:
-    return os.environ.get("CHAT_DEPLOYMENT_NAME", "gpt-4o-mini")
+    return os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini")
 
 
 def get_embedding_deployment_name() -> str:
     return (
         os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME")
-        or os.environ.get("EMBEDDING_DEPLOYMENT_NAME")
         or "text-embedding-3-large"
     )

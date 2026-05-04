@@ -236,3 +236,84 @@ async def test_close_clears_async_client():
 
     await client.close()
     assert client._async_client is None
+
+
+# ---------------------------------------------------------------------------
+# Async-credential detection / sync-credential adapter
+# ---------------------------------------------------------------------------
+
+
+def test_is_async_credential_detects_sync():
+    from agent_memory_toolkit.chat import _is_async_credential
+
+    class SyncCred:
+        def get_token(self, scope):  # not a coroutine function
+            return MagicMock(token="t")
+
+    assert _is_async_credential(SyncCred()) is False
+
+
+def test_is_async_credential_detects_async():
+    from agent_memory_toolkit.chat import _is_async_credential
+
+    class AsyncCred:
+        async def get_token(self, scope):  # coroutine function
+            return MagicMock(token="t")
+
+    assert _is_async_credential(AsyncCred()) is True
+
+
+@pytest.mark.asyncio
+async def test_sync_credential_token_provider_offloads_to_thread():
+    from agent_memory_toolkit.chat import _make_sync_token_provider_for_async
+
+    class SyncCred:
+        def __init__(self):
+            self.calls = 0
+
+        def get_token(self, scope):
+            self.calls += 1
+            return MagicMock(token=f"token-for-{scope}")
+
+    cred = SyncCred()
+    provider = _make_sync_token_provider_for_async(cred, "scope-x")
+    token = await provider()
+    assert token == "token-for-scope-x"
+    assert cred.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_async_client_accepts_sync_credential(monkeypatch):
+    """Regression: passing a sync ``DefaultAzureCredential`` must not raise.
+
+    Previously ``_ensure_async_client`` always wrapped the credential with
+    ``azure.identity.aio.get_bearer_token_provider`` which expects an async
+    credential and would fail at runtime when a sync one was supplied.
+    """
+
+    class SyncCred:
+        def get_token(self, scope):
+            return MagicMock(token="tok")
+
+    captured = {}
+
+    class FakeAsyncAzureOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import sys
+    fake_openai = MagicMock()
+    fake_openai.AsyncAzureOpenAI = FakeAsyncAzureOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    client = ChatClient(
+        endpoint="https://test.openai.azure.com",
+        credential=SyncCred(),
+    )
+    result = client._ensure_async_client()
+
+    assert result is client._async_client
+    assert "azure_ad_token_provider" in captured
+    # The provider must be an async callable that returns the token string.
+    token = await captured["azure_ad_token_provider"]()
+    assert token == "tok"

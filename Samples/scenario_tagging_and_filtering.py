@@ -17,7 +17,7 @@ search and the other structural filters (``user_id``, ``thread_id``,
 Required environment variables:
     COSMOS_DB_ENDPOINT   – Azure Cosmos DB endpoint URL
     AI_FOUNDRY_ENDPOINT  – Azure AI Foundry endpoint URL (for embeddings)
-    EMBEDDING_DEPLOYMENT_NAME – embedding model deployment name
+    AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME – embedding model deployment name
 """
 from __future__ import annotations
 
@@ -52,9 +52,9 @@ def main() -> None:
 
     client = CosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
-        cosmos_key=os.environ.get("COSMOS_KEY"),
+        cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
-        embedding_deployment_name=os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+        embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
     )
 
     # ------------------------------------------------------------------

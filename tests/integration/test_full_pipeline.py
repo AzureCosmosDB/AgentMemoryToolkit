@@ -14,7 +14,7 @@ Enable by setting::
 
     AGENT_MEMORY_RUN_INTEGRATION=true
 
-Auth: ``COSMOS_KEY`` is used when present (relief while Cosmos control-plane
+Auth: ``COSMOS_DB_KEY`` is used when present (relief while Cosmos control-plane
 RBAC is still in private preview); otherwise ``DefaultAzureCredential``.
 """
 

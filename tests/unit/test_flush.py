@@ -94,23 +94,25 @@ def test_flush_and_wait_durable_polls_until_summary_appears():
 def test_flush_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.search_cosmos = MagicMock(return_value=[])
+    client.get_memories = MagicMock(return_value=[])
 
     with patch("time.sleep"):
         ok = client.flush_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
+    assert client.get_memories.call_count >= 1
 
 
 def test_flush_and_wait_durable_swallows_search_errors_until_timeout():
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.search_cosmos = MagicMock(side_effect=RuntimeError("transient"))
+    client.get_memories = MagicMock(side_effect=RuntimeError("transient"))
 
     with patch("time.sleep"):
         ok = client.flush_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
+    assert client.get_memories.call_count >= 1
 
 
 def test_constructor_accepts_processor_kwarg():

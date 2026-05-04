@@ -102,7 +102,7 @@ To tear everything down later: `azd down --purge` (the `--purge` flag skips Cosm
 
 ```bash
 cp .env.template .env
-# edit COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, EMBEDDING_DEPLOYMENT_NAME, CHAT_DEPLOYMENT_NAME
+# edit COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME, AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
 ```
 
 You can also point `azd up` at existing resources via `azd env set USE_EXISTING_COSMOS true` / `USE_EXISTING_AI_FOUNDRY true` (full BYOR flag list in `infra/README.md`).
@@ -123,8 +123,8 @@ memory = CosmosMemoryClient(
     cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
     cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
     ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
-    embedding_deployment_name=os.getenv("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
-    chat_deployment_name=os.getenv("CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
+    embedding_deployment_name=os.getenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+    chat_deployment_name=os.getenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     use_default_credential=True,
     # processor=InProcessProcessor()   # implicit default
 )

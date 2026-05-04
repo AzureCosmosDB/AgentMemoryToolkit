@@ -11,8 +11,8 @@ change-feed trigger). No Function deployment required.
 
 Required env vars (.env supported):
 
-    COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, EMBEDDING_DEPLOYMENT_NAME, CHAT_DEPLOYMENT_NAME
-    COSMOS_KEY (optional fallback)
+    COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME, AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
+    COSMOS_DB_KEY (optional fallback)
 """
 
 from __future__ import annotations
@@ -52,13 +52,13 @@ def main() -> None:
 
     mem = CosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
-        cosmos_key=os.environ.get("COSMOS_KEY") or None,
+        cosmos_key=os.environ.get("COSMOS_DB_KEY") or None,
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
         cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
         ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
-        embedding_deployment_name=os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
-        chat_deployment_name=os.environ.get("CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
+        embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+        chat_deployment_name=os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     )
     print("✅ Connected to Cosmos DB")
 

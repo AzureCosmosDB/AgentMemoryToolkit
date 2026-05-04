@@ -88,7 +88,7 @@ def test_builds_pipeline_from_complete_env(mocks):
 
 
 def test_uses_chat_deployment_name_env_var(monkeypatch, mocks):
-    monkeypatch.setenv("CHAT_DEPLOYMENT_NAME", "gpt-4o-mega")
+    monkeypatch.setenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mega")
     pipeline_factory.get_pipeline()
 
     chat_kwargs = mocks.chat_ctor.call_args.kwargs
@@ -97,26 +97,15 @@ def test_uses_chat_deployment_name_env_var(monkeypatch, mocks):
 
 
 def test_uses_embedding_deployment_name_env_var(monkeypatch, mocks):
-    monkeypatch.setenv("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-tiny")
-    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", raising=False)
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-tiny")
     pipeline_factory.get_pipeline()
 
     embed_kwargs = mocks.embed_ctor.call_args.kwargs
     assert embed_kwargs["model"] == "text-embedding-tiny"
 
 
-def test_ai_foundry_embedding_deployment_name_takes_precedence(monkeypatch, mocks):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "fancy-embed")
-    monkeypatch.setenv("EMBEDDING_DEPLOYMENT_NAME", "plain-embed")
-    pipeline_factory.get_pipeline()
-
-    embed_kwargs = mocks.embed_ctor.call_args.kwargs
-    assert embed_kwargs["model"] == "fancy-embed"
-
-
 def test_default_chat_and_embedding_models_when_env_unset(monkeypatch, mocks):
-    monkeypatch.delenv("CHAT_DEPLOYMENT_NAME", raising=False)
-    monkeypatch.delenv("EMBEDDING_DEPLOYMENT_NAME", raising=False)
+    monkeypatch.delenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", raising=False)
     monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", raising=False)
 
     pipeline_factory.get_pipeline()

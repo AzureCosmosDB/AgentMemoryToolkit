@@ -37,7 +37,7 @@ pytestmark = [
 def cosmos_clients():
     """Cosmos DB container clients for memories and counters.
 
-    Uses ``COSMOS_KEY`` when set (relief while control-plane RBAC is in
+    Uses ``COSMOS_DB_KEY`` when set (relief while control-plane RBAC is in
     private preview); otherwise falls back to ``DefaultAzureCredential``.
     """
     from azure.cosmos import CosmosClient
@@ -46,7 +46,7 @@ def cosmos_clients():
     database_name = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
     memories_container_name = os.environ.get("COSMOS_DB_CONTAINER", "memories")
     counter_container_name = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")
-    cosmos_key = os.environ.get("COSMOS_KEY")
+    cosmos_key = os.environ.get("COSMOS_DB_KEY")
 
     if cosmos_key:
         client = CosmosClient(endpoint, credential=cosmos_key)

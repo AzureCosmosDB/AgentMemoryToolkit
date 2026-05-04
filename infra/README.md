@@ -38,12 +38,12 @@ azd up
 `azd` writes resource outputs to `.azure/<env-name>/.env`:
 
 ```
-COSMOS_ENDPOINT=...
-COSMOS_DATABASE=ai_memory
-COSMOS_CONTAINER=memories
+COSMOS_DB_ENDPOINT=...
+COSMOS_DB_DATABASE=ai_memory
+COSMOS_DB_CONTAINER=memories
 AI_FOUNDRY_ENDPOINT=...
-EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
-CHAT_DEPLOYMENT_NAME=gpt-4o-mini
+AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
+AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-4o-mini
 FUNCTION_APP_NAME=func-...
 FUNCTION_APP_URL=https://func-....azurewebsites.net
 ```
@@ -85,11 +85,11 @@ Override either before `azd up`:
 
 ```bash
 # Use a different catalog model with the default deployment name
-azd env set CHAT_MODEL_NAME gpt-4o
+azd env set AI_FOUNDRY_CHAT_MODEL_NAME gpt-4o
 
 # Or pin a custom deployment name (existing or to-be-created)
-azd env set CHAT_DEPLOYMENT_NAME my-prod-chat
-azd env set EMBEDDING_DEPLOYMENT_NAME my-prod-embed
+azd env set AI_FOUNDRY_CHAT_DEPLOYMENT_NAME my-prod-chat
+azd env set AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME my-prod-embed
 ```
 
 The `*_DEPLOYMENT_NAME` value is what the SDK and Function app pass as the `model=` argument to the Azure OpenAI client at runtime.

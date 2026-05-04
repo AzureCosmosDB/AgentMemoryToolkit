@@ -1245,8 +1245,13 @@ class CosmosMemoryClient:
         For :class:`InProcessProcessor` this is just :meth:`flush` followed
         by ``True`` (the in-process pipeline is synchronous). For
         :class:`DurableFunctionProcessor` this polls
-        ``search_cosmos(memory_type="summary", ...)`` every 0.5s until a
+        ``get_memories(memory_type="summary", ...)`` every 0.5s until a
         summary appears or the timeout expires.
+
+        Polling uses ``get_memories`` (filter-only, no embeddings) so this
+        path does *not* require AI Foundry / embeddings to be configured —
+        the SDK can act as a pure Cosmos writer while the Function App owns
+        all LLM calls.
 
         Returns ``True`` on success, ``False`` on timeout.
         """

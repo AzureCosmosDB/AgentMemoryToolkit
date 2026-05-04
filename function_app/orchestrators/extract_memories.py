@@ -1,9 +1,12 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``ExtractMemories`` → ``DeduplicateFacts`` → ``PersistMemories``.
+Chain: ``ExtractMemories`` → ``DeduplicateFacts``.
 
-A salience pre-filter (``SALIENCE_THRESHOLD``) is applied in
-``PersistMemories`` when the threshold is > 0 (spec §11.2).
+The pipeline writes memories to Cosmos DB during ``ExtractMemories``; the
+Function App does not delete or tombstone any memories on its own. Memories
+are removed only via explicit user-driven SDK calls (``forget_memory`` /
+``delete_memories``). Salience is preserved on each document for use as a
+ranking signal at retrieval time, not as an automatic-deletion threshold.
 """
 
 from __future__ import annotations
@@ -45,17 +48,10 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         {"user_id": user_id},
     )
 
-    persisted = yield context.call_activity_with_retry(
-        "em_PersistMemories", retry,
-        {"user_id": user_id, "thread_id": thread_id, "extracted": extracted, "dedup": dedup},
-    )
-
     return {
         "persisted": True,
         "extracted": extracted,
         "dedup": dedup,
-        "kept": persisted.get("kept") if isinstance(persisted, dict) else None,
-        "filtered": persisted.get("filtered") if isinstance(persisted, dict) else None,
     }
 
 
@@ -94,50 +90,3 @@ def em_DeduplicateFacts(payload: dict) -> dict:
     user_id = payload["user_id"]
     pipeline = get_pipeline()
     return pipeline.deduplicate_facts(user_id=user_id) or {}
-
-
-@bp.activity_trigger(input_name="payload")
-def em_PersistMemories(payload: dict) -> dict:
-    """Apply the configured salience pre-filter and report persisted counts.
-
-    ``ProcessingPipeline.extract_memories`` has already written the memories
-    to Cosmos DB. When ``SALIENCE_THRESHOLD > 0`` we sweep the just-extracted
-    memories for the thread and tombstone any whose salience is below the
-    threshold. Doing this here (rather than inside the pipeline) keeps the
-    library's default behaviour conservative — operators opt into the filter
-    via configuration.
-    """
-    user_id = payload["user_id"]
-    thread_id = payload["thread_id"]
-    extracted = payload.get("extracted") or {}
-    threshold = config.get_salience_threshold()
-
-    if threshold <= 0:
-        return {"kept": extracted, "filtered": 0, "threshold": threshold}
-
-    pipeline = get_pipeline()
-    container = pipeline._container
-    query = (
-        "SELECT * FROM c "
-        "WHERE c.user_id = @user_id "
-        "AND c.thread_id = @thread_id "
-        "AND c.type IN ('fact', 'procedural', 'episodic') "
-        "AND IS_DEFINED(c.salience) AND c.salience < @threshold"
-    )
-    parameters = [
-        {"name": "@user_id", "value": user_id},
-        {"name": "@thread_id", "value": thread_id},
-        {"name": "@threshold", "value": threshold},
-    ]
-    low_salience = list(container.query_items(query=query, parameters=parameters))
-    filtered = 0
-    for doc in low_salience:
-        try:
-            container.delete_item(
-                item=doc["id"], partition_key=[user_id, thread_id],
-            )
-            filtered += 1
-        except Exception:
-            logger.exception("Failed to drop low-salience memory id=%s", doc.get("id"))
-
-    return {"kept": extracted, "filtered": filtered, "threshold": threshold}

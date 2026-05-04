@@ -7,11 +7,12 @@ Defaults match the spec (section 8.4 / 11.2):
 * ``FACT_EXTRACTION_EVERY_N``      — default 4
 * ``USER_SUMMARY_EVERY_N``         — default 20
 * ``MAX_BATCH_SIZE``               — default 20
-* ``SALIENCE_THRESHOLD``           — default 0.0  (disabled)
 
-Setting any ``*_EVERY_N`` to ``0`` disables that orchestrator entirely.
-``_parse_threshold`` returns ``0`` when the value is missing or invalid so the
-caller can rely on a single sentinel for "disabled".
+Setting any ``*_EVERY_N`` env var to ``"0"`` disables that orchestrator
+entirely. When the env var is unset or invalid the documented default is
+applied (so an out-of-the-box deploy actually summarizes/extracts) and a
+warning is logged for invalid values. Use the ``get_*_every_n()`` helpers
+rather than calling ``_parse_threshold`` directly.
 """
 
 from __future__ import annotations
@@ -42,24 +43,27 @@ DEFAULT_THREAD_SUMMARY_EVERY_N = 4
 DEFAULT_FACT_EXTRACTION_EVERY_N = 4
 DEFAULT_USER_SUMMARY_EVERY_N = 20
 DEFAULT_MAX_BATCH_SIZE = 20
-DEFAULT_SALIENCE_THRESHOLD = 0.0
 
 
-def _parse_threshold(name: str) -> int:
-    """Parse an integer threshold env var. Returns ``0`` if unset/invalid.
+def _parse_threshold(name: str, default: int) -> int:
+    """Parse an integer threshold env var.
 
-    The function is intentionally permissive: we want a misconfigured app to
-    *disable* a threshold rather than crash on every change-feed batch. A
-    warning is logged so the misconfiguration is visible.
+    Returns ``default`` when the env var is unset, empty, or invalid (with a
+    warning logged on invalid input). Use this for the ``*_EVERY_N`` knobs
+    where ``"0"`` is a valid explicit-disable value but a missing setting
+    should fall back to the documented default rather than silently disabling
+    the orchestrator.
     """
     raw = os.environ.get(name)
     if raw is None or raw == "":
-        return 0
+        return default
     try:
         return int(raw)
     except (ValueError, TypeError):
-        logger.warning("Invalid value for %s=%r, defaulting to 0 (disabled)", name, raw)
-        return 0
+        logger.warning(
+            "Invalid value for %s=%r, using default %d", name, raw, default,
+        )
+        return default
 
 
 def _parse_int(name: str, default: int) -> int:
@@ -88,8 +92,25 @@ def get_max_batch_size() -> int:
     return _parse_int("MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE)
 
 
-def get_salience_threshold() -> float:
-    return _parse_float("SALIENCE_THRESHOLD", DEFAULT_SALIENCE_THRESHOLD)
+def get_thread_summary_every_n() -> int:
+    """Threshold for triggering ``ThreadSummaryOrchestrator``. ``0`` disables."""
+    return _parse_threshold(
+        "THREAD_SUMMARY_EVERY_N", DEFAULT_THREAD_SUMMARY_EVERY_N,
+    )
+
+
+def get_fact_extraction_every_n() -> int:
+    """Threshold for triggering ``ExtractMemoriesOrchestrator``. ``0`` disables."""
+    return _parse_threshold(
+        "FACT_EXTRACTION_EVERY_N", DEFAULT_FACT_EXTRACTION_EVERY_N,
+    )
+
+
+def get_user_summary_every_n() -> int:
+    """Threshold for triggering ``UserSummaryOrchestrator``. ``0`` disables."""
+    return _parse_threshold(
+        "USER_SUMMARY_EVERY_N", DEFAULT_USER_SUMMARY_EVERY_N,
+    )
 
 
 def get_cosmos_endpoint() -> str:

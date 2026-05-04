@@ -22,8 +22,7 @@
     "FACT_EXTRACTION_EVERY_N": "4",
     "USER_SUMMARY_EVERY_N": "20",
 
-    "// --- Batch + filter knobs ---": "",
-    "MAX_BATCH_SIZE": "20",
-    "SALIENCE_THRESHOLD": "0.0"
+    "// --- Batch knob ---": "",
+    "MAX_BATCH_SIZE": "20"
   }
 }

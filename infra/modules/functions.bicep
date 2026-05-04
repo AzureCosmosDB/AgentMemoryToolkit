@@ -277,10 +277,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: '20'
         }
         {
-          name: 'SALIENCE_THRESHOLD'
-          value: '0.0'
-        }
-        {
           name: 'ENABLE_DEDUP'
           value: 'true'
         }

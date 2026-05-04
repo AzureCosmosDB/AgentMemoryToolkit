@@ -54,9 +54,9 @@ async def process_changefeed_batch(
         counter_container: Optional counter container for testing. When omitted
             the cached async container client is used.
     """
-    n_thread = config._parse_threshold("THREAD_SUMMARY_EVERY_N")
-    n_facts = config._parse_threshold("FACT_EXTRACTION_EVERY_N")
-    n_user = config._parse_threshold("USER_SUMMARY_EVERY_N")
+    n_thread = config.get_thread_summary_every_n()
+    n_facts = config.get_fact_extraction_every_n()
+    n_user = config.get_user_summary_every_n()
 
     if n_thread == 0 and n_facts == 0 and n_user == 0:
         return  # all orchestrators disabled

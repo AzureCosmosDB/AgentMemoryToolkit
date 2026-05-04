@@ -79,7 +79,6 @@ def _drive(gen, activity_results):
 @pytest.fixture(autouse=True)
 def _stable_env(monkeypatch):
     monkeypatch.setenv("MAX_BATCH_SIZE", "20")
-    monkeypatch.delenv("SALIENCE_THRESHOLD", raising=False)
     yield
 
 
@@ -180,7 +179,7 @@ class TestExtractMemoriesOrchestrator:
         return _user_function(em_mod.ExtractMemoriesOrchestrator)
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
-    def test_happy_path_calls_three_activities_in_order(self, _retry):
+    def test_happy_path_calls_two_activities_in_order(self, _retry):
         ctx = _make_context({"user_id": "u1", "thread_id": "t1"})
         gen = self._orchestrator()(ctx)
         result, _ = _drive(
@@ -188,49 +187,33 @@ class TestExtractMemoriesOrchestrator:
             [
                 {"facts": 2, "procedural": 1, "episodic": 0},  # em_ExtractMemories
                 {"deduplicated": 1},  # em_DeduplicateFacts
-                {"kept": {"facts": 2}, "filtered": 0, "threshold": 0.0},  # em_PersistMemories
             ],
         )
 
         assert [c[0] for c in ctx._yielded_calls] == [
             "em_ExtractMemories",
             "em_DeduplicateFacts",
-            "em_PersistMemories",
         ]
         assert result["persisted"] is True
         assert result["extracted"] == {"facts": 2, "procedural": 1, "episodic": 0}
         assert result["dedup"] == {"deduplicated": 1}
-        assert result["kept"] == {"facts": 2}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
-    def test_persist_payload_contains_extracted_and_dedup(self, _retry):
+    def test_extract_payload_carries_user_thread_and_limit(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        extracted = {"facts": 5}
-        dedup = {"deduplicated": 2}
-        _drive(gen, [extracted, dedup, {"kept": extracted}])
+        _drive(gen, [{"facts": 5}, {"deduplicated": 2}])
 
-        persist_payload = ctx._yielded_calls[2][2]
-        assert persist_payload["extracted"] == extracted
-        assert persist_payload["dedup"] == dedup
-        assert persist_payload["user_id"] == "u"
-        assert persist_payload["thread_id"] == "t"
+        extract_payload = ctx._yielded_calls[0][2]
+        assert extract_payload == {"user_id": "u", "thread_id": "t", "limit": 20}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_dedup_payload_only_carries_user_id(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": 0}, {}, {"kept": {}}])
+        _drive(gen, [{"facts": 0}, {}])
         dedup_payload = ctx._yielded_calls[1][2]
         assert dedup_payload == {"user_id": "u"}
-
-    @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
-    def test_non_dict_persisted_yields_none_kept(self, _retry):
-        ctx = _make_context({"user_id": "u", "thread_id": "t"})
-        gen = self._orchestrator()(ctx)
-        result, _ = _drive(gen, [{}, {}, "not-a-dict"])
-        assert result["kept"] is None
-        assert result["filtered"] is None
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_activity_failure_propagates(self, _retry):

@@ -102,7 +102,13 @@ def run_demo() -> None:
 
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,
+        cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
+        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_key=os.environ.get("COSMOS_KEY"),
         ai_foundry_endpoint=ai_foundry_endpoint,
+        ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),
+        embedding_deployment_name=os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+        chat_deployment_name=os.environ.get("CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     )
     mem.connect_cosmos()
 

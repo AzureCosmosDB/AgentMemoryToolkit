@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["agent_memory_toolkit*"]
 
+[tool.setuptools.package-data]
+"agent_memory_toolkit" = ["prompts/*.prompty"]
+
 [project]
 name = "agent-memory-toolkit"
 version = "0.1.0"
@@ -18,6 +21,9 @@ dependencies = [
     "openai>=1.40",
     "aiohttp>=3.9",
     "pydantic>=2.0",
+    "prompty>=2.0.0a9",
+    "jinja2>=3.0",
+    "typing_extensions>=4.5",
 ]
 
 [project.optional-dependencies]

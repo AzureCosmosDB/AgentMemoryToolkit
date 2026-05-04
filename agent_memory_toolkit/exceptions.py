@@ -89,6 +89,10 @@ class EmbeddingError(AgentMemoryError):
     """Raised when embedding generation fails."""
 
 
+class LLMError(AgentMemoryError):
+    """Raised when an LLM chat completion call fails."""
+
+
 class ProcessingError(AgentMemoryError):
     """Raised when the processing pipeline (Azure Durable Functions) returns an error."""
 
@@ -125,3 +129,12 @@ class OrchestrationTimeoutError(AgentMemoryError):
 
 class AuthenticationError(AgentMemoryError):
     """Raised when authentication to Azure services fails."""
+
+
+class DuplicateMemoryError(AgentMemoryError):
+    """Raised when an exact duplicate memory is detected during write."""
+
+    def __init__(self, existing_id: str, content_hash: str):
+        self.existing_id = existing_id
+        self.content_hash = content_hash
+        super().__init__(f"Duplicate memory detected (existing_id={existing_id}, hash={content_hash})")

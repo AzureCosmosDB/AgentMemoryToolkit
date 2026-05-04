@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
 from agent_memory_toolkit._utils import (
@@ -31,14 +31,24 @@ from agent_memory_toolkit._utils import (
     _validate_hybrid_search,
 )
 from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
+from agent_memory_toolkit.aio.processors import (
+    AsyncInProcessProcessor,
+    AsyncMemoryProcessor,
+)
+from agent_memory_toolkit.chat import ChatClient
 from agent_memory_toolkit.exceptions import (
     CosmosNotConnectedError,
     CosmosOperationError,
     MemoryNotFoundError,
     ValidationError,
 )
-from agent_memory_toolkit.llm import LLMClient
 from agent_memory_toolkit.models import MemoryRecord
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only import
+    from agent_memory_toolkit.processors.base import (  # noqa: F401
+        ProcessThreadResult,
+        UserSummaryResult,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +75,7 @@ class AsyncCosmosMemoryClient:
         self,
         cosmos_endpoint: Optional[str] = None,
         cosmos_credential: Optional[Any] = None,
+        cosmos_key: Optional[str] = None,
         cosmos_database: Optional[str] = None,
         cosmos_container: Optional[str] = None,
         cosmos_counter_container: Optional[str] = None,
@@ -74,10 +85,11 @@ class AsyncCosmosMemoryClient:
         ai_foundry_endpoint: Optional[str] = None,
         ai_foundry_credential: Optional[Any] = None,
         ai_foundry_api_key: Optional[str] = None,
-        embedding_model: str = "text-embedding-3-large",
+        embedding_deployment_name: str = "text-embedding-3-large",
         embedding_dimensions: Optional[int] = None,
-        llm_model: str = "gpt-4o-mini",
+        chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
+        processor: Optional[AsyncMemoryProcessor] = None,
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
@@ -85,6 +97,7 @@ class AsyncCosmosMemoryClient:
         # Store kwargs directly
         self._cosmos_endpoint = cosmos_endpoint
         self._cosmos_credential = cosmos_credential
+        self._cosmos_key = cosmos_key
         self._cosmos_database = cosmos_database or "ai_memory"
         self._cosmos_container = cosmos_container or "memories"
         self._cosmos_counter_container = cosmos_counter_container or "counter"
@@ -98,17 +111,28 @@ class AsyncCosmosMemoryClient:
         self._ai_foundry_endpoint = ai_foundry_endpoint
         self._ai_foundry_credential = ai_foundry_credential
         self._ai_foundry_api_key = ai_foundry_api_key
-        self._embedding_model = embedding_model
+        self._embedding_deployment_name = embedding_deployment_name
         self._embedding_dimensions = _resolve_embedding_dimensions(embedding_dimensions)
-        self._llm_model = llm_model
+        self._chat_deployment_name = chat_deployment_name
 
-        # Resolve credentials via async DefaultAzureCredential when needed
+        # Credential resolution priority:
+        #   1. Explicit cosmos_credential / ai_foundry_credential (highest priority)
+        #   2. Explicit cosmos_key / ai_foundry_api_key (relief for environments
+        #      where Cosmos control-plane RBAC is in private preview, etc.)
+        #   3. DefaultAzureCredential() when use_default_credential=True
         self._owns_credential = False
+        if self._cosmos_credential is None and self._cosmos_key:
+            self._cosmos_credential = self._cosmos_key
         # Keep a sync credential for the pipeline's sync Cosmos container
-        self._sync_cosmos_credential: Any = cosmos_credential
+        self._sync_cosmos_credential: Any = cosmos_credential or self._cosmos_key
+        # Sync credential for the sync ChatClient used by ProcessingPipeline.
+        # If the caller supplied an explicit ai_foundry_credential it might be
+        # async-only, so we still need an independent sync one when no api_key.
+        self._sync_ai_foundry_credential: Any = None
+
         if use_default_credential:
             needs_cosmos = self._cosmos_credential is None
-            needs_embed = self._ai_foundry_credential is None
+            needs_embed = self._ai_foundry_credential is None and not self._ai_foundry_api_key
             if needs_cosmos or needs_embed:
                 try:
                     from azure.identity.aio import DefaultAzureCredential
@@ -117,11 +141,11 @@ class AsyncCosmosMemoryClient:
                     self._owns_credential = True
                 except ImportError:
                     _default = None
-                if needs_cosmos:
+                if needs_cosmos and _default is not None:
                     self._cosmos_credential = _default
-                if needs_embed:
+                if needs_embed and _default is not None:
                     self._ai_foundry_credential = _default
-            # Sync credential for pipeline
+            # Sync credential for pipeline (only when we don't already have a key)
             if self._sync_cosmos_credential is None:
                 try:
                     from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
@@ -129,6 +153,15 @@ class AsyncCosmosMemoryClient:
                     self._sync_cosmos_credential = SyncDefaultAzureCredential()
                 except ImportError:
                     self._sync_cosmos_credential = None
+            # Sync credential for AI Foundry (used by sync ChatClient inside
+            # ProcessingPipeline). Only needed when no api_key is configured.
+            if not self._ai_foundry_api_key:
+                try:
+                    from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+
+                    self._sync_ai_foundry_credential = SyncDefaultAzureCredential()
+                except ImportError:
+                    self._sync_ai_foundry_credential = None
 
         # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
@@ -139,20 +172,25 @@ class AsyncCosmosMemoryClient:
             endpoint=self._ai_foundry_endpoint,
             credential=self._ai_foundry_credential,
             api_key=self._ai_foundry_api_key,
-            model=self._embedding_model,
+            model=self._embedding_deployment_name,
             dimensions=self._embedding_dimensions,
         )
-        self._llm_client = LLMClient(
+        self._chat_client = ChatClient(
             endpoint=self._ai_foundry_endpoint,
-            credential=self._ai_foundry_credential,
+            credential=self._sync_ai_foundry_credential or self._ai_foundry_credential,
             api_key=self._ai_foundry_api_key,
-            model=self._llm_model,
+            model=self._chat_deployment_name,
         )
 
         # ProcessingPipeline is lazily initialized when Cosmos is connected
         self._pipeline: Any = None
         # Sync Cosmos client for the pipeline
         self._sync_cosmos_client: Any = None
+
+        # Pluggable async backend that owns summarize/extract/dedup. ``None``
+        # means lazily build an :class:`AsyncInProcessProcessor` on first use.
+        self._processor: Optional[AsyncMemoryProcessor] = processor
+        self._processor_explicit: bool = processor is not None
 
         logger.info("AsyncCosmosMemoryClient initialized")
 
@@ -173,13 +211,28 @@ class AsyncCosmosMemoryClient:
             self._cosmos_client = None
             self._container_client = None
         if self._sync_cosmos_client is not None:
-            self._sync_cosmos_client.close()
+            close = getattr(self._sync_cosmos_client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
             self._sync_cosmos_client = None
         await self._embeddings_client.close()
         if self._owns_credential and self._cosmos_credential is not None:
             close = getattr(self._cosmos_credential, "close", None)
             if close is not None:
                 await close()
+        # Sync credentials (Cosmos + AI Foundry fallback) close synchronously.
+        for sync_cred in (self._sync_cosmos_credential, self._sync_ai_foundry_credential):
+            if sync_cred is None:
+                continue
+            close = getattr(sync_cred, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
         logger.info("AsyncCosmosMemoryClient closed")
 
     # ------------------------------------------------------------------
@@ -308,6 +361,7 @@ class AsyncCosmosMemoryClient:
         self,
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
+        key: Optional[str] = None,
         database: Optional[str] = None,
         container: Optional[str] = None,
     ) -> None:
@@ -315,9 +369,16 @@ class AsyncCosmosMemoryClient:
 
         Parameters override whatever was set in ``__init__``.  After this
         call the Cosmos CRUD methods are ready to use.
+
+        Either *credential* (Entra ID) or *key* (account key) may be
+        provided.  *credential* takes precedence.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
-        self._cosmos_credential = credential or self._cosmos_credential
+        if credential is not None:
+            self._cosmos_credential = credential
+        elif key is not None:
+            self._cosmos_credential = key
+            self._cosmos_key = key
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
 
@@ -355,6 +416,7 @@ class AsyncCosmosMemoryClient:
         lease_container: Optional[str] = None,
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
+        key: Optional[str] = None,
         embedding_dimensions: Optional[int] = None,
         embedding_data_type: Optional[str] = None,
         distance_function: Optional[str] = None,
@@ -367,10 +429,14 @@ class AsyncCosmosMemoryClient:
         After successful creation the instance is connected and ready
         for CRUD operations.
 
+        Either *credential* (Entra ID) or *key* (account key) may be
+        provided.  *credential* takes precedence.  When neither is
+        given the instance falls back to whatever was set at init time.
+
         The memories container is provisioned with:
 
         * Hierarchical partition key ``[/user_id, /thread_id]``
-        * ``quantizedFlat`` vector index on ``/embedding``
+        * ``diskANN`` vector index on ``/embedding``
         * Full-text index on ``/content``
         * Throughput behavior controlled by *throughput_mode*
 
@@ -380,7 +446,11 @@ class AsyncCosmosMemoryClient:
         autoscale max RU from *autoscale_max_ru*.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
-        self._cosmos_credential = credential or self._cosmos_credential
+        if credential is not None:
+            self._cosmos_credential = credential
+        elif key is not None:
+            self._cosmos_credential = key
+            self._cosmos_key = key
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
         self._cosmos_counter_container = counter_container or self._cosmos_counter_container
@@ -483,8 +553,15 @@ class AsyncCosmosMemoryClient:
         tags: Optional[list[str]] = None,
         ttl: Optional[int] = None,
         salience: Optional[float] = None,
-    ) -> None:
-        """Add a memory to Cosmos DB."""
+        embedding: Optional[list[float]] = None,
+        embed: Optional[bool] = None,
+    ) -> str:
+        """Add a memory to Cosmos DB.
+
+        Returns the document id. For non-``turn`` memory types an embedding is
+        generated automatically (override with ``embed=False`` or supply
+        ``embedding=[...]``).
+        """
         await self._require_cosmos()
         kwargs: dict[str, Any] = {
             "user_id": user_id,
@@ -503,11 +580,27 @@ class AsyncCosmosMemoryClient:
             kwargs["salience"] = salience
         record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
+
+        if embed is None:
+            embed = memory_type != "turn"
+        if embedding is not None:
+            body["embedding"] = embedding
+        elif embed and content:
+            try:
+                body["embedding"] = await self._embeddings_client.generate(content)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "add_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
+                    record.id,
+                    exc,
+                )
+
         try:
             await self._container_client.upsert_item(body=body)
         except Exception as exc:
             raise CosmosOperationError(f"Async upsert failed for record {record.id}: {exc}") from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
+        return record.id
 
     async def push_to_cosmos(self, batch_size: int = 25) -> None:
         """Insert all local memories into Cosmos DB in concurrent batches.
@@ -592,8 +685,7 @@ class AsyncCosmosMemoryClient:
             qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
         if exclude_tags:
             for i, tag in enumerate(exclude_tags):
-                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
-                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -769,8 +861,7 @@ class AsyncCosmosMemoryClient:
             qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
         if exclude_tags:
             for i, tag in enumerate(exclude_tags):
-                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
-                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -784,8 +875,8 @@ class AsyncCosmosMemoryClient:
             )
 
         query = (
-            f"SELECT TOP @top_k c.id, c.user_id, c.role, c.type, c.content, "
-            f"c.metadata, c.created_at "
+            f"SELECT TOP @top_k c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
+            f"c.metadata, c.created_at, c.tags, c.salience, c.superseded_by "
             f"FROM c{where} "
             f"{order_by}"
         )
@@ -847,8 +938,7 @@ class AsyncCosmosMemoryClient:
                 qb.add_array_contains("c.tags", f"@tag_{i}", tag)
         if exclude_tags:
             for i, tag in enumerate(exclude_tags):
-                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
-                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -1020,7 +1110,8 @@ class AsyncCosmosMemoryClient:
             from azure.cosmos import CosmosClient as SyncCosmosClient
 
             sync_client = SyncCosmosClient(
-                self._cosmos_endpoint, credential=self._sync_cosmos_credential,
+                self._cosmos_endpoint,
+                credential=self._sync_cosmos_credential,
             )
             sync_db = sync_client.get_database_client(self._cosmos_database)
             sync_container = sync_db.get_container_client(self._cosmos_container)
@@ -1032,17 +1123,49 @@ class AsyncCosmosMemoryClient:
         # Pipeline needs a sync embeddings client
         sync_embeddings = EmbeddingsClient(
             endpoint=self._ai_foundry_endpoint,
-            credential=self._sync_cosmos_credential,
+            credential=self._sync_ai_foundry_credential,
             api_key=self._ai_foundry_api_key,
-            model=self._embedding_model,
+            model=self._embedding_deployment_name,
             dimensions=self._embedding_dimensions,
         )
 
         if sync_container is not None:
             self._pipeline = ProcessingPipeline(
                 cosmos_container=sync_container,
-                llm_client=self._llm_client,
+                chat_client=self._chat_client,
                 embeddings_client=sync_embeddings,
+            )
+            self._warn_on_embedding_dim_mismatch(sync_container)
+
+    def _warn_on_embedding_dim_mismatch(self, sync_container: Any) -> None:
+        """Log a WARNING if the resolved embedding dim differs from the container's policy.
+
+        See ``CosmosMemoryClient._warn_on_embedding_dim_mismatch`` for rationale.
+        We use the sync container handle (built alongside the async client) so
+        the check is non-blocking and runs synchronously inside ``_init_pipeline``.
+        """
+        if sync_container is None or self._embedding_dimensions is None:
+            return
+        try:
+            props = sync_container.read()
+        except Exception:
+            return
+        policy = (props or {}).get("vectorEmbeddingPolicy") or {}
+        embeddings = policy.get("vectorEmbeddings") or []
+        if not embeddings:
+            return
+        container_dim = embeddings[0].get("dimensions")
+        if container_dim and container_dim != self._embedding_dimensions:
+            logger.warning(
+                "Embedding dimension mismatch: container '%s' is configured "
+                "for %d-dim vectors but the SDK is set to write %d-dim vectors. "
+                "Vector search will return empty/wrong results until both sides "
+                "agree. Pass embedding_dimensions=%d (or recreate the container) "
+                "to fix.",
+                self._cosmos_container,
+                container_dim,
+                self._embedding_dimensions,
+                container_dim,
             )
 
     def _require_pipeline(self) -> None:
@@ -1053,6 +1176,13 @@ class AsyncCosmosMemoryClient:
                 "Call connect_cosmos() or create_memory_store() first."
             )
 
+    def _get_processor(self) -> AsyncMemoryProcessor:
+        """Return the active async processor, lazily building an in-process default."""
+        if self._processor is None:
+            self._require_pipeline()
+            self._processor = AsyncInProcessProcessor(pipeline=self._pipeline)
+        return self._processor
+
     async def extract_memories(
         self,
         user_id: str,
@@ -1061,11 +1191,13 @@ class AsyncCosmosMemoryClient:
     ) -> dict[str, int]:
         """Extract facts, procedural, and episodic memories from a thread.
 
-        .. note:: Processing uses the sync pipeline internally.
+        Pipeline calls are dispatched to a worker thread via
+        :func:`asyncio.to_thread` to avoid blocking the event loop on
+        synchronous LLM + embedding + Cosmos I/O.
         """
         await self._require_cosmos()
         self._require_pipeline()
-        return self._pipeline.extract_memories(user_id, thread_id, recent_k)
+        return await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id, recent_k)
 
     async def generate_thread_summary(
         self,
@@ -1076,11 +1208,12 @@ class AsyncCosmosMemoryClient:
     ) -> dict[str, Any]:
         """Generate a thread summary.
 
-        .. note:: Processing uses the sync pipeline internally.
+        Pipeline calls are dispatched to a worker thread via
+        :func:`asyncio.to_thread` to avoid blocking the event loop.
         """
         await self._require_cosmos()
         self._require_pipeline()
-        return self._pipeline.generate_thread_summary(user_id, thread_id, recent_k)
+        return await asyncio.to_thread(self._pipeline.generate_thread_summary, user_id, thread_id, recent_k)
 
     async def generate_user_summary(
         self,
@@ -1091,11 +1224,12 @@ class AsyncCosmosMemoryClient:
     ) -> dict[str, Any]:
         """Generate a cross-thread user summary.
 
-        .. note:: Processing uses the sync pipeline internally.
+        Pipeline calls are dispatched to a worker thread via
+        :func:`asyncio.to_thread` to avoid blocking the event loop.
         """
         await self._require_cosmos()
         self._require_pipeline()
-        return self._pipeline.generate_user_summary(user_id, thread_ids, recent_k)
+        return await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids, recent_k)
 
     async def deduplicate_facts(
         self,
@@ -1105,8 +1239,88 @@ class AsyncCosmosMemoryClient:
     ) -> dict[str, int]:
         """Run LLM-based dedup on user's facts.
 
-        .. note:: Processing uses the sync pipeline internally.
+        Pipeline calls are dispatched to a worker thread via
+        :func:`asyncio.to_thread` to avoid blocking the event loop.
         """
         await self._require_cosmos()
         self._require_pipeline()
-        return self._pipeline.deduplicate_facts(user_id, similarity_threshold, max_facts)
+        return await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id, similarity_threshold, max_facts)
+
+    # ------------------------------------------------------------------
+    # Processor delegation
+    # ------------------------------------------------------------------
+
+    async def flush(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> "ProcessThreadResult":
+        """Process buffered turns for ``(user_id, thread_id)`` via the active processor.
+
+        For :class:`AsyncInProcessProcessor` this runs the sync pipeline
+        inline. For :class:`AsyncDurableFunctionProcessor` this is a
+        debug-logged no-op (the function app handles processing via
+        Cosmos DB Change Feed).
+        """
+        from agent_memory_toolkit.processors.base import ProcessThreadResult
+
+        await self._require_cosmos()
+        processor = self._get_processor()
+
+        try:
+            turns = await self.get_thread(thread_id=thread_id, user_id=user_id, memory_type="turn")
+        except Exception:  # pragma: no cover - best-effort load
+            turns = []
+
+        result = await processor.process_thread(
+            user_id=user_id,
+            thread_id=thread_id,
+            turns=turns,
+        )
+        assert isinstance(result, ProcessThreadResult)
+        return result
+
+    async def flush_and_wait(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Flush and block until a thread summary exists (or ``timeout``).
+
+        Mirrors :meth:`CosmosMemoryClient.flush_and_wait`. For
+        :class:`AsyncInProcessProcessor` this is just a flush followed by
+        ``True``. For :class:`AsyncDurableFunctionProcessor` this polls
+        ``search_cosmos`` every 0.5s using :func:`asyncio.sleep`.
+        """
+        await self._require_cosmos()
+        processor = self._get_processor()
+
+        if isinstance(processor, AsyncInProcessProcessor):
+            await self.flush(user_id=user_id, thread_id=thread_id)
+            return True
+
+        await self.flush(user_id=user_id, thread_id=thread_id)
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        poll_interval = 0.5
+        while loop.time() < deadline:
+            # Use get_memories (filter-only, no embeddings) so flush_and_wait
+            # works even when the client has no AI Foundry endpoint configured
+            # — the Function app owns all LLM work in the durable backend.
+            try:
+                results = await self.get_memories(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    memory_type="summary",
+                    recent_k=1,
+                )
+            except Exception:
+                results = []
+            if results:
+                return True
+            await asyncio.sleep(poll_interval)
+        return False

@@ -6,6 +6,7 @@ duplication and hidden cross-module coupling.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +20,27 @@ from .exceptions import ConfigurationError, ValidationError
 # ---------------------------------------------------------------------------
 
 VALID_ROLES = {"agent", "user", "tool", "system"}
-VALID_TYPES = {"turn", "summary", "fact", "user_summary"}
+VALID_TYPES = {"turn", "summary", "fact", "user_summary", "procedural", "episodic"}
+
+DEFAULT_TTL_BY_TYPE: dict[str, int | None] = {
+    "turn": 2_592_000,  # 30 days
+    "summary": None,
+    "fact": None,
+    "user_summary": None,
+    "procedural": None,
+    "episodic": 7_776_000,  # 90 days
+}
+
+
+# ---------------------------------------------------------------------------
+# Content hashing
+# ---------------------------------------------------------------------------
+
+
+def compute_content_hash(content: str) -> str:
+    """SHA-256 of whitespace-normalized content. Does NOT lowercase."""
+    normalized = " ".join(content.split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -36,12 +57,20 @@ def _make_memory(
     metadata: Optional[dict[str, Any]] = None,
     memory_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    ttl: Optional[int] = None,
+    salience: Optional[float] = None,
+    content_hash: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create a validated memory dict."""
     if role not in VALID_ROLES:
         raise ValidationError(f"role must be one of {VALID_ROLES}, got '{role}'")
     if memory_type not in VALID_TYPES:
         raise ValidationError(f"type must be one of {VALID_TYPES}, got '{memory_type}'")
+
+    # Apply default TTL if caller didn't specify one
+    if ttl is None:
+        ttl = DEFAULT_TTL_BY_TYPE.get(memory_type)
 
     memory: dict[str, Any] = {
         "id": memory_id or str(uuid.uuid4()),
@@ -52,21 +81,32 @@ def _make_memory(
         "content": content,
         "metadata": metadata or {},
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "tags": tags if tags is not None else [],
     }
 
     if agent_id is not None:
         memory["agent_id"] = agent_id
+    if ttl is not None:
+        memory["ttl"] = ttl
+    if salience is not None:
+        memory["salience"] = salience
+    if content_hash is not None:
+        memory["content_hash"] = content_hash
 
     return memory
 
 
 def _resolve_embedding_dimensions(val: Optional[int]) -> Optional[int]:
-    """Resolve embedding dimensions from explicit value or ``EMBEDDING_DIMENSIONS`` env var."""
+    """Resolve embedding dimensions from explicit value or ``EMBEDDING_DIMENSIONS`` env var.
+
+    Defaults to 1536 (the dimension we ship with for ``text-embedding-3-large``
+    truncated to 1536, which is the size DiskANN is tuned for in our containers).
+    """
     if val is not None:
         return val
-    raw = os.environ.get("EMBEDDING_DIMENSIONS", "0") or "0"
+    raw = os.environ.get("EMBEDDING_DIMENSIONS", "1536") or "1536"
     parsed = int(raw)
-    return parsed if parsed else None
+    return parsed if parsed else 1536
 
 
 def _resolve_cosmos_throughput_mode(val: Optional[str]) -> str:
@@ -218,8 +258,12 @@ def _container_policies(
 
     indexing_policy = {
         "includedPaths": [{"path": "/*"}],
-        "excludedPaths": [{"path": "/embedding/*"}],
-        "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}],
+        "excludedPaths": [
+            {"path": "/embedding/*"},
+            {"path": "/source_memory_ids/*"},
+            {"path": "/supersedes_ids/*"},
+        ],
+        "vectorIndexes": [{"path": "/embedding", "type": "diskANN"}],
         "fullTextIndexes": [{"path": "/content"}],
     }
 

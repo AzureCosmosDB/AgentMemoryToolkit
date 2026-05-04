@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: agent-memory-toolkit
+metadata:
+  template: agent-memory-toolkit@0.1.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  function_app:
+    project: ./function_app
+    language: python
+    host: function

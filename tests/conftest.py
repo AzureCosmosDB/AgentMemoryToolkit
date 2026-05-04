@@ -118,6 +118,12 @@ def cosmos_container():
 
 
 @pytest.fixture(scope="session")
+def cosmos_key():
+    """Cosmos DB account key (used as a fallback when control-plane RBAC is not available)."""
+    return os.environ.get("COSMOS_KEY", "")
+
+
+@pytest.fixture(scope="session")
 def ai_foundry_endpoint():
     """Azure OpenAI endpoint from env vars."""
     return os.environ.get("AI_FOUNDRY_ENDPOINT", "")
@@ -125,26 +131,14 @@ def ai_foundry_endpoint():
 
 @pytest.fixture(scope="session")
 def ai_foundry_api_key():
-    """Azure OpenAI API key from env vars."""
+    """Azure OpenAI API key from env vars (optional — Entra ID is preferred)."""
     return os.environ.get("AI_FOUNDRY_API_KEY", "")
 
 
 @pytest.fixture(scope="session")
-def adf_endpoint():
-    """Azure Durable Functions endpoint from env vars."""
-    return os.environ.get("ADF_ENDPOINT", "")
-
-
-@pytest.fixture(scope="session")
-def adf_key():
-    """Azure Durable Functions key from env vars."""
-    return os.environ.get("ADF_KEY", "")
-
-
-@pytest.fixture(scope="session")
-def embedding_model():
+def embedding_deployment_name():
     """Embedding model deployment name."""
-    return os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+    return os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large")
 
 
 @pytest.fixture(scope="session")
@@ -152,6 +146,12 @@ def embedding_dimensions():
     """Embedding dimensions from env vars."""
     raw = os.environ.get("EMBEDDING_DIMENSIONS", "1536")
     return int(raw) if raw else 1536
+
+
+@pytest.fixture(scope="session")
+def chat_deployment_name():
+    """LLM deployment name used by the processing pipeline."""
+    return os.environ.get("CHAT_DEPLOYMENT_NAME", "gpt-4o-mini")
 
 
 @pytest.fixture

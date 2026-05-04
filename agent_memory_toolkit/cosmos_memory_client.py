@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ._query_builder import _QueryBuilder
 from ._utils import (
@@ -26,6 +26,7 @@ from ._utils import (
     _validate_connection,
     _validate_hybrid_search,
 )
+from .chat import ChatClient
 from .embeddings import EmbeddingsClient
 from .exceptions import (
     CosmosNotConnectedError,
@@ -33,8 +34,14 @@ from .exceptions import (
     MemoryNotFoundError,
     ValidationError,
 )
-from .llm import LLMClient
 from .models import MemoryRecord
+from .processors import (
+    InProcessProcessor,
+    MemoryProcessor,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only import
+    from .processors import ProcessThreadResult, UserSummaryResult  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +53,20 @@ class CosmosMemoryClient:
     credential is passed for Cosmos DB or AI Foundry, a
     ``DefaultAzureCredential`` is created automatically.
 
+    For Cosmos DB control-plane operations (database/container creation),
+    Entra ID RBAC is in private preview. If RBAC is unavailable, pass
+    ``cosmos_key`` as a fallback — the SDK will use it when no
+    ``TokenCredential`` is available.
+
     Parameters
     ----------
     cosmos_endpoint : str, optional
         The Cosmos DB account endpoint URL.
     cosmos_credential : TokenCredential, optional
-        Azure credential for Cosmos DB.
+        Azure credential for Cosmos DB (Entra ID / RBAC).
+    cosmos_key : str, optional
+        Cosmos DB account key. Used as fallback when ``cosmos_credential``
+        is not provided and ``DefaultAzureCredential`` is unavailable.
     cosmos_database : str, optional
         Cosmos DB database name.
     cosmos_container : str, optional
@@ -62,11 +77,11 @@ class CosmosMemoryClient:
         Azure credential for the AI Foundry endpoint.
     ai_foundry_api_key : str, optional
         API key for Azure OpenAI (takes precedence over credential).
-    embedding_model : str, optional
+    embedding_deployment_name : str, optional
         Embedding model deployment name (default ``text-embedding-3-large``).
     embedding_dimensions : int, optional
         Dimensionality of embedding vectors.
-    llm_model : str, optional
+    chat_deployment_name : str, optional
         LLM model deployment name (default ``gpt-4o-mini``).
     use_default_credential : bool, optional
         Automatically create ``DefaultAzureCredential`` when ``True``.
@@ -76,6 +91,7 @@ class CosmosMemoryClient:
         self,
         cosmos_endpoint: Optional[str] = None,
         cosmos_credential: Optional[Any] = None,
+        cosmos_key: Optional[str] = None,
         cosmos_database: Optional[str] = None,
         cosmos_container: Optional[str] = None,
         cosmos_counter_container: Optional[str] = None,
@@ -85,10 +101,11 @@ class CosmosMemoryClient:
         ai_foundry_endpoint: Optional[str] = None,
         ai_foundry_credential: Optional[Any] = None,
         ai_foundry_api_key: Optional[str] = None,
-        embedding_model: str = "text-embedding-3-large",
+        embedding_deployment_name: str = "text-embedding-3-large",
         embedding_dimensions: Optional[int] = None,
-        llm_model: str = "gpt-4o-mini",
+        chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
+        processor: Optional[MemoryProcessor] = None,
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
@@ -96,6 +113,7 @@ class CosmosMemoryClient:
         # Store kwargs directly
         self._cosmos_endpoint = cosmos_endpoint
         self._cosmos_credential = cosmos_credential
+        self._cosmos_key = cosmos_key
         self._cosmos_database = cosmos_database or "ai_memory"
         self._cosmos_container = cosmos_container or "memories"
         self._cosmos_counter_container = cosmos_counter_container or "counter"
@@ -109,14 +127,21 @@ class CosmosMemoryClient:
         self._ai_foundry_endpoint = ai_foundry_endpoint
         self._ai_foundry_credential = ai_foundry_credential
         self._ai_foundry_api_key = ai_foundry_api_key
-        self._embedding_model = embedding_model
+        self._embedding_deployment_name = embedding_deployment_name
         self._embedding_dimensions = _resolve_embedding_dimensions(embedding_dimensions)
-        self._llm_model = llm_model
+        self._chat_deployment_name = chat_deployment_name
 
-        # Resolve credentials via DefaultAzureCredential when needed
+        # Credential resolution priority:
+        #   1. Explicit cosmos_credential / ai_foundry_credential (highest priority)
+        #   2. Explicit cosmos_key / ai_foundry_api_key (relief for environments
+        #      where Cosmos control-plane RBAC is in private preview, etc.)
+        #   3. DefaultAzureCredential() when use_default_credential=True
+        if self._cosmos_credential is None and self._cosmos_key:
+            self._cosmos_credential = self._cosmos_key
+
         if use_default_credential:
             needs_cosmos = self._cosmos_credential is None
-            needs_embed = self._ai_foundry_credential is None
+            needs_embed = self._ai_foundry_credential is None and not self._ai_foundry_api_key
             if needs_cosmos or needs_embed:
                 try:
                     from azure.identity import DefaultAzureCredential
@@ -124,9 +149,9 @@ class CosmosMemoryClient:
                     _default = DefaultAzureCredential()
                 except ImportError:
                     _default = None
-                if needs_cosmos:
+                if needs_cosmos and _default is not None:
                     self._cosmos_credential = _default
-                if needs_embed:
+                if needs_embed and _default is not None:
                     self._ai_foundry_credential = _default
 
         # Internal Cosmos SDK handles
@@ -138,18 +163,24 @@ class CosmosMemoryClient:
             endpoint=self._ai_foundry_endpoint,
             credential=self._ai_foundry_credential,
             api_key=self._ai_foundry_api_key,
-            model=self._embedding_model,
+            model=self._embedding_deployment_name,
             dimensions=self._embedding_dimensions,
         )
-        self._llm_client = LLMClient(
+        self._chat_client = ChatClient(
             endpoint=self._ai_foundry_endpoint,
             credential=self._ai_foundry_credential,
             api_key=self._ai_foundry_api_key,
-            model=self._llm_model,
+            model=self._chat_deployment_name,
         )
 
         # ProcessingPipeline is lazily initialized when Cosmos is connected
         self._pipeline: Any = None
+
+        # Pluggable backend that owns summarize/extract/dedup. ``None`` means
+        # "lazily construct an InProcessProcessor on first use, sharing the
+        # client's pipeline / LLM / embeddings."
+        self._processor: Optional[MemoryProcessor] = processor
+        self._processor_explicit: bool = processor is not None
 
         # Auto-connect and create store when Cosmos endpoint is provided
         if self._cosmos_endpoint:
@@ -305,6 +336,7 @@ class CosmosMemoryClient:
         self,
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
+        key: Optional[str] = None,
         database: Optional[str] = None,
         container: Optional[str] = None,
     ) -> None:
@@ -312,9 +344,16 @@ class CosmosMemoryClient:
 
         Parameters override whatever was set in ``__init__``.  After this
         call the Cosmos CRUD methods are ready to use.
+
+        Either *credential* (Entra ID) or *key* (account key) may be
+        provided.  *credential* takes precedence.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
-        self._cosmos_credential = credential or self._cosmos_credential
+        if credential is not None:
+            self._cosmos_credential = credential
+        elif key is not None:
+            self._cosmos_credential = key
+            self._cosmos_key = key
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
 
@@ -352,6 +391,7 @@ class CosmosMemoryClient:
         lease_container: Optional[str] = None,
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
+        key: Optional[str] = None,
         embedding_dimensions: Optional[int] = None,
         embedding_data_type: Optional[str] = None,
         distance_function: Optional[str] = None,
@@ -364,10 +404,14 @@ class CosmosMemoryClient:
         After successful creation the instance is connected and ready
         for CRUD operations.
 
+        Either *credential* (Entra ID) or *key* (account key) may be
+        provided.  *credential* takes precedence.  When neither is
+        given the instance falls back to whatever was set at init time.
+
         The memories container is provisioned with:
 
         * Hierarchical partition key ``[/user_id, /thread_id]``
-        * ``quantizedFlat`` vector index on ``/embedding``
+        * ``diskANN`` vector index on ``/embedding``
         * Full-text index on ``/content``
         * Throughput behavior controlled by *throughput_mode*
 
@@ -377,7 +421,11 @@ class CosmosMemoryClient:
         autoscale max RU from *autoscale_max_ru*.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
-        self._cosmos_credential = credential or self._cosmos_credential
+        if credential is not None:
+            self._cosmos_credential = credential
+        elif key is not None:
+            self._cosmos_credential = key
+            self._cosmos_key = key
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
         self._cosmos_counter_container = counter_container or self._cosmos_counter_container
@@ -465,9 +513,52 @@ class CosmosMemoryClient:
 
         self._pipeline = ProcessingPipeline(
             cosmos_container=self._container_client,
-            llm_client=self._llm_client,
+            chat_client=self._chat_client,
             embeddings_client=self._embeddings_client,
         )
+        self._warn_on_embedding_dim_mismatch()
+
+    def _warn_on_embedding_dim_mismatch(self) -> None:
+        """Log a WARNING if the resolved embedding dim differs from the container's policy.
+
+        Writing vectors at a different dimensionality than the container's
+        ``vectorEmbeddingPolicy`` produces vectors that will not match in
+        similarity search — the failure mode is silent (empty / wrong
+        results), so we surface it loudly at connect time. We never raise:
+        the user may have a legitimate reason (e.g. the container was created
+        outside the SDK and they are migrating).
+        """
+        if self._container_client is None or self._embedding_dimensions is None:
+            return
+        try:
+            props = self._container_client.read()
+        except Exception:
+            return
+        policy = (props or {}).get("vectorEmbeddingPolicy") or {}
+        embeddings = policy.get("vectorEmbeddings") or []
+        if not embeddings:
+            return
+        container_dim = embeddings[0].get("dimensions")
+        if container_dim and container_dim != self._embedding_dimensions:
+            logger.warning(
+                "Embedding dimension mismatch: container '%s' is configured "
+                "for %d-dim vectors but the SDK is set to write %d-dim vectors. "
+                "Vector search will return empty/wrong results until both sides "
+                "agree. Pass embedding_dimensions=%d (or recreate the container) "
+                "to fix.",
+                self._cosmos_container,
+                container_dim,
+                self._embedding_dimensions,
+                container_dim,
+            )
+
+    def _get_processor(self) -> MemoryProcessor:
+        """Return the active processor, lazily building an in-process default."""
+        if self._processor is None:
+            if self._pipeline is None:
+                self._init_pipeline()
+            self._processor = InProcessProcessor(pipeline=self._pipeline)
+        return self._processor
 
     def _require_cosmos(self) -> None:
         """Raise if Cosmos DB is not connected."""
@@ -489,8 +580,18 @@ class CosmosMemoryClient:
         tags: Optional[list[str]] = None,
         ttl: Optional[int] = None,
         salience: Optional[float] = None,
-    ) -> None:
-        """Add a memory to Cosmos DB."""
+        embedding: Optional[list[float]] = None,
+        embed: Optional[bool] = None,
+    ) -> str:
+        """Add a memory to Cosmos DB.
+
+        Returns the document id (whether newly generated or supplied via
+        ``metadata``). For non-``turn`` memory types (``fact``, ``summary``,
+        ``episodic``, ``procedural``, ``user_summary``) an embedding is
+        generated automatically so vector / hybrid search and deduplication
+        work out of the box. Pass ``embed=False`` to skip embedding, or
+        ``embedding=[...]`` to supply one explicitly.
+        """
         self._require_cosmos()
         kwargs: dict[str, Any] = {
             "user_id": user_id,
@@ -509,11 +610,29 @@ class CosmosMemoryClient:
             kwargs["salience"] = salience
         record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
+
+        # Auto-embed derived memories so search / dedup work out of the box.
+        # Default: embed everything except raw "turn" memories.
+        if embed is None:
+            embed = memory_type != "turn"
+        if embedding is not None:
+            body["embedding"] = embedding
+        elif embed and content:
+            try:
+                body["embedding"] = self._embeddings_client.generate(content)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "add_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
+                    record.id,
+                    exc,
+                )
+
         try:
             self._container_client.upsert_item(body=body)
         except Exception as exc:
             raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
+        return record.id
 
     def push_to_cosmos(self, batch_size: int = 25) -> None:
         """Insert all local memories into Cosmos DB.
@@ -603,9 +722,7 @@ class CosmosMemoryClient:
             qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
         if exclude_tags:
             for i, tag in enumerate(exclude_tags):
-                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
-                # Replace the ARRAY_CONTAINS with NOT ARRAY_CONTAINS
-                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -788,8 +905,7 @@ class CosmosMemoryClient:
             qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
         if exclude_tags:
             for i, tag in enumerate(exclude_tags):
-                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
-                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -803,8 +919,8 @@ class CosmosMemoryClient:
             )
 
         query = (
-            f"SELECT TOP @top_k c.id, c.user_id, c.role, c.type, c.content, "
-            f"c.metadata, c.created_at "
+            f"SELECT TOP @top_k c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
+            f"c.metadata, c.created_at, c.tags, c.salience, c.superseded_by "
             f"FROM c{where} "
             f"{order_by}"
         )
@@ -871,8 +987,7 @@ class CosmosMemoryClient:
                 qb.add_array_contains("c.tags", f"@tag_{i}", tag)
         if exclude_tags:
             for i, tag in enumerate(exclude_tags):
-                qb.add_array_contains("c.tags", f"@exc_tag_{i}", tag)
-                qb._conditions[-1] = f"NOT ARRAY_CONTAINS(c.tags, @exc_tag_{i})"
+                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -1082,3 +1197,89 @@ class CosmosMemoryClient:
         """Run LLM-based dedup on user's facts."""
         self._require_cosmos()
         return self._pipeline.deduplicate_facts(user_id, similarity_threshold, max_facts)
+
+    # ------------------------------------------------------------------
+    # Processor delegation
+    # ------------------------------------------------------------------
+
+    def flush(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> "ProcessThreadResult":
+        """Process buffered turns for ``(user_id, thread_id)`` via the active processor.
+
+        For :class:`InProcessProcessor` this runs the summarize/extract/dedup
+        pipeline inline. For :class:`DurableFunctionProcessor` this is a
+        debug-logged no-op (the function app handles processing via
+        Cosmos DB Change Feed).
+        """
+        from .processors import ProcessThreadResult  # local import for forward ref
+
+        self._require_cosmos()
+        processor = self._get_processor()
+
+        try:
+            turns = self.get_thread(thread_id=thread_id, user_id=user_id, memory_type="turn")
+        except Exception:  # pragma: no cover - best-effort load
+            turns = []
+
+        result = processor.process_thread(
+            user_id=user_id,
+            thread_id=thread_id,
+            turns=turns,
+        )
+        assert isinstance(result, ProcessThreadResult)
+        return result
+
+    def flush_and_wait(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Flush and block until a thread summary exists (or ``timeout``).
+
+        For :class:`InProcessProcessor` this is just :meth:`flush` followed
+        by ``True`` (the in-process pipeline is synchronous). For
+        :class:`DurableFunctionProcessor` this polls
+        ``search_cosmos(memory_type="summary", ...)`` every 0.5s until a
+        summary appears or the timeout expires.
+
+        Returns ``True`` on success, ``False`` on timeout.
+        """
+        import time as _time
+
+        self._require_cosmos()
+        processor = self._get_processor()
+
+        # In-process: pipeline is synchronous, so flush() already finished work.
+        if isinstance(processor, InProcessProcessor):
+            self.flush(user_id=user_id, thread_id=thread_id)
+            return True
+
+        # Durable: trigger the no-op flush (debug log) then poll Cosmos.
+        self.flush(user_id=user_id, thread_id=thread_id)
+
+        deadline = _time.monotonic() + timeout
+        poll_interval = 0.5
+        while _time.monotonic() < deadline:
+            # Use get_memories (filter-only, no embeddings) so flush_and_wait
+            # works even when the client has no AI Foundry endpoint configured
+            # (i.e. the SDK is purely a Cosmos writer + the Function app owns
+            # all LLM calls).
+            try:
+                results = self.get_memories(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    memory_type="summary",
+                    recent_k=1,
+                )
+            except Exception:
+                results = []
+            if results:
+                return True
+            _time.sleep(poll_interval)
+        return False

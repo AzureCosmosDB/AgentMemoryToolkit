@@ -109,9 +109,9 @@ az functionapp config appsettings set \
     COSMOS_DB_THROUGHPUT_MODE="serverless" \
     COSMOS_DB_AUTOSCALE_MAX_RU="1000" \
     AI_FOUNDRY_ENDPOINT="https://<openai-account-name>.openai.azure.com/" \
-    EMBEDDING_MODEL="text-embedding-3-large" \
+    EMBEDDING_DEPLOYMENT_NAME="text-embedding-3-large" \
     EMBEDDING_DIMENSIONS="1536" \
-    LLM_MODEL="gpt-5-mini"
+    CHAT_DEPLOYMENT_NAME="gpt-5-mini"
 ```
 
 `COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
@@ -175,9 +175,9 @@ COSMOS_DB_THROUGHPUT_MODE=serverless
 COSMOS_DB_AUTOSCALE_MAX_RU=1000
 
 AI_FOUNDRY_ENDPOINT=https://<openai-account-name>.openai.azure.com/
-EMBEDDING_MODEL=text-embedding-3-large
+EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 EMBEDDING_DIMENSIONS=1536
-LLM_MODEL=gpt-5-mini
+CHAT_DEPLOYMENT_NAME=gpt-5-mini
 
 ADF_ENDPOINT=https://<function-app-name>.azurewebsites.net/api
 ADF_KEY=<function-key-if-needed>
@@ -208,7 +208,7 @@ memory = AgentMemory(
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
     cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
-    embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
+    embedding_deployment_name=os.getenv("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT"),
     adf_key=os.getenv("ADF_KEY", ""),
     use_default_credential=True,
@@ -238,7 +238,7 @@ memory = AsyncAgentMemory(
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
     cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
-    embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
+    embedding_deployment_name=os.getenv("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
     adf_endpoint=os.getenv("ADF_ENDPOINT"),
     adf_key=os.getenv("ADF_KEY", ""),
     use_default_credential=True,

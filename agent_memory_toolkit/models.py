@@ -6,6 +6,7 @@ Cosmos DB-compatible JSON.
 """
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -36,6 +37,8 @@ class MemoryType(str, Enum):
     summary = "summary"
     fact = "fact"
     user_summary = "user_summary"
+    procedural = "procedural"
+    episodic = "episodic"
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +53,12 @@ def _uuid4_str() -> str:
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+# ---------------------------------------------------------------------------
+# Tag validation
+# ---------------------------------------------------------------------------
+
+TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_:./-]{0,99}$")
 
 # ---------------------------------------------------------------------------
 # Core model
@@ -80,6 +89,13 @@ class MemoryRecord(BaseModel):
     agent_id: Optional[str] = None
     created_at: str = Field(default_factory=_utc_now_iso)
     updated_at: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    ttl: Optional[int] = None
+    salience: Optional[float] = None
+    content_hash: Optional[str] = None
+    superseded_by: Optional[str] = None
+    supersedes_ids: list[str] = Field(default_factory=list)
+    source_memory_ids: list[str] = Field(default_factory=list)
 
     # -- validators ----------------------------------------------------------
 
@@ -105,13 +121,38 @@ class MemoryRecord(BaseModel):
                 raise ValueError(f"type must be one of {{{valid}}}, got '{v}'")
         return v
 
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _validate_tags(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("tags must be a list of strings")
+        validated = []
+        for tag in v:
+            tag = str(tag).strip().lower()
+            if not tag:
+                continue
+            if not TAG_PATTERN.match(tag):
+                raise ValueError(f"Invalid tag format: '{tag}'. Must match [a-z0-9][a-z0-9_:./-]{{0,99}}")
+            validated.append(tag)
+        return sorted(set(validated))
+
+    @field_validator("salience", mode="before")
+    @classmethod
+    def _validate_salience(cls, v: Any) -> Any:
+        if v is not None and (v < 0.0 or v > 1.0):
+            raise ValueError(f"salience must be between 0.0 and 1.0, got {v}")
+        return v
+
     # -- serialization helpers -----------------------------------------------
 
     def to_cosmos_dict(self) -> dict[str, Any]:
         """Return a dict suitable for Cosmos DB upsert.
 
         * Uses ``"type"`` as the key name (not ``"memory_type"``).
-        * Omits keys whose value is ``None``.
+        * Always emits ``tags``.
+        * Omits keys whose value is ``None`` or empty list (for optional fields).
         """
         data: dict[str, Any] = {
             "id": self.id,
@@ -122,6 +163,7 @@ class MemoryRecord(BaseModel):
             "content": self.content,
             "metadata": self.metadata,
             "created_at": self.created_at,
+            "tags": self.tags,
         }
         if self.embedding is not None:
             data["embedding"] = self.embedding
@@ -129,6 +171,18 @@ class MemoryRecord(BaseModel):
             data["agent_id"] = self.agent_id
         if self.updated_at is not None:
             data["updated_at"] = self.updated_at
+        if self.ttl is not None:
+            data["ttl"] = self.ttl
+        if self.salience is not None:
+            data["salience"] = self.salience
+        if self.content_hash is not None:
+            data["content_hash"] = self.content_hash
+        if self.superseded_by is not None:
+            data["superseded_by"] = self.superseded_by
+        if self.supersedes_ids:
+            data["supersedes_ids"] = self.supersedes_ids
+        if self.source_memory_ids:
+            data["source_memory_ids"] = self.source_memory_ids
         return data
 
     @classmethod

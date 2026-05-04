@@ -8,7 +8,9 @@ from agent_memory_toolkit.exceptions import (
     ConfigurationError,
     CosmosNotConnectedError,
     CosmosOperationError,
+    DuplicateMemoryError,
     EmbeddingError,
+    LLMError,
     MemoryNotFoundError,
     OrchestrationTimeoutError,
     ProcessingError,
@@ -29,6 +31,8 @@ ALL_SUBTYPES = [
     ProcessingError,
     OrchestrationTimeoutError,
     AuthenticationError,
+    DuplicateMemoryError,
+    LLMError,
 ]
 
 
@@ -40,8 +44,12 @@ def test_all_exceptions_inherit_from_agent_memory_error(exc_cls):
 def test_catch_all_subtypes():
     """try/except AgentMemoryError catches every subtype."""
     for cls in ALL_SUBTYPES:
-        with pytest.raises(AgentMemoryError):
-            raise cls("test")
+        if cls is DuplicateMemoryError:
+            with pytest.raises(AgentMemoryError):
+                raise cls(existing_id="x", content_hash="y")
+        else:
+            with pytest.raises(AgentMemoryError):
+                raise cls("test")
 
 
 # ---------------------------------------------------------------------------
@@ -109,3 +117,46 @@ def test_orchestration_timeout_with_attrs():
     msg = str(err)
     assert "30.0" in msg
     assert "https://example.com/status" in msg
+
+
+# ---------------------------------------------------------------------------
+# DuplicateMemoryError
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_memory_error():
+    err = DuplicateMemoryError(existing_id="abc", content_hash="def")
+    assert err.existing_id == "abc"
+    assert err.content_hash == "def"
+    assert "abc" in str(err)
+    assert "def" in str(err)
+
+
+def test_duplicate_memory_error_inherits():
+    err = DuplicateMemoryError(existing_id="x", content_hash="y")
+    assert isinstance(err, AgentMemoryError)
+
+
+def test_duplicate_memory_error_caught_by_base():
+    with pytest.raises(AgentMemoryError):
+        raise DuplicateMemoryError(existing_id="x", content_hash="y")
+
+
+# ---------------------------------------------------------------------------
+# LLMError
+# ---------------------------------------------------------------------------
+
+
+def test_llm_error():
+    err = LLMError("test error")
+    assert str(err) == "test error"
+
+
+def test_llm_error_inherits():
+    err = LLMError("boom")
+    assert isinstance(err, AgentMemoryError)
+
+
+def test_llm_error_caught_by_base():
+    with pytest.raises(AgentMemoryError):
+        raise LLMError("oops")

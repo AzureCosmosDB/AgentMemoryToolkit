@@ -594,7 +594,9 @@ class TestGenerateThreadSummary:
         result = await mem.generate_thread_summary(user_id="u1", thread_id="t1")
 
         mock_pipeline.generate_thread_summary.assert_called_once_with(
-            "u1", "t1", None,
+            "u1",
+            "t1",
+            None,
         )
         assert result == {"status": "ok"}
 

@@ -26,7 +26,10 @@ from agent_memory_toolkit._utils import (
     _make_memory,
     _resolve_cosmos_provisioning_autoscale_max_ru,
     _resolve_cosmos_throughput_mode,
+    _resolve_distance_function,
+    _resolve_embedding_data_type,
     _resolve_embedding_dimensions,
+    _resolve_full_text_language,
     _validate_connection,
     _validate_hybrid_search,
 )
@@ -482,9 +485,9 @@ class AsyncCosmosMemoryClient:
             lease_partition_key = PartitionKey(path="/id")
             vec_policy, idx_policy, ft_policy = _container_policies(
                 embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
-                embedding_data_type=embedding_data_type or "float32",
-                distance_function=distance_function or "cosine",
-                full_text_language=full_text_language or "en-US",
+                embedding_data_type=_resolve_embedding_data_type(embedding_data_type),
+                distance_function=_resolve_distance_function(distance_function),
+                full_text_language=_resolve_full_text_language(full_text_language),
             )
             offer_throughput = _cosmos_container_offer_throughput(
                 throughput_mode=self._cosmos_throughput_mode,

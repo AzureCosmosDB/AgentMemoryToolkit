@@ -114,6 +114,12 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
             path: '/embedding/?'
           }
           {
+            path: '/source_memory_ids/*'
+          }
+          {
+            path: '/supersedes_ids/*'
+          }
+          {
             path: '/"_etag"/?'
           }
         ]

@@ -6,9 +6,12 @@ from agent_memory_toolkit._utils import (
     DEFAULT_TTL_BY_TYPE,
     _build_container_kwargs,
     _make_memory,
+    _resolve_distance_function,
+    _resolve_embedding_data_type,
+    _resolve_full_text_language,
     compute_content_hash,
 )
-from agent_memory_toolkit.exceptions import ValidationError
+from agent_memory_toolkit.exceptions import ConfigurationError, ValidationError
 
 
 def test_build_container_kwargs_includes_required_fields_and_extras():
@@ -180,3 +183,50 @@ def test_make_memory_invalid_role():
 def test_make_memory_invalid_type():
     with pytest.raises(ValidationError):
         _make_memory(user_id="u1", role="user", content="test", memory_type="invalid")
+
+
+def test_resolve_embedding_data_type_defaults(monkeypatch):
+    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", raising=False)
+    assert _resolve_embedding_data_type(None) == "float32"
+
+
+def test_resolve_embedding_data_type_from_env(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", "int8")
+    assert _resolve_embedding_data_type(None) == "int8"
+
+
+def test_resolve_embedding_data_type_explicit_overrides_env(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", "int8")
+    assert _resolve_embedding_data_type("uint8") == "uint8"
+
+
+def test_resolve_embedding_data_type_invalid_raises(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", "bogus")
+    with pytest.raises(ConfigurationError):
+        _resolve_embedding_data_type(None)
+
+
+def test_resolve_distance_function_defaults(monkeypatch):
+    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION", raising=False)
+    assert _resolve_distance_function(None) == "cosine"
+
+
+def test_resolve_distance_function_from_env(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION", "dotproduct")
+    assert _resolve_distance_function(None) == "dotproduct"
+
+
+def test_resolve_distance_function_invalid_raises(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION", "manhattan")
+    with pytest.raises(ConfigurationError):
+        _resolve_distance_function(None)
+
+
+def test_resolve_full_text_language_defaults(monkeypatch):
+    monkeypatch.delenv("COSMOS_DB_FULL_TEXT_LANGUAGE", raising=False)
+    assert _resolve_full_text_language(None) == "en-US"
+
+
+def test_resolve_full_text_language_from_env(monkeypatch):
+    monkeypatch.setenv("COSMOS_DB_FULL_TEXT_LANGUAGE", "fr-FR")
+    assert _resolve_full_text_language(None) == "fr-FR"

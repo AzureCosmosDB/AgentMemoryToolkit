@@ -128,6 +128,53 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> int:
     return parsed
 
 
+_ALLOWED_EMBEDDING_DATA_TYPES = ("float32", "uint8", "int8")
+_ALLOWED_DISTANCE_FUNCTIONS = ("cosine", "dotproduct", "euclidean")
+
+
+def _resolve_embedding_data_type(val: Optional[str]) -> str:
+    """Resolve embedding data type from explicit value or ``AI_FOUNDRY_EMBEDDING_DATA_TYPE`` env var.
+
+    Defaults to ``float32``. Raises :class:`ConfigurationError` for unknown values.
+    """
+    raw = (val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_DATA_TYPE") or "float32").strip()
+    if raw not in _ALLOWED_EMBEDDING_DATA_TYPES:
+        raise ConfigurationError(
+            message=(
+                f"Invalid configuration for embedding_data_type: must be one of "
+                f"{_ALLOWED_EMBEDDING_DATA_TYPES}, got {raw!r}"
+            ),
+            parameter="embedding_data_type",
+        )
+    return raw
+
+
+def _resolve_distance_function(val: Optional[str]) -> str:
+    """Resolve distance function from explicit value or ``AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION`` env var.
+
+    Defaults to ``cosine``. Raises :class:`ConfigurationError` for unknown values.
+    """
+    raw = (val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION") or "cosine").strip()
+    if raw not in _ALLOWED_DISTANCE_FUNCTIONS:
+        raise ConfigurationError(
+            message=(
+                f"Invalid configuration for distance_function: must be one of "
+                f"{_ALLOWED_DISTANCE_FUNCTIONS}, got {raw!r}"
+            ),
+            parameter="distance_function",
+        )
+    return raw
+
+
+def _resolve_full_text_language(val: Optional[str]) -> str:
+    """Resolve full-text language from explicit value or ``COSMOS_DB_FULL_TEXT_LANGUAGE`` env var.
+
+    Defaults to ``en-US``. Empty values fall back to the default.
+    """
+    raw = (val if val is not None else os.environ.get("COSMOS_DB_FULL_TEXT_LANGUAGE") or "en-US").strip()
+    return raw or "en-US"
+
+
 def _resolve_cosmos_throughput_mode(val: Optional[str]) -> str:
     """Resolve throughput mode from explicit value or env var.
 

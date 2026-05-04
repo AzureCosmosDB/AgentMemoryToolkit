@@ -302,6 +302,7 @@ async def test_ensure_async_client_accepts_sync_credential(monkeypatch):
             captured.update(kwargs)
 
     import sys
+
     fake_openai = MagicMock()
     fake_openai.AsyncAzureOpenAI = FakeAsyncAzureOpenAI
     monkeypatch.setitem(sys.modules, "openai", fake_openai)

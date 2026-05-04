@@ -179,9 +179,7 @@ class ChatClient:
 
                 token_provider = get_bearer_token_provider(self._credential, _TOKEN_SCOPE)
             else:
-                token_provider = _make_sync_token_provider_for_async(
-                    self._credential, _TOKEN_SCOPE
-                )
+                token_provider = _make_sync_token_provider_for_async(self._credential, _TOKEN_SCOPE)
 
             self._async_client = AsyncAzureOpenAI(
                 api_version=self._api_version,

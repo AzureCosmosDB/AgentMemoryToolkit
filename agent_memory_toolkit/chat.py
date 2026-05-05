@@ -75,6 +75,25 @@ def _unsupported_param(exc: Exception) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _extract_content(response: Any, model: str) -> str:
+    """Pull the assistant content out of a chat-completions response.
+
+    Raises ``LLMError`` when the model returned no content (content filter,
+    max-tokens-no-output, or certain reasoning-model paths). Without this
+    guard, downstream JSON parsing crashes with ``AttributeError: 'NoneType'
+    object has no attribute 'strip'`` and the actual root cause is invisible
+    in App Insights.
+    """
+    if not response.choices:
+        raise LLMError(f"LLM returned no choices (model={model})")
+    choice = response.choices[0]
+    content = getattr(choice.message, "content", None)
+    if content is None:
+        finish_reason = getattr(choice, "finish_reason", "unknown")
+        raise LLMError(f"LLM returned no content (model={model}, finish_reason={finish_reason})")
+    return content
+
+
 class ChatClient:
     """Synchronous LLM chat completion client backed by Azure OpenAI.
 
@@ -265,7 +284,7 @@ class ChatClient:
                         usage.completion_tokens,
                         usage.total_tokens,
                     )
-                return response.choices[0].message.content
+                return _extract_content(response, self._model)
             except openai.RateLimitError as exc:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
@@ -363,7 +382,7 @@ class ChatClient:
                         usage.completion_tokens,
                         usage.total_tokens,
                     )
-                return response.choices[0].message.content
+                return _extract_content(response, self._model)
             except openai.RateLimitError as exc:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)

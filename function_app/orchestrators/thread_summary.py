@@ -39,12 +39,14 @@ def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
     retry = default_retry_options()
 
     summary = yield context.call_activity_with_retry(
-        "ts_SummarizeThread", retry,
+        "ts_SummarizeThread",
+        retry,
         {"user_id": user_id, "thread_id": thread_id, "limit": max_batch},
     )
 
     yield context.call_activity_with_retry(
-        "ts_PersistSummary", retry,
+        "ts_PersistSummary",
+        retry,
         {"user_id": user_id, "thread_id": thread_id, "summary": summary},
     )
 
@@ -72,7 +74,9 @@ def ts_SummarizeThread(payload: dict) -> dict:
     limit = payload.get("limit")
     pipeline = get_pipeline()
     summary = pipeline.generate_thread_summary(
-        user_id=user_id, thread_id=thread_id, recent_k=limit,
+        user_id=user_id,
+        thread_id=thread_id,
+        recent_k=limit,
     )
     logger.info("ThreadSummary generated user=%s thread=%s", user_id, thread_id)
     return summary

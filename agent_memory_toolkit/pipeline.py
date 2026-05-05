@@ -404,7 +404,13 @@ class ProcessingPipeline:
             if action == "NONE":
                 continue
 
-            text = fact["text"]
+            text = fact.get("text")
+            if not text:
+                logger.warning(
+                    "extract_memories: dropping malformed fact (missing 'text'): %r",
+                    fact,
+                )
+                continue
             content_hash = compute_content_hash(text)
             det_id = f"fact_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:16]}"
 
@@ -482,7 +488,13 @@ class ProcessingPipeline:
             if action == "NONE":
                 continue
 
-            text = proc["instruction"]
+            text = proc.get("instruction")
+            if not text:
+                logger.warning(
+                    "extract_memories: dropping malformed procedural (missing 'instruction'): %r",
+                    proc,
+                )
+                continue
             content_hash = compute_content_hash(text)
             det_id = f"proc_{hashlib.sha256(f'{user_id}:{content_hash}'.encode()).hexdigest()[:16]}"
 
@@ -541,7 +553,16 @@ class ProcessingPipeline:
 
         # ---- 7. Process episodic ----
         for ep in episodic:
-            text = f"{ep['situation']} → {ep['action_taken']} → {ep['outcome']}"
+            situation = ep.get("situation")
+            action_taken = ep.get("action_taken")
+            outcome = ep.get("outcome")
+            if not (situation and action_taken and outcome):
+                logger.warning(
+                    "extract_memories: dropping malformed episodic (missing situation/action_taken/outcome): %r",
+                    ep,
+                )
+                continue
+            text = f"{situation} → {action_taken} → {outcome}"
             content_hash = compute_content_hash(text)
             det_id = f"ep_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:16]}"
 
@@ -679,7 +700,7 @@ class ProcessingPipeline:
         ]
 
         if existing_summary:
-            since = existing_summary.get("created_at", "")
+            since = existing_summary["updated_at"]
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
@@ -758,7 +779,8 @@ class ProcessingPipeline:
                 "recent_k": recent_k,
                 "incremental_update": existing_summary is not None,
             },
-            "created_at": now,
+            "created_at": existing_summary["created_at"] if existing_summary else now,
+            "updated_at": now,
         }
 
         self._upsert_memory(summary_doc)
@@ -802,7 +824,7 @@ class ProcessingPipeline:
         ]
 
         if existing_summary:
-            since = existing_summary.get("created_at", "")
+            since = existing_summary["updated_at"]
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
@@ -901,7 +923,8 @@ class ProcessingPipeline:
                 "recent_k": recent_k,
                 "incremental_update": existing_summary is not None,
             },
-            "created_at": now,
+            "created_at": existing_summary["created_at"] if existing_summary else now,
+            "updated_at": now,
         }
 
         self._upsert_memory(summary_doc)
@@ -928,11 +951,17 @@ class ProcessingPipeline:
         logger.info("deduplicate_facts started user_id=%s threshold=%.2f", user_id, similarity_threshold)
 
         # ---- 1. Load all active facts ----
+        # ORDER BY c._ts DESC makes the TOP cap deterministic - without it
+        # Cosmos returns rows in implementation-defined order across physical
+        # partitions, so two near-duplicates on opposite sides of the cap
+        # would never get a chance to merge. Newest-first means recently
+        # extracted facts are always considered.
         query = (
             f"SELECT TOP {max_facts} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = 'fact' "
-            "AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null)"
+            "AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null) "
+            "ORDER BY c._ts DESC"
         )
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},

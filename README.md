@@ -211,11 +211,12 @@ By default, the **InProcess processor** runs each pipeline step independently as
 
 | Env var | Default | Step that fires | Async behavior |
 |---|---|---|---|
-| `FACT_EXTRACTION_EVERY_N` | `1` (every turn) | `process_extract_memories` (extract + dedup) | scheduled via `asyncio.create_task` |
+| `FACT_EXTRACTION_EVERY_N` | `1` (every turn) | `process_extract_memories` | scheduled via `asyncio.create_task` |
+| `DEDUP_EVERY_N` | `5` | `process_dedup` (fires every Nth extract → effectively every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns) | scheduled via `asyncio.create_task` |
 | `THREAD_SUMMARY_EVERY_N` | `10` | `process_thread_summary` | scheduled via `asyncio.create_task` |
 | `USER_SUMMARY_EVERY_N` | `20` | `process_user_summary` | scheduled via `asyncio.create_task` |
 
-Each `*_EVERY_N=0` disables only that step. The Durable backend uses the same defaults via the change-feed function app, so the in-process and durable backends fire on the same turn boundaries — only the *where* differs. Calling `process_now()` is normally redundant — it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
+Each `*_EVERY_N=0` disables only that step. Dedup is gated independently of extract because cross-thread dedup is dramatically more expensive than per-thread extract (it reads every active fact for the user) — running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app (the function-app `azd` deploy bumps `FACT_EXTRACTION_EVERY_N` to `5` since the FA path is intended for higher-volume workloads). Calling `process_now()` is normally redundant — it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
 
 The async client (`AsyncCosmosMemoryClient.push_to_cosmos`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
 

@@ -39,12 +39,14 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     retry = default_retry_options()
 
     extracted = yield context.call_activity_with_retry(
-        "em_ExtractMemories", retry,
+        "em_ExtractMemories",
+        retry,
         {"user_id": user_id, "thread_id": thread_id, "limit": max_batch},
     )
 
     dedup = yield context.call_activity_with_retry(
-        "em_DeduplicateFacts", retry,
+        "em_DeduplicateFacts",
+        retry,
         {"user_id": user_id},
     )
 
@@ -79,10 +81,15 @@ def em_ExtractMemories(payload: dict) -> dict:
     limit = payload.get("limit")
     pipeline = get_pipeline()
     counts = pipeline.extract_memories(
-        user_id=user_id, thread_id=thread_id, recent_k=limit,
+        user_id=user_id,
+        thread_id=thread_id,
+        recent_k=limit,
     )
     logger.info(
-        "ExtractMemories user=%s thread=%s counts=%s", user_id, thread_id, counts,
+        "ExtractMemories user=%s thread=%s counts=%s",
+        user_id,
+        thread_id,
+        counts,
     )
     return counts or {}
 

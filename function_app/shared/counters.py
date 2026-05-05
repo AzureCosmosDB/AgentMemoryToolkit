@@ -28,6 +28,39 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 
+# One-shot mismatch-warn dedup. Mirrors the SDK-side pattern in
+# ``agent_memory_toolkit/_counters.py`` so the FA also surfaces double-write
+# misconfigurations without spamming logs (key = (counter_id, my_owner)).
+_warned_owner_mismatch: set[tuple[str, str]] = set()
+
+
+def _maybe_warn_owner_mismatch(
+    counter_id: str,
+    existing_owner: str | None,
+    my_owner: str | None,
+) -> None:
+    """Log a one-shot WARN when the counter's previous writer differs from us.
+
+    Advisory-only — the FA still runs the orchestration. ``MEMORY_PROCESSOR_OWNER``
+    is operator-configured exclusivity, not a server-side lock; this just
+    surfaces accidental double-deployment so it shows up in App Insights.
+    """
+    if not my_owner or not existing_owner or existing_owner == my_owner:
+        return
+    key = (counter_id, my_owner)
+    if key in _warned_owner_mismatch:
+        return
+    _warned_owner_mismatch.add(key)
+    logger.warning(
+        "Owner mismatch on counter %s: existing last_owner=%r, this process owner=%r. "
+        "Both backends appear to be writing the same counter. Ensure MEMORY_PROCESSOR_OWNER "
+        "is set consistently on both the SDK client and the function app, otherwise extracts "
+        "and dedups will run twice. (One-shot WARN per counter+owner pair per process.)",
+        counter_id,
+        existing_owner,
+        my_owner,
+    )
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -75,13 +108,19 @@ async def increment_counter_by(
         etag: str | None = None
         existing_doc: dict | None = None
         try:
-            existing_doc = await container.read_item(
-                item=counter_id, partition_key=partition_key
-            )
+            existing_doc = await container.read_item(item=counter_id, partition_key=partition_key)
             old_count = existing_doc.get("count", 0)
             etag = existing_doc.get("_etag")
         except CosmosResourceNotFoundError:
             pass  # first time — will create
+
+        # Owner-mismatch detection (advisory only).
+        if existing_doc is not None:
+            _maybe_warn_owner_mismatch(
+                counter_id,
+                existing_doc.get("last_owner"),
+                owner,
+            )
 
         # ---- Replay detection via LSN ----
         if (
@@ -92,7 +131,8 @@ async def increment_counter_by(
             replay_old = existing_doc.get("last_batch_old_count", old_count)
             logger.info(
                 "Counter replay detected counter_id=%s lsn=%s, returning cached result",
-                counter_id, batch_max_lsn,
+                counter_id,
+                batch_max_lsn,
             )
             return (replay_old, old_count)
 
@@ -104,9 +144,7 @@ async def increment_counter_by(
             "count": new_count,
             "last_batch_lsn": batch_max_lsn,
             "last_batch_old_count": old_count,
-            "created_at": existing_doc.get("created_at", _utc_now_iso())
-            if existing_doc
-            else _utc_now_iso(),
+            "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
             "updated_at": _utc_now_iso(),
         }
         # Preserve SDK-written failure breadcrumbs so the FA doesn't blow
@@ -138,7 +176,9 @@ async def increment_counter_by(
                     if create_exc.status_code == 409 and attempt < MAX_RETRIES - 1:
                         logger.warning(
                             "Counter create conflict counter_id=%s attempt=%d/%d, retrying",
-                            counter_id, attempt + 1, MAX_RETRIES,
+                            counter_id,
+                            attempt + 1,
+                            MAX_RETRIES,
                         )
                         continue
                     if create_exc.status_code == 409:
@@ -153,7 +193,9 @@ async def increment_counter_by(
             if exc.status_code == 412 and attempt < MAX_RETRIES - 1:
                 logger.warning(
                     "Counter ETag conflict counter_id=%s attempt=%d/%d, retrying",
-                    counter_id, attempt + 1, MAX_RETRIES,
+                    counter_id,
+                    attempt + 1,
+                    MAX_RETRIES,
                 )
                 continue
             if exc.status_code == 412:
@@ -164,17 +206,14 @@ async def increment_counter_by(
                 # firing the orchestrator that the increment was supposed to
                 # trigger, causing permanent threshold-miss bugs.
                 logger.warning(
-                    "Counter ETag conflict exhausted retries counter_id=%s, "
-                    "raising to force change-feed batch retry",
+                    "Counter ETag conflict exhausted retries counter_id=%s, raising to force change-feed batch retry",
                     counter_id,
                 )
                 raise
             raise
 
     # Should never reach here — the loop either returns or raises every iteration.
-    raise RuntimeError(
-        f"increment_counter_by({counter_id}) exhausted MAX_RETRIES without resolution"
-    )
+    raise RuntimeError(f"increment_counter_by({counter_id}) exhausted MAX_RETRIES without resolution")
 
 
 def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:

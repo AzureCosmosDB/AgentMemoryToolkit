@@ -17,4 +17,3 @@ def default_retry_options():
         first_retry_interval_in_milliseconds=2000,
         max_number_of_attempts=3,
     )
-

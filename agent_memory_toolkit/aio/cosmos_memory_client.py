@@ -154,7 +154,11 @@ class AsyncCosmosMemoryClient:
         #   2. Explicit cosmos_key / ai_foundry_api_key (relief for environments
         #      where Cosmos control-plane RBAC is in private preview, etc.)
         #   3. DefaultAzureCredential() when use_default_credential=True
-        self._owns_credential = False
+        #
+        # Track ownership separately for each credential so close() doesn't
+        # accidentally close a user-supplied credential or leak one we created.
+        self._owns_cosmos_credential = False
+        self._owns_ai_foundry_credential = False
         if self._cosmos_credential is None and self._cosmos_key:
             self._cosmos_credential = self._cosmos_key
         # Keep a sync credential for the pipeline's sync Cosmos container
@@ -171,14 +175,17 @@ class AsyncCosmosMemoryClient:
                 try:
                     from azure.identity.aio import DefaultAzureCredential
 
-                    _default = DefaultAzureCredential()
-                    self._owns_credential = True
+                    # Use independent instances per consumer so close()
+                    # ordering is unambiguous and one consumer's lifecycle
+                    # can't tear down a credential another is still using.
+                    if needs_cosmos:
+                        self._cosmos_credential = DefaultAzureCredential()
+                        self._owns_cosmos_credential = True
+                    if needs_embed:
+                        self._ai_foundry_credential = DefaultAzureCredential()
+                        self._owns_ai_foundry_credential = True
                 except ImportError:
-                    _default = None
-                if needs_cosmos and _default is not None:
-                    self._cosmos_credential = _default
-                if needs_embed and _default is not None:
-                    self._ai_foundry_credential = _default
+                    pass
             # Sync credential for pipeline (only when we don't already have a key)
             if self._sync_cosmos_credential is None:
                 try:
@@ -266,10 +273,20 @@ class AsyncCosmosMemoryClient:
                     pass
             self._sync_cosmos_client = None
         await self._embeddings_client.close()
-        if self._owns_credential and self._cosmos_credential is not None:
+        if self._owns_cosmos_credential and self._cosmos_credential is not None:
             close = getattr(self._cosmos_credential, "close", None)
             if close is not None:
-                await close()
+                try:
+                    await close()
+                except Exception:
+                    pass
+        if self._owns_ai_foundry_credential and self._ai_foundry_credential is not None:
+            close = getattr(self._ai_foundry_credential, "close", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
         # Sync credentials (Cosmos + AI Foundry fallback) close synchronously.
         for sync_cred in (self._sync_cosmos_credential, self._sync_ai_foundry_credential):
             if sync_cred is None:
@@ -1297,6 +1314,7 @@ class AsyncCosmosMemoryClient:
         from ..thresholds import (
             PROCESSOR_OWNER_DURABLE,
             PROCESSOR_OWNER_INPROCESS,
+            get_dedup_every_n,
             get_fact_extraction_every_n,
             get_processor_owner,
             get_thread_summary_every_n,
@@ -1330,8 +1348,13 @@ class AsyncCosmosMemoryClient:
         n_facts = get_fact_extraction_every_n()
         n_summary = get_thread_summary_every_n()
         n_user = get_user_summary_every_n()
+        n_dedup = get_dedup_every_n()
         if n_facts == 0 and n_summary == 0 and n_user == 0:
             return
+
+        # Dedup fires every Nth EXTRACT, not every Nth turn — see the
+        # sync-client mirror for the same combined-threshold pattern.
+        n_dedup_turns = n_facts * n_dedup if (n_facts > 0 and n_dedup > 0) else 0
 
         counter_container = self._get_counter_container()
         if counter_container is None:
@@ -1349,6 +1372,7 @@ class AsyncCosmosMemoryClient:
                 n_facts=n_facts,
                 n_summary=n_summary,
                 n_user=n_user,
+                n_dedup_turns=n_dedup_turns,
             )
 
     async def _run_auto_trigger_steps(
@@ -1361,6 +1385,7 @@ class AsyncCosmosMemoryClient:
         n_facts: int,
         n_summary: int,
         n_user: int,
+        n_dedup_turns: int = 0,
     ) -> None:
         from .._counters import (
             USER_COUNTER_THREAD_ID,
@@ -1394,6 +1419,7 @@ class AsyncCosmosMemoryClient:
 
             fire_extract = n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)
             fire_summary = n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
+            fire_dedup = n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
 
             if fire_extract:
                 try:
@@ -1411,6 +1437,23 @@ class AsyncCosmosMemoryClient:
                         user_id,
                         thread_id,
                         f"process_extract_memories: {exc!r}",
+                    )
+
+            if fire_dedup:
+                try:
+                    await processor.process_dedup(user_id=user_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-trigger process_dedup failed for %s: %s",
+                        user_id,
+                        exc,
+                    )
+                    await stamp_failure_async(
+                        counter_container,
+                        thread_counter_id(user_id, thread_id),
+                        user_id,
+                        thread_id,
+                        f"process_dedup: {exc!r}",
                     )
 
             if fire_summary:

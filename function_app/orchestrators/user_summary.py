@@ -27,20 +27,20 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     retry = default_retry_options()
 
     user_summary = yield context.call_activity_with_retry(
-        "us_GenerateUserSummary", retry,
+        "us_GenerateUserSummary",
+        retry,
         {"user_id": user_id, "limit": max_batch},
     )
 
     yield context.call_activity_with_retry(
-        "us_PersistUserSummary", retry,
+        "us_PersistUserSummary",
+        retry,
         {"user_id": user_id, "user_summary": user_summary},
     )
 
     return {
         "persisted": True,
-        "user_summary_id": (
-            user_summary.get("id") if isinstance(user_summary, dict) else None
-        ),
+        "user_summary_id": (user_summary.get("id") if isinstance(user_summary, dict) else None),
     }
 
 

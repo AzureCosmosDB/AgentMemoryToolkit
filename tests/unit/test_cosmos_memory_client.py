@@ -58,16 +58,20 @@ def _make_doc(**overrides) -> dict:
 
 class TestConstructor:
     def test_default_credential_created_when_flag_true(self):
-        """use_default_credential=True creates a DefaultAzureCredential."""
+        """use_default_credential=True creates independent DefaultAzureCredential instances."""
         sentinel = MagicMock(name="default-cred")
         mock_module = MagicMock()
         mock_module.DefaultAzureCredential.return_value = sentinel
 
         with patch.dict("sys.modules", {"azure.identity": mock_module}):
             mem = CosmosMemoryClient(use_default_credential=True)
-            mock_module.DefaultAzureCredential.assert_called_once()
+            # Two independent instances — one per consumer (cosmos + AI Foundry)
+            # — so close() can tear each down without affecting the other.
+            assert mock_module.DefaultAzureCredential.call_count == 2
             assert mem._cosmos_credential is sentinel
             assert mem._ai_foundry_credential is sentinel
+            assert mem._owns_cosmos_credential is True
+            assert mem._owns_ai_foundry_credential is True
 
     def test_no_credential_when_flag_false(self):
         """use_default_credential=False leaves credentials as None."""

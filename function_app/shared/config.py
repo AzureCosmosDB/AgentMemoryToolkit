@@ -70,13 +70,15 @@ def _parse_threshold(name: str, default: int) -> int:
         parsed = int(raw)
     except (ValueError, TypeError):
         logger.warning(
-            "Invalid value for %s=%r, using default %d", name, raw, default,
+            "Invalid value for %s=%r, using default %d",
+            name,
+            raw,
+            default,
         )
         return default
     if parsed < 0:
         logger.warning(
-            "Negative value for %s=%r is not allowed; using default %d "
-            "(set to 0 to explicitly disable)",
+            "Negative value for %s=%r is not allowed; using default %d (set to 0 to explicitly disable)",
             name,
             raw,
             default,
@@ -114,21 +116,24 @@ def get_max_batch_size() -> int:
 def get_thread_summary_every_n() -> int:
     """Threshold for triggering ``ThreadSummaryOrchestrator``. ``0`` disables."""
     return _parse_threshold(
-        "THREAD_SUMMARY_EVERY_N", DEFAULT_THREAD_SUMMARY_EVERY_N,
+        "THREAD_SUMMARY_EVERY_N",
+        DEFAULT_THREAD_SUMMARY_EVERY_N,
     )
 
 
 def get_fact_extraction_every_n() -> int:
     """Threshold for triggering ``ExtractMemoriesOrchestrator``. ``0`` disables."""
     return _parse_threshold(
-        "FACT_EXTRACTION_EVERY_N", DEFAULT_FACT_EXTRACTION_EVERY_N,
+        "FACT_EXTRACTION_EVERY_N",
+        DEFAULT_FACT_EXTRACTION_EVERY_N,
     )
 
 
 def get_user_summary_every_n() -> int:
     """Threshold for triggering ``UserSummaryOrchestrator``. ``0`` disables."""
     return _parse_threshold(
-        "USER_SUMMARY_EVERY_N", DEFAULT_USER_SUMMARY_EVERY_N,
+        "USER_SUMMARY_EVERY_N",
+        DEFAULT_USER_SUMMARY_EVERY_N,
     )
 
 
@@ -139,13 +144,9 @@ def get_cosmos_endpoint() -> str:
     identity-based connection convention); all of our own clients use the
     plain ``COSMOS_DB_ENDPOINT`` env var.
     """
-    endpoint = os.environ.get("COSMOS_DB_ENDPOINT") or os.environ.get(
-        "COSMOS_DB__accountEndpoint"
-    )
+    endpoint = os.environ.get("COSMOS_DB_ENDPOINT") or os.environ.get("COSMOS_DB__accountEndpoint")
     if not endpoint:
-        raise RuntimeError(
-            "COSMOS_DB_ENDPOINT (or COSMOS_DB__accountEndpoint) is not configured"
-        )
+        raise RuntimeError("COSMOS_DB_ENDPOINT (or COSMOS_DB__accountEndpoint) is not configured")
     return endpoint
 
 
@@ -161,7 +162,4 @@ def get_chat_deployment_name() -> str:
 
 
 def get_embedding_deployment_name() -> str:
-    return (
-        os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME")
-        or "text-embedding-3-large"
-    )
+    return os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME") or "text-embedding-3-large"

@@ -90,12 +90,7 @@ class InProcessProcessor:
         user_id: str,
         thread_id: str,
     ) -> dict[str, int]:
-        """Run extract + dedup. Used by the auto-trigger on FACT_EXTRACTION_EVERY_N."""
         extracted = self._pipeline.extract_memories(user_id, thread_id)
-        try:
-            self._pipeline.deduplicate_facts(user_id)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("post-extract dedup failed user_id=%s: %s", user_id, exc)
         return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
 
     def process_thread_summary(

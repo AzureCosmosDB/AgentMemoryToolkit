@@ -78,9 +78,7 @@ async def process_changefeed_batch(
                 "will be logged at DEBUG level."
             )
         else:
-            logger.debug(
-                "Change-feed batch skipped: MEMORY_PROCESSOR_OWNER=inprocess"
-            )
+            logger.debug("Change-feed batch skipped: MEMORY_PROCESSOR_OWNER=inprocess")
         return
 
     n_thread = config.get_thread_summary_every_n()
@@ -123,9 +121,7 @@ async def process_changefeed_batch(
 
     if not thread_counts and not user_counts:
         return
-    if (not thread_enabled or not thread_counts) and (
-        not user_enabled or not user_counts
-    ):
+    if (not thread_enabled or not thread_counts) and (not user_enabled or not user_counts):
         return
 
     if counter_container is None:
@@ -139,14 +135,20 @@ async def process_changefeed_batch(
             cid = thread_counter_id(user_id, thread_id)
             lsn = thread_max_lsn.get((user_id, thread_id))
             old_count, new_count = await increment_counter_by(
-                counter_container, cid, user_id, thread_id, batch_count,
+                counter_container,
+                cid,
+                user_id,
+                thread_id,
+                batch_count,
                 batch_max_lsn=lsn,
             )
 
             if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
                 instance_id = f"thread_summary:{user_id}:{thread_id}:{new_count}"
                 await _safe_start(
-                    starter, "ThreadSummaryOrchestrator", instance_id,
+                    starter,
+                    "ThreadSummaryOrchestrator",
+                    instance_id,
                     {"user_id": user_id, "thread_id": thread_id, "count": new_count},
                     orchestration_errors,
                 )
@@ -154,7 +156,9 @@ async def process_changefeed_batch(
             if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
                 instance_id = f"extract:{user_id}:{thread_id}:{new_count}"
                 await _safe_start(
-                    starter, "ExtractMemoriesOrchestrator", instance_id,
+                    starter,
+                    "ExtractMemoriesOrchestrator",
+                    instance_id,
                     {"user_id": user_id, "thread_id": thread_id, "count": new_count},
                     orchestration_errors,
                 )
@@ -165,22 +169,26 @@ async def process_changefeed_batch(
             cid = user_counter_id(user_id)
             lsn = user_max_lsn.get(user_id)
             old_count, new_count = await increment_counter_by(
-                counter_container, cid, user_id, config.USER_COUNTER_THREAD_ID, batch_count,
+                counter_container,
+                cid,
+                user_id,
+                config.USER_COUNTER_THREAD_ID,
+                batch_count,
                 batch_max_lsn=lsn,
             )
             if crosses_threshold(old_count, new_count, n_user):
                 instance_id = f"user_summary:{user_id}:{new_count}"
                 await _safe_start(
-                    starter, "UserSummaryOrchestrator", instance_id,
+                    starter,
+                    "UserSummaryOrchestrator",
+                    instance_id,
                     {"user_id": user_id, "count": new_count},
                     orchestration_errors,
                 )
 
     # Re-raise so the change-feed batch is retried & thresholds re-fire.
     if orchestration_errors:
-        raise RuntimeError(
-            f"Failed to start {len(orchestration_errors)} orchestration(s)"
-        ) from orchestration_errors[0]
+        raise RuntimeError(f"Failed to start {len(orchestration_errors)} orchestration(s)") from orchestration_errors[0]
 
 
 async def _safe_start(
@@ -191,7 +199,9 @@ async def _safe_start(
     errors: list[Exception],
 ) -> None:
     logger.info(
-        "change-feed: starting %s instance=%s", orchestration_name, instance_id,
+        "change-feed: starting %s instance=%s",
+        orchestration_name,
+        instance_id,
     )
     try:
         await starter.start_new(
@@ -202,24 +212,34 @@ async def _safe_start(
     except Exception as exc:
         # Duplicate-instance-id is the idempotency mechanism for change-feed
         # retries: it shows up as a 409 Conflict from the Durable client.
-        # Anything else gets bubbled up.
+        # The Durable Python SDK currently raises bare ``Exception`` for
+        # everything (no typed class for OrchestrationAlreadyExists), so
+        # we keep two signals — status_code first, then the canonical
+        # message string. We always log ``type(exc).__name__`` so any future
+        # SDK switch to a typed exception shows up immediately in App
+        # Insights instead of silently breaking string matching.
+        exc_type = type(exc).__name__
         status_code = getattr(exc, "status_code", None)
         if status_code == 409:
             logger.info(
-                "change-feed: instance %s already exists (409 Conflict), skipping",
+                "change-feed: instance %s already exists (409 Conflict, exc_type=%s), skipping",
                 instance_id,
+                exc_type,
             )
             return
-        # Fallback: some Durable client variants surface duplicate-instance-id
-        # via plain exceptions without status_code. Match the canonical message.
         msg = str(exc).lower()
         if "already exists" in msg and "instance" in msg:
             logger.info(
-                "change-feed: instance %s already exists (message match), skipping",
+                "change-feed: instance %s already exists (message match, exc_type=%s), skipping",
                 instance_id,
+                exc_type,
             )
             return
-        logger.exception("change-feed: failed to start %s", instance_id)
+        logger.exception(
+            "change-feed: failed to start %s (exc_type=%s)",
+            instance_id,
+            exc_type,
+        )
         errors.append(exc)
 
 

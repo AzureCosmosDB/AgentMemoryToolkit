@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_FACT_EXTRACTION_EVERY_N = 1
 DEFAULT_THREAD_SUMMARY_EVERY_N = 10
 DEFAULT_USER_SUMMARY_EVERY_N = 20
+# Dedup runs on its own cadence — every Nth extract (NOT every Nth turn),
+# because dedup is O(N²) over all active facts and dominates per-push cost
+# when FACT_EXTRACTION_EVERY_N=1. Default 5 = one dedup sweep per 5 extracts.
+# Set to 1 to dedup on every extract; set to 0 to disable entirely.
+DEFAULT_DEDUP_EVERY_N = 5
 
 # Owner exclusivity — declares which backend is authoritative for the shared
 # memories + counter container. When set, the *other* backend skips its
@@ -59,6 +64,11 @@ def get_user_summary_every_n() -> int:
     return _parse_threshold("USER_SUMMARY_EVERY_N", DEFAULT_USER_SUMMARY_EVERY_N)
 
 
+def get_dedup_every_n() -> int:
+    """Run dedup once per N extracts. 0 disables dedup auto-trigger entirely."""
+    return _parse_threshold("DEDUP_EVERY_N", DEFAULT_DEDUP_EVERY_N)
+
+
 def get_processor_owner() -> Optional[str]:
     """Return the configured ``MEMORY_PROCESSOR_OWNER`` or ``None``.
 
@@ -93,10 +103,12 @@ __all__ = [
     "DEFAULT_FACT_EXTRACTION_EVERY_N",
     "DEFAULT_THREAD_SUMMARY_EVERY_N",
     "DEFAULT_USER_SUMMARY_EVERY_N",
+    "DEFAULT_DEDUP_EVERY_N",
     "PROCESSOR_OWNER_INPROCESS",
     "PROCESSOR_OWNER_DURABLE",
     "get_fact_extraction_every_n",
     "get_thread_summary_every_n",
     "get_user_summary_every_n",
+    "get_dedup_every_n",
     "get_processor_owner",
 ]

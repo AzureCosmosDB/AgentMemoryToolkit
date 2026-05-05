@@ -43,9 +43,7 @@ def get_memories_container():
     from azure.cosmos import CosmosClient
 
     if _sync_cosmos_client is None:
-        _sync_cosmos_client = CosmosClient(
-            config.get_cosmos_endpoint(), credential=_credential()
-        )
+        _sync_cosmos_client = CosmosClient(config.get_cosmos_endpoint(), credential=_credential())
 
     db = _sync_cosmos_client.get_database_client(config.CHANGE_FEED_DATABASE)
     _sync_memories_container = db.get_container_client(config.CHANGE_FEED_CONTAINER)
@@ -65,9 +63,7 @@ async def get_counter_container_async():
         _async_credential = AsyncDefaultAzureCredential()
 
     if _async_cosmos_client is None:
-        _async_cosmos_client = AsyncCosmosClient(
-            config.get_cosmos_endpoint(), credential=_async_credential
-        )
+        _async_cosmos_client = AsyncCosmosClient(config.get_cosmos_endpoint(), credential=_async_credential)
 
     db = _async_cosmos_client.get_database_client(config.CHANGE_FEED_DATABASE)
     _async_counter_container = db.get_container_client(config.COUNTERS_CONTAINER)

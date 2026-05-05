@@ -93,6 +93,7 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
   properties: {
     resource: {
       id: 'memories'
+      defaultTtl: -1
       partitionKey: {
         kind: 'MultiHash'
         version: 2

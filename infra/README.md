@@ -101,8 +101,10 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | App setting | Default | Effect |
 |---|---|---|
 | `THREAD_SUMMARY_EVERY_N` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. |
-| `FACT_EXTRACTION_EVERY_N` | `1` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. |
+| `FACT_EXTRACTION_EVERY_N` | `5` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. |
+| `DEDUP_EVERY_N` | `5` | Run fact dedup every Nth fact-extraction (so dedup actually fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns). |
 | `USER_SUMMARY_EVERY_N` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. |
+| `MEMORY_PROCESSOR_OWNER` | `durable` | Backend that owns processing. Set to `inprocess` if you want only the SDK to process and the FA to skip its change-feed batches. See the SDK README for details. |
 
 Set any value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:
 

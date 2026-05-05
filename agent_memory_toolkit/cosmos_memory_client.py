@@ -142,6 +142,11 @@ class CosmosMemoryClient:
         #   2. Explicit cosmos_key / ai_foundry_api_key (relief for environments
         #      where Cosmos control-plane RBAC is in private preview, etc.)
         #   3. DefaultAzureCredential() when use_default_credential=True
+        #
+        # Track ownership separately so close() doesn't accidentally close a
+        # user-supplied credential or leak one we created.
+        self._owns_cosmos_credential = False
+        self._owns_ai_foundry_credential = False
         if self._cosmos_credential is None and self._cosmos_key:
             self._cosmos_credential = self._cosmos_key
 
@@ -152,13 +157,14 @@ class CosmosMemoryClient:
                 try:
                     from azure.identity import DefaultAzureCredential
 
-                    _default = DefaultAzureCredential()
+                    if needs_cosmos:
+                        self._cosmos_credential = DefaultAzureCredential()
+                        self._owns_cosmos_credential = True
+                    if needs_embed:
+                        self._ai_foundry_credential = DefaultAzureCredential()
+                        self._owns_ai_foundry_credential = True
                 except ImportError:
-                    _default = None
-                if needs_cosmos and _default is not None:
-                    self._cosmos_credential = _default
-                if needs_embed and _default is not None:
-                    self._ai_foundry_credential = _default
+                    pass
 
         # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
@@ -213,6 +219,20 @@ class CosmosMemoryClient:
             self._container_client = None
             self._counter_container_client = None
             logger.info("Cosmos client closed")
+        # Close credentials we created ourselves (sync DefaultAzureCredential
+        # holds an underlying token cache + HTTP transport).
+        for owns, cred in (
+            (self._owns_cosmos_credential, self._cosmos_credential),
+            (self._owns_ai_foundry_credential, self._ai_foundry_credential),
+        ):
+            if not owns or cred is None:
+                continue
+            close = getattr(cred, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Read-only properties
@@ -621,6 +641,7 @@ class CosmosMemoryClient:
         from .thresholds import (
             PROCESSOR_OWNER_DURABLE,
             PROCESSOR_OWNER_INPROCESS,
+            get_dedup_every_n,
             get_fact_extraction_every_n,
             get_processor_owner,
             get_thread_summary_every_n,
@@ -660,8 +681,14 @@ class CosmosMemoryClient:
         n_facts = get_fact_extraction_every_n()
         n_summary = get_thread_summary_every_n()
         n_user = get_user_summary_every_n()
+        n_dedup = get_dedup_every_n()
         if n_facts == 0 and n_summary == 0 and n_user == 0:
             return
+
+        # Dedup fires every Nth EXTRACT, not every Nth turn. Express that
+        # via the same thread counter using the combined threshold
+        # n_facts * n_dedup. Disabled when either knob is 0.
+        n_dedup_turns = n_facts * n_dedup if (n_facts > 0 and n_dedup > 0) else 0
 
         counter_container = self._get_counter_container()
         if counter_container is None:
@@ -691,6 +718,7 @@ class CosmosMemoryClient:
 
             fire_extract = n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)
             fire_summary = n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
+            fire_dedup = n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
 
             if fire_extract:
                 try:
@@ -708,6 +736,23 @@ class CosmosMemoryClient:
                         user_id,
                         thread_id,
                         f"process_extract_memories: {exc!r}",
+                    )
+
+            if fire_dedup:
+                try:
+                    processor.process_dedup(user_id=user_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-trigger process_dedup failed for %s: %s",
+                        user_id,
+                        exc,
+                    )
+                    stamp_failure_sync(
+                        counter_container,
+                        thread_counter_id(user_id, thread_id),
+                        user_id,
+                        thread_id,
+                        f"process_dedup: {exc!r}",
                     )
 
             if fire_summary:

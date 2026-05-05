@@ -265,28 +265,36 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: '10'
         }
         {
+          // Production default = 5 (one extract per 5 turns). The SDK
+          // default is 1 for prototype/demo UX; azd-deployed fleets pay
+          // real LLM cost per turn, so we amortize.
           name: 'FACT_EXTRACTION_EVERY_N'
-          value: '1'
+          value: '5'
         }
         {
           name: 'USER_SUMMARY_EVERY_N'
           value: '20'
         }
         {
+          // Run dedup once per N extract batches (see DEDUP_EVERY_N in
+          // agent_memory_toolkit.thresholds). Default 5 = one O(N²) sweep
+          // per 5 extracts so the SDK in-process backend doesn't slow
+          // down high-TPS workloads.
+          name: 'DEDUP_EVERY_N'
+          value: '5'
+        }
+        {
           name: 'MAX_BATCH_SIZE'
           value: '20'
         }
         {
-          name: 'ENABLE_DEDUP'
-          value: 'true'
-        }
-        {
-          name: 'ENABLE_PROCEDURAL'
-          value: 'true'
-        }
-        {
-          name: 'ENABLE_EPISODIC'
-          value: 'true'
+          // Owner exclusivity: the FA owns processing for any
+          // azd-deployed container. SDK clients pointed at the same
+          // Cosmos container will see this and skip their auto-trigger
+          // (loud one-shot WARN). Operators who want SDK ownership must
+          // override to `inprocess`.
+          name: 'MEMORY_PROCESSOR_OWNER'
+          value: 'durable'
         }
       ]
     }

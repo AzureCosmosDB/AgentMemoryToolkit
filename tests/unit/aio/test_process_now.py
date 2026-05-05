@@ -1,4 +1,4 @@
-"""Tests for AsyncCosmosMemoryClient.flush() / flush_and_wait() processor delegation."""
+"""Tests for AsyncCosmosMemoryClient.process_now() / process_now_and_wait() processor delegation."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _patch_get_thread(client, turns):
 
 
 @pytest.mark.asyncio
-async def test_flush_with_inprocess_invokes_pipeline():
+async def test_process_now_with_inprocess_invokes_pipeline():
     client = _connected()
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
@@ -35,7 +35,7 @@ async def test_flush_with_inprocess_invokes_pipeline():
     client._pipeline = pipeline
     _patch_get_thread(client, [{"role": "user"}])
 
-    result = await client.flush(user_id="u", thread_id="t")
+    result = await client.process_now(user_id="u", thread_id="t")
 
     assert isinstance(result, ProcessThreadResult)
     assert isinstance(client._processor, AsyncInProcessProcessor)
@@ -45,13 +45,13 @@ async def test_flush_with_inprocess_invokes_pipeline():
 
 
 @pytest.mark.asyncio
-async def test_flush_with_durable_is_noop():
+async def test_process_now_with_durable_is_noop():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     pipeline = MagicMock()
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 
-    result = await client.flush(user_id="u", thread_id="t")
+    result = await client.process_now(user_id="u", thread_id="t")
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary is None
@@ -59,14 +59,14 @@ async def test_flush_with_durable_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_flush_requires_cosmos():
+async def test_process_now_requires_cosmos():
     client = AsyncCosmosMemoryClient(use_default_credential=False)
     with pytest.raises(CosmosNotConnectedError):
-        await client.flush(user_id="u", thread_id="t")
+        await client.process_now(user_id="u", thread_id="t")
 
 
 @pytest.mark.asyncio
-async def test_flush_and_wait_inprocess_returns_true():
+async def test_process_now_and_wait_inprocess_returns_true():
     client = _connected()
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
@@ -75,11 +75,11 @@ async def test_flush_and_wait_inprocess_returns_true():
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 
-    assert await client.flush_and_wait(user_id="u", thread_id="t") is True
+    assert await client.process_now_and_wait(user_id="u", thread_id="t") is True
 
 
 @pytest.mark.asyncio
-async def test_flush_and_wait_durable_polls_until_summary_appears():
+async def test_process_now_and_wait_durable_polls_until_summary_appears():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
     client.get_memories = AsyncMock(side_effect=[[], [], [{"id": "summary"}]])
@@ -88,14 +88,14 @@ async def test_flush_and_wait_durable_polls_until_summary_appears():
         return None
 
     with patch("asyncio.sleep", new=_no_sleep):
-        ok = await client.flush_and_wait(user_id="u", thread_id="t", timeout=5.0)
+        ok = await client.process_now_and_wait(user_id="u", thread_id="t", timeout=5.0)
 
     assert ok is True
     assert client.get_memories.await_count == 3
 
 
 @pytest.mark.asyncio
-async def test_flush_and_wait_durable_returns_false_on_timeout():
+async def test_process_now_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
     client.get_memories = AsyncMock(return_value=[])
@@ -104,7 +104,7 @@ async def test_flush_and_wait_durable_returns_false_on_timeout():
         return None
 
     with patch("asyncio.sleep", new=_no_sleep):
-        ok = await client.flush_and_wait(user_id="u", thread_id="t", timeout=0.01)
+        ok = await client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
     assert client.get_memories.await_count >= 1

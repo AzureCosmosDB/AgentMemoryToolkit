@@ -17,8 +17,8 @@ Three orchestrators run independently, each gated on its own threshold:
 +--------------------------+---------+------------------------------------+
 
 This sample writes a transcript long enough to cross the thread-level
-thresholds and uses :meth:`flush_and_wait` to *poll* Cosmos until the
-function app has produced a summary. ``flush_and_wait`` is intended for
+thresholds and uses :meth:`process_now_and_wait` to *poll* Cosmos until the
+function app has produced a summary. ``process_now_and_wait`` is intended for
 demos/tests; production code should not poll Cosmos for orchestration
 state.
 
@@ -80,14 +80,14 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # In durable mode .flush() is a no-op locally — the function app's
+    # In durable mode .process_now() is a no-op locally — the function app's
     # change-feed trigger has already begun work asynchronously. Use
-    # flush_and_wait() to *poll* for the summary doc; it's RU-costly so
+    # process_now_and_wait() to *poll* for the summary doc; it's RU-costly so
     # use it only in demos/tests.
     # ------------------------------------------------------------------
     print("\nWaiting (poll) for thread summary to be written by function app...")
     t0 = time.monotonic()
-    ok = client.flush_and_wait(
+    ok = client.process_now_and_wait(
         user_id=user_id,
         thread_id=thread_id,
         timeout=90.0,

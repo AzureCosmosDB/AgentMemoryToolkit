@@ -293,6 +293,43 @@ def test_salience_boundary_one():
 
 
 # ---------------------------------------------------------------------------
+# Confidence validation
+# ---------------------------------------------------------------------------
+
+
+def test_confidence_valid():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", confidence=0.92)
+    assert rec.confidence == 0.92
+
+
+def test_confidence_none_default():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    assert rec.confidence is None
+
+
+def test_confidence_out_of_range_high():
+    with pytest.raises(pydantic.ValidationError, match="confidence must be between"):
+        MemoryRecord(user_id="u1", role="user", content="test", confidence=1.5)
+
+
+def test_confidence_out_of_range_low():
+    with pytest.raises(pydantic.ValidationError, match="confidence must be between"):
+        MemoryRecord(user_id="u1", role="user", content="test", confidence=-0.1)
+
+
+def test_confidence_emitted_in_to_cosmos_dict():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", confidence=0.7)
+    data = rec.to_cosmos_dict()
+    assert data["confidence"] == 0.7
+
+
+def test_confidence_omitted_when_none():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    data = rec.to_cosmos_dict()
+    assert "confidence" not in data
+
+
+# ---------------------------------------------------------------------------
 # TTL field
 # ---------------------------------------------------------------------------
 

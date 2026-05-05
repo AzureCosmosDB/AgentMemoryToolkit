@@ -51,7 +51,7 @@ class TestAsyncInProcessFlushEndToEnd:
         ]
         client.get_thread = AsyncMock(return_value=fake_turns)
 
-        result = await client.flush(user_id="u-paris", thread_id="thread-paris")
+        result = await client.process_now(user_id="u-paris", thread_id="thread-paris")
 
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary == {
@@ -87,7 +87,7 @@ class TestAsyncDurableFlushEndToEnd:
         import logging
 
         with caplog.at_level(logging.DEBUG, logger="agent_memory_toolkit.aio.processors.durable"):
-            result = await client.flush(user_id="u-1", thread_id="th-1")
+            result = await client.process_now(user_id="u-1", thread_id="th-1")
 
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary is None
@@ -103,7 +103,7 @@ class TestAsyncDurableFlushEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# (c) flush_and_wait polling for AsyncDurableFunctionProcessor
+# (c) process_now_and_wait polling for AsyncDurableFunctionProcessor
 # ---------------------------------------------------------------------------
 
 
@@ -126,7 +126,7 @@ class TestAsyncDurableFlushAndWaitPolling:
 
         monkeypatch.setattr("asyncio.sleep", _no_sleep)
 
-        ok = await client.flush_and_wait(user_id="u-poll", thread_id="th-poll", timeout=10.0)
+        ok = await client.process_now_and_wait(user_id="u-poll", thread_id="th-poll", timeout=10.0)
 
         assert ok is True
         assert client.get_memories.await_count == 3
@@ -138,7 +138,7 @@ class TestAsyncDurableFlushAndWaitPolling:
 
 
 # ---------------------------------------------------------------------------
-# (d) flush_and_wait timeout for AsyncDurableFunctionProcessor
+# (d) process_now_and_wait timeout for AsyncDurableFunctionProcessor
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +155,7 @@ class TestAsyncDurableFlushAndWaitTimeout:
         monkeypatch.setattr("asyncio.sleep", _no_sleep)
 
         # Tiny timeout — loop.time() advances normally, so this expires fast.
-        ok = await client.flush_and_wait(user_id="u-to", thread_id="th-to", timeout=0.001)
+        ok = await client.process_now_and_wait(user_id="u-to", thread_id="th-to", timeout=0.001)
 
         assert ok is False
 
@@ -170,6 +170,6 @@ class TestAsyncDurableFlushAndWaitTimeout:
 
         monkeypatch.setattr("asyncio.sleep", _no_sleep)
 
-        ok = await client.flush_and_wait(user_id="u-err", thread_id="th-err", timeout=0.001)
+        ok = await client.process_now_and_wait(user_id="u-err", thread_id="th-err", timeout=0.001)
 
         assert ok is False

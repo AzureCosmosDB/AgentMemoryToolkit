@@ -14,9 +14,9 @@ Prerequisites
 
 Behavior notes
 --------------
-* :meth:`CosmosMemoryClient.flush` is a debug-logged no-op when using the
+* :meth:`CosmosMemoryClient.process_now` is a debug-logged no-op when using the
   durable processor — the function app owns processing.
-* :meth:`CosmosMemoryClient.flush_and_wait` *polls* Cosmos for the resulting
+* :meth:`CosmosMemoryClient.process_now_and_wait` *polls* Cosmos for the resulting
   summary; that costs RUs so it's opt-in and intended for demos / tests.
 """
 from __future__ import annotations
@@ -59,12 +59,12 @@ def main() -> None:
         print(f"  wrote {role:>9}: {content}")
 
     # No-op locally; the change-feed trigger in the function app does the work.
-    client.flush(user_id=user_id, thread_id=thread_id)
+    client.process_now(user_id=user_id, thread_id=thread_id)
 
     # Optional: block until the function app has produced a summary for this
     # thread. Polls Cosmos every 0.5s until ``timeout`` — RU-costly, demo only.
     print("\nWaiting for the function app to produce a summary...")
-    ok = client.flush_and_wait(user_id=user_id, thread_id=thread_id, timeout=60.0)
+    ok = client.process_now_and_wait(user_id=user_id, thread_id=thread_id, timeout=60.0)
     print(f"Summary available: {ok}")
 
 

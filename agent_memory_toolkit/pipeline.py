@@ -173,7 +173,7 @@ class ProcessingPipeline:
         for key, value in raw.items():
             if value is None:
                 continue
-            if key == "additionalProperties":
+            if key in ("additionalProperties", "additional_properties"):
                 if isinstance(value, dict):
                     params.update(value)
                 continue
@@ -391,6 +391,7 @@ class ProcessingPipeline:
         facts = parsed.get("facts", [])
         procedural = parsed.get("procedural", [])
         episodic = parsed.get("episodic", [])
+        unclassified = parsed.get("unclassified", [])
 
         now = datetime.now(timezone.utc).isoformat()
         docs_to_embed: list[dict[str, Any]] = []
@@ -410,6 +411,10 @@ class ProcessingPipeline:
             topic_tags = [f"topic:{t}" for t in fact.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted"] + topic_tags
 
+            confidence = fact.get("confidence")
+            if confidence is None:
+                confidence = 0.5
+
             doc: dict[str, Any] = {
                 "id": det_id,
                 "user_id": user_id,
@@ -418,12 +423,12 @@ class ProcessingPipeline:
                 "type": "fact",
                 "content": text,
                 "content_hash": content_hash,
+                "confidence": confidence,
                 "metadata": {
                     "category": fact.get("category"),
                     "subject": fact.get("subject"),
                     "predicate": fact.get("predicate"),
                     "object": fact.get("object"),
-                    "confidence": fact.get("confidence"),
                     "temporal_context": fact.get("temporal_context"),
                 },
                 "salience": fact.get("salience"),
@@ -484,6 +489,10 @@ class ProcessingPipeline:
             topic_tags = [f"topic:{t}" for t in proc.get("tags", [])]
             tags = ["sys:procedural", "sys:auto-extracted"] + topic_tags
 
+            confidence = proc.get("confidence")
+            if confidence is None:
+                confidence = 0.5
+
             doc = {
                 "id": det_id,
                 "user_id": user_id,
@@ -492,6 +501,7 @@ class ProcessingPipeline:
                 "type": "procedural",
                 "content": text,
                 "content_hash": content_hash,
+                "confidence": confidence,
                 "metadata": {
                     "trigger": proc.get("trigger"),
                     "category": proc.get("category"),
@@ -538,6 +548,10 @@ class ProcessingPipeline:
             topic_tags = [f"topic:{t}" for t in ep.get("tags", [])]
             tags = ["sys:episodic", "sys:auto-extracted"] + topic_tags
 
+            confidence = ep.get("confidence")
+            if confidence is None:
+                confidence = 0.5
+
             doc = {
                 "id": det_id,
                 "user_id": user_id,
@@ -546,6 +560,7 @@ class ProcessingPipeline:
                 "type": "episodic",
                 "content": text,
                 "content_hash": content_hash,
+                "confidence": confidence,
                 "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
                 "metadata": {
                     "situation": ep.get("situation"),
@@ -564,14 +579,53 @@ class ProcessingPipeline:
             docs_to_embed.append(doc)
             embed_texts.append(text)
 
-        # ---- 8. Generate embeddings in batch ----
+        # ---- 8. Process unclassified ----
+        # The LLM uses the `unclassified` bucket when it cannot confidently
+        # decide between fact / procedural / episodic. We persist these as
+        # facts (the most common type, retrieval already handles them well)
+        # tagged `sys:unclassified` so they're easy to audit and reclassify.
+        for item in unclassified:
+            text = item.get("text")
+            if not text:
+                continue
+            content_hash = compute_content_hash(text)
+            det_id = f"unc_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:16]}"
+
+            topic_tags = [f"topic:{t}" for t in item.get("tags", [])]
+            tags = ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags
+
+            confidence = item.get("confidence")
+            if confidence is None:
+                confidence = 0.5
+
+            doc = {
+                "id": det_id,
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "role": "system",
+                "type": "fact",
+                "content": text,
+                "content_hash": content_hash,
+                "confidence": confidence,
+                "metadata": {
+                    "unclassified_reason": item.get("reason"),
+                },
+                "salience": item.get("salience"),
+                "tags": tags,
+                "created_at": now,
+            }
+
+            docs_to_embed.append(doc)
+            embed_texts.append(text)
+
+        # ---- 9. Generate embeddings in batch ----
         if embed_texts:
             logger.info("extract_memories generating embeddings for %d items", len(embed_texts))
             embeddings = self._embeddings.generate_batch(embed_texts)
             for doc, emb in zip(docs_to_embed, embeddings):
                 doc["embedding"] = emb
 
-        # ---- 9. Upsert all documents ----
+        # ---- 10. Upsert all documents ----
         for doc in docs_to_embed:
             self._upsert_memory(doc)
 
@@ -579,6 +633,7 @@ class ProcessingPipeline:
             "facts_count": sum(1 for d in docs_to_embed if d["type"] == "fact"),
             "procedural_count": sum(1 for d in docs_to_embed if d["type"] == "procedural"),
             "episodic_count": sum(1 for d in docs_to_embed if d["type"] == "episodic"),
+            "unclassified_count": sum(1 for d in docs_to_embed if "sys:unclassified" in d.get("tags", [])),
             "updated_count": updated_count,
         }
         logger.info("extract_memories completed: %s", result)

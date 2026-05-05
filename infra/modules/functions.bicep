@@ -259,14 +259,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           name: 'AZURE_CLIENT_ID'
           value: uamiClientId
         }
-        // --- Threshold/batching policy (see spec section 8.4 / 11.2) ---
+        // --- Threshold/batching policy (see docs/processor_triggers.md) ---
         {
           name: 'THREAD_SUMMARY_EVERY_N'
-          value: '4'
+          value: '10'
         }
         {
           name: 'FACT_EXTRACTION_EVERY_N'
-          value: '4'
+          value: '1'
         }
         {
           name: 'USER_SUMMARY_EVERY_N'

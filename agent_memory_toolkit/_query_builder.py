@@ -61,6 +61,11 @@ class _QueryBuilder:
         """Add ``(IS_DEFINED(field) AND NOT IS_NULL(field))`` filter."""
         self._conditions.append(f"(IS_DEFINED({field}) AND NOT IS_NULL({field}))")
 
+    def add_gte(self, field: str, param_name: str, value: Any) -> None:
+        """Add a ``field >= @param`` filter."""
+        self._conditions.append(f"{field} >= {param_name}")
+        self._parameters.append({"name": param_name, "value": value})
+
     def build_where(self) -> str:
         """Return the ``WHERE …`` clause (or empty string if no filters)."""
         if not self._conditions:

@@ -292,6 +292,7 @@ def _build_memory_query_builder(
     thread_id: Optional[str] = None,
     role: Optional[str] = None,
     memory_type: Optional[str] = None,
+    min_confidence: Optional[float] = None,
 ) -> _QueryBuilder:
     """Return a :class:`_QueryBuilder` pre-loaded with the standard filters."""
     qb = _QueryBuilder()
@@ -300,6 +301,8 @@ def _build_memory_query_builder(
     qb.add_filter("c.thread_id", "@thread_id", thread_id)
     qb.add_filter("c.role", "@role", role)
     qb.add_filter("c.type", "@memory_type", memory_type)
+    if min_confidence is not None and min_confidence > 0:
+        qb.add_gte("c.confidence", "@min_confidence", min_confidence)
     return qb
 
 

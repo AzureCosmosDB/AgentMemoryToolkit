@@ -51,11 +51,11 @@ async def main() -> None:
             print(f"  wrote {role:>9}: {content}")
 
         # No-op locally; the change-feed trigger in the function app does the work.
-        await client.flush(user_id=user_id, thread_id=thread_id)
+        await client.process_now(user_id=user_id, thread_id=thread_id)
 
         # Optional: poll until the function app produces a summary. RU-costly.
         print("\nWaiting for the function app to produce a summary...")
-        ok = await client.flush_and_wait(
+        ok = await client.process_now_and_wait(
             user_id=user_id, thread_id=thread_id, timeout=60.0
         )
         print(f"Summary available: {ok}")

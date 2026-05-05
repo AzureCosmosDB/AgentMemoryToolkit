@@ -18,8 +18,8 @@
     "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME": "text-embedding-3-large",
 
     "// --- Threshold knobs (set to 0 to disable that orchestrator) ---": "",
-    "THREAD_SUMMARY_EVERY_N": "4",
-    "FACT_EXTRACTION_EVERY_N": "4",
+    "THREAD_SUMMARY_EVERY_N": "10",
+    "FACT_EXTRACTION_EVERY_N": "1",
     "USER_SUMMARY_EVERY_N": "20",
 
     "// --- Batch knob ---": "",

@@ -169,6 +169,7 @@ class AsyncCosmosMemoryClient:
         # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
         self._container_client: Any = None
+        self._counter_container_client: Any = None
 
         # Composed sub-clients
         self._embeddings_client = AsyncEmbeddingsClient(
@@ -213,6 +214,7 @@ class AsyncCosmosMemoryClient:
             await self._cosmos_client.close()
             self._cosmos_client = None
             self._container_client = None
+            self._counter_container_client = None
         if self._sync_cosmos_client is not None:
             close = getattr(self._sync_cosmos_client, "close", None)
             if callable(close):
@@ -610,6 +612,11 @@ class AsyncCosmosMemoryClient:
 
         Each local memory is inserted as-is, preserving its existing
         ``id``, ``thread_id``, timestamps, and metadata.
+
+        After the upserts, per-(user_id, thread_id) turn counts are
+        accumulated and the in-process processor's auto-trigger runs
+        inline. The trigger is best-effort: any failure is logged and
+        swallowed so writes never fail because of background processing.
         """
         await self._require_cosmos()
         if batch_size <= 0:
@@ -620,6 +627,11 @@ class AsyncCosmosMemoryClient:
             batch_size,
         )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
+        turn_counts: dict[tuple[str, str], int] = {}
+        for r in records:
+            if str(getattr(r, "memory_type", "")) == "turn":
+                key = (r.user_id, r.thread_id)
+                turn_counts[key] = turn_counts.get(key, 0) + 1
 
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
@@ -630,6 +642,12 @@ class AsyncCosmosMemoryClient:
                 raise CosmosOperationError(f"Async push_to_cosmos batch upsert failed: {exc}") from exc
 
         logger.info("Async upserted batch of %d records", len(records))
+
+        try:
+            await self._maybe_auto_trigger(turn_counts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Auto-trigger after push_to_cosmos failed: %s", exc)
+
 
     async def get_memories(
         self,
@@ -644,6 +662,7 @@ class AsyncCosmosMemoryClient:
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
+        min_confidence: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve memories from Cosmos DB with optional filters.
 
@@ -660,6 +679,9 @@ class AsyncCosmosMemoryClient:
             exclude_tags: NOT filter — none of these tags may be present.
             include_superseded: If False (default), exclude superseded memories.
             min_salience: Post-filter: only return memories with salience >= this value.
+            min_confidence: Cosmos-side filter — only return memories with
+                ``confidence >= min_confidence``. Memories without a confidence
+                value (e.g. ``turn`` records) are excluded when this is set.
         """
         await self._require_cosmos()
         logger.debug(
@@ -678,6 +700,7 @@ class AsyncCosmosMemoryClient:
             thread_id=thread_id,
             role=role,
             memory_type=memory_type,
+            min_confidence=min_confidence,
         )
 
         # Tag filters
@@ -828,6 +851,7 @@ class AsyncCosmosMemoryClient:
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
+        min_confidence: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         """Search memories in Cosmos DB using vector similarity.
 
@@ -854,7 +878,13 @@ class AsyncCosmosMemoryClient:
 
         query_vector = await self._embeddings_client.generate(search_terms)
 
-        qb = _build_memory_query_builder(user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id)
+        qb = _build_memory_query_builder(
+            user_id=user_id,
+            role=role,
+            memory_type=memory_type,
+            thread_id=thread_id,
+            min_confidence=min_confidence,
+        )
 
         # Tag filters
         if tags:
@@ -879,7 +909,7 @@ class AsyncCosmosMemoryClient:
 
         query = (
             f"SELECT TOP @top_k c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
-            f"c.metadata, c.created_at, c.tags, c.salience, c.superseded_by "
+            f"c.metadata, c.created_at, c.tags, c.salience, c.confidence, c.superseded_by "
             f"FROM c{where} "
             f"{order_by}"
         )
@@ -1186,6 +1216,101 @@ class AsyncCosmosMemoryClient:
             self._processor = AsyncInProcessProcessor(pipeline=self._pipeline)
         return self._processor
 
+    def _get_counter_container(self) -> Any:
+        """Lazy handle to the counter container (best-effort, returns None on failure)."""
+        if self._counter_container_client is not None:
+            return self._counter_container_client
+        if self._cosmos_client is None:
+            return None
+        try:
+            db = self._cosmos_client.get_database_client(self._cosmos_database)
+            self._counter_container_client = db.get_container_client(
+                self._cosmos_counter_container
+            )
+            return self._counter_container_client
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Counter container %s/%s unreachable; auto-trigger disabled: %s",
+                self._cosmos_database,
+                self._cosmos_counter_container,
+                exc,
+            )
+            return None
+
+    async def _maybe_auto_trigger(
+        self, turn_counts: dict[tuple[str, str], int]
+    ) -> None:
+        """Async mirror of ``CosmosMemoryClient._maybe_auto_trigger``.
+
+        Inlines the call to ``processor.process_thread`` rather than
+        spawning a background task — operators wanting fire-and-forget
+        can wrap the surrounding ``push_to_cosmos()`` call in
+        ``asyncio.create_task()`` themselves so errors and tracing remain
+        visible to them.
+        """
+        from .._counters import (
+            crosses_threshold,
+            increment_counter_async,
+            thread_counter_id,
+        )
+        from .._thresholds import (
+            get_fact_extraction_every_n,
+            get_thread_summary_every_n,
+        )
+
+        if not turn_counts:
+            return
+
+        try:
+            processor = self._get_processor()
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not isinstance(processor, AsyncInProcessProcessor):
+            return
+
+        n_facts = get_fact_extraction_every_n()
+        n_summary = get_thread_summary_every_n()
+        if n_facts == 0 and n_summary == 0:
+            return
+
+        counter_container = self._get_counter_container()
+        if counter_container is None:
+            return
+
+        for (user_id, thread_id), batch_count in turn_counts.items():
+            if batch_count <= 0:
+                continue
+            try:
+                old_count, new_count = await increment_counter_async(
+                    counter_container,
+                    thread_counter_id(user_id, thread_id),
+                    user_id,
+                    thread_id,
+                    batch_count,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Counter increment failed for %s/%s: %s", user_id, thread_id, exc)
+                continue
+
+            should_fire = (n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)) or (
+                n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
+            )
+            if not should_fire:
+                continue
+
+            try:
+                await processor.process_thread(
+                    user_id=user_id, thread_id=thread_id, turns=[],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Auto-trigger process_thread failed for %s/%s: %s",
+                    user_id,
+                    thread_id,
+                    exc,
+                )
+
+
     async def extract_memories(
         self,
         user_id: str,
@@ -1253,13 +1378,17 @@ class AsyncCosmosMemoryClient:
     # Processor delegation
     # ------------------------------------------------------------------
 
-    async def flush(
+    async def process_now(
         self,
         *,
         user_id: str,
         thread_id: str,
     ) -> "ProcessThreadResult":
-        """Process buffered turns for ``(user_id, thread_id)`` via the active processor.
+        """Force the processor to run summarize/extract/dedup right now.
+
+        Unlike the auto-trigger that fires from :meth:`push_to_cosmos` once
+        a per-turn threshold is crossed, this method runs unconditionally.
+        Useful for end-of-conversation cleanup and eval/test determinism.
 
         For :class:`AsyncInProcessProcessor` this runs the sync pipeline
         inline. For :class:`AsyncDurableFunctionProcessor` this is a
@@ -1284,18 +1413,18 @@ class AsyncCosmosMemoryClient:
         assert isinstance(result, ProcessThreadResult)
         return result
 
-    async def flush_and_wait(
+    async def process_now_and_wait(
         self,
         *,
         user_id: str,
         thread_id: str,
         timeout: float = 30.0,
     ) -> bool:
-        """Flush and block until a thread summary exists (or ``timeout``).
+        """Force processing and block until a thread summary exists (or ``timeout``).
 
-        Mirrors :meth:`CosmosMemoryClient.flush_and_wait`. For
-        :class:`AsyncInProcessProcessor` this is just a flush followed by
-        ``True``. For :class:`AsyncDurableFunctionProcessor` this polls
+        Mirrors :meth:`CosmosMemoryClient.process_now_and_wait`. For
+        :class:`AsyncInProcessProcessor` this is just a process_now followed
+        by ``True``. For :class:`AsyncDurableFunctionProcessor` this polls
         ``get_memories(memory_type="summary", ...)`` every 0.5s using
         :func:`asyncio.sleep`.
 
@@ -1307,10 +1436,10 @@ class AsyncCosmosMemoryClient:
         processor = self._get_processor()
 
         if isinstance(processor, AsyncInProcessProcessor):
-            await self.flush(user_id=user_id, thread_id=thread_id)
+            await self.process_now(user_id=user_id, thread_id=thread_id)
             return True
 
-        await self.flush(user_id=user_id, thread_id=thread_id)
+        await self.process_now(user_id=user_id, thread_id=thread_id)
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout

@@ -1,12 +1,17 @@
 """Configuration helpers for the processor function app.
 
 All knobs are read from environment variables / Azure Functions app settings.
-Defaults match the spec (section 8.4 / 11.2):
+Defaults:
 
-* ``THREAD_SUMMARY_EVERY_N``       — default 4
-* ``FACT_EXTRACTION_EVERY_N``      — default 4
+* ``FACT_EXTRACTION_EVERY_N``      — default 1 (per-turn extraction)
+* ``THREAD_SUMMARY_EVERY_N``       — default 10 (rolling summary cadence)
 * ``USER_SUMMARY_EVERY_N``         — default 20
 * ``MAX_BATCH_SIZE``               — default 20
+
+The fact-extraction default of ``1`` - every
+new turn produces fresh facts. Operators can raise this for cost-sensitive
+workloads. Summaries default to ``10`` because each summary call sees the
+full recent context window and is the most expensive per-call operation.
 
 Setting any ``*_EVERY_N`` env var to ``"0"`` disables that orchestrator
 entirely. When the env var is unset or invalid the documented default is
@@ -39,8 +44,8 @@ USER_COUNTER_THREAD_ID = "__counters__"
 # Defaults documented in local.settings.json.template
 # ---------------------------------------------------------------------------
 
-DEFAULT_THREAD_SUMMARY_EVERY_N = 4
-DEFAULT_FACT_EXTRACTION_EVERY_N = 4
+DEFAULT_THREAD_SUMMARY_EVERY_N = 10
+DEFAULT_FACT_EXTRACTION_EVERY_N = 1
 DEFAULT_USER_SUMMARY_EVERY_N = 20
 DEFAULT_MAX_BATCH_SIZE = 20
 

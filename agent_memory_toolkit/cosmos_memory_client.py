@@ -160,6 +160,7 @@ class CosmosMemoryClient:
         # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
         self._container_client: Any = None
+        self._counter_container_client: Any = None
 
         # Composed sub-clients
         self._embeddings_client = EmbeddingsClient(
@@ -207,6 +208,7 @@ class CosmosMemoryClient:
             self._cosmos_client.close()
             self._cosmos_client = None
             self._container_client = None
+            self._counter_container_client = None
             logger.info("Cosmos client closed")
 
     # ------------------------------------------------------------------
@@ -563,6 +565,107 @@ class CosmosMemoryClient:
             self._processor = InProcessProcessor(pipeline=self._pipeline)
         return self._processor
 
+    def _get_counter_container(self) -> Any:
+        """Return a lazy handle to the counter container.
+
+        Best-effort: returns ``None`` if the container is unreachable (e.g. the
+        operator brought their own memory container without provisioning a
+        counter container). Auto-trigger callers must tolerate ``None`` and
+        skip the increment.
+        """
+        if self._counter_container_client is not None:
+            return self._counter_container_client
+        if self._cosmos_client is None:
+            return None
+        try:
+            db = self._cosmos_client.get_database_client(self._cosmos_database)
+            self._counter_container_client = db.get_container_client(self._cosmos_counter_container)
+            return self._counter_container_client
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Counter container %s/%s unreachable; auto-trigger disabled: %s",
+                self._cosmos_database,
+                self._cosmos_counter_container,
+                exc,
+            )
+            return None
+
+    def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
+        """After ``push_to_cosmos``, increment counters and run the processor inline.
+
+        Only fires for the in-process backend; the durable backend relies on
+        the change-feed-driven function app, which uses the same counter
+        container and would otherwise double-fire. Failures here are logged
+        and swallowed — the user's primary write must never fail because of
+        an auto-trigger.
+        """
+        from ._counters import (
+            crosses_threshold,
+            increment_counter_sync,
+            thread_counter_id,
+        )
+        from ._thresholds import (
+            get_fact_extraction_every_n,
+            get_thread_summary_every_n,
+        )
+        from .processors import InProcessProcessor
+
+        if not turn_counts:
+            return
+
+        # Only the InProcess backend needs the client-side trigger; Durable is
+        # driven by the FA change-feed processor with the same thresholds.
+        try:
+            processor = self._get_processor()
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not isinstance(processor, InProcessProcessor):
+            return
+
+        n_facts = get_fact_extraction_every_n()
+        n_summary = get_thread_summary_every_n()
+        if n_facts == 0 and n_summary == 0:
+            return
+
+        counter_container = self._get_counter_container()
+        if counter_container is None:
+            return
+
+        for (user_id, thread_id), batch_count in turn_counts.items():
+            if batch_count <= 0:
+                continue
+            try:
+                old_count, new_count = increment_counter_sync(
+                    counter_container,
+                    thread_counter_id(user_id, thread_id),
+                    user_id,
+                    thread_id,
+                    batch_count,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Counter increment failed for %s/%s: %s", user_id, thread_id, exc)
+                continue
+
+            should_fire = (n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)) or (
+                n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
+            )
+            if not should_fire:
+                continue
+
+            try:
+                processor.process_thread(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    turns=[],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Auto-trigger process_thread failed for %s/%s: %s",
+                    user_id,
+                    thread_id,
+                    exc,
+                )
+
     def _require_cosmos(self) -> None:
         """Raise if Cosmos DB is not connected."""
         if self._container_client is None:
@@ -643,6 +746,13 @@ class CosmosMemoryClient:
         Each local memory is inserted as-is, preserving its existing
         ``id``, ``thread_id``, timestamps, and metadata.
 
+        After the batched upserts complete, per-(user_id, thread_id) turn
+        counts are accumulated and the in-process processor's auto-trigger
+        runs. The trigger is best-effort: any failure (counter container
+        missing, threshold-crossing logic raising, processor error) is
+        logged and swallowed so writes never fail because of background
+        processing.
+
         Parameters
         ----------
         batch_size : int
@@ -658,6 +768,7 @@ class CosmosMemoryClient:
             batch_size,
         )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
+        turn_counts: dict[tuple[str, str], int] = {}
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
             for record in batch:
@@ -666,7 +777,15 @@ class CosmosMemoryClient:
                     self._container_client.upsert_item(body=body)
                 except Exception as exc:
                     raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
+                if str(getattr(record, "memory_type", "")) == "turn":
+                    key = (record.user_id, record.thread_id)
+                    turn_counts[key] = turn_counts.get(key, 0) + 1
         logger.info("Upserted batch of %d records", len(records))
+
+        try:
+            self._maybe_auto_trigger(turn_counts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Auto-trigger after push_to_cosmos failed: %s", exc)
 
     def get_memories(
         self,
@@ -681,6 +800,7 @@ class CosmosMemoryClient:
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
+        min_confidence: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve memories from Cosmos DB with optional filters.
 
@@ -697,6 +817,9 @@ class CosmosMemoryClient:
             exclude_tags: NOT filter — none of these tags may be present.
             include_superseded: If False (default), exclude superseded memories.
             min_salience: Post-filter: only return memories with salience >= this value.
+            min_confidence: Cosmos-side filter — only return memories with
+                ``confidence >= min_confidence``. Memories without a confidence
+                value (e.g. ``turn`` records) are excluded when this is set.
         """
         self._require_cosmos()
         logger.debug(
@@ -715,6 +838,7 @@ class CosmosMemoryClient:
             thread_id=thread_id,
             role=role,
             memory_type=memory_type,
+            min_confidence=min_confidence,
         )
 
         # Tag filters
@@ -872,6 +996,7 @@ class CosmosMemoryClient:
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
+        min_confidence: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         """Search memories in Cosmos DB using vector similarity.
 
@@ -879,6 +1004,11 @@ class CosmosMemoryClient:
         2. Runs a vector similarity query against the Cosmos DB container.
         3. Optionally filters by the remaining keyword parameters.
         4. Returns up to *top_k* results ordered by similarity.
+
+        Args:
+            min_confidence: Cosmos-side filter — only return memories with
+                ``confidence >= min_confidence``. Memories without confidence
+                (e.g. raw ``turn`` records) are excluded when set.
         """
         self._require_cosmos()
         _validate_hybrid_search(hybrid_search, search_terms)
@@ -898,7 +1028,13 @@ class CosmosMemoryClient:
 
         query_vector = self._embeddings_client.generate(search_terms)
 
-        qb = _build_memory_query_builder(user_id=user_id, role=role, memory_type=memory_type, thread_id=thread_id)
+        qb = _build_memory_query_builder(
+            user_id=user_id,
+            role=role,
+            memory_type=memory_type,
+            thread_id=thread_id,
+            min_confidence=min_confidence,
+        )
 
         # Tag filters
         if tags:
@@ -923,7 +1059,7 @@ class CosmosMemoryClient:
 
         query = (
             f"SELECT TOP @top_k c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
-            f"c.metadata, c.created_at, c.tags, c.salience, c.superseded_by "
+            f"c.metadata, c.created_at, c.tags, c.salience, c.confidence, c.superseded_by "
             f"FROM c{where} "
             f"{order_by}"
         )
@@ -1205,18 +1341,25 @@ class CosmosMemoryClient:
     # Processor delegation
     # ------------------------------------------------------------------
 
-    def flush(
+    def process_now(
         self,
         *,
         user_id: str,
         thread_id: str,
     ) -> "ProcessThreadResult":
-        """Process buffered turns for ``(user_id, thread_id)`` via the active processor.
+        """Force the processor to run summarize/extract/dedup right now.
+
+        Unlike the auto-trigger that fires from :meth:`push_to_cosmos` once
+        a per-turn threshold is crossed, this method runs unconditionally.
+        Useful for end-of-conversation cleanup, eval/test determinism, and
+        agent handoff when you need a fresh summary regardless of cadence.
 
         For :class:`InProcessProcessor` this runs the summarize/extract/dedup
         pipeline inline. For :class:`DurableFunctionProcessor` this is a
         debug-logged no-op (the function app handles processing via
-        Cosmos DB Change Feed).
+        Cosmos DB Change Feed). With per-turn extraction enabled (the
+        default ``FACT_EXTRACTION_EVERY_N=1``) calling this after every
+        turn is redundant — facts have already been extracted.
         """
         from .processors import ProcessThreadResult  # local import for forward ref
 
@@ -1236,17 +1379,17 @@ class CosmosMemoryClient:
         assert isinstance(result, ProcessThreadResult)
         return result
 
-    def flush_and_wait(
+    def process_now_and_wait(
         self,
         *,
         user_id: str,
         thread_id: str,
         timeout: float = 30.0,
     ) -> bool:
-        """Flush and block until a thread summary exists (or ``timeout``).
+        """Force processing and block until a thread summary exists (or ``timeout``).
 
-        For :class:`InProcessProcessor` this is just :meth:`flush` followed
-        by ``True`` (the in-process pipeline is synchronous). For
+        For :class:`InProcessProcessor` this is just :meth:`process_now`
+        followed by ``True`` (the in-process pipeline is synchronous). For
         :class:`DurableFunctionProcessor` this polls
         ``get_memories(memory_type="summary", ...)`` every 0.5s until a
         summary appears or the timeout expires.
@@ -1263,21 +1406,17 @@ class CosmosMemoryClient:
         self._require_cosmos()
         processor = self._get_processor()
 
-        # In-process: pipeline is synchronous, so flush() already finished work.
+        # In-process: pipeline is synchronous, so process_now() already finished work.
         if isinstance(processor, InProcessProcessor):
-            self.flush(user_id=user_id, thread_id=thread_id)
+            self.process_now(user_id=user_id, thread_id=thread_id)
             return True
 
         # Durable: trigger the no-op flush (debug log) then poll Cosmos.
-        self.flush(user_id=user_id, thread_id=thread_id)
+        self.process_now(user_id=user_id, thread_id=thread_id)
 
         deadline = _time.monotonic() + timeout
         poll_interval = 0.5
         while _time.monotonic() < deadline:
-            # Use get_memories (filter-only, no embeddings) so flush_and_wait
-            # works even when the client has no AI Foundry endpoint configured
-            # (i.e. the SDK is purely a Cosmos writer + the Function app owns
-            # all LLM calls).
             try:
                 results = self.get_memories(
                     user_id=user_id,

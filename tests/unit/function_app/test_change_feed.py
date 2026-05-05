@@ -96,7 +96,8 @@ def test_all_disabled_skips_everything():
 
 
 def test_unset_thresholds_apply_documented_defaults(monkeypatch):
-    """When env vars are unset, thresholds fall back to 4/4/20, not 0.
+    """When env vars are unset, thresholds fall back to documented defaults
+    (fact=1, thread=10, user=20), not 0.
 
     Regression for the silent-no-op out-of-the-box deploy bug: a missing
     setting should NOT disable the orchestrator (only an explicit "0" does).
@@ -107,20 +108,31 @@ def test_unset_thresholds_apply_documented_defaults(monkeypatch):
     starter = _make_starter()
     container = _make_counter_container_starting_at()
 
-    # 4 turns from the same user/thread => crosses thread (n=4) and fact (n=4)
-    # thresholds; 4 user-scoped turns is below user (n=20).
+    # 1 turn => crosses fact extraction (n=1) only.
     asyncio.run(
         process_changefeed_batch(
-            [_turn(), _turn(), _turn(), _turn()],
+            [_turn()],
             starter,
             counter_container=container,
         )
     )
 
     started_names = [c.args[0] for c in starter.start_new.await_args_list]
-    assert "ThreadSummaryOrchestrator" in started_names
     assert "ExtractMemoriesOrchestrator" in started_names
+    assert "ThreadSummaryOrchestrator" not in started_names
     assert "UserSummaryOrchestrator" not in started_names
+
+    # 10 more turns from the same user/thread => crosses thread (n=10).
+    starter.start_new.reset_mock()
+    asyncio.run(
+        process_changefeed_batch(
+            [_turn() for _ in range(10)],
+            starter,
+            counter_container=container,
+        )
+    )
+    started_names = [c.args[0] for c in starter.start_new.await_args_list]
+    assert "ThreadSummaryOrchestrator" in started_names
 
 
 @patch.dict(

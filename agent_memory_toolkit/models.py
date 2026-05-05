@@ -92,6 +92,7 @@ class MemoryRecord(BaseModel):
     tags: list[str] = Field(default_factory=list)
     ttl: Optional[int] = None
     salience: Optional[float] = None
+    confidence: Optional[float] = None
     content_hash: Optional[str] = None
     superseded_by: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
@@ -145,6 +146,13 @@ class MemoryRecord(BaseModel):
             raise ValueError(f"salience must be between 0.0 and 1.0, got {v}")
         return v
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _validate_confidence(cls, v: Any) -> Any:
+        if v is not None and (v < 0.0 or v > 1.0):
+            raise ValueError(f"confidence must be between 0.0 and 1.0, got {v}")
+        return v
+
     # -- serialization helpers -----------------------------------------------
 
     def to_cosmos_dict(self) -> dict[str, Any]:
@@ -175,6 +183,8 @@ class MemoryRecord(BaseModel):
             data["ttl"] = self.ttl
         if self.salience is not None:
             data["salience"] = self.salience
+        if self.confidence is not None:
+            data["confidence"] = self.confidence
         if self.content_hash is not None:
             data["content_hash"] = self.content_hash
         if self.superseded_by is not None:

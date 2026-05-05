@@ -137,7 +137,7 @@ memory.add_cosmos(user_id=USER, thread_id=THREAD, role="user", content="I love C
 memory.add_cosmos(user_id=USER, thread_id=THREAD, role="assistant", content="It is fantastic.")
 
 # Run the processing pipeline (thread summary + fact extraction + user summary)
-memory.flush(user_id=USER, thread_id=THREAD)
+memory.process_now(user_id=USER, thread_id=THREAD)
 
 # Search semantically across the stored memory
 hits = memory.search_cosmos(user_id=USER, query_text="Cosmos DB preferences", top=5)
@@ -169,12 +169,45 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 |---|---|---|
 | **Turn** | One message (user or assistant) — the raw conversation atom | `add_cosmos(...)`, `add_local(...)` |
 | **Thread summary** | LLM-generated, incrementally updated rollup of a single thread | `generate_thread_summary(...)` |
-| **Fact** | Discrete, independently searchable assertion extracted from turns | `extract_facts(...)` |
+| **Fact** | Discrete, independently searchable assertion extracted from turns | `extract_memories(...)` |
+| **Procedural** | Behavioral rule / instruction the user wants followed | `extract_memories(...)` |
+| **Episodic** | Past situation → action → outcome experience (90-day TTL) | `extract_memories(...)` |
 | **User summary** | Cross-thread profile of what's known about a user | `generate_user_summary(...)`, `get_user_summary(...)` |
-| **Search** | Vector + full-text + filter; returns turns, summaries, and facts | `search_cosmos(...)` |
-| **Flush** | Run the full pipeline (summary → facts → user profile) for recent turns | `flush(...)`, `flush_and_wait(...)` |
+| **Search** | Vector + full-text + filter; returns any of the above | `search_cosmos(...)` |
+| **Process now** | Run the full pipeline (summary → facts → user profile) for recent turns | `process_now(...)`, `process_now_and_wait(...)` |
 
-All four memory kinds live in the same Cosmos container, partitioned by `(user_id, thread_id)`, distinguished by a `memory_type` discriminator.
+All memory kinds live in the same Cosmos container, partitioned by `(user_id, thread_id)`, distinguished by a `type` discriminator.
+
+### Memory Type Taxonomy
+
+The `extract_memories` pipeline classifies each item it pulls from the conversation into one of four buckets. Every memory carries a top-level `confidence` (0.0–1.0) so retrieval can suppress weakly-grounded extractions.
+
+| Bucket | Meaning | Storage type | TTL |
+|---|---|---|---|
+| Fact | Declarative knowledge ("user prefers dark mode") | `type="fact"` | none |
+| Procedural | Behavioral rule ("always confirm before deleting") | `type="procedural"` | none |
+| Episodic | Past experience: situation → action → outcome | `type="episodic"` | 90 days |
+| Unclassified | Item worth keeping but the LLM couldn't confidently classify | `type="fact"` + tag `sys:unclassified` | none |
+
+#### Confidence Scale
+
+| Range | Meaning |
+|---|---|
+| 0.9–1.0 | Directly stated and unambiguous |
+| 0.7–0.9 | Clearly implied, no contradicting evidence |
+| 0.5–0.7 | Inferred from context — plausible but not explicit |
+| < 0.5 | Should be in `unclassified` instead |
+
+Filter at retrieval time:
+
+```python
+results = memory.search_cosmos("user preferences", user_id="u1", min_confidence=0.7)
+high_conf_facts = memory.get_memories(user_id="u1", memory_type="fact", min_confidence=0.7)
+```
+
+### Auto-trigger (per-turn extraction)
+
+By default, the **InProcess processor** runs fact extraction after **every turn** (`FACT_EXTRACTION_EVERY_N=1`) and a thread summary every **10 turns** (`THREAD_SUMMARY_EVERY_N=10`). The trigger fires inside `push_to_cosmos()` after the turn is durably written, so calling `process_now()` is normally redundant — it remains as an explicit "flush now" hook. The Durable backend uses the same defaults via the change-feed function app.
 
 ---
 
@@ -186,8 +219,8 @@ Pick at construction time via the `processor=` kwarg.
 |---|---|---|
 | Infra | None — just `pip install` | Sibling Azure Function app |
 | Best for | Prototypes, low TPS, single-agent | Fleet / multi-agent / high TPS |
-| `flush()` | Synchronous, returns when done | No-op (work runs async on change feed) |
-| `flush_and_wait()` | Returns immediately after flush | Polls until summary visible (RU-costly; tests/demos) |
+| `process_now()` | Synchronous, returns when done | No-op (work runs async on change feed) |
+| `process_now_and_wait()` | Returns immediately after flush | Polls until summary visible (RU-costly; tests/demos) |
 
 ```python
 from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
@@ -208,8 +241,8 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 | `MemoryProcessor` | `agent_memory_toolkit` | Protocol that any processor backend implements |
 | `InProcessProcessor` | `agent_memory_toolkit` | Default backend — runs the pipeline in-process |
 | `DurableFunctionProcessor` | `agent_memory_toolkit` | Marker backend — work runs in sibling Function app via change feed |
-| `client.flush()` | — | Run the pipeline for recent turns (in-process) or no-op (remote) |
-| `client.flush_and_wait()` | — | Opt-in poll until processing completes; useful for tests/demos with the remote backend |
+| `client.process_now()` | — | Run the pipeline for recent turns (in-process) or no-op (remote) |
+| `client.process_now_and_wait()` | — | Opt-in poll until processing completes; useful for tests/demos with the remote backend |
 | `MemoryRecord`, `MemoryType`, `Role` | `agent_memory_toolkit` | Pydantic models / enums |
 
 Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) live in `agent_memory_toolkit.aio`.
@@ -243,6 +276,6 @@ tests/                  Unit + integration tests (pytest)
 
 ## Migration notes
 
-- **`agent_memory_toolkit.processing.ProcessingClient` is removed.** Drop the import and call `client.flush()` (or `client.flush_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
+- **`agent_memory_toolkit.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
 - **New `processor=` kwarg.** Defaults to `InProcessProcessor()` — existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.

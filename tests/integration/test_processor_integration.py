@@ -1,6 +1,6 @@
 """Integration-style tests for the processor protocol surface.
 
-Exercises ``CosmosMemoryClient.flush`` / ``flush_and_wait`` end-to-end with
+Exercises ``CosmosMemoryClient.flush`` / ``process_now_and_wait`` end-to-end with
 a fully mocked Cosmos container — no live Azure calls — to validate that
 the SDK wires the active :class:`MemoryProcessor` correctly through the
 public API.
@@ -55,7 +55,7 @@ class TestInProcessFlushEndToEnd:
         ]
         client.get_thread = MagicMock(return_value=fake_turns)
 
-        result = client.flush(user_id="u-paris", thread_id="thread-paris")
+        result = client.process_now(user_id="u-paris", thread_id="thread-paris")
 
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary == {
@@ -92,7 +92,7 @@ class TestDurableFlushEndToEnd:
         import logging
 
         with caplog.at_level(logging.DEBUG, logger="agent_memory_toolkit.processors.durable"):
-            result = client.flush(user_id="u-1", thread_id="th-1")
+            result = client.process_now(user_id="u-1", thread_id="th-1")
 
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary is None
@@ -108,7 +108,7 @@ class TestDurableFlushEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# (c) flush_and_wait polling for DurableFunctionProcessor
+# (c) process_now_and_wait polling for DurableFunctionProcessor
 # ---------------------------------------------------------------------------
 
 
@@ -129,7 +129,7 @@ class TestDurableFlushAndWaitPolling:
         # Make sleep a no-op so the test stays fast.
         monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
-        ok = client.flush_and_wait(user_id="u-poll", thread_id="th-poll", timeout=10.0)
+        ok = client.process_now_and_wait(user_id="u-poll", thread_id="th-poll", timeout=10.0)
 
         assert ok is True
         assert client.get_memories.call_count == 3
@@ -142,7 +142,7 @@ class TestDurableFlushAndWaitPolling:
 
 
 # ---------------------------------------------------------------------------
-# (d) flush_and_wait timeout for DurableFunctionProcessor
+# (d) process_now_and_wait timeout for DurableFunctionProcessor
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +165,7 @@ class TestDurableFlushAndWaitTimeout:
         monkeypatch.setattr("time.monotonic", _fake_monotonic)
         monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
 
-        ok = client.flush_and_wait(user_id="u-to", thread_id="th-to", timeout=0.5)
+        ok = client.process_now_and_wait(user_id="u-to", thread_id="th-to", timeout=0.5)
 
         assert ok is False
         # get_memories was tried at least once before the deadline expired.
@@ -178,6 +178,6 @@ class TestDurableFlushAndWaitTimeout:
 
         monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
 
-        ok = client.flush_and_wait(user_id="u-err", thread_id="th-err", timeout=0.01)
+        ok = client.process_now_and_wait(user_id="u-err", thread_id="th-err", timeout=0.01)
 
         assert ok is False

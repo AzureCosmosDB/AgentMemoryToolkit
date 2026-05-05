@@ -1,4 +1,4 @@
-"""Tests for CosmosMemoryClient.flush() / flush_and_wait() processor delegation."""
+"""Tests for CosmosMemoryClient.process_now() / process_now_and_wait() processor delegation."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _patch_get_thread(client, turns):
     client.get_thread = MagicMock(return_value=turns)
 
 
-def test_flush_with_inprocess_invokes_pipeline():
+def test_process_now_with_inprocess_invokes_pipeline():
     client = _connected()  # default → InProcessProcessor lazily built
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s", "type": "summary"}
@@ -35,7 +35,7 @@ def test_flush_with_inprocess_invokes_pipeline():
     client._pipeline = pipeline  # short-circuit lazy build
     _patch_get_thread(client, [{"role": "user", "content": "hi"}])
 
-    result = client.flush(user_id="u1", thread_id="t1")
+    result = client.process_now(user_id="u1", thread_id="t1")
 
     assert isinstance(result, ProcessThreadResult)
     assert isinstance(client._processor, InProcessProcessor)
@@ -44,13 +44,13 @@ def test_flush_with_inprocess_invokes_pipeline():
     pipeline.deduplicate_facts.assert_called_once_with("u1")
 
 
-def test_flush_with_durable_is_noop():
+def test_process_now_with_durable_is_noop():
     client = _connected(processor=DurableFunctionProcessor())
     pipeline = MagicMock()
     client._pipeline = pipeline
     _patch_get_thread(client, [{"role": "user", "content": "hi"}])
 
-    result = client.flush(user_id="u1", thread_id="t1")
+    result = client.process_now(user_id="u1", thread_id="t1")
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary is None
@@ -59,13 +59,13 @@ def test_flush_with_durable_is_noop():
     pipeline.deduplicate_facts.assert_not_called()
 
 
-def test_flush_requires_cosmos():
+def test_process_now_requires_cosmos():
     client = CosmosMemoryClient(use_default_credential=False)
     with pytest.raises(CosmosNotConnectedError):
-        client.flush(user_id="u1", thread_id="t1")
+        client.process_now(user_id="u1", thread_id="t1")
 
 
-def test_flush_and_wait_inprocess_returns_true():
+def test_process_now_and_wait_inprocess_returns_true():
     client = _connected()
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
@@ -74,10 +74,10 @@ def test_flush_and_wait_inprocess_returns_true():
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 
-    assert client.flush_and_wait(user_id="u", thread_id="t") is True
+    assert client.process_now_and_wait(user_id="u", thread_id="t") is True
 
 
-def test_flush_and_wait_durable_polls_until_summary_appears():
+def test_process_now_and_wait_durable_polls_until_summary_appears():
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
 
@@ -85,31 +85,31 @@ def test_flush_and_wait_durable_polls_until_summary_appears():
     client.get_memories = MagicMock(side_effect=[[], [], [{"id": "summary_u_t"}]])
 
     with patch("time.sleep"):
-        ok = client.flush_and_wait(user_id="u", thread_id="t", timeout=5.0)
+        ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=5.0)
 
     assert ok is True
     assert client.get_memories.call_count == 3
 
 
-def test_flush_and_wait_durable_returns_false_on_timeout():
+def test_process_now_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
     client.get_memories = MagicMock(return_value=[])
 
     with patch("time.sleep"):
-        ok = client.flush_and_wait(user_id="u", thread_id="t", timeout=0.01)
+        ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
     assert client.get_memories.call_count >= 1
 
 
-def test_flush_and_wait_durable_swallows_search_errors_until_timeout():
+def test_process_now_and_wait_durable_swallows_search_errors_until_timeout():
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
     client.get_memories = MagicMock(side_effect=RuntimeError("transient"))
 
     with patch("time.sleep"):
-        ok = client.flush_and_wait(user_id="u", thread_id="t", timeout=0.01)
+        ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
     assert client.get_memories.call_count >= 1

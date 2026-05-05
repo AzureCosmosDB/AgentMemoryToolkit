@@ -696,7 +696,6 @@ class AsyncCosmosMemoryClient:
             except RuntimeError:  # pragma: no cover - no running loop
                 logger.warning("No running event loop for auto-trigger; skipping")
 
-
     async def get_memories(
         self,
         memory_id: Optional[str] = None,
@@ -1272,9 +1271,7 @@ class AsyncCosmosMemoryClient:
             return None
         try:
             db = self._cosmos_client.get_database_client(self._cosmos_database)
-            self._counter_container_client = db.get_container_client(
-                self._cosmos_counter_container
-            )
+            self._counter_container_client = db.get_container_client(self._cosmos_counter_container)
             return self._counter_container_client
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
@@ -1285,9 +1282,7 @@ class AsyncCosmosMemoryClient:
             )
             return None
 
-    async def _maybe_auto_trigger(
-        self, turn_counts: dict[tuple[str, str], int]
-    ) -> None:
+    async def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
         """Async mirror of ``CosmosMemoryClient._maybe_auto_trigger``.
 
         Scheduled by ``push_to_cosmos`` as a background ``asyncio.Task``
@@ -1329,9 +1324,7 @@ class AsyncCosmosMemoryClient:
                     "Further skips will be logged at DEBUG level."
                 )
             else:
-                logger.debug(
-                    "Skipping SDK auto-trigger: MEMORY_PROCESSOR_OWNER=durable"
-                )
+                logger.debug("Skipping SDK auto-trigger: MEMORY_PROCESSOR_OWNER=durable")
             return
 
         n_facts = get_fact_extraction_every_n()
@@ -1470,7 +1463,6 @@ class AsyncCosmosMemoryClient:
                             USER_COUNTER_THREAD_ID,
                             f"process_user_summary: {exc!r}",
                         )
-
 
     async def extract_memories(
         self,

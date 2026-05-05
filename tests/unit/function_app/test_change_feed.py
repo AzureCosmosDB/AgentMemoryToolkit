@@ -456,10 +456,7 @@ def test_runs_normally_when_owner_durable():
     # Counter was written.
     assert container._state["thread:u1:t1"]["count"] == 2
     # Threshold (2) crossed — orchestrator started.
-    summary_starts = [
-        c for c in starter.start_new.await_args_list
-        if c.args[0] == "ThreadSummaryOrchestrator"
-    ]
+    summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 1
 
 
@@ -483,8 +480,5 @@ def test_runs_normally_when_owner_unset(monkeypatch):
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
 
     assert container._state["thread:u1:t1"]["count"] == 2
-    summary_starts = [
-        c for c in starter.start_new.await_args_list
-        if c.args[0] == "ThreadSummaryOrchestrator"
-    ]
+    summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 1

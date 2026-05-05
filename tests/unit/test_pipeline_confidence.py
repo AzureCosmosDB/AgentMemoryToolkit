@@ -208,17 +208,17 @@ class TestDedupMergeConfidence:
         ]
         pipeline._container.query_items.return_value = iter(facts)
 
-        with patch.object(
-            pipeline, "_cluster_by_similarity", return_value=[[0, 1]]
-        ), patch.object(
-            pipeline,
-            "_run_prompty",
-            return_value=(
-                '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
-                '"merged_text":"User likes coffee in the morning.","salience":0.7}]}'
+        with (
+            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
+            patch.object(
+                pipeline,
+                "_run_prompty",
+                return_value=(
+                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
+                    '"merged_text":"User likes coffee in the morning.","salience":0.7}]}'
+                ),
             ),
-        ), patch.object(
-            pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)
+            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
         ):
             pipeline.deduplicate_facts(user_id="u1")
 
@@ -237,17 +237,16 @@ class TestDedupMergeConfidence:
         ]
         pipeline._container.query_items.return_value = iter(facts)
 
-        with patch.object(
-            pipeline, "_cluster_by_similarity", return_value=[[0, 1]]
-        ), patch.object(
-            pipeline,
-            "_run_prompty",
-            return_value=(
-                '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
-                '"merged_text":"merged","salience":0.5}]}'
+        with (
+            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
+            patch.object(
+                pipeline,
+                "_run_prompty",
+                return_value=(
+                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],"merged_text":"merged","salience":0.5}]}'
+                ),
             ),
-        ), patch.object(
-            pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)
+            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
         ):
             pipeline.deduplicate_facts(user_id="u1")
 

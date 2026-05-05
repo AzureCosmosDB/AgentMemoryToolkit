@@ -1012,9 +1012,7 @@ class ProcessingPipeline:
                     )
 
                     source_confidences = [
-                        c for f in cluster_facts
-                        if f["id"] in source_ids
-                        and (c := f.get("confidence")) is not None
+                        c for f in cluster_facts if f["id"] in source_ids and (c := f.get("confidence")) is not None
                     ]
                     merged_confidence = max(source_confidences) if source_confidences else None
 

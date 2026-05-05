@@ -653,9 +653,7 @@ class CosmosMemoryClient:
                     "Further skips will be logged at DEBUG level."
                 )
             else:
-                logger.debug(
-                    "Skipping SDK auto-trigger: MEMORY_PROCESSOR_OWNER=durable"
-                )
+                logger.debug("Skipping SDK auto-trigger: MEMORY_PROCESSOR_OWNER=durable")
             return
         # When unset (None) or PROCESSOR_OWNER_INPROCESS, proceed.
 

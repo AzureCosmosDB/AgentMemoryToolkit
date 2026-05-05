@@ -73,9 +73,7 @@ def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:
     return old_count // n != new_count // n
 
 
-def _maybe_warn_owner_mismatch(
-    counter_id: str, existing_owner: Optional[str], observer_owner: Optional[str]
-) -> None:
+def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], observer_owner: Optional[str]) -> None:
     """One-shot WARN when the previous writer disagrees with the current one.
 
     Operators run with either ``MEMORY_PROCESSOR_OWNER=inprocess`` or

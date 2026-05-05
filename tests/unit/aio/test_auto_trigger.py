@@ -54,9 +54,7 @@ class TestAsyncAutoTriggerNonBlocking:
             elapsed = loop.time() - t0
 
             # If push had awaited the slow trigger we'd see >= 0.5s here.
-            assert elapsed < 0.4, (
-                f"push_to_cosmos awaited trigger inline (elapsed={elapsed:.3f}s)"
-            )
+            assert elapsed < 0.4, f"push_to_cosmos awaited trigger inline (elapsed={elapsed:.3f}s)"
 
             # Drain the background task so pytest doesn't warn about a
             # destroyed-but-pending task at teardown.

@@ -49,6 +49,7 @@ async def increment_counter_by(
     count: int,
     *,
     batch_max_lsn: int | None = None,
+    owner: str | None = "durable",
 ) -> tuple[int, int]:
     """Atomically increment ``counter_id`` by *count* and return ``(old, new)``.
 
@@ -60,6 +61,11 @@ async def increment_counter_by(
       is treated as a change-feed replay and we return the cached
       ``(pre_batch_count, current_count)`` **without writing** so the
       threshold-crossing semantics are preserved without double-counting.
+    * Preserves SDK-written failure breadcrumbs (``last_failure_at`` /
+      ``last_failure_reason``) so monitors don't flap when the FA writes
+      after an SDK failure stamp.
+    * Stamps ``last_owner=owner`` (advisory) so operators can detect
+      double-write configurations across SDK and FA.
     """
     partition_key = [user_id, thread_id]
 
@@ -103,6 +109,20 @@ async def increment_counter_by(
             else _utc_now_iso(),
             "updated_at": _utc_now_iso(),
         }
+        # Preserve SDK-written failure breadcrumbs so the FA doesn't blow
+        # them away on the next successful increment. Operators alerting on
+        # ``last_failure_at`` would otherwise see the field flap based on
+        # which backend wrote last.
+        if existing_doc is not None:
+            if "last_failure_at" in existing_doc:
+                new_doc["last_failure_at"] = existing_doc.get("last_failure_at")
+            if "last_failure_reason" in existing_doc:
+                new_doc["last_failure_reason"] = existing_doc.get("last_failure_reason")
+        # Stamp the writing backend (advisory only — not enforced server-side).
+        if owner is not None:
+            new_doc["last_owner"] = owner
+        elif existing_doc is not None and "last_owner" in existing_doc:
+            new_doc["last_owner"] = existing_doc.get("last_owner")
 
         try:
             if etag is not None:

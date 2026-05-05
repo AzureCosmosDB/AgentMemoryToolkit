@@ -27,6 +27,37 @@ class _FullAsyncDummy:
     ) -> ProcessThreadResult:
         return ProcessThreadResult()
 
+    async def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        return {}
+
+    async def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]:
+        return {}
+
+    async def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult:
+        return UserSummaryResult()
+
+    async def process_dedup(
+        self,
+        *,
+        user_id: str,
+    ) -> int:
+        return 0
+
     async def generate_user_summary(
         self,
         *,

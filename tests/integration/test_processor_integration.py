@@ -1,6 +1,6 @@
 """Integration-style tests for the processor protocol surface.
 
-Exercises ``CosmosMemoryClient.flush`` / ``process_now_and_wait`` end-to-end with
+Exercises ``CosmosMemoryClient.process_now`` / ``process_now_and_wait`` end-to-end with
 a fully mocked Cosmos container — no live Azure calls — to validate that
 the SDK wires the active :class:`MemoryProcessor` correctly through the
 public API.
@@ -30,8 +30,8 @@ def _build_client(processor=None) -> CosmosMemoryClient:
 # ---------------------------------------------------------------------------
 
 
-class TestInProcessFlushEndToEnd:
-    def test_flush_invokes_pipeline_with_correct_args(self):
+class TestInProcessProcessNowEndToEnd:
+    def test_process_now_invokes_pipeline_with_correct_args(self):
         pipeline = MagicMock()
         pipeline.generate_thread_summary.return_value = {
             "id": "summary-1",
@@ -80,8 +80,8 @@ class TestInProcessFlushEndToEnd:
 # ---------------------------------------------------------------------------
 
 
-class TestDurableFlushEndToEnd:
-    def test_flush_is_a_noop(self, caplog):
+class TestDurableProcessNowEndToEnd:
+    def test_process_now_is_a_noop(self, caplog):
         client = _build_client(processor=DurableFunctionProcessor())
 
         # Replace the pipeline so we can prove no methods were called.
@@ -112,7 +112,7 @@ class TestDurableFlushEndToEnd:
 # ---------------------------------------------------------------------------
 
 
-class TestDurableFlushAndWaitPolling:
+class TestDurableProcessNowAndWaitPolling:
     def test_returns_true_when_summary_appears_after_polling(self, monkeypatch):
         client = _build_client(processor=DurableFunctionProcessor())
         client.get_thread = MagicMock(return_value=[])
@@ -146,7 +146,7 @@ class TestDurableFlushAndWaitPolling:
 # ---------------------------------------------------------------------------
 
 
-class TestDurableFlushAndWaitTimeout:
+class TestDurableProcessNowAndWaitTimeout:
     def test_returns_false_after_timeout(self, monkeypatch):
         client = _build_client(processor=DurableFunctionProcessor())
         client.get_thread = MagicMock(return_value=[])

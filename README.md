@@ -207,7 +207,33 @@ high_conf_facts = memory.get_memories(user_id="u1", memory_type="fact", min_conf
 
 ### Auto-trigger (per-turn extraction)
 
-By default, the **InProcess processor** runs fact extraction after **every turn** (`FACT_EXTRACTION_EVERY_N=1`) and a thread summary every **10 turns** (`THREAD_SUMMARY_EVERY_N=10`). The trigger fires inside `push_to_cosmos()` after the turn is durably written, so calling `process_now()` is normally redundant — it remains as an explicit "flush now" hook. The Durable backend uses the same defaults via the change-feed function app.
+By default, the **InProcess processor** runs each pipeline step independently as its own threshold trips inside `push_to_cosmos()`:
+
+| Env var | Default | Step that fires | Async behavior |
+|---|---|---|---|
+| `FACT_EXTRACTION_EVERY_N` | `1` (every turn) | `process_extract_memories` (extract + dedup) | scheduled via `asyncio.create_task` |
+| `THREAD_SUMMARY_EVERY_N` | `10` | `process_thread_summary` | scheduled via `asyncio.create_task` |
+| `USER_SUMMARY_EVERY_N` | `20` | `process_user_summary` | scheduled via `asyncio.create_task` |
+
+Each `*_EVERY_N=0` disables only that step. The Durable backend uses the same defaults via the change-feed function app, so the in-process and durable backends fire on the same turn boundaries — only the *where* differs. Calling `process_now()` is normally redundant — it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
+
+The async client (`AsyncCosmosMemoryClient.push_to_cosmos`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
+
+#### Backend exclusivity (`MEMORY_PROCESSOR_OWNER`)
+
+Both the SDK auto-trigger and the function-app change-feed processor write into the same `counter` container. If you accidentally point an `InProcessProcessor` at a Cosmos container that already has a function app attached, both backends will run the pipeline on the same writes — double extraction, double dedup, double counters.
+
+Set the env var on **both sides** to make ownership explicit:
+
+| `MEMORY_PROCESSOR_OWNER` | SDK behavior | Function-app behavior |
+|---|---|---|
+| _unset_ (default) | runs auto-trigger | runs orchestrator (today's behavior) |
+| `inprocess` | runs auto-trigger | change-feed trigger skips batch + logs |
+| `durable` | auto-trigger logs warning + skips | runs orchestrator |
+
+The default (unset) preserves backward compatibility. For any production deployment we recommend setting it on both sides so a misconfiguration produces a loud log line instead of silent double-work.
+
+> **Advisory, not enforced.** `MEMORY_PROCESSOR_OWNER` is operator-configured exclusivity, not a server-side lock. Each backend reads its own env var; if the SDK is set to `inprocess` but the FA forgets to set `durable` (or vice versa), both still run. As a backstop, every counter write stamps `last_owner=<this backend>` on the doc — when the SDK observes a counter previously written by `durable` (or vice versa), it logs a one-shot `WARN` so misconfiguration surfaces in logs without spamming. Treat this as a configuration audit signal, not a hard guarantee.
 
 ---
 

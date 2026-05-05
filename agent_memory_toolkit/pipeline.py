@@ -973,8 +973,7 @@ class ProcessingPipeline:
             cluster_facts = [facts[idx] for idx in cluster]
             lines = []
             for i, cf in enumerate(cluster_facts, 1):
-                metadata = cf.get("metadata") or {}
-                confidence = metadata.get("confidence", "N/A")
+                confidence = cf.get("confidence", "N/A")
                 lines.append(
                     f'{i}. ID: {cf["id"]} | Content: "{cf.get("content", "")}" | '
                     f"Confidence: {confidence} | "
@@ -1012,6 +1011,13 @@ class ProcessingPipeline:
                         cluster_facts[0],
                     )
 
+                    source_confidences = [
+                        c for f in cluster_facts
+                        if f["id"] in source_ids
+                        and (c := f.get("confidence")) is not None
+                    ]
+                    merged_confidence = max(source_confidences) if source_confidences else None
+
                     merged_doc: dict[str, Any] = {
                         "id": det_id,
                         "user_id": user_id,
@@ -1022,12 +1028,15 @@ class ProcessingPipeline:
                         "content_hash": content_hash,
                         "metadata": {
                             "merged_from": source_ids,
+                            "merged_from_count": len(source_ids),
                         },
                         "salience": act.get("salience"),
                         "supersedes_ids": source_ids,
                         "tags": source_fact.get("tags", ["sys:fact"]),
                         "created_at": now,
                     }
+                    if merged_confidence is not None:
+                        merged_doc["confidence"] = merged_confidence
 
                     # Generate embedding for merged text
                     merged_doc["embedding"] = self._embeddings.generate(merged_text)

@@ -22,8 +22,8 @@ def get_pipeline():
 
     from azure.identity import DefaultAzureCredential
 
-    from agent_memory_toolkit.embeddings import EmbeddingsClient
     from agent_memory_toolkit.chat import ChatClient
+    from agent_memory_toolkit.embeddings import EmbeddingsClient
     from agent_memory_toolkit.pipeline import ProcessingPipeline
 
     credential = DefaultAzureCredential()

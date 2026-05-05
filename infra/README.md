@@ -100,8 +100,8 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 
 | App setting | Default | Effect |
 |---|---|---|
-| `THREAD_SUMMARY_EVERY_N` | `4` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. |
-| `FACT_EXTRACTION_EVERY_N` | `4` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. |
+| `THREAD_SUMMARY_EVERY_N` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. |
+| `FACT_EXTRACTION_EVERY_N` | `1` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. |
 | `USER_SUMMARY_EVERY_N` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. |
 
 Set any value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:

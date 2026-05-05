@@ -35,6 +35,48 @@ class AsyncDurableFunctionProcessor:
         )
         return ProcessThreadResult(thread_summary=None, extracted_counts={}, deduplicated_count=0, elapsed_ms=0)
 
+    async def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        logger.debug(
+            "AsyncDurableFunctionProcessor.process_extract_memories no-op user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return {}
+
+    async def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]:
+        logger.debug(
+            "AsyncDurableFunctionProcessor.process_thread_summary no-op user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return None
+
+    async def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult:
+        logger.debug(
+            "AsyncDurableFunctionProcessor.process_user_summary no-op user_id=%s",
+            user_id,
+        )
+        return UserSummaryResult(summary=None)
+
+    async def process_dedup(self, *, user_id: str) -> int:
+        logger.debug("AsyncDurableFunctionProcessor.process_dedup no-op user_id=%s", user_id)
+        return 0
+
     async def generate_user_summary(
         self,
         *,

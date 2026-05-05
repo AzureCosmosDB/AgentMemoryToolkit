@@ -27,6 +27,37 @@ class _FullDummy:
     ) -> ProcessThreadResult:
         return ProcessThreadResult()
 
+    def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        return {}
+
+    def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]:
+        return {}
+
+    def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult:
+        return UserSummaryResult()
+
+    def process_dedup(
+        self,
+        *,
+        user_id: str,
+    ) -> int:
+        return 0
+
     def generate_user_summary(
         self,
         *,

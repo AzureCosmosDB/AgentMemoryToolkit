@@ -62,6 +62,7 @@ def test_push_to_cosmos_durable_does_not_fire_trigger(monkeypatch):
 def test_push_to_cosmos_skips_trigger_when_thresholds_zero(monkeypatch):
     monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "0")
     monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+    monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
     client = _connected(processor=InProcessProcessor(pipeline=MagicMock()))
     client._counter_container_client = MagicMock()
@@ -108,3 +109,134 @@ def test_push_to_cosmos_skips_when_counter_container_unavailable(monkeypatch):
     client.push_to_cosmos()
 
     pipeline.extract_memories.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-step trigger gating — each *_EVERY_N fires its own pipeline step
+# independently (Round 4 fix #3). The InProcess backend mirrors the
+# function-app split-orchestrator behavior so the two backends produce the
+# same memory contents for the same chat history.
+# ---------------------------------------------------------------------------
+
+
+class TestPerStepAutoTrigger:
+    def test_extract_fires_independently_of_summary(self, monkeypatch):
+        """N_facts=1 alone fires extract; summary/user-summary stay quiet."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "10")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "20")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(return_value={})
+        processor.process_thread_summary = MagicMock(return_value={})
+        processor.process_user_summary = MagicMock()
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        with patch(
+            "agent_memory_toolkit._counters.increment_counter_sync",
+            return_value=(0, 1),  # crosses 1 only
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.push_to_cosmos()
+
+        processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1")
+        processor.process_thread_summary.assert_not_called()
+        processor.process_user_summary.assert_not_called()
+
+    def test_summary_fires_independently_when_threshold_crossed(self, monkeypatch):
+        """N_summary=10 boundary fires summary; N_facts=0 prevents extract."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "0")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "10")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock()
+        processor.process_thread_summary = MagicMock(return_value={})
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        with patch(
+            "agent_memory_toolkit._counters.increment_counter_sync",
+            return_value=(9, 10),  # crosses 10 only
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.push_to_cosmos()
+
+        processor.process_thread_summary.assert_called_once_with(user_id="u1", thread_id="t1")
+        processor.process_extract_memories.assert_not_called()
+
+    def test_user_summary_fires_at_user_threshold(self, monkeypatch):
+        """The user-scoped counter is incremented separately from the thread counter."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "0")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "2")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_user_summary = MagicMock()
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        # Thread counter: (0,1) then (1,2); user counter: (1,2) crosses 2.
+        with patch(
+            "agent_memory_toolkit._counters.increment_counter_sync",
+            side_effect=[(0, 1), (1, 2), (1, 2)],
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.add_local(user_id="u1", role="agent", thread_id="t1", content="ok")
+            client.push_to_cosmos()
+
+        processor.process_user_summary.assert_called_once_with(user_id="u1")
+
+
+# ---------------------------------------------------------------------------
+# Owner exclusivity (Round 4 fix #4) — MEMORY_PROCESSOR_OWNER ensures only
+# one of {SDK auto-trigger, FA change-feed processor} runs against a shared
+# container, preventing double-extraction / double-dedup.
+# ---------------------------------------------------------------------------
+
+
+class TestProcessorOwner:
+    def test_durable_owner_suppresses_sdk_trigger(self, monkeypatch):
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "durable")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock()
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        with patch(
+            "agent_memory_toolkit._counters.increment_counter_sync",
+            return_value=(0, 1),
+        ) as inc:
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.push_to_cosmos()
+
+        inc.assert_not_called()
+        processor.process_extract_memories.assert_not_called()
+
+    def test_inprocess_owner_allows_sdk_trigger(self, monkeypatch):
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "inprocess")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(return_value={})
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        with patch(
+            "agent_memory_toolkit._counters.increment_counter_sync",
+            return_value=(0, 1),
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.push_to_cosmos()
+
+        processor.process_extract_memories.assert_called_once()

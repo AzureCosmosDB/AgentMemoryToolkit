@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 
 import azure.durable_functions as df
-
 from shared import config
 from shared.pipeline_factory import get_pipeline
+
 from ._retry import default_retry_options
 
 logger = logging.getLogger(__name__)

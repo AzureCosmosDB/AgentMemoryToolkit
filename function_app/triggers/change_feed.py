@@ -19,19 +19,23 @@ from typing import Any
 
 import azure.durable_functions as df
 import azure.functions as func
-
 from shared import config
+from shared.cosmos_clients import get_counter_container_async
 from shared.counters import (
     crosses_threshold,
     increment_counter_by,
     thread_counter_id,
     user_counter_id,
 )
-from shared.cosmos_clients import get_counter_container_async
 
 logger = logging.getLogger(__name__)
 
 bp = df.Blueprint()
+
+# Module-level one-shot guard so the per-batch INFO log doesn't spam when
+# the SDK owns processing (potentially many batches per minute). Function
+# instances are short-lived, so worst case is one INFO per cold start.
+_warned_owner_skip: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +58,31 @@ async def process_changefeed_batch(
         counter_container: Optional counter container for testing. When omitted
             the cached async container client is used.
     """
+    # Owner exclusivity: when MEMORY_PROCESSOR_OWNER=inprocess is set the SDK
+    # client owns auto-trigger for this Cosmos container; the FA must stay
+    # silent or both backends would double-extract / double-dedup against
+    # the same writes. The default (unset) preserves today's behavior so
+    # existing deployments don't need to change anything.
+    from agent_memory_toolkit.thresholds import (
+        PROCESSOR_OWNER_INPROCESS,
+        get_processor_owner,
+    )
+
+    if get_processor_owner() == PROCESSOR_OWNER_INPROCESS:
+        global _warned_owner_skip
+        if not _warned_owner_skip:
+            _warned_owner_skip = True
+            logger.warning(
+                "MEMORY_PROCESSOR_OWNER=inprocess; change-feed trigger skipping batch "
+                "(SDK owns auto-trigger for this container). Further skipped batches "
+                "will be logged at DEBUG level."
+            )
+        else:
+            logger.debug(
+                "Change-feed batch skipped: MEMORY_PROCESSOR_OWNER=inprocess"
+            )
+        return
+
     n_thread = config.get_thread_summary_every_n()
     n_facts = config.get_fact_extraction_every_n()
     n_user = config.get_user_summary_every_n()

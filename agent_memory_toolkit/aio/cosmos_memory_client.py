@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -56,6 +57,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
 logger = logging.getLogger(__name__)
 
 
+def _log_auto_trigger_task_failure(task: "asyncio.Task[Any]") -> None:
+    """Log unhandled exceptions from background auto-trigger tasks.
+
+    Without this callback, exceptions raised inside the fire-and-forget
+    ``asyncio.create_task(self._maybe_auto_trigger(...))`` would only
+    surface when the task is garbage-collected, which produces noisy
+    "Task exception was never retrieved" warnings far from the failure
+    site.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Background auto-trigger task failed: %r", exc)
+
+
 class AsyncCosmosMemoryClient:
     """Async variant of :class:`CosmosMemoryClient`.
 
@@ -96,6 +113,20 @@ class AsyncCosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
+
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        # Backpressure for fire-and-forget auto-trigger tasks. Without a
+        # cap, FACT_EXTRACTION_EVERY_N=1 + a burst of pushes spawns one
+        # extract pipeline per push and slams AI Foundry. Configurable via
+        # MEMORY_AUTO_TRIGGER_CONCURRENCY (default 4).
+        try:
+            _max = int(os.environ.get("MEMORY_AUTO_TRIGGER_CONCURRENCY", "4"))
+        except ValueError:
+            _max = 4
+        self._auto_trigger_semaphore: asyncio.Semaphore = asyncio.Semaphore(max(1, _max))
+        # One-shot WARN guard: skip-due-to-MEMORY_PROCESSOR_OWNER=durable
+        # would otherwise log on every push.
+        self._warned_owner_skip: bool = False
 
         # Store kwargs directly
         self._cosmos_endpoint = cosmos_endpoint
@@ -209,7 +240,18 @@ class AsyncCosmosMemoryClient:
         await self.close()
 
     async def close(self) -> None:
-        """Close all underlying async clients."""
+        """Close all underlying async clients.
+
+        Drains any in-flight fire-and-forget auto-trigger tasks first so
+        they don't continue running against torn-down Cosmos/embeddings
+        handles.
+        """
+        # Drain fire-and-forget auto-trigger tasks before tearing down the
+        # underlying clients, otherwise an in-flight extract+dedup will
+        # crash with CosmosOperationError mid-shutdown.
+        pending = list(self._background_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if self._cosmos_client is not None:
             await self._cosmos_client.close()
             self._cosmos_client = None
@@ -614,9 +656,11 @@ class AsyncCosmosMemoryClient:
         ``id``, ``thread_id``, timestamps, and metadata.
 
         After the upserts, per-(user_id, thread_id) turn counts are
-        accumulated and the in-process processor's auto-trigger runs
-        inline. The trigger is best-effort: any failure is logged and
-        swallowed so writes never fail because of background processing.
+        accumulated and the in-process processor's auto-trigger is
+        scheduled as a background ``asyncio.Task`` (non-blocking) so the
+        write call returns promptly even when extraction/summary takes
+        seconds. Failures in the background task are logged via a
+        done-callback and never surface to the caller.
         """
         await self._require_cosmos()
         if batch_size <= 0:
@@ -643,10 +687,14 @@ class AsyncCosmosMemoryClient:
 
         logger.info("Async upserted batch of %d records", len(records))
 
-        try:
-            await self._maybe_auto_trigger(turn_counts)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Auto-trigger after push_to_cosmos failed: %s", exc)
+        if turn_counts:
+            try:
+                task = asyncio.create_task(self._maybe_auto_trigger(turn_counts))
+                task.add_done_callback(_log_auto_trigger_task_failure)
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:  # pragma: no cover - no running loop
+                logger.warning("No running event loop for auto-trigger; skipping")
 
 
     async def get_memories(
@@ -1242,20 +1290,22 @@ class AsyncCosmosMemoryClient:
     ) -> None:
         """Async mirror of ``CosmosMemoryClient._maybe_auto_trigger``.
 
-        Inlines the call to ``processor.process_thread`` rather than
-        spawning a background task — operators wanting fire-and-forget
-        can wrap the surrounding ``push_to_cosmos()`` call in
-        ``asyncio.create_task()`` themselves so errors and tracing remain
-        visible to them.
+        Scheduled by ``push_to_cosmos`` as a background ``asyncio.Task``
+        rather than being awaited inline, so the user's write call returns
+        as soon as the Cosmos upserts complete. Each ``*_EVERY_N``
+        threshold fires its own pipeline step independently.
+
+        Failures are logged + stamped on the counter doc; they never
+        propagate back to the caller because the surrounding
+        ``add_done_callback`` will surface them via the task's exception.
         """
-        from .._counters import (
-            crosses_threshold,
-            increment_counter_async,
-            thread_counter_id,
-        )
-        from .._thresholds import (
+        from ..thresholds import (
+            PROCESSOR_OWNER_DURABLE,
+            PROCESSOR_OWNER_INPROCESS,
             get_fact_extraction_every_n,
+            get_processor_owner,
             get_thread_summary_every_n,
+            get_user_summary_every_n,
         )
 
         if not turn_counts:
@@ -1268,18 +1318,74 @@ class AsyncCosmosMemoryClient:
         if not isinstance(processor, AsyncInProcessProcessor):
             return
 
+        owner = get_processor_owner()
+        if owner == PROCESSOR_OWNER_DURABLE:
+            if not self._warned_owner_skip:
+                self._warned_owner_skip = True
+                logger.warning(
+                    "MEMORY_PROCESSOR_OWNER=durable is set; SDK auto-trigger will not run "
+                    "(the function app owns processing for this container). Set "
+                    "MEMORY_PROCESSOR_OWNER=inprocess (or unset it) to enable SDK auto-trigger. "
+                    "Further skips will be logged at DEBUG level."
+                )
+            else:
+                logger.debug(
+                    "Skipping SDK auto-trigger: MEMORY_PROCESSOR_OWNER=durable"
+                )
+            return
+
         n_facts = get_fact_extraction_every_n()
         n_summary = get_thread_summary_every_n()
-        if n_facts == 0 and n_summary == 0:
+        n_user = get_user_summary_every_n()
+        if n_facts == 0 and n_summary == 0 and n_user == 0:
             return
 
         counter_container = self._get_counter_container()
         if counter_container is None:
             return
 
+        # Backpressure: with FACT_EXTRACTION_EVERY_N=1, every push spawns a
+        # task. The semaphore caps how many concurrent extract+dedup
+        # pipelines hit AI Foundry at once.
+        async with self._auto_trigger_semaphore:
+            await self._run_auto_trigger_steps(
+                processor=processor,
+                turn_counts=turn_counts,
+                counter_container=counter_container,
+                owner=PROCESSOR_OWNER_INPROCESS,
+                n_facts=n_facts,
+                n_summary=n_summary,
+                n_user=n_user,
+            )
+
+    async def _run_auto_trigger_steps(
+        self,
+        *,
+        processor: "AsyncInProcessProcessor",
+        turn_counts: dict[tuple[str, str], int],
+        counter_container: Any,
+        owner: str,
+        n_facts: int,
+        n_summary: int,
+        n_user: int,
+    ) -> None:
+        from .._counters import (
+            USER_COUNTER_THREAD_ID,
+            crosses_threshold,
+            increment_counter_async,
+            stamp_failure_async,
+            thread_counter_id,
+            user_counter_id,
+        )
+
+        user_batch_counts: dict[str, int] = {}
+
+        # ---- thread-scoped counter increments + per-step triggers ----
         for (user_id, thread_id), batch_count in turn_counts.items():
             if batch_count <= 0:
                 continue
+            user_batch_counts[user_id] = user_batch_counts.get(user_id, 0) + batch_count
+
             try:
                 old_count, new_count = await increment_counter_async(
                     counter_container,
@@ -1287,28 +1393,83 @@ class AsyncCosmosMemoryClient:
                     user_id,
                     thread_id,
                     batch_count,
+                    owner=owner,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Counter increment failed for %s/%s: %s", user_id, thread_id, exc)
                 continue
 
-            should_fire = (n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)) or (
-                n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
-            )
-            if not should_fire:
-                continue
+            fire_extract = n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)
+            fire_summary = n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
 
-            try:
-                await processor.process_thread(
-                    user_id=user_id, thread_id=thread_id, turns=[],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Auto-trigger process_thread failed for %s/%s: %s",
-                    user_id,
-                    thread_id,
-                    exc,
-                )
+            if fire_extract:
+                try:
+                    await processor.process_extract_memories(user_id=user_id, thread_id=thread_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-trigger process_extract_memories failed for %s/%s: %s",
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                    await stamp_failure_async(
+                        counter_container,
+                        thread_counter_id(user_id, thread_id),
+                        user_id,
+                        thread_id,
+                        f"process_extract_memories: {exc!r}",
+                    )
+
+            if fire_summary:
+                try:
+                    await processor.process_thread_summary(user_id=user_id, thread_id=thread_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-trigger process_thread_summary failed for %s/%s: %s",
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                    await stamp_failure_async(
+                        counter_container,
+                        thread_counter_id(user_id, thread_id),
+                        user_id,
+                        thread_id,
+                        f"process_thread_summary: {exc!r}",
+                    )
+
+        # ---- user-scoped counter increment + per-step trigger ----
+        if n_user > 0:
+            for user_id, batch_count in user_batch_counts.items():
+                try:
+                    old_count, new_count = await increment_counter_async(
+                        counter_container,
+                        user_counter_id(user_id),
+                        user_id,
+                        USER_COUNTER_THREAD_ID,
+                        batch_count,
+                        owner=owner,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("User counter increment failed for %s: %s", user_id, exc)
+                    continue
+
+                if crosses_threshold(old_count, new_count, n_user):
+                    try:
+                        await processor.process_user_summary(user_id=user_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Auto-trigger process_user_summary failed for %s: %s",
+                            user_id,
+                            exc,
+                        )
+                        await stamp_failure_async(
+                            counter_container,
+                            user_counter_id(user_id),
+                            user_id,
+                            USER_COUNTER_THREAD_ID,
+                            f"process_user_summary: {exc!r}",
+                        )
 
 
     async def extract_memories(

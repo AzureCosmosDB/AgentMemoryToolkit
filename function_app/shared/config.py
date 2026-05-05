@@ -44,9 +44,12 @@ USER_COUNTER_THREAD_ID = "__counters__"
 # Defaults documented in local.settings.json.template
 # ---------------------------------------------------------------------------
 
-DEFAULT_THREAD_SUMMARY_EVERY_N = 10
-DEFAULT_FACT_EXTRACTION_EVERY_N = 1
-DEFAULT_USER_SUMMARY_EVERY_N = 20
+from agent_memory_toolkit.thresholds import (  # noqa: E402
+    DEFAULT_FACT_EXTRACTION_EVERY_N,
+    DEFAULT_THREAD_SUMMARY_EVERY_N,
+    DEFAULT_USER_SUMMARY_EVERY_N,
+)
+
 DEFAULT_MAX_BATCH_SIZE = 20
 
 

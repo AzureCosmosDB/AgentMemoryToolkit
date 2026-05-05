@@ -25,9 +25,9 @@ def _build_client(processor=None) -> AsyncCosmosMemoryClient:
 # ---------------------------------------------------------------------------
 
 
-class TestAsyncInProcessFlushEndToEnd:
+class TestAsyncInProcessProcessNowEndToEnd:
     @pytest.mark.asyncio
-    async def test_flush_invokes_pipeline_with_correct_args(self):
+    async def test_process_now_invokes_pipeline_with_correct_args(self):
         pipeline = MagicMock()
         pipeline.generate_thread_summary.return_value = {
             "id": "summary-1",
@@ -76,9 +76,9 @@ class TestAsyncInProcessFlushEndToEnd:
 # ---------------------------------------------------------------------------
 
 
-class TestAsyncDurableFlushEndToEnd:
+class TestAsyncDurableProcessNowEndToEnd:
     @pytest.mark.asyncio
-    async def test_flush_is_a_noop(self, caplog):
+    async def test_process_now_is_a_noop(self, caplog):
         client = _build_client(processor=AsyncDurableFunctionProcessor())
         pipeline = MagicMock()
         client._pipeline = pipeline
@@ -107,7 +107,7 @@ class TestAsyncDurableFlushEndToEnd:
 # ---------------------------------------------------------------------------
 
 
-class TestAsyncDurableFlushAndWaitPolling:
+class TestAsyncDurableProcessNowAndWaitPolling:
     @pytest.mark.asyncio
     async def test_returns_true_when_summary_appears_after_polling(self, monkeypatch):
         client = _build_client(processor=AsyncDurableFunctionProcessor())
@@ -142,7 +142,7 @@ class TestAsyncDurableFlushAndWaitPolling:
 # ---------------------------------------------------------------------------
 
 
-class TestAsyncDurableFlushAndWaitTimeout:
+class TestAsyncDurableProcessNowAndWaitTimeout:
     @pytest.mark.asyncio
     async def test_returns_false_after_timeout(self, monkeypatch):
         client = _build_client(processor=AsyncDurableFunctionProcessor())

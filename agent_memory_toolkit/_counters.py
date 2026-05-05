@@ -8,24 +8,29 @@ Counter document shape::
 
     # thread-scoped — id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
-      "last_batch_lsn": int|None, "last_batch_old_count": int }
+      "last_batch_lsn": int|None, "last_batch_old_count": int,
+      "last_failure_at": str|None, "last_failure_reason": str|None,
+      "last_owner": str|None }
 
     # user-scoped — id = "user:{user_id}", PK = [user_id, "__counters__"]
-    { "id": ..., "user_id": ..., "thread_id": "__counters__",
-      "count": int, "last_batch_lsn": int|None, "last_batch_old_count": int }
+    { ... same fields ... }
 
 Unlike the FA-side helper, the SDK clients drive these counters without LSN
 replay protection because each ``push_to_cosmos()`` call is its own atomic
-boundary — there is no change-feed redelivery to defend against. We still
-pass ``batch_max_lsn=None`` so the cached doc shape stays compatible with
-the FA-side dedup logic.
+boundary — there is no change-feed redelivery to defend against. We
+**preserve any existing ``last_batch_lsn``** the FA may have written so the
+FA's monotonicity assumption stays valid even on shared deployments.
+
+The ``last_owner`` field is informational only: it records which backend
+last wrote the counter (``"inprocess"`` or ``"durable"``) so operators can
+detect double-write configurations after the fact. It is not a lock.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
@@ -34,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 USER_COUNTER_THREAD_ID = "__counters__"
 MAX_RETRIES = 3
+
+# Module-level dedup set so we only log "double-write detected" WARNs once
+# per (counter_id, observer_owner) per process. On busy clients this would
+# otherwise fire on every push.
+_warned_owner_mismatch: set[tuple[str, str]] = set()
 
 
 def _utc_now_iso() -> str:
@@ -63,6 +73,34 @@ def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:
     return old_count // n != new_count // n
 
 
+def _maybe_warn_owner_mismatch(
+    counter_id: str, existing_owner: Optional[str], observer_owner: Optional[str]
+) -> None:
+    """One-shot WARN when the previous writer disagrees with the current one.
+
+    Operators run with either ``MEMORY_PROCESSOR_OWNER=inprocess`` or
+    ``=durable``. If the same counter doc keeps getting touched by both
+    backends, that's a misconfiguration — both pipelines are extracting
+    against the same memories container.
+    """
+    if not existing_owner or not observer_owner or existing_owner == observer_owner:
+        return
+    key = (counter_id, observer_owner)
+    if key in _warned_owner_mismatch:
+        return
+    _warned_owner_mismatch.add(key)
+    logger.warning(
+        "Counter doc %s was last written by owner=%r but this process is "
+        "owner=%r — both backends appear to be processing the same container. "
+        "Set MEMORY_PROCESSOR_OWNER consistently across all clients and the "
+        "Function App to avoid double-extraction. Further mismatches for this "
+        "counter will be logged at DEBUG level.",
+        counter_id,
+        existing_owner,
+        observer_owner,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sync increment
 # ---------------------------------------------------------------------------
@@ -74,6 +112,8 @@ def increment_counter_sync(
     user_id: str,
     thread_id: str,
     count: int,
+    *,
+    owner: Optional[str] = None,
 ) -> tuple[int, int]:
     """Atomically increment ``counter_id`` by *count* and return ``(old, new)``.
 
@@ -81,6 +121,11 @@ def increment_counter_sync(
     times on HTTP 412. Uses ``create_item`` for the first-write path,
     retrying on HTTP 409 in case multiple SDK clients raced to seed the
     counter.
+
+    Preserves any existing ``last_batch_lsn`` written by the FA-side
+    increment helper so the FA's change-feed replay-dedup logic stays valid
+    on shared deployments. Stamps ``last_owner`` (advisory) when *owner*
+    is provided.
 
     Returns ``(0, 0)`` and logs a warning if the container is unreachable —
     auto-trigger failures must never block the user's primary write path.
@@ -98,17 +143,19 @@ def increment_counter_sync(
         except CosmosResourceNotFoundError:
             pass
 
+        if existing_doc is not None and owner is not None:
+            _maybe_warn_owner_mismatch(counter_id, existing_doc.get("last_owner"), owner)
+
         new_count = old_count + count
-        new_doc = {
-            "id": counter_id,
-            "user_id": user_id,
-            "thread_id": thread_id,
-            "count": new_count,
-            "last_batch_lsn": None,
-            "last_batch_old_count": old_count,
-            "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+        new_doc = _build_counter_doc(
+            counter_id=counter_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            new_count=new_count,
+            old_count=old_count,
+            existing=existing_doc,
+            owner=owner,
+        )
 
         try:
             if etag is not None:
@@ -149,6 +196,8 @@ async def increment_counter_async(
     user_id: str,
     thread_id: str,
     count: int,
+    *,
+    owner: Optional[str] = None,
 ) -> tuple[int, int]:
     """Async version of :func:`increment_counter_sync`."""
     partition_key = [user_id, thread_id]
@@ -164,17 +213,19 @@ async def increment_counter_async(
         except CosmosResourceNotFoundError:
             pass
 
+        if existing_doc is not None and owner is not None:
+            _maybe_warn_owner_mismatch(counter_id, existing_doc.get("last_owner"), owner)
+
         new_count = old_count + count
-        new_doc = {
-            "id": counter_id,
-            "user_id": user_id,
-            "thread_id": thread_id,
-            "count": new_count,
-            "last_batch_lsn": None,
-            "last_batch_old_count": old_count,
-            "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+        new_doc = _build_counter_doc(
+            counter_id=counter_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            new_count=new_count,
+            old_count=old_count,
+            existing=existing_doc,
+            owner=owner,
+        )
 
         try:
             if etag is not None:
@@ -204,6 +255,112 @@ async def increment_counter_async(
     return (0, 0)
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_counter_doc(
+    *,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    new_count: int,
+    old_count: int,
+    existing: Optional[dict],
+    owner: Optional[str] = None,
+) -> dict:
+    """Construct the counter doc, preserving FA-managed fields when present."""
+    now = _utc_now_iso()
+    doc: dict[str, Any] = {
+        "id": counter_id,
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "count": new_count,
+        "last_batch_old_count": old_count,
+        "created_at": existing.get("created_at", now) if existing else now,
+        "updated_at": now,
+    }
+    # Preserve FA-managed LSN replay-dedup field if present; only initialize
+    # to None when seeding the document for the first time. Mutating an
+    # existing FA-written LSN to None would invalidate the FA's monotonicity
+    # assumption on the next change-feed redelivery.
+    if existing is not None and "last_batch_lsn" in existing:
+        doc["last_batch_lsn"] = existing.get("last_batch_lsn")
+    else:
+        doc["last_batch_lsn"] = None
+    # Carry over auto-trigger failure breadcrumbs so they aren't blown away
+    # by a successful write. ``stamp_failure_*`` helpers refresh them on
+    # failure; operators can monitor ``last_failure_at`` directly.
+    if existing is not None:
+        if "last_failure_at" in existing:
+            doc["last_failure_at"] = existing.get("last_failure_at")
+        if "last_failure_reason" in existing:
+            doc["last_failure_reason"] = existing.get("last_failure_reason")
+    # Stamp the writing backend (advisory). When owner is None (legacy
+    # caller), preserve whatever the previous writer recorded.
+    if owner is not None:
+        doc["last_owner"] = owner
+    elif existing is not None and "last_owner" in existing:
+        doc["last_owner"] = existing.get("last_owner")
+    return doc
+
+
+# Patch operations only touch the failure fields; concurrent counter
+# increments on the same doc are unaffected. This avoids the lost-update
+# race that a read → mutate → upsert sequence would have.
+def stamp_failure_sync(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    reason: str,
+) -> None:
+    """Best-effort stamp ``last_failure_at`` / ``last_failure_reason`` on the counter doc.
+
+    Uses Cosmos ``patch_item`` so only the failure fields are touched —
+    concurrent counter increments cannot lose updates here. Failures are
+    logged and swallowed; we never want failure-stamping itself to break
+    the user's write path.
+    """
+    partition_key = [user_id, thread_id]
+    patch_ops = [
+        {"op": "add", "path": "/last_failure_at", "value": _utc_now_iso()},
+        {"op": "add", "path": "/last_failure_reason", "value": (reason or "")[:500]},
+    ]
+    try:
+        container.patch_item(
+            item=counter_id,
+            partition_key=partition_key,
+            patch_operations=patch_ops,
+        )
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("stamp_failure_sync failed counter_id=%s: %s", counter_id, exc)
+
+
+async def stamp_failure_async(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    reason: str,
+) -> None:
+    """Async version of :func:`stamp_failure_sync`."""
+    partition_key = [user_id, thread_id]
+    patch_ops = [
+        {"op": "add", "path": "/last_failure_at", "value": _utc_now_iso()},
+        {"op": "add", "path": "/last_failure_reason", "value": (reason or "")[:500]},
+    ]
+    try:
+        await container.patch_item(
+            item=counter_id,
+            partition_key=partition_key,
+            patch_operations=patch_ops,
+        )
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, exc)
+
+
 __all__ = [
     "USER_COUNTER_THREAD_ID",
     "thread_counter_id",
@@ -211,4 +368,6 @@ __all__ = [
     "crosses_threshold",
     "increment_counter_sync",
     "increment_counter_async",
+    "stamp_failure_sync",
+    "stamp_failure_async",
 ]

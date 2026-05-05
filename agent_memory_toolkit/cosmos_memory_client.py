@@ -112,6 +112,9 @@ class CosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
+        # One-shot WARN guard for MEMORY_PROCESSOR_OWNER=durable skip path
+        # (see _maybe_auto_trigger).
+        self._warned_owner_skip: bool = False
 
         # Store kwargs directly
         self._cosmos_endpoint = cosmos_endpoint
@@ -591,24 +594,38 @@ class CosmosMemoryClient:
             return None
 
     def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
-        """After ``push_to_cosmos``, increment counters and run the processor inline.
+        """After ``push_to_cosmos``, increment counters and run granular processor steps.
+
+        Each ``*_EVERY_N`` threshold fires its own pipeline step independently
+        (mirroring the function-app split-orchestrator behavior):
+
+        - ``FACT_EXTRACTION_EVERY_N`` → ``processor.process_extract_memories``
+        - ``THREAD_SUMMARY_EVERY_N``  → ``processor.process_thread_summary``
+        - ``USER_SUMMARY_EVERY_N``    → ``processor.process_user_summary``
 
         Only fires for the in-process backend; the durable backend relies on
         the change-feed-driven function app, which uses the same counter
         container and would otherwise double-fire. Failures here are logged
-        and swallowed — the user's primary write must never fail because of
-        an auto-trigger.
+        and stamped on the counter doc — the user's primary write must never
+        fail because of an auto-trigger.
         """
         from ._counters import (
+            USER_COUNTER_THREAD_ID,
             crosses_threshold,
             increment_counter_sync,
+            stamp_failure_sync,
             thread_counter_id,
-        )
-        from ._thresholds import (
-            get_fact_extraction_every_n,
-            get_thread_summary_every_n,
+            user_counter_id,
         )
         from .processors import InProcessProcessor
+        from .thresholds import (
+            PROCESSOR_OWNER_DURABLE,
+            PROCESSOR_OWNER_INPROCESS,
+            get_fact_extraction_every_n,
+            get_processor_owner,
+            get_thread_summary_every_n,
+            get_user_summary_every_n,
+        )
 
         if not turn_counts:
             return
@@ -622,18 +639,45 @@ class CosmosMemoryClient:
         if not isinstance(processor, InProcessProcessor):
             return
 
+        # Owner exclusivity: when MEMORY_PROCESSOR_OWNER is set to the
+        # opposite backend, defer to it and skip the SDK auto-trigger so we
+        # don't double-extract / double-dedup against a shared container.
+        owner = get_processor_owner()
+        if owner == PROCESSOR_OWNER_DURABLE:
+            if not self._warned_owner_skip:
+                self._warned_owner_skip = True
+                logger.warning(
+                    "MEMORY_PROCESSOR_OWNER=durable is set; SDK auto-trigger will not run "
+                    "(the function app owns processing for this container). Set "
+                    "MEMORY_PROCESSOR_OWNER=inprocess (or unset it) to enable SDK auto-trigger. "
+                    "Further skips will be logged at DEBUG level."
+                )
+            else:
+                logger.debug(
+                    "Skipping SDK auto-trigger: MEMORY_PROCESSOR_OWNER=durable"
+                )
+            return
+        # When unset (None) or PROCESSOR_OWNER_INPROCESS, proceed.
+
         n_facts = get_fact_extraction_every_n()
         n_summary = get_thread_summary_every_n()
-        if n_facts == 0 and n_summary == 0:
+        n_user = get_user_summary_every_n()
+        if n_facts == 0 and n_summary == 0 and n_user == 0:
             return
 
         counter_container = self._get_counter_container()
         if counter_container is None:
             return
 
+        # Per-user batch totals for the user-scoped counter.
+        user_batch_counts: dict[str, int] = {}
+
+        # ---- thread-scoped counter increments + per-step triggers ----
         for (user_id, thread_id), batch_count in turn_counts.items():
             if batch_count <= 0:
                 continue
+            user_batch_counts[user_id] = user_batch_counts.get(user_id, 0) + batch_count
+
             try:
                 old_count, new_count = increment_counter_sync(
                     counter_container,
@@ -641,30 +685,83 @@ class CosmosMemoryClient:
                     user_id,
                     thread_id,
                     batch_count,
+                    owner=PROCESSOR_OWNER_INPROCESS,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Counter increment failed for %s/%s: %s", user_id, thread_id, exc)
                 continue
 
-            should_fire = (n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)) or (
-                n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
-            )
-            if not should_fire:
-                continue
+            fire_extract = n_facts > 0 and crosses_threshold(old_count, new_count, n_facts)
+            fire_summary = n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
 
-            try:
-                processor.process_thread(
-                    user_id=user_id,
-                    thread_id=thread_id,
-                    turns=[],
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Auto-trigger process_thread failed for %s/%s: %s",
-                    user_id,
-                    thread_id,
-                    exc,
-                )
+            if fire_extract:
+                try:
+                    processor.process_extract_memories(user_id=user_id, thread_id=thread_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-trigger process_extract_memories failed for %s/%s: %s",
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                    stamp_failure_sync(
+                        counter_container,
+                        thread_counter_id(user_id, thread_id),
+                        user_id,
+                        thread_id,
+                        f"process_extract_memories: {exc!r}",
+                    )
+
+            if fire_summary:
+                try:
+                    processor.process_thread_summary(user_id=user_id, thread_id=thread_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-trigger process_thread_summary failed for %s/%s: %s",
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                    stamp_failure_sync(
+                        counter_container,
+                        thread_counter_id(user_id, thread_id),
+                        user_id,
+                        thread_id,
+                        f"process_thread_summary: {exc!r}",
+                    )
+
+        # ---- user-scoped counter increment + per-step trigger ----
+        if n_user > 0:
+            for user_id, batch_count in user_batch_counts.items():
+                try:
+                    old_count, new_count = increment_counter_sync(
+                        counter_container,
+                        user_counter_id(user_id),
+                        user_id,
+                        USER_COUNTER_THREAD_ID,
+                        batch_count,
+                        owner=PROCESSOR_OWNER_INPROCESS,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("User counter increment failed for %s: %s", user_id, exc)
+                    continue
+
+                if crosses_threshold(old_count, new_count, n_user):
+                    try:
+                        processor.process_user_summary(user_id=user_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Auto-trigger process_user_summary failed for %s: %s",
+                            user_id,
+                            exc,
+                        )
+                        stamp_failure_sync(
+                            counter_container,
+                            user_counter_id(user_id),
+                            user_id,
+                            USER_COUNTER_THREAD_ID,
+                            f"process_user_summary: {exc!r}",
+                        )
 
     def _require_cosmos(self) -> None:
         """Raise if Cosmos DB is not connected."""

@@ -28,6 +28,33 @@ class AsyncMemoryProcessor(Protocol):
         existing_memories: Optional[list[dict[str, Any]]] = None,
     ) -> ProcessThreadResult: ...
 
+    async def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]: ...
+
+    async def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]: ...
+
+    async def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult: ...
+
+    async def process_dedup(
+        self,
+        *,
+        user_id: str,
+    ) -> int: ...
+
     async def generate_user_summary(
         self,
         *,

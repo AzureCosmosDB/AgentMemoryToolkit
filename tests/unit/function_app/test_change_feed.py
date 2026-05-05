@@ -395,3 +395,96 @@ def test_lsn_replay_does_not_double_increment():
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 2  # same id sent twice — durable dedups
     assert all(c.kwargs["instance_id"] == "thread_summary:u1:t1:4" for c in summary_starts)
+
+
+# ---------------------------------------------------------------------------
+# MEMORY_PROCESSOR_OWNER exclusivity (Round 5 — PR #7 comment #8)
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(
+    os.environ,
+    {
+        "MEMORY_PROCESSOR_OWNER": "inprocess",
+        "THREAD_SUMMARY_EVERY_N": "1",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "USER_SUMMARY_EVERY_N": "1",
+    },
+    clear=False,
+)
+def test_skips_when_owner_inprocess():
+    """When the SDK owns processing, the FA must short-circuit:
+    no counter writes, no orchestrator starts."""
+    # Reset the module-level one-shot guard so the test sees the WARN path
+    # deterministically (test isolation across runs).
+    import triggers.change_feed as cf
+
+    cf._warned_owner_skip = False
+
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(lsn=1), _turn(lsn=2)]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    # No counter reads/writes happened.
+    container.read_item.assert_not_called()
+    container.upsert_item.assert_not_called()
+    container.create_item.assert_not_called()
+    # No orchestrator starts happened.
+    starter.start_new.assert_not_called()
+
+
+@patch.dict(
+    os.environ,
+    {
+        "MEMORY_PROCESSOR_OWNER": "durable",
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_runs_normally_when_owner_durable():
+    """When the FA owns processing, the trigger must run the normal path."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(lsn=1), _turn(lsn=2)]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    # Counter was written.
+    assert container._state["thread:u1:t1"]["count"] == 2
+    # Threshold (2) crossed — orchestrator started.
+    summary_starts = [
+        c for c in starter.start_new.await_args_list
+        if c.args[0] == "ThreadSummaryOrchestrator"
+    ]
+    assert len(summary_starts) == 1
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_runs_normally_when_owner_unset(monkeypatch):
+    """When MEMORY_PROCESSOR_OWNER is unset, legacy behavior — FA still runs."""
+    monkeypatch.delenv("MEMORY_PROCESSOR_OWNER", raising=False)
+
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(lsn=1), _turn(lsn=2)]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    assert container._state["thread:u1:t1"]["count"] == 2
+    summary_starts = [
+        c for c in starter.start_new.await_args_list
+        if c.args[0] == "ThreadSummaryOrchestrator"
+    ]
+    assert len(summary_starts) == 1

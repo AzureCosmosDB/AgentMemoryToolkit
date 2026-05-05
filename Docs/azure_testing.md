@@ -28,8 +28,10 @@ You need:
 
 ```bash
 pip install -e ".[dev]"
-pip install -r azure_functions/requirements.txt
+pip install -r function_app/requirements.txt
 ```
+
+> The recommended way to provision **all** required Azure resources is `azd up` from the repo root, which uses the Bicep templates under `infra/`. See [`infra/README.md`](../infra/README.md) for details. The manual `az ...` commands below are kept as a reference for operators who can't use `azd`.
 
 ---
 
@@ -111,10 +113,16 @@ az functionapp config appsettings set \
     AI_FOUNDRY_ENDPOINT="https://<openai-account-name>.openai.azure.com/" \
     AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME="text-embedding-3-large" \
     AI_FOUNDRY_EMBEDDING_DIMENSIONS="1536" \
-    AI_FOUNDRY_CHAT_DEPLOYMENT_NAME="gpt-5-mini"
+    AI_FOUNDRY_CHAT_DEPLOYMENT_NAME="gpt-5-mini" \
+    THREAD_SUMMARY_EVERY_N="10" \
+    FACT_EXTRACTION_EVERY_N="1" \
+    USER_SUMMARY_EVERY_N="20" \
+    MEMORY_PROCESSOR_OWNER="durable"
 ```
 
 `COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
+
+`MEMORY_PROCESSOR_OWNER=durable` tells the SDK that the deployed Function App owns processing, so any `CosmosMemoryClient` pointed at the same container will skip its in-process auto-trigger and avoid double-extraction. See the README's processor-ownership table for details.
 
 ### Change feed settings (optional)
 
@@ -139,14 +147,16 @@ Set any threshold to `"0"` to disable that processing type.
 
 The `leases` container is provisioned by `create_memory_store()` alongside the `memories` and `counter` containers, so the Function App should be configured to use that existing lease container.
 
-If you use function-key auth for the HTTP trigger, keep the key for the client as `ADF_KEY`.
+The Function App authenticates to Cosmos DB and Azure OpenAI via its managed identity — there's no shared key or function-key handoff between the SDK and the Function App.
 
 ---
 
 ## 4. Deploy the Functions Project
 
+The recommended path is `azd up` (which builds and deploys the `function_app/` service automatically). For manual deployment:
+
 ```bash
-cd azure_functions
+cd function_app
 func azure functionapp publish <function-app-name>
 ```
 
@@ -179,8 +189,9 @@ AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 AI_FOUNDRY_EMBEDDING_DIMENSIONS=1536
 AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-5-mini
 
-ADF_ENDPOINT=https://<function-app-name>.azurewebsites.net/api
-ADF_KEY=<function-key-if-needed>
+# Tells the SDK that the deployed Function App owns auto-processing,
+# so this client skips its in-process auto-trigger.
+MEMORY_PROCESSOR_OWNER=durable
 ```
 
 ---
@@ -195,22 +206,21 @@ Run once if the database and container do not already exist:
 import os
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
-from agent_memory_toolkit import AgentMemory
+from agent_memory_toolkit import CosmosMemoryClient
 
 load_dotenv()
 
-memory = AgentMemory(
+memory = CosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
-    cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
+    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
     cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_deployment_name=os.getenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
-    adf_endpoint=os.getenv("ADF_ENDPOINT"),
-    adf_key=os.getenv("ADF_KEY", ""),
+    chat_deployment_name=os.getenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-5-mini"),
     use_default_credential=True,
     cosmos_credential=DefaultAzureCredential(),
 )
@@ -225,32 +235,26 @@ memory.connect_cosmos()
 import os
 from dotenv import load_dotenv
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit.aio import AsyncAgentMemory
+from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
 
 load_dotenv()
 
-memory = AsyncAgentMemory(
+memory = AsyncCosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
-    cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
+    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
     cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_deployment_name=os.getenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
-    adf_endpoint=os.getenv("ADF_ENDPOINT"),
-    adf_key=os.getenv("ADF_KEY", ""),
+    chat_deployment_name=os.getenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-5-mini"),
     use_default_credential=True,
     cosmos_credential=AsyncDefaultAzureCredential(),
 )
 
-await memory.connect_cosmos(
-    endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
-    database=os.getenv("COSMOS_DB_DATABASE"),
-    container=os.getenv("COSMOS_DB_CONTAINER"),
-    credential=AsyncDefaultAzureCredential(),
-)
+await memory.connect_cosmos()
 await memory.create_memory_store()
 ```
 
@@ -269,11 +273,11 @@ Bring the environment up in this order:
 5. test `add_cosmos()` / `push_to_cosmos()` / `get_memories()`
 6. test `get_memories(user_id=..., thread_id=...)` filtering
 7. test `search_cosmos()`
-8. deploy the Function App
-9. test `generate_thread_summary()`
-10. test `extract_facts()` — verify single-line fact output
-11. test `generate_user_summary()` / `get_user_summary()`
-12. (if change feed is enabled) test automatic processing — write turns and verify derived memories appear
+8. deploy the Function App (e.g., via `azd up`) so the change-feed processor is running
+9. write a few turns and verify a thread `summary` memory appears
+10. write more turns and verify `fact`, `procedural`, and `episodic` memories appear
+11. verify a per-user `user_summary` memory appears once `USER_SUMMARY_EVERY_N` turns have accumulated for that user
+12. test deduplication by writing two near-duplicate facts and confirming the dedup orchestrator merges them
 
 This keeps failures isolated and easier to diagnose.
 
@@ -294,15 +298,26 @@ print(memory.get_memories(user_id="user-1"))
 print(memory.search_cosmos("hello", user_id="user-1"))
 ```
 
-### Durable Functions
+### Durable processing (change-feed driven)
+
+Processing is no longer invoked directly from the SDK — write turns with `add_cosmos()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, and `user_summary` orchestrators per the configured thresholds.
 
 ```python
-print(memory.generate_thread_summary(user_id="user-1", thread_id="thread-1"))
-print(memory.extract_facts(user_id="user-1", thread_id="thread-1"))
-print(memory.generate_user_summary(user_id="user-1"))
-```
+# Write enough turns to cross THREAD_SUMMARY_EVERY_N (default 10).
+for i in range(10):
+    memory.add_cosmos(
+        user_id="user-1",
+        thread_id="thread-1",
+        role="user",
+        content=f"Turn {i+1}",
+    )
 
-Thread summaries and user summaries update incrementally: repeated calls merge only new memories into the existing derived document.
+# Wait for the change-feed processor to catch up, then read derived memories.
+import time; time.sleep(15)
+print(memory.get_memories(user_id="user-1", thread_id="thread-1", memory_type="summary"))
+print(memory.get_memories(user_id="user-1", memory_type="fact"))
+print(memory.get_memories(user_id="user-1", memory_type="user_summary"))
+```
 
 ### Change feed auto-processing
 
@@ -335,7 +350,7 @@ Check the Function App logs to confirm the `on_memory_change` trigger fired and 
 ```python
 print(memory.get_memories(user_id="user-1", memory_type="summary"))
 print(memory.get_memories(user_id="user-1", memory_type="fact"))
-print(memory.get_user_summary(user_id="user-1"))
+print(memory.get_memories(user_id="user-1", memory_type="user_summary"))
 ```
 
 ---
@@ -366,5 +381,5 @@ Recommended checks:
 
 - enable Application Insights
 - confirm Function App managed identity roles
-- confirm `ADF_ENDPOINT` points to Azure
+- confirm `MEMORY_PROCESSOR_OWNER=durable` is set on any client pointed at a container that the Function App is also processing
 - confirm model deployment names are correct

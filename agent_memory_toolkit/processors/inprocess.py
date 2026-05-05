@@ -55,6 +55,12 @@ class InProcessProcessor:
     ) -> ProcessThreadResult:
         """Summarize → extract → deduplicate for a single thread.
 
+        Fused convenience wrapper used by
+        :meth:`CosmosMemoryClient.process_now`. The auto-trigger path uses
+        the granular ``process_extract_memories`` / ``process_thread_summary``
+        / ``process_dedup`` methods instead so each step fires on its own
+        threshold cadence (matching the function-app behavior).
+
         ``turns`` and ``existing_memories`` are accepted for protocol
         symmetry; the pipeline queries the container itself.
         """
@@ -64,12 +70,7 @@ class InProcessProcessor:
         extracted = self._pipeline.extract_memories(user_id, thread_id)
         dedup = self._pipeline.deduplicate_facts(user_id)
 
-        deduped_count = 0
-        if isinstance(dedup, dict):
-            for key in ("deduplicated", "merged", "removed", "deduplicated_count"):
-                if key in dedup and isinstance(dedup[key], int):
-                    deduped_count = dedup[key]
-                    break
+        deduped_count = self._extract_dedup_count(dedup)
 
         extracted_counts: dict[str, int] = (
             {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
@@ -82,6 +83,53 @@ class InProcessProcessor:
             deduplicated_count=deduped_count,
             elapsed_ms=elapsed_ms,
         )
+
+    def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        """Run extract + dedup. Used by the auto-trigger on FACT_EXTRACTION_EVERY_N."""
+        extracted = self._pipeline.extract_memories(user_id, thread_id)
+        try:
+            self._pipeline.deduplicate_facts(user_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("post-extract dedup failed user_id=%s: %s", user_id, exc)
+        return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
+
+    def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Generate a thread summary. Used by the auto-trigger on THREAD_SUMMARY_EVERY_N."""
+        summary = self._pipeline.generate_thread_summary(user_id, thread_id)
+        return summary if isinstance(summary, dict) else None
+
+    def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult:
+        """Generate a cross-thread user summary. Used by the auto-trigger on USER_SUMMARY_EVERY_N."""
+        summary = self._pipeline.generate_user_summary(user_id, thread_ids)
+        return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
+
+    def process_dedup(self, *, user_id: str) -> int:
+        """Run dedup standalone. Returns count of facts merged/superseded."""
+        dedup = self._pipeline.deduplicate_facts(user_id)
+        return self._extract_dedup_count(dedup)
+
+    @staticmethod
+    def _extract_dedup_count(dedup: Any) -> int:
+        if isinstance(dedup, dict):
+            for key in ("deduplicated", "merged", "removed", "deduplicated_count"):
+                if key in dedup and isinstance(dedup[key], int):
+                    return dedup[key]
+        return 0
 
     def generate_user_summary(
         self,

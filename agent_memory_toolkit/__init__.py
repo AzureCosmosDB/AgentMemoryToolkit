@@ -25,6 +25,17 @@ from agent_memory_toolkit.processors import (
     ProcessThreadResult,
     UserSummaryResult,
 )
+from agent_memory_toolkit.thresholds import (
+    DEFAULT_FACT_EXTRACTION_EVERY_N,
+    DEFAULT_THREAD_SUMMARY_EVERY_N,
+    DEFAULT_USER_SUMMARY_EVERY_N,
+    PROCESSOR_OWNER_DURABLE,
+    PROCESSOR_OWNER_INPROCESS,
+    get_fact_extraction_every_n,
+    get_processor_owner,
+    get_thread_summary_every_n,
+    get_user_summary_every_n,
+)
 
 __all__ = [
     "CosmosMemoryClient",
@@ -51,4 +62,13 @@ __all__ = [
     "OrchestrationTimeoutError",
     "ProcessingError",
     "ValidationError",
+    "DEFAULT_FACT_EXTRACTION_EVERY_N",
+    "DEFAULT_THREAD_SUMMARY_EVERY_N",
+    "DEFAULT_USER_SUMMARY_EVERY_N",
+    "PROCESSOR_OWNER_DURABLE",
+    "PROCESSOR_OWNER_INPROCESS",
+    "get_fact_extraction_every_n",
+    "get_processor_owner",
+    "get_thread_summary_every_n",
+    "get_user_summary_every_n",
 ]

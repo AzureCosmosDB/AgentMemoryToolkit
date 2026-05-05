@@ -45,6 +45,15 @@ class MemoryProcessor(Protocol):
 
     Implementations must be safe to call from a sync context. The async
     mirror lives at :mod:`agent_memory_toolkit.aio.processors`.
+
+    The protocol exposes both a fused :meth:`process_thread` (used by
+    :meth:`CosmosMemoryClient.process_now`) and per-step methods
+    (:meth:`process_extract_memories`, :meth:`process_thread_summary`,
+    :meth:`process_user_summary`, :meth:`process_dedup`) used by the
+    auto-trigger path so that ``FACT_EXTRACTION_EVERY_N`` /
+    ``THREAD_SUMMARY_EVERY_N`` / ``USER_SUMMARY_EVERY_N`` actually fire
+    independently per their own cadence - matching the function-app
+    split-orchestrator behavior.
     """
 
     def process_thread(
@@ -55,6 +64,33 @@ class MemoryProcessor(Protocol):
         turns: list[dict[str, Any]],
         existing_memories: Optional[list[dict[str, Any]]] = None,
     ) -> ProcessThreadResult: ...
+
+    def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]: ...
+
+    def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]: ...
+
+    def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult: ...
+
+    def process_dedup(
+        self,
+        *,
+        user_id: str,
+    ) -> int: ...
 
     def generate_user_summary(
         self,

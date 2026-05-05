@@ -68,12 +68,7 @@ class AsyncInProcessProcessor:
         extracted = await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id)
         dedup = await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id)
 
-        deduped_count = 0
-        if isinstance(dedup, dict):
-            for key in ("deduplicated", "merged", "removed", "deduplicated_count"):
-                if key in dedup and isinstance(dedup[key], int):
-                    deduped_count = dedup[key]
-                    break
+        deduped_count = self._extract_dedup_count(dedup)
 
         extracted_counts: dict[str, int] = (
             {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
@@ -86,6 +81,49 @@ class AsyncInProcessProcessor:
             deduplicated_count=deduped_count,
             elapsed_ms=elapsed_ms,
         )
+
+    async def process_extract_memories(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        extracted = await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id)
+        try:
+            await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("post-extract dedup failed user_id=%s: %s", user_id, exc)
+        return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
+
+    async def process_thread_summary(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> Optional[dict[str, Any]]:
+        summary = await asyncio.to_thread(self._pipeline.generate_thread_summary, user_id, thread_id)
+        return summary if isinstance(summary, dict) else None
+
+    async def process_user_summary(
+        self,
+        *,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+    ) -> UserSummaryResult:
+        summary = await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids)
+        return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
+
+    async def process_dedup(self, *, user_id: str) -> int:
+        dedup = await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id)
+        return self._extract_dedup_count(dedup)
+
+    @staticmethod
+    def _extract_dedup_count(dedup: Any) -> int:
+        if isinstance(dedup, dict):
+            for key in ("deduplicated", "merged", "removed", "deduplicated_count"):
+                if key in dedup and isinstance(dedup[key], int):
+                    return dedup[key]
+        return 0
 
     async def generate_user_summary(
         self,

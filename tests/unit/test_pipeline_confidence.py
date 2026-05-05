@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -161,3 +161,95 @@ def test_extract_procedural_carries_confidence():
     pipeline.extract_memories("u1", "t1")
     [pr] = [d for d in upserted if d["type"] == "procedural"]
     assert pr["confidence"] == pytest.approx(0.95)
+
+
+# ---------------------------------------------------------------------------
+# MERGE confidence preservation (Round 4 fix #5).
+#
+# Before: dedup MERGE branch never set ``confidence``, so every merged fact
+# was silently excluded from ``get_memories(min_confidence=...)``. We now
+# carry forward ``max(non-null source confidences)`` plus ``merged_from_count``.
+# ---------------------------------------------------------------------------
+
+
+class TestDedupMergeConfidence:
+    def _build_pipeline(self):
+        from agent_memory_toolkit.pipeline import ProcessingPipeline
+
+        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline._embeddings = MagicMock()
+        pipeline._embeddings.generate.return_value = [0.1] * 8
+        pipeline._upsert_memory = MagicMock()
+        pipeline._mark_superseded = MagicMock(return_value=True)
+        pipeline._container = MagicMock()
+        return pipeline
+
+    def test_merge_carries_max_confidence_and_count(self):
+        import json
+
+        pipeline = self._build_pipeline()
+        facts = [
+            {
+                "id": "f1",
+                "user_id": "u1",
+                "thread_id": "t1",
+                "content": "User likes coffee.",
+                "confidence": 0.6,
+                "embedding": [0.1] * 8,
+            },
+            {
+                "id": "f2",
+                "user_id": "u1",
+                "thread_id": "t1",
+                "content": "User likes coffee in the morning.",
+                "confidence": 0.9,
+                "embedding": [0.1] * 8,
+            },
+        ]
+        pipeline._container.query_items.return_value = iter(facts)
+
+        with patch.object(
+            pipeline, "_cluster_by_similarity", return_value=[[0, 1]]
+        ), patch.object(
+            pipeline,
+            "_run_prompty",
+            return_value=(
+                '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
+                '"merged_text":"User likes coffee in the morning.","salience":0.7}]}'
+            ),
+        ), patch.object(
+            pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)
+        ):
+            pipeline.deduplicate_facts(user_id="u1")
+
+        merged_doc = pipeline._upsert_memory.call_args.args[0]
+        assert merged_doc["confidence"] == 0.9
+        assert merged_doc["metadata"]["merged_from_count"] == 2
+
+    def test_merge_omits_confidence_when_no_sources_have_it(self):
+        """Sources without confidence → merged doc has no confidence (legacy data)."""
+        import json
+
+        pipeline = self._build_pipeline()
+        facts = [
+            {"id": "f1", "user_id": "u1", "thread_id": "t1", "content": "a", "embedding": [0.1] * 8},
+            {"id": "f2", "user_id": "u1", "thread_id": "t1", "content": "b", "embedding": [0.1] * 8},
+        ]
+        pipeline._container.query_items.return_value = iter(facts)
+
+        with patch.object(
+            pipeline, "_cluster_by_similarity", return_value=[[0, 1]]
+        ), patch.object(
+            pipeline,
+            "_run_prompty",
+            return_value=(
+                '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
+                '"merged_text":"merged","salience":0.5}]}'
+            ),
+        ), patch.object(
+            pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)
+        ):
+            pipeline.deduplicate_facts(user_id="u1")
+
+        merged_doc = pipeline._upsert_memory.call_args.args[0]
+        assert "confidence" not in merged_doc

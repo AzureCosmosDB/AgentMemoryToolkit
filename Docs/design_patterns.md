@@ -1,6 +1,6 @@
 # Design Patterns
 
-This guide shows when and how to use the toolkit's main operations in real applications. All examples use the async API (`AsyncAgentMemory`); the sync API (`AgentMemory`) has the same method signatures without `await`.
+This guide shows when and how to use the toolkit's main operations in real applications. All examples use the async API (`AsyncCosmosMemoryClient`); the sync API (`CosmosMemoryClient`) has the same method signatures without `await`.
 
 ---
 
@@ -11,26 +11,18 @@ This guide shows when and how to use the toolkit's main operations in real appli
 Write a turn memory every time a user or agent message is produced. If the application runs locally first and syncs later, use the local + bulk-upload pattern.
 
 ```python
-from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit.aio import AsyncAgentMemory
+from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
 
-mem = AsyncAgentMemory(
+mem = AsyncCosmosMemoryClient(
     cosmos_endpoint=COSMOS_DB_ENDPOINT,
-    cosmos_database="memory",
+    cosmos_database="ai_memory",
     cosmos_container="memories",
-    ai_foundry_endpoint=AOAI_ENDPOINT,
+    ai_foundry_endpoint=AI_FOUNDRY_ENDPOINT,
     embedding_deployment_name="text-embedding-3-large",
-    adf_endpoint=ADF_ENDPOINT,
-    adf_key=ADF_KEY,
+    chat_deployment_name="gpt-4o-mini",
     use_default_credential=True,
-    cosmos_credential=AsyncDefaultAzureCredential(),
 )
-await mem.connect_cosmos(
-    endpoint=COSMOS_DB_ENDPOINT,
-    database="memory",
-    container="memories",
-    credential=AsyncDefaultAzureCredential(),
-)
+await mem.connect_cosmos()
 
 THREAD_ID = "thread-abc-123"
 

@@ -1,13 +1,24 @@
-"""Integration tests for the full CosmosMemoryClient pipeline against live Azure services.
+"""Integration tests for CosmosMemoryClient against live Azure services.
 
-These tests exercise the end-to-end flow: writing turns to Cosmos DB, triggering
-Azure Durable Functions for summarisation / fact-extraction, and reading back the
-results via Cosmos DB queries and vector search.
+These tests exercise the end-to-end in-process flow: writing turns to
+Cosmos DB, running the ProcessingPipeline (summarisation, fact / procedural /
+episodic extraction, deduplication) inline, and reading back results via
+Cosmos DB queries and vector / hybrid search.
 
-Enable by setting the environment variable::
+The Azure Function host is **not** required — the same ProcessingPipeline
+that the change-feed trigger invokes is also exposed directly on
+``CosmosMemoryClient`` (``extract_memories``, ``generate_thread_summary``,
+``generate_user_summary``, ``deduplicate_facts``).
+
+Enable by setting::
 
     AGENT_MEMORY_RUN_INTEGRATION=true
+
+Auth: ``COSMOS_DB_KEY`` is used when present (relief while Cosmos control-plane
+RBAC is still in private preview); otherwise ``DefaultAzureCredential``.
 """
+
+from __future__ import annotations
 
 import time
 import uuid
@@ -17,11 +28,6 @@ import pytest
 from agent_memory_toolkit import CosmosMemoryClient
 from tests.conftest import INTEGRATION_ENABLED
 
-# ---------------------------------------------------------------------------
-# Module-level markers – every test in this file is an integration test and
-# will be skipped automatically when the flag is not set.
-# ---------------------------------------------------------------------------
-
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -29,10 +35,6 @@ pytestmark = [
         reason="Set AGENT_MEMORY_RUN_INTEGRATION=true",
     ),
 ]
-
-# Durable Functions can take a while; generous defaults keep CI green.
-_POLL_INTERVAL = 3.0
-_TIMEOUT = 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -43,34 +45,40 @@ _TIMEOUT = 180.0
 @pytest.fixture(scope="module")
 def agent_memory(
     cosmos_endpoint,
+    cosmos_key,
     cosmos_database,
     cosmos_container,
     ai_foundry_endpoint,
     ai_foundry_api_key,
-    adf_endpoint,
-    adf_key,
-    embedding_model,
+    embedding_deployment_name,
     embedding_dimensions,
+    chat_deployment_name,
 ):
-    """Create and connect a CosmosMemoryClient instance shared across this module."""
-    mem = CosmosMemoryClient(
+    """A live CosmosMemoryClient shared by every test in this module."""
+    if not cosmos_endpoint or not ai_foundry_endpoint:
+        pytest.skip("COSMOS_DB_ENDPOINT / AI_FOUNDRY_ENDPOINT not set")
+
+    return CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,
+        cosmos_key=cosmos_key or None,
         cosmos_database=cosmos_database,
         cosmos_container=cosmos_container,
         ai_foundry_endpoint=ai_foundry_endpoint,
-        ai_foundry_api_key=ai_foundry_api_key,
-        adf_endpoint=adf_endpoint,
-        adf_key=adf_key,
-        embedding_model=embedding_model,
+        ai_foundry_api_key=ai_foundry_api_key or None,
+        embedding_deployment_name=embedding_deployment_name,
         embedding_dimensions=embedding_dimensions,
+        chat_deployment_name=chat_deployment_name,
     )
-    return mem
 
 
-def _add_turns(agent_memory: CosmosMemoryClient, user_id: str, thread_id: str, turns: list[tuple[str, str]]):
-    """Helper – add a sequence of (role, content) turns to Cosmos."""
+def _add_turns(
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
+    turns: list[tuple[str, str]],
+) -> None:
     for role, content in turns:
-        agent_memory.add_cosmos(
+        mem.add_cosmos(
             user_id=user_id,
             role=role,
             content=content,
@@ -79,29 +87,20 @@ def _add_turns(agent_memory: CosmosMemoryClient, user_id: str, thread_id: str, t
         )
 
 
-def _cleanup_memories(agent_memory: CosmosMemoryClient, user_id: str, thread_id: str | None = None):
-    """Best-effort cleanup of all memories for a user (optionally scoped to thread)."""
+def _cleanup(mem: CosmosMemoryClient, user_id: str) -> None:
+    """Best-effort delete of every memory belonging to *user_id*."""
     try:
-        kwargs: dict = {"user_id": user_id}
-        if thread_id:
-            kwargs["thread_id"] = thread_id
-        memories = agent_memory.get_memories(**kwargs)
-        for mem in memories:
+        for m in mem.get_memories(user_id=user_id, include_superseded=True):
             try:
-                agent_memory.delete_cosmos(
-                    memory_id=mem["id"],
-                    thread_id=mem.get("thread_id", ""),
+                mem.delete_cosmos(
+                    memory_id=m["id"],
+                    thread_id=m.get("thread_id", ""),
                     user_id=user_id,
                 )
             except Exception:
-                pass  # best-effort
+                pass
     except Exception:
         pass
-
-
-def _cleanup_user(agent_memory: CosmosMemoryClient, user_id: str):
-    """Remove all data for *user_id* regardless of thread."""
-    _cleanup_memories(agent_memory, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -109,106 +108,84 @@ def _cleanup_user(agent_memory: CosmosMemoryClient, user_id: str):
 # ---------------------------------------------------------------------------
 
 
-class TestAddTurnsAndGenerateThreadSummary:
-    """Scenario 1: add turns → generate thread summary → verify."""
-
-    def test_add_turns_and_generate_thread_summary(self, agent_memory, unique_user_id, unique_thread_id):
-        user_id = unique_user_id
-        thread_id = unique_thread_id
+class TestThreadSummary:
+    def test_generate_thread_summary(self, agent_memory, unique_user_id, unique_thread_id):
         try:
-            # -- Arrange: insert 3 conversation turns --
             _add_turns(
                 agent_memory,
-                user_id,
-                thread_id,
+                unique_user_id,
+                unique_thread_id,
                 [
                     ("user", "What are some good restaurants in Paris?"),
                     ("agent", "Le Comptoir du Panthéon is a classic bistro in the 5th arrondissement."),
                     ("user", "What kind of cuisine do they serve?"),
+                    ("agent", "Traditional French bistro fare — confit de canard, steak frites, etc."),
                 ],
             )
-            time.sleep(2)
+            time.sleep(1)
 
-            # -- Act: trigger the durable function --
-            result = agent_memory.generate_thread_summary(
-                user_id=user_id,
-                thread_id=thread_id,
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
+            doc = agent_memory.generate_thread_summary(
+                user_id=unique_user_id,
+                thread_id=unique_thread_id,
             )
+            assert doc.get("id"), f"Expected summary doc with id, got {doc}"
+            assert doc.get("type") == "summary"
+            assert doc.get("content"), "Summary content must not be empty"
 
-            # -- Assert: orchestration completed --
-            assert result.get("runtimeStatus") == "Completed", (
-                f"Expected runtimeStatus='Completed', got {result.get('runtimeStatus')}"
-            )
-
-            time.sleep(2)
-
-            # -- Assert: summary persisted in Cosmos --
             summaries = agent_memory.get_memories(
-                user_id=user_id,
-                thread_id=thread_id,
+                user_id=unique_user_id,
+                thread_id=unique_thread_id,
                 memory_type="summary",
             )
-            assert len(summaries) >= 1, "Expected at least 1 summary memory"
-            assert summaries[0].get("content"), "Summary content must not be empty"
+            assert len(summaries) >= 1
         finally:
-            _cleanup_memories(agent_memory, user_id, thread_id)
+            _cleanup(agent_memory, unique_user_id)
 
 
-class TestAddTurnsAndExtractFacts:
-    """Scenario 2: add turns with factual info → extract facts → verify."""
-
-    def test_add_turns_and_extract_facts(self, agent_memory, unique_user_id, unique_thread_id):
-        user_id = unique_user_id
-        thread_id = unique_thread_id
+class TestExtractMemories:
+    def test_extract_facts_episodic_procedural(self, agent_memory, unique_user_id, unique_thread_id):
         try:
             _add_turns(
                 agent_memory,
-                user_id,
-                thread_id,
+                unique_user_id,
+                unique_thread_id,
                 [
                     ("user", "I live in Seattle and I work at Microsoft as a software engineer."),
                     ("agent", "That's great! Seattle is a wonderful city for tech professionals."),
                     ("user", "I prefer Python over JavaScript for backend work."),
+                    ("user", "I had a great trip to Japan last spring during cherry blossom season."),
+                    ("user", "When asked about deployment, always check the resource group first."),
                 ],
             )
-            time.sleep(2)
+            time.sleep(1)
 
-            result = agent_memory.extract_facts(
-                user_id=user_id,
-                thread_id=thread_id,
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
+            stats = agent_memory.extract_memories(
+                user_id=unique_user_id,
+                thread_id=unique_thread_id,
             )
+            assert isinstance(stats, dict)
+            total = stats.get("facts_count", 0) + stats.get("procedural_count", 0) + stats.get("episodic_count", 0)
+            assert total >= 1, f"Expected at least one memory extracted, got {stats}"
 
-            assert result.get("runtimeStatus") == "Completed", (
-                f"Expected runtimeStatus='Completed', got {result.get('runtimeStatus')}"
-            )
+            facts = agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+            assert len(facts) >= 1, "Expected at least one fact (Seattle / Microsoft / Python)"
 
-            time.sleep(2)
-
-            facts = agent_memory.get_memories(
-                user_id=user_id,
-                memory_type="fact",
-            )
-            assert len(facts) >= 1, "Expected at least 1 extracted fact about Seattle / Microsoft"
+            for f in facts:
+                assert isinstance(f.get("tags", []), list)
+                salience = f.get("salience")
+                assert salience is None or 0.0 <= float(salience) <= 1.0
         finally:
-            _cleanup_user(agent_memory, user_id)
+            _cleanup(agent_memory, unique_user_id)
 
 
-class TestMultipleThreadsGenerateUserSummary:
-    """Scenario 3: two threads → generate user summary → verify."""
-
-    def test_multiple_threads_generate_user_summary(self, agent_memory, unique_user_id):
-        user_id = unique_user_id
+class TestUserSummary:
+    def test_multi_thread_user_summary(self, agent_memory, unique_user_id):
         t1 = str(uuid.uuid4())
         t2 = str(uuid.uuid4())
         try:
-            # Thread 1: cooking topic
             _add_turns(
                 agent_memory,
-                user_id,
+                unique_user_id,
                 t1,
                 [
                     ("user", "I love Italian cooking, especially pasta."),
@@ -216,10 +193,9 @@ class TestMultipleThreadsGenerateUserSummary:
                     ("user", "Yes, I make homemade fettuccine every weekend."),
                 ],
             )
-            # Thread 2: fitness topic
             _add_turns(
                 agent_memory,
-                user_id,
+                unique_user_id,
                 t2,
                 [
                     ("user", "I go running every morning before work."),
@@ -227,224 +203,152 @@ class TestMultipleThreadsGenerateUserSummary:
                     ("user", "About 5 kilometres each day."),
                 ],
             )
-            time.sleep(2)
+            time.sleep(1)
 
-            result = agent_memory.generate_user_summary(
-                user_id=user_id,
+            doc = agent_memory.generate_user_summary(
+                user_id=unique_user_id,
                 thread_ids=[t1, t2],
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
             )
+            assert doc.get("id"), f"Expected user_summary doc with id, got {doc}"
+            assert doc.get("type") == "user_summary"
 
-            assert result.get("runtimeStatus") == "Completed", (
-                f"Expected runtimeStatus='Completed', got {result.get('runtimeStatus')}"
-            )
-
-            time.sleep(2)
-
-            user_summaries = agent_memory.get_user_summary(user_id)
-            assert len(user_summaries) >= 1, "Expected at least 1 user_summary"
+            summaries = agent_memory.get_user_summary(unique_user_id)
+            assert len(summaries) >= 1
+            combined = " ".join(s.get("content", "") for s in summaries).lower()
+            assert any(t in combined for t in ("pasta", "italian", "cooking", "fettuccine"))
+            assert any(t in combined for t in ("running", "run", "morning"))
         finally:
-            _cleanup_memories(agent_memory, user_id, t1)
-            _cleanup_memories(agent_memory, user_id, t2)
-            _cleanup_user(agent_memory, user_id)
+            _cleanup(agent_memory, unique_user_id)
 
 
-class TestIncrementalSummaryUpdate:
-    """Scenario 4: add turns → summarise → add more turns → re-summarise → verify update."""
-
-    def test_incremental_summary_update(self, agent_memory, unique_user_id, unique_thread_id):
-        user_id = unique_user_id
-        thread_id = unique_thread_id
-        try:
-            # -- First batch of turns --
-            _add_turns(
-                agent_memory,
-                user_id,
-                thread_id,
-                [
-                    ("user", "Tell me about the Eiffel Tower."),
-                    ("agent", "The Eiffel Tower is a wrought-iron lattice tower in Paris, France."),
-                ],
-            )
-            time.sleep(2)
-
-            first_result = agent_memory.generate_thread_summary(
-                user_id=user_id,
-                thread_id=thread_id,
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
-            )
-            assert first_result.get("runtimeStatus") == "Completed"
-            time.sleep(2)
-
-            first_summaries = agent_memory.get_memories(
-                user_id=user_id,
-                thread_id=thread_id,
-                memory_type="summary",
-            )
-            assert len(first_summaries) >= 1, "First summary should exist"
-            first_content = first_summaries[0].get("content", "")
-
-            # -- Second batch of turns --
-            _add_turns(
-                agent_memory,
-                user_id,
-                thread_id,
-                [
-                    ("user", "How tall is it exactly?"),
-                    ("agent", "The Eiffel Tower is approximately 330 metres tall, including antennas."),
-                ],
-            )
-            time.sleep(2)
-
-            second_result = agent_memory.generate_thread_summary(
-                user_id=user_id,
-                thread_id=thread_id,
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
-            )
-            assert second_result.get("runtimeStatus") == "Completed"
-            time.sleep(2)
-
-            updated_summaries = agent_memory.get_memories(
-                user_id=user_id,
-                thread_id=thread_id,
-                memory_type="summary",
-            )
-            assert len(updated_summaries) >= 1, "Updated summary should exist"
-            updated_content = updated_summaries[0].get("content", "")
-
-            # The summary should have changed or include references to the new info.
-            # Use updated_at comparison or content change as evidence.
-            first_updated = first_summaries[0].get("updated_at", "")
-            second_updated = updated_summaries[0].get("updated_at", "")
-            content_changed = updated_content != first_content
-            timestamp_changed = second_updated != first_updated
-            assert content_changed or timestamp_changed, "Expected the summary to be updated after adding new turns"
-        finally:
-            _cleanup_memories(agent_memory, user_id, thread_id)
-
-
-class TestIncrementalUserSummary:
-    """Scenario 5: thread A → user summary → thread B → user summary → verify both topics."""
-
-    def test_incremental_user_summary(self, agent_memory, unique_user_id):
-        user_id = unique_user_id
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        try:
-            # Thread 1: gardening
-            _add_turns(
-                agent_memory,
-                user_id,
-                t1,
-                [
-                    ("user", "I grow tomatoes and basil in my backyard garden."),
-                    ("agent", "Home gardening is rewarding! Do you compost as well?"),
-                ],
-            )
-            time.sleep(2)
-
-            r1 = agent_memory.generate_user_summary(
-                user_id=user_id,
-                thread_ids=[t1],
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
-            )
-            assert r1.get("runtimeStatus") == "Completed"
-            time.sleep(2)
-
-            # Thread 2: photography
-            _add_turns(
-                agent_memory,
-                user_id,
-                t2,
-                [
-                    ("user", "I love landscape photography, especially during golden hour."),
-                    ("agent", "Golden hour light is stunning! What camera do you use?"),
-                ],
-            )
-            time.sleep(2)
-
-            r2 = agent_memory.generate_user_summary(
-                user_id=user_id,
-                thread_ids=[t1, t2],
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
-            )
-            assert r2.get("runtimeStatus") == "Completed"
-            time.sleep(2)
-
-            user_summaries = agent_memory.get_user_summary(user_id)
-            assert len(user_summaries) >= 1, "Expected at least 1 user_summary"
-            combined_content = " ".join(s.get("content", "") for s in user_summaries).lower()
-            # The final summary should reference both topics.
-            assert "garden" in combined_content or "tomato" in combined_content or "basil" in combined_content, (
-                "User summary should mention gardening topic"
-            )
-            assert "photo" in combined_content or "camera" in combined_content or "golden" in combined_content, (
-                "User summary should mention photography topic"
-            )
-        finally:
-            _cleanup_memories(agent_memory, user_id, t1)
-            _cleanup_memories(agent_memory, user_id, t2)
-            _cleanup_user(agent_memory, user_id)
-
-
-class TestSearchSummariesAndFacts:
-    """Scenario 6: add turns → extract facts → generate summary → search."""
-
-    def test_search_summaries_and_facts(self, agent_memory, unique_user_id, unique_thread_id):
-        user_id = unique_user_id
-        thread_id = unique_thread_id
+class TestSearchAfterExtraction:
+    def test_vector_and_hybrid_search(self, agent_memory, unique_user_id, unique_thread_id):
         try:
             _add_turns(
                 agent_memory,
-                user_id,
-                thread_id,
+                unique_user_id,
+                unique_thread_id,
                 [
                     ("user", "I have a golden retriever named Buddy."),
                     ("agent", "Golden retrievers are great family dogs! How old is Buddy?"),
                     ("user", "Buddy is 3 years old and loves playing fetch at the park."),
                 ],
             )
+            time.sleep(1)
+
+            agent_memory.extract_memories(user_id=unique_user_id, thread_id=unique_thread_id)
+            agent_memory.generate_thread_summary(user_id=unique_user_id, thread_id=unique_thread_id)
             time.sleep(2)
 
-            # Extract facts
-            fact_result = agent_memory.extract_facts(
-                user_id=user_id,
-                thread_id=thread_id,
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
-            )
-            assert fact_result.get("runtimeStatus") == "Completed"
-
-            # Generate thread summary
-            summary_result = agent_memory.generate_thread_summary(
-                user_id=user_id,
-                thread_id=thread_id,
-                poll_interval=_POLL_INTERVAL,
-                timeout=_TIMEOUT,
-            )
-            assert summary_result.get("runtimeStatus") == "Completed"
-            time.sleep(3)
-
-            # -- Vector search --
-            vector_results = agent_memory.search_cosmos(
+            vec = agent_memory.search_cosmos(
                 search_terms="golden retriever dog",
-                user_id=user_id,
+                user_id=unique_user_id,
                 top_k=5,
             )
-            assert len(vector_results) >= 1, "Vector search for 'golden retriever dog' should return at least 1 result"
+            assert len(vec) >= 1, "Vector search should return at least 1 result"
 
-            # -- Hybrid search --
-            hybrid_results = agent_memory.search_cosmos(
+            hyb = agent_memory.search_cosmos(
                 search_terms="Buddy the dog park",
-                user_id=user_id,
+                user_id=unique_user_id,
                 hybrid_search=True,
                 top_k=5,
             )
-            assert len(hybrid_results) >= 1, "Hybrid search for 'Buddy the dog park' should return at least 1 result"
+            assert len(hyb) >= 1, "Hybrid search should return at least 1 result"
         finally:
-            _cleanup_user(agent_memory, user_id)
+            _cleanup(agent_memory, unique_user_id)
+
+
+class TestTaggingAndSalience:
+    def test_add_remove_tags_and_salience_filter(self, agent_memory, unique_user_id, unique_thread_id):
+        try:
+            agent_memory.add_cosmos(
+                user_id=unique_user_id,
+                role="user",
+                content="The user prefers dark mode UI and uses VS Code.",
+                memory_type="fact",
+                thread_id=unique_thread_id,
+                tags=["preference", "ide"],
+                salience=0.8,
+            )
+            tagged = agent_memory.get_memories(
+                user_id=unique_user_id,
+                tags=["preference"],
+            )
+            assert len(tagged) == 1
+            mid = tagged[0]["id"]
+
+            agent_memory.add_tags(
+                memory_id=mid,
+                user_id=unique_user_id,
+                thread_id=unique_thread_id,
+                tags=["ui"],
+            )
+            agent_memory.remove_tags(
+                memory_id=mid,
+                user_id=unique_user_id,
+                thread_id=unique_thread_id,
+                tags=["ide"],
+            )
+
+            refreshed = agent_memory.get_memories(
+                user_id=unique_user_id,
+                tags=["ui"],
+            )
+            assert any(m["id"] == mid for m in refreshed)
+            stored = next(m for m in refreshed if m["id"] == mid)
+            assert "ui" in (stored.get("tags") or [])
+            assert "ide" not in (stored.get("tags") or [])
+
+            results = agent_memory.search_cosmos(
+                search_terms="dark mode",
+                user_id=unique_user_id,
+                min_salience=0.5,
+                top_k=5,
+            )
+            assert any(r["id"] == mid for r in results)
+        finally:
+            _cleanup(agent_memory, unique_user_id)
+
+
+class TestDeduplication:
+    def test_dedup_near_duplicate_facts(self, agent_memory, unique_user_id, unique_thread_id):
+        try:
+            for content in [
+                "The user lives in Seattle.",
+                "User lives in Seattle, WA.",
+                "The user resides in Seattle.",
+                "The user works at Microsoft as an engineer.",
+            ]:
+                agent_memory.add_cosmos(
+                    user_id=unique_user_id,
+                    role="user",
+                    content=content,
+                    memory_type="fact",
+                    thread_id=unique_thread_id,
+                    salience=0.7,
+                )
+
+            before = agent_memory.get_memories(
+                user_id=unique_user_id,
+                memory_type="fact",
+            )
+            assert len(before) >= 4
+
+            stats = agent_memory.deduplicate_facts(
+                user_id=unique_user_id,
+                similarity_threshold=0.85,
+            )
+            assert isinstance(stats, dict)
+            assert "kept" in stats and "merged" in stats and "superseded" in stats
+            assert stats["merged"] + stats["superseded"] >= 1, (
+                f"Expected at least one near-duplicate to be merged/superseded, got {stats}"
+            )
+
+            active = [
+                m
+                for m in agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+                if not m.get("superseded_by")
+            ]
+            assert len(active) < len(before)
+        finally:
+            _cleanup(agent_memory, unique_user_id)

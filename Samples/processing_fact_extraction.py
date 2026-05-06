@@ -1,125 +1,97 @@
+"""Demonstrate fact / procedural / episodic memory extraction.
+
+The Agent Memory Toolkit runs the extraction pipeline **in-process** via
+``CosmosMemoryClient.extract_memories(...)``. The same pipeline also runs
+inside the Azure Functions change-feed trigger, so this script exercises
+identical code without needing a deployed Function.
+
+Required environment variables (.env supported via python-dotenv):
+
+    COSMOS_DB_ENDPOINT   – Cosmos DB account URL
+    COSMOS_DB_KEY           – (optional) account key fallback while
+                           Cosmos control-plane RBAC is in private preview
+    AI_FOUNDRY_ENDPOINT  – Azure AI Foundry / Azure OpenAI endpoint
+    AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME      – embedding deployment name
+    AI_FOUNDRY_CHAT_DEPLOYMENT_NAME            – chat completion deployment name
 """
-Fact Extraction Workflow – Agent Memory Toolkit
 
-Demonstrates the end-to-end fact extraction pipeline:
-  1. Connect to Cosmos DB
-  2. Add conversation turns containing factual statements
-  3. Extract facts via Azure Durable Functions (ADF)
-  4. Read the extracted facts back from Cosmos DB
-  5. Search facts semantically using vector search
-
-Requirements:
-  - Azure Cosmos DB configured with the Agent Memory Toolkit schema
-  - Azure Durable Functions (ADF) deployed or running locally
-  - Azure AI Foundry endpoint for embeddings
-
-Environment variables (set in shell or .env file):
-  COSMOS_DB_ENDPOINT   – Cosmos DB account endpoint
-  COSMOS_DB_DATABASE   – (optional) database name override
-  COSMOS_DB_CONTAINER  – (optional) container name override
-  AI_FOUNDRY_ENDPOINT  – Azure AI Foundry endpoint for embedding models
-  EMBEDDING_MODEL      – (optional) embedding model name, default text-embedding-3-large
-  ADF_ENDPOINT         – Azure Durable Functions endpoint (or http://localhost:7071/api)
-  ADF_KEY              – (optional) function-level auth key for ADF
-"""
+from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 
 from dotenv import load_dotenv
 
 from agent_memory_toolkit import CosmosMemoryClient
 
+load_dotenv()
+
 
 def main() -> None:
-    # ── Load configuration ────────────────────────────────────────────
-    load_dotenv()
+    required = ["COSMOS_DB_ENDPOINT", "AI_FOUNDRY_ENDPOINT"]
+    missing = [v for v in required if not os.environ.get(v)]
+    if missing:
+        print(f"ERROR: missing env vars: {', '.join(missing)}")
+        sys.exit(1)
 
-    cosmos_endpoint = os.environ["COSMOS_DB_ENDPOINT"]
-    ai_foundry_endpoint = os.environ["AI_FOUNDRY_ENDPOINT"]
-    adf_endpoint = os.environ.get("ADF_ENDPOINT", "http://localhost:7071/api")
-    adf_key = os.environ.get("ADF_KEY", "")
-
-    memory = CosmosMemoryClient(
-        cosmos_endpoint=cosmos_endpoint,
-        cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
-        cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
-        ai_foundry_endpoint=ai_foundry_endpoint,
-        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
-        adf_endpoint=adf_endpoint,
-        adf_key=adf_key,
+    mem = CosmosMemoryClient(
+        cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
+        cosmos_key=os.environ.get("COSMOS_DB_KEY") or None,
+        cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
+        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
+        ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
+        embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+        chat_deployment_name=os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     )
+    print("Connected to Cosmos DB.\n")
 
-    # ── 1. Connect to Cosmos DB ───────────────────────────────────────
-    print("Connecting to Cosmos DB …")
-    memory.connect_cosmos()
-    print("Connected.\n")
-
-    # ── 2. Add conversation turns with factual content ────────────────
-    user_id = "demo-user"
+    user_id = f"demo-user-{uuid.uuid4().hex[:6]}"
     thread_id = str(uuid.uuid4())
+    print(f"User ID:   {user_id}")
     print(f"Thread ID: {thread_id}\n")
 
     conversations = [
         ("user", "I live in Seattle and work at Microsoft as a software engineer."),
         ("agent", "Got it! You're based in Seattle working at Microsoft as a software engineer."),
-        ("user", "My favorite programming language is Python and I've been using it for 8 years."),
-        ("agent", "Nice — 8 years of Python experience is impressive!"),
-        (
-            "user",
-            "I'm currently working on a project involving large language models and RAG.",
-        ),
-        (
-            "agent",
-            "That's a great area! LLMs combined with RAG can unlock powerful applications.",
-        ),
+        ("user", "My favourite programming language is Python and I've been using it for 8 years."),
+        ("agent", "8 years of Python experience is impressive!"),
+        ("user", "I'm currently working on a project involving large language models and RAG."),
+        ("agent", "That's a great area! LLMs combined with RAG can unlock powerful applications."),
+        ("user", "Last spring I went hiking on Mount Rainier with my dog — best trip ever."),
+        ("user", "When debugging an LLM, always check the prompt first then the response format."),
     ]
 
-    print("Adding conversation turns …")
+    print("Adding conversation turns…")
     for role, content in conversations:
-        memory.add_cosmos(
-            user_id=user_id,
-            role=role,
-            content=content,
-            thread_id=thread_id,
-        )
+        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
         print(f"  [{role:>5}] {content[:80]}")
     print()
 
-    # ── 3. Extract facts via Azure Durable Functions ──────────────────
-    print("Extracting facts (calling ADF) …")
-    result = memory.extract_facts(user_id=user_id, thread_id=thread_id)
-    print(f"Extraction result:\n{json.dumps(result, indent=2)}\n")
+    print("Running extraction pipeline (facts / procedural / episodic)…")
+    stats = mem.extract_memories(user_id=user_id, thread_id=thread_id)
+    print(f"Extraction stats: {json.dumps(stats, indent=2)}\n")
 
-    # ── 4. Read extracted facts from Cosmos DB ────────────────────────
-    print("Reading extracted facts from Cosmos DB …")
-    facts = memory.get_memories(user_id=user_id, memory_type="fact")
-    print(f"Found {len(facts)} fact(s):\n")
-    for fact in facts:
-        print(f"  • [{fact['id'][:8]}…] {fact['content']}")
-    print()
+    for kind in ("fact", "procedural", "episodic"):
+        items = mem.get_memories(user_id=user_id, memory_type=kind)
+        print(f"{kind.upper()}S ({len(items)}):")
+        for it in items:
+            tags = ", ".join(it.get("tags") or [])
+            sal = it.get("salience")
+            print(f"  • {it['content'][:90]}  [salience={sal} tags={tags}]")
+        print()
 
-    # ── 5. Semantic search over extracted facts ───────────────────────
-    queries = [
+    print("Semantic search examples:")
+    for q in [
         "where does the user work",
-        "programming languages the user knows",
-        "what project is the user working on",
-    ]
-
-    for query in queries:
-        print(f'Searching: "{query}"')
-        results = memory.search_cosmos(
-            search_terms=query,
-            user_id=user_id,
-            memory_type="fact",
-            top_k=3,
-        )
-        if results:
-            for r in results:
-                print(f"  → {r['content'][:100]}")
-        else:
-            print("  (no results)")
+        "what programming languages does the user know",
+        "what outdoor activities does the user enjoy",
+    ]:
+        print(f'  query: "{q}"')
+        for r in mem.search_cosmos(search_terms=q, user_id=user_id, top_k=3):
+            print(f"    → [{r.get('type')}] {r['content'][:80]}")
         print()
 
     print("Done.")

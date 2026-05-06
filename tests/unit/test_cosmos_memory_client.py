@@ -58,16 +58,20 @@ def _make_doc(**overrides) -> dict:
 
 class TestConstructor:
     def test_default_credential_created_when_flag_true(self):
-        """use_default_credential=True creates a DefaultAzureCredential."""
+        """use_default_credential=True creates independent DefaultAzureCredential instances."""
         sentinel = MagicMock(name="default-cred")
         mock_module = MagicMock()
         mock_module.DefaultAzureCredential.return_value = sentinel
 
         with patch.dict("sys.modules", {"azure.identity": mock_module}):
             mem = CosmosMemoryClient(use_default_credential=True)
-            mock_module.DefaultAzureCredential.assert_called_once()
+            # Two independent instances — one per consumer (cosmos + AI Foundry)
+            # — so close() can tear each down without affecting the other.
+            assert mock_module.DefaultAzureCredential.call_count == 2
             assert mem._cosmos_credential is sentinel
             assert mem._ai_foundry_credential is sentinel
+            assert mem._owns_cosmos_credential is True
+            assert mem._owns_ai_foundry_credential is True
 
     def test_no_credential_when_flag_false(self):
         """use_default_credential=False leaves credentials as None."""
@@ -404,7 +408,9 @@ class TestGetMemories:
         result = mem.get_memories()
 
         call_kwargs = container.query_items.call_args.kwargs
-        assert "WHERE" not in call_kwargs["query"]
+        # Default behavior now includes superseded_by filter
+        assert "WHERE" in call_kwargs["query"]
+        assert "superseded_by" in call_kwargs["query"]
         assert result == [doc]
 
     def test_with_filters(self):
@@ -581,19 +587,17 @@ class TestSearchCosmos:
 
 class TestGenerateThreadSummary:
     def test_generate_thread_summary(self):
-        mem = _make_client()
-        mock_proc = MagicMock()
-        mock_proc.generate_thread_summary.return_value = {"status": "ok"}
-        mem._processing_client = mock_proc
+        mem, container = _connected_client()
+        mock_pipeline = MagicMock()
+        mock_pipeline.generate_thread_summary.return_value = {"status": "ok"}
+        mem._pipeline = mock_pipeline
 
         result = mem.generate_thread_summary(user_id="u1", thread_id="t1")
 
-        mock_proc.generate_thread_summary.assert_called_once_with(
-            user_id="u1",
-            thread_id="t1",
-            recent_k=None,
-            poll_interval=2.0,
-            timeout=120.0,
+        mock_pipeline.generate_thread_summary.assert_called_once_with(
+            "u1",
+            "t1",
+            None,
         )
         assert result == {"status": "ok"}
 

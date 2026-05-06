@@ -34,12 +34,12 @@ def print_results(results: list) -> None:
         print("  (no results)")
         return
     for i, result in enumerate(results, 1):
-        content = getattr(result, "content", None) or str(result)
-        role = getattr(result, "role", "n/a")
-        mem_type = getattr(result, "memory_type", "n/a")
-        score = getattr(result, "score", None)
-        score_str = f"  [score: {score:.4f}]" if score is not None else ""
-        print(f"  {i}. [{role}] ({mem_type}) {content}{score_str}")
+        content = result.get("content", "") if isinstance(result, dict) else str(result)
+        role = result.get("role", "n/a") if isinstance(result, dict) else "n/a"
+        mem_type = result.get("type", "n/a") if isinstance(result, dict) else "n/a"
+        salience = result.get("salience") if isinstance(result, dict) else None
+        suffix = f"  [salience: {salience:.2f}]" if isinstance(salience, (int, float)) else ""
+        print(f"  {i}. [{role}] ({mem_type}) {content[:100]}{suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +192,14 @@ def main() -> None:
 
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,
+        cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
+        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         ai_foundry_endpoint=ai_foundry_endpoint,
+        ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),
+        embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+        chat_deployment_name=os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     )
-    mem.connect_cosmos()
-
     user_id = "search-demo-user"
     thread_id = str(uuid.uuid4())
 

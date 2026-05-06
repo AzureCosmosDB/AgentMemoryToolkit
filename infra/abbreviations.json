@@ -1,0 +1,12 @@
+{
+  "appInsights": "appi-",
+  "logAnalytics": "log-",
+  "storageAccount": "st",
+  "functionApp": "func-",
+  "appServicePlan": "asp-",
+  "cosmosAccount": "cosmos-",
+  "userAssignedIdentity": "id-",
+  "aiFoundryAccount": "aif-",
+  "azureOpenAi": "oai-",
+  "resourceGroup": "rg-"
+}

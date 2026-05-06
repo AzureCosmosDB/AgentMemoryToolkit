@@ -76,10 +76,20 @@ def test_invalid_role():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mt", ["turn", "summary", "fact", "user_summary"])
+@pytest.mark.parametrize("mt", ["turn", "summary", "fact", "user_summary", "procedural", "episodic"])
 def test_valid_memory_types(mt):
     rec = MemoryRecord(user_id="u", role="user", content="c", memory_type=mt)
     assert rec.memory_type == mt
+
+
+def test_memory_type_procedural():
+    rec = MemoryRecord(user_id="u1", role="system", content="test", memory_type="procedural")
+    assert rec.memory_type == "procedural"
+
+
+def test_memory_type_episodic():
+    rec = MemoryRecord(user_id="u1", role="system", content="test", memory_type="episodic")
+    assert rec.memory_type == "episodic"
 
 
 def test_invalid_memory_type():
@@ -205,3 +215,239 @@ def test_orchestration_result():
     assert orch.output == {"result": 42}
     assert orch.custom_status == "done"
     assert orch.instance_id == "inst-1"
+
+
+# ---------------------------------------------------------------------------
+# Tags validation
+# ---------------------------------------------------------------------------
+
+
+def test_tags_default_empty():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    assert rec.tags == []
+
+
+def test_tags_validation_valid():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", tags=["topic:travel", "sys:fact"])
+    assert rec.tags == ["sys:fact", "topic:travel"]  # sorted and deduped
+
+
+def test_tags_validation_lowercase():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", tags=["Topic:Travel"])
+    assert rec.tags == ["topic:travel"]
+
+
+def test_tags_validation_invalid_pattern():
+    with pytest.raises(pydantic.ValidationError, match="Invalid tag format"):
+        MemoryRecord(user_id="u1", role="user", content="test", tags=["invalid tag!"])
+
+
+def test_tags_validation_too_long():
+    with pytest.raises(pydantic.ValidationError, match="Invalid tag format"):
+        MemoryRecord(user_id="u1", role="user", content="test", tags=["a" * 101])
+
+
+def test_tags_none_becomes_empty_list():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", tags=None)
+    assert rec.tags == []
+
+
+def test_tags_deduplication():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", tags=["a", "b", "a"])
+    assert rec.tags == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# Salience validation
+# ---------------------------------------------------------------------------
+
+
+def test_salience_valid():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", salience=0.85)
+    assert rec.salience == 0.85
+
+
+def test_salience_none_default():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    assert rec.salience is None
+
+
+def test_salience_out_of_range_high():
+    with pytest.raises(pydantic.ValidationError, match="salience must be between"):
+        MemoryRecord(user_id="u1", role="user", content="test", salience=1.5)
+
+
+def test_salience_out_of_range_low():
+    with pytest.raises(pydantic.ValidationError, match="salience must be between"):
+        MemoryRecord(user_id="u1", role="user", content="test", salience=-0.1)
+
+
+def test_salience_boundary_zero():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", salience=0.0)
+    assert rec.salience == 0.0
+
+
+def test_salience_boundary_one():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", salience=1.0)
+    assert rec.salience == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Confidence validation
+# ---------------------------------------------------------------------------
+
+
+def test_confidence_valid():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", confidence=0.92)
+    assert rec.confidence == 0.92
+
+
+def test_confidence_none_default():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    assert rec.confidence is None
+
+
+def test_confidence_out_of_range_high():
+    with pytest.raises(pydantic.ValidationError, match="confidence must be between"):
+        MemoryRecord(user_id="u1", role="user", content="test", confidence=1.5)
+
+
+def test_confidence_out_of_range_low():
+    with pytest.raises(pydantic.ValidationError, match="confidence must be between"):
+        MemoryRecord(user_id="u1", role="user", content="test", confidence=-0.1)
+
+
+def test_confidence_emitted_in_to_cosmos_dict():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", confidence=0.7)
+    data = rec.to_cosmos_dict()
+    assert data["confidence"] == 0.7
+
+
+def test_confidence_omitted_when_none():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    data = rec.to_cosmos_dict()
+    assert "confidence" not in data
+
+
+# ---------------------------------------------------------------------------
+# TTL field
+# ---------------------------------------------------------------------------
+
+
+def test_ttl_field():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", ttl=86400)
+    assert rec.ttl == 86400
+
+
+# ---------------------------------------------------------------------------
+# Content hash field
+# ---------------------------------------------------------------------------
+
+
+def test_content_hash_field():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", content_hash="abc123")
+    assert rec.content_hash == "abc123"
+
+
+# ---------------------------------------------------------------------------
+# Superseded / lineage fields
+# ---------------------------------------------------------------------------
+
+
+def test_superseded_by_field():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", superseded_by="new-id")
+    assert rec.superseded_by == "new-id"
+
+
+def test_supersedes_ids_field():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", supersedes_ids=["old1", "old2"])
+    assert rec.supersedes_ids == ["old1", "old2"]
+
+
+def test_source_memory_ids_field():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", source_memory_ids=["src1"])
+    assert rec.source_memory_ids == ["src1"]
+
+
+# ---------------------------------------------------------------------------
+# to_cosmos_dict with new fields
+# ---------------------------------------------------------------------------
+
+
+def test_to_cosmos_dict_includes_tags():
+    rec = MemoryRecord(user_id="u1", role="user", content="test", tags=["topic:test"])
+    d = rec.to_cosmos_dict()
+    assert d["tags"] == ["topic:test"]
+
+
+def test_to_cosmos_dict_tags_always_present():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    d = rec.to_cosmos_dict()
+    assert d["tags"] == []
+
+
+def test_to_cosmos_dict_conditional_fields():
+    rec = MemoryRecord(
+        user_id="u1",
+        role="user",
+        content="test",
+        ttl=86400,
+        salience=0.8,
+        content_hash="hash",
+        superseded_by="new",
+        supersedes_ids=["old"],
+        source_memory_ids=["src"],
+    )
+    d = rec.to_cosmos_dict()
+    assert d["ttl"] == 86400
+    assert d["salience"] == 0.8
+    assert d["content_hash"] == "hash"
+    assert d["superseded_by"] == "new"
+    assert d["supersedes_ids"] == ["old"]
+    assert d["source_memory_ids"] == ["src"]
+
+
+def test_to_cosmos_dict_omits_none_new_fields():
+    rec = MemoryRecord(user_id="u1", role="user", content="test")
+    d = rec.to_cosmos_dict()
+    assert "ttl" not in d
+    assert "salience" not in d
+    assert "content_hash" not in d
+    assert "superseded_by" not in d
+    assert "supersedes_ids" not in d
+    assert "source_memory_ids" not in d
+
+
+# ---------------------------------------------------------------------------
+# from_cosmos_dict round-trip with new fields
+# ---------------------------------------------------------------------------
+
+
+def test_from_cosmos_dict_round_trip_new_fields(sample_embedding):
+    original = MemoryRecord(
+        id="rt-new",
+        user_id="u",
+        thread_id="t",
+        role="agent",
+        memory_type="procedural",
+        content="a rule",
+        metadata={"k": 1},
+        embedding=sample_embedding,
+        tags=["sys:rule"],
+        ttl=86400,
+        salience=0.9,
+        content_hash="abc",
+        superseded_by="new-id",
+        supersedes_ids=["old-id"],
+        source_memory_ids=["src-id"],
+    )
+    cosmos = original.to_cosmos_dict()
+    restored = MemoryRecord.from_cosmos_dict(cosmos)
+    assert restored.memory_type == "procedural"
+    assert restored.tags == ["sys:rule"]
+    assert restored.ttl == 86400
+    assert restored.salience == 0.9
+    assert restored.content_hash == "abc"
+    assert restored.superseded_by == "new-id"
+    assert restored.supersedes_ids == ["old-id"]
+    assert restored.source_memory_ids == ["src-id"]

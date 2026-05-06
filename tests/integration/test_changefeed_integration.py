@@ -1,54 +1,65 @@
-"""Integration tests for the change feed trigger and counter management.
+"""Integration tests for the change-feed trigger and counter management.
 
-These tests exercise the end-to-end flow: inserting turn documents,
-verifying counters increment inside the counter container, and verifying
-orchestrations are started at threshold crossings.
+These tests exercise the end-to-end flow: inserting turn documents and
+verifying that counters increment inside the counter container as the
+change-feed Function processes them.
 
-Enable by setting::
+Enable by setting both::
 
     AGENT_MEMORY_RUN_INTEGRATION=true
+    AGENT_MEMORY_RUN_CHANGEFEED=true
 
-Requires a running Azure Functions host with the change feed trigger
-configured and Cosmos DB containers (memories, counter, leases) provisioned.
+A running Azure Functions host (deployed or local ``func start``) with the
+change-feed trigger configured is required, along with the ``memories``,
+``counter``, and ``leases`` containers.
 """
 
 import os
-import sys
 import time
 import uuid
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "azure_functions"))
-
 from tests.conftest import INTEGRATION_ENABLED
+
+CHANGEFEED_ENABLED = os.environ.get("AGENT_MEMORY_RUN_CHANGEFEED", "").lower() == "true"
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not INTEGRATION_ENABLED,
-        reason="Set AGENT_MEMORY_RUN_INTEGRATION=true",
+        not (INTEGRATION_ENABLED and CHANGEFEED_ENABLED),
+        reason="Set AGENT_MEMORY_RUN_INTEGRATION=true and AGENT_MEMORY_RUN_CHANGEFEED=true",
     ),
 ]
 
 
 @pytest.fixture(scope="module")
 def cosmos_clients():
-    """Create Cosmos DB container clients for memories and counters."""
+    """Cosmos DB container clients for memories and counters.
+
+    Uses ``COSMOS_DB_KEY`` when set (relief while control-plane RBAC is in
+    private preview); otherwise falls back to ``DefaultAzureCredential``.
+    """
     from azure.cosmos import CosmosClient
-    from azure.identity import DefaultAzureCredential
 
     endpoint = os.environ.get("COSMOS_DB__accountEndpoint") or os.environ.get("COSMOS_DB_ENDPOINT")
     database_name = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
     memories_container_name = os.environ.get("COSMOS_DB_CONTAINER", "memories")
     counter_container_name = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")
+    cosmos_key = os.environ.get("COSMOS_DB_KEY")
 
-    credential = DefaultAzureCredential()
-    client = CosmosClient(endpoint, credential=credential)
+    if cosmos_key:
+        client = CosmosClient(endpoint, credential=cosmos_key)
+    else:
+        from azure.identity import DefaultAzureCredential
+
+        client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+
     db = client.get_database_client(database_name)
-    memories = db.get_container_client(memories_container_name)
-    counters = db.get_container_client(counter_container_name)
-    return memories, counters
+    return (
+        db.get_container_client(memories_container_name),
+        db.get_container_client(counter_container_name),
+    )
 
 
 @pytest.fixture
@@ -97,7 +108,7 @@ class TestChangeFeedIntegration:
         memories, counters = cosmos_clients
         user_id = unique_ids["user_id"]
         thread_id = unique_ids["thread_id"]
-        counter_id = f"thread_counter_{user_id}_{thread_id}"
+        counter_id = f"thread:{user_id}:{thread_id}"
 
         # Insert 3 turn documents
         for _ in range(3):

@@ -23,6 +23,11 @@ def main() -> None:
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
         cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_key=os.environ.get("COSMOS_DB_KEY"),
+        ai_foundry_endpoint=os.environ.get("AI_FOUNDRY_ENDPOINT"),
+        ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),
+        embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
+        chat_deployment_name=os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
         use_default_credential=True,
     )
 
@@ -30,7 +35,8 @@ def main() -> None:
     mem.connect_cosmos()
     print("Connected to Cosmos DB")
 
-    # Add a memory directly to Cosmos
+    # Add a memory directly to Cosmos. memory_type="turn" skips auto-embedding,
+    # which keeps the quickstart runnable without AI Foundry credentials.
     mem.add_cosmos(user_id="u1", role="user", content="Hello from quickstart!", thread_id="t1")
     print("Added memory to Cosmos")
 

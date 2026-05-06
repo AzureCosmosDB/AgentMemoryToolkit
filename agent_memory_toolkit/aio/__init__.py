@@ -6,10 +6,20 @@ and follows the ``azure.cosmos`` / ``azure.cosmos.aio`` convention.
 
 from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
-from agent_memory_toolkit.aio.processing import AsyncProcessingClient
+from agent_memory_toolkit.aio.processors import (
+    AsyncDurableFunctionProcessor,
+    AsyncInProcessProcessor,
+    AsyncMemoryProcessor,
+    ProcessThreadResult,
+    UserSummaryResult,
+)
 
 __all__ = [
     "AsyncCosmosMemoryClient",
     "AsyncEmbeddingsClient",
-    "AsyncProcessingClient",
+    "AsyncMemoryProcessor",
+    "AsyncInProcessProcessor",
+    "AsyncDurableFunctionProcessor",
+    "ProcessThreadResult",
+    "UserSummaryResult",
 ]

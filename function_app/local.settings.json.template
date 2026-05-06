@@ -1,0 +1,28 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+
+    "// --- Cosmos DB (MI auth via DefaultAzureCredential) ---": "",
+    "COSMOS_DB__accountEndpoint": "https://<cosmos-account>.documents.azure.com:443/",
+    "COSMOS_DB_ENDPOINT": "https://<cosmos-account>.documents.azure.com:443/",
+    "COSMOS_DB_DATABASE": "ai_memory",
+    "COSMOS_DB_CONTAINER": "memories",
+    "COSMOS_DB_LEASE_CONTAINER": "leases",
+    "COSMOS_DB_COUNTERS_CONTAINER": "counter",
+
+    "// --- Azure AI Foundry / Azure OpenAI (MI auth) ---": "",
+    "AI_FOUNDRY_ENDPOINT": "https://<foundry>.openai.azure.com/",
+    "AI_FOUNDRY_CHAT_DEPLOYMENT_NAME": "gpt-4o-mini",
+    "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME": "text-embedding-3-large",
+
+    "// --- Threshold knobs (set to 0 to disable that orchestrator) ---": "",
+    "THREAD_SUMMARY_EVERY_N": "10",
+    "FACT_EXTRACTION_EVERY_N": "1",
+    "USER_SUMMARY_EVERY_N": "20",
+
+    "// --- Batch knob ---": "",
+    "MAX_BATCH_SIZE": "20"
+  }
+}

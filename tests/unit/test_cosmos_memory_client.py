@@ -416,15 +416,15 @@ class TestPushToCosmos:
     def test_push_to_cosmos_embeds_non_turn_memories(self):
         """Non-turn memories must be embedded on push so vector search works."""
         mem, container = _connected_client()
-        # Wire a fake embeddings client that returns a deterministic vector.
-        embed_calls: list[str] = []
+        # Wire a fake embeddings client that returns deterministic vectors.
+        embed_calls: list[list[str]] = []
 
-        def _generate(text: str) -> list[float]:
-            embed_calls.append(text)
-            return [0.1, 0.2, 0.3]
+        def _generate_batch(texts: list[str]) -> list[list[float]]:
+            embed_calls.append(list(texts))
+            return [[0.1, 0.2, 0.3] for _ in texts]
 
         mem._embeddings_client = MagicMock()
-        mem._embeddings_client.generate.side_effect = _generate
+        mem._embeddings_client.generate_batch.side_effect = _generate_batch
 
         mem.add_local(
             user_id="u1",
@@ -436,8 +436,8 @@ class TestPushToCosmos:
 
         mem.push_to_cosmos()
 
-        # Only the fact (non-turn) should have triggered embedding.
-        assert embed_calls == ["user prefers dark mode"]
+        # Only the fact (non-turn) should have been included in the batch embed call.
+        assert embed_calls == [["user prefers dark mode"]]
         upserted_bodies = [c.kwargs["body"] for c in container.upsert_item.call_args_list]
         fact_body = next(b for b in upserted_bodies if b["type"] == "fact")
         turn_body = next(b for b in upserted_bodies if b["type"] == "turn")

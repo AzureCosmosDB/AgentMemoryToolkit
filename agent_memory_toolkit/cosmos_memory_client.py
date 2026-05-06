@@ -585,7 +585,10 @@ class CosmosMemoryClient:
                 logger.warning("Failed to close prior Cosmos client during reconnect", exc_info=True)
         self._cosmos_client = None
         self._container_client = None
+        self._counter_container_client = None
         self._pipeline = None
+        if not self._processor_explicit:
+            self._processor = None
 
     def _warn_on_embedding_dim_mismatch(self) -> None:
         """Log a WARNING if the resolved embedding dim differs from the container's policy.
@@ -976,17 +979,31 @@ class CosmosMemoryClient:
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            for record in batch:
-                body = record.to_cosmos_dict()
+            bodies = [r.to_cosmos_dict() for r in batch]
+
+            # Batch-embed non-turn memories that don't already carry a
+            # vector — one /embeddings POST per Cosmos batch instead of
+            # one per record.
+            to_embed_idx: list[int] = []
+            to_embed_text: list[str] = []
+            for i, body in enumerate(bodies):
                 if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
-                    try:
-                        body["embedding"] = self._embeddings_client.generate(body["content"])
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "push_to_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
-                            record.id,
-                            exc,
-                        )
+                    to_embed_idx.append(i)
+                    to_embed_text.append(body["content"])
+            if to_embed_text:
+                try:
+                    vectors = self._embeddings_client.generate_batch(to_embed_text)
+                    for i, vec in zip(to_embed_idx, vectors):
+                        bodies[i]["embedding"] = vec
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "push_to_cosmos: batch embedding generation failed (%s); "
+                        "proceeding without embeddings for %d records",
+                        exc,
+                        len(to_embed_text),
+                    )
+
+            for record, body in zip(batch, bodies):
                 try:
                     self._container_client.upsert_item(body=body)
                 except Exception as exc:

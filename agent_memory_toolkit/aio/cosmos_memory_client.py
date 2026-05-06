@@ -740,22 +740,32 @@ class AsyncCosmosMemoryClient:
         )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
 
-        async def _embed_and_serialize(record: MemoryRecord) -> dict[str, Any]:
-            body = record.to_cosmos_dict()
-            if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
-                try:
-                    body["embedding"] = await self._embeddings_client.generate(body["content"])
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "push_to_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
-                        record.id,
-                        exc,
-                    )
-            return body
-
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            bodies = await asyncio.gather(*(_embed_and_serialize(r) for r in batch))
+            bodies = [r.to_cosmos_dict() for r in batch]
+
+            # Batch-embed non-turn memories that don't already carry a
+            # vector — one /embeddings POST per Cosmos batch instead of
+            # N concurrent ones.
+            to_embed_idx: list[int] = []
+            to_embed_text: list[str] = []
+            for i, body in enumerate(bodies):
+                if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
+                    to_embed_idx.append(i)
+                    to_embed_text.append(body["content"])
+            if to_embed_text:
+                try:
+                    vectors = await self._embeddings_client.generate_batch(to_embed_text)
+                    for i, vec in zip(to_embed_idx, vectors):
+                        bodies[i]["embedding"] = vec
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "push_to_cosmos: batch embedding generation failed (%s); "
+                        "proceeding without embeddings for %d records",
+                        exc,
+                        len(to_embed_text),
+                    )
+
             tasks = [self._container_client.upsert_item(body=b) for b in bodies]
             try:
                 await asyncio.gather(*tasks)
@@ -1284,7 +1294,14 @@ class AsyncCosmosMemoryClient:
             self._sync_embeddings_client = None
 
     async def _drain_cosmos_client(self) -> None:
-        """Close any prior async Cosmos client before reassigning the field."""
+        """Close any prior async Cosmos client before reassigning the field.
+
+        Also nulls the cached pipeline, counter container handle, and any
+        lazily-created processor — otherwise they retain references to
+        the drained sync container client and the next op fails with an
+        opaque "Object disposed" error. A user-supplied processor is left
+        intact since the SDK does not own its lifecycle.
+        """
         prior = self._cosmos_client
         if prior is None:
             return
@@ -1296,7 +1313,10 @@ class AsyncCosmosMemoryClient:
                 logger.warning("Failed to close prior async Cosmos client during reconnect", exc_info=True)
         self._cosmos_client = None
         self._container_client = None
+        self._counter_container_client = None
         self._pipeline = None
+        if not self._processor_explicit:
+            self._processor = None
 
     def _init_pipeline(self) -> None:
         """Initialize the ProcessingPipeline with a sync container client.

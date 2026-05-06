@@ -1232,6 +1232,34 @@ class AsyncCosmosMemoryClient:
     # Processing (LLM pipeline)
     # ------------------------------------------------------------------
 
+    def _drain_pipeline_resources(self) -> None:
+        """Close any prior sync resources before reassigning in ``_init_pipeline``.
+
+        ``connect_cosmos()`` may be invoked more than once on the same
+        client (e.g. switching containers, reconnecting after a credential
+        rotation). Without draining, the predecessor sync Cosmos client
+        and EmbeddingsClient leak their httpx pools / FDs.
+        """
+        prior_sync_cosmos = getattr(self, "_sync_cosmos_client", None)
+        if prior_sync_cosmos is not None:
+            close = getattr(prior_sync_cosmos, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            self._sync_cosmos_client = None
+
+        prior_sync_embeddings = getattr(self, "_sync_embeddings_client", None)
+        if prior_sync_embeddings is not None:
+            close = getattr(prior_sync_embeddings, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            self._sync_embeddings_client = None
+
     def _init_pipeline(self) -> None:
         """Initialize the ProcessingPipeline with a sync container client.
 
@@ -1241,6 +1269,8 @@ class AsyncCosmosMemoryClient:
         """
         from agent_memory_toolkit.embeddings import EmbeddingsClient
         from agent_memory_toolkit.pipeline import ProcessingPipeline
+
+        self._drain_pipeline_resources()
 
         # Build a sync container for the pipeline
         try:

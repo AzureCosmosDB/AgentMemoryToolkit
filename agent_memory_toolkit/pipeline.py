@@ -810,12 +810,27 @@ class ProcessingPipeline:
     ) -> dict[str, Any]:
         """Generate or incrementally update a cross-thread user summary.
 
+        ``thread_ids`` is observability metadata — recorded on the resulting
+        document for debugging/auditing — but **not** used to filter the
+        query. Filtering by ``thread_ids`` would silently drop memories from
+        threads contributing earlier in the cross-counter window: if N
+        change-feed batches accumulate before USER_SUMMARY_EVERY_N is
+        crossed, only the threads in the *last* batch would be visible to
+        the query, and pre-existing facts on other contributing threads
+        would be permanently excluded from every subsequent incremental
+        summary (the ``c.created_at > @since`` watermark moves past them).
+        Cross-partition is unavoidable for a per-user roll-up.
+
         Returns the user summary document dict.
         """
         if not user_id:
             raise ValidationError("user_id is required")
 
-        logger.info("generate_user_summary started user_id=%s", user_id)
+        logger.info(
+            "generate_user_summary started user_id=%s observed_thread_ids=%s",
+            user_id,
+            len(thread_ids) if thread_ids else 0,
+        )
 
         # ---- 1. Check for existing user summary ----
         user_summary_id = f"user_summary_{user_id}"
@@ -838,12 +853,6 @@ class ProcessingPipeline:
             since = existing_summary["updated_at"]
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
-
-        if thread_ids:
-            placeholders = ", ".join(f"@tid{i}" for i in range(len(thread_ids)))
-            query += f" AND c.thread_id IN ({placeholders})"
-            for i, tid in enumerate(thread_ids):
-                parameters.append({"name": f"@tid{i}", "value": tid})
 
         query_started_at = datetime.now(timezone.utc).isoformat()
 

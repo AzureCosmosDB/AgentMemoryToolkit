@@ -414,3 +414,108 @@ class TestMarkSupersededDoesNotMutate:
 
         assert result is False
         assert old_doc == snapshot
+
+
+class TestGenerateUserSummaryThreadIdsObservabilityOnly:
+    """``thread_ids`` must NOT filter the SQL query.
+
+    A user-summary roll-up may run after several change-feed batches have
+    accumulated against the user counter; ``thread_ids`` from the last
+    crossing batch is a strict subset of the threads that contributed
+    memories in the cross-counter window. Filtering the query by it would
+    permanently exclude pre-watermark memories from threads in earlier
+    batches (the ``c.created_at > @since`` bound moves past them on the
+    next persist).
+    """
+
+    def _build_pipeline(self):
+        from agent_memory_toolkit.pipeline import ProcessingPipeline
+
+        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline._embeddings = MagicMock()
+        pipeline._embeddings.generate.return_value = [0.1] * 8
+        pipeline._upsert_memory = MagicMock()
+        pipeline._container = MagicMock()
+        pipeline._chat = MagicMock()
+        return pipeline
+
+    def test_thread_ids_does_not_appear_in_query_or_parameters(self):
+        pipeline = self._build_pipeline()
+        # No prior user-summary; first-pass full generation.
+        pipeline._container.read_item.side_effect = Exception("not found")
+        # Two memories on different threads; the IN filter would drop t3.
+        pipeline._container.query_items.return_value = iter(
+            [
+                {
+                    "id": "f1",
+                    "user_id": "u1",
+                    "thread_id": "t1",
+                    "type": "fact",
+                    "content": "User likes coffee.",
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "f3",
+                    "user_id": "u1",
+                    "thread_id": "t3",
+                    "type": "fact",
+                    "content": "User lives in Seattle.",
+                    "created_at": "2025-01-01T00:00:01+00:00",
+                },
+            ]
+        )
+
+        with patch.object(
+            pipeline,
+            "_run_prompty",
+            return_value='{"key_facts":["likes coffee","lives in Seattle"]}',
+        ):
+            pipeline.generate_user_summary(user_id="u1", thread_ids=["t1"])
+
+        call = pipeline._container.query_items.call_args
+        query = call.kwargs["query"]
+        params = call.kwargs["parameters"]
+
+        assert "IN (" not in query
+        assert "@tid" not in query
+        assert not any(p["name"].startswith("@tid") for p in params)
+
+        upserted = pipeline._upsert_memory.call_args.args[0]
+        # Both threads must contribute to the resulting summary metadata.
+        assert sorted(upserted["metadata"]["thread_ids"]) == ["t1", "t3"]
+
+
+class TestDrainPipelineResources:
+    """``_init_pipeline`` must drain prior sync resources on re-entry.
+
+    Calling ``connect_cosmos()`` more than once on the same async client
+    (container switch, credential rotation, reconnect) must not leak the
+    predecessor sync EmbeddingsClient or sync CosmosClient.
+    """
+
+    def test_reentry_closes_prior_sync_embeddings_and_cosmos(self):
+        from agent_memory_toolkit.aio.cosmos_memory_client import (
+            AsyncCosmosMemoryClient,
+        )
+
+        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
+        prior_embed = MagicMock()
+        prior_cosmos = MagicMock()
+        client._sync_embeddings_client = prior_embed
+        client._sync_cosmos_client = prior_cosmos
+
+        client._drain_pipeline_resources()
+
+        prior_embed.close.assert_called_once()
+        prior_cosmos.close.assert_called_once()
+        assert client._sync_embeddings_client is None
+        assert client._sync_cosmos_client is None
+
+    def test_drain_is_safe_when_attributes_unset(self):
+        from agent_memory_toolkit.aio.cosmos_memory_client import (
+            AsyncCosmosMemoryClient,
+        )
+
+        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
+        # No attribute set yet — must not AttributeError.
+        client._drain_pipeline_resources()

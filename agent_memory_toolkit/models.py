@@ -10,7 +10,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -95,6 +95,8 @@ class MemoryRecord(BaseModel):
     confidence: Optional[float] = None
     content_hash: Optional[str] = None
     superseded_by: Optional[str] = None
+    supersede_reason: Optional[Literal["duplicate", "contradiction"]] = None
+    superseded_at: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
     source_memory_ids: list[str] = Field(default_factory=list)
 
@@ -189,6 +191,10 @@ class MemoryRecord(BaseModel):
             data["content_hash"] = self.content_hash
         if self.superseded_by is not None:
             data["superseded_by"] = self.superseded_by
+        if self.supersede_reason is not None:
+            data["supersede_reason"] = self.supersede_reason
+        if self.superseded_at is not None:
+            data["superseded_at"] = self.superseded_at
         if self.supersedes_ids:
             data["supersedes_ids"] = self.supersedes_ids
         if self.source_memory_ids:

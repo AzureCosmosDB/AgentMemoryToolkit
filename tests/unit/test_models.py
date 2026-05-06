@@ -451,3 +451,38 @@ def test_from_cosmos_dict_round_trip_new_fields(sample_embedding):
     assert restored.superseded_by == "new-id"
     assert restored.supersedes_ids == ["old-id"]
     assert restored.source_memory_ids == ["src-id"]
+
+
+def test_supersede_reason_and_at_fields():
+    """supersede_reason (Literal) and superseded_at (str) fields behave correctly."""
+    rec = MemoryRecord(user_id="u1", role="user", content="hello")
+    assert rec.supersede_reason is None
+    assert rec.superseded_at is None
+
+    rec_dup = MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="duplicate")
+    assert rec_dup.supersede_reason == "duplicate"
+
+    rec_con = MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="contradiction")
+    assert rec_con.supersede_reason == "contradiction"
+
+    with pytest.raises(pydantic.ValidationError):
+        MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="anything_else")
+
+    rec_at = MemoryRecord(
+        user_id="u1",
+        role="user",
+        content="hello",
+        superseded_at="2024-01-01T00:00:00Z",
+    )
+    assert rec_at.superseded_at == "2024-01-01T00:00:00Z"
+
+    rec_full = MemoryRecord(
+        user_id="u1",
+        role="user",
+        content="hello",
+        supersede_reason="duplicate",
+        superseded_at="2024-01-01T00:00:00Z",
+    )
+    out = rec_full.to_cosmos_dict()
+    assert out["supersede_reason"] == "duplicate"
+    assert out["superseded_at"] == "2024-01-01T00:00:00Z"

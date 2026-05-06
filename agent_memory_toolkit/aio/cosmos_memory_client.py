@@ -1607,10 +1607,10 @@ class AsyncCosmosMemoryClient:
 
             if fire_dedup:
                 try:
-                    await processor.process_dedup(user_id=user_id)
+                    await processor.process_reconcile(user_id=user_id)
                 except Exception as exc:
                     logger.warning(
-                        "Auto-trigger process_dedup failed for %s: %s",
+                        "Auto-trigger process_reconcile failed for %s: %s",
                         user_id,
                         exc,
                     )
@@ -1619,7 +1619,7 @@ class AsyncCosmosMemoryClient:
                         thread_counter_id(user_id, thread_id),
                         user_id,
                         thread_id,
-                        f"process_dedup: {exc!r}",
+                        f"process_reconcile: {exc!r}",
                     )
 
             if fire_summary:
@@ -1721,20 +1721,19 @@ class AsyncCosmosMemoryClient:
         self._require_pipeline()
         return await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids, recent_k)
 
-    async def deduplicate_facts(
+    async def reconcile(
         self,
         user_id: str,
-        similarity_threshold: float = 0.9,
-        max_facts: int = 200,
+        n: int = 50,
     ) -> dict[str, int]:
-        """Run LLM-based dedup on user's facts.
+        """Reconcile a user's facts via the contradiction-aware dedup pass.
 
         Pipeline calls are dispatched to a worker thread via
         :func:`asyncio.to_thread` to avoid blocking the event loop.
         """
         await self._require_cosmos()
         self._require_pipeline()
-        return await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id, similarity_threshold, max_facts)
+        return await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, n)
 
     # ------------------------------------------------------------------
     # Processor delegation

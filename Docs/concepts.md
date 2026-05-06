@@ -114,6 +114,31 @@ Prompts for summarization and fact extraction live in `azure_functions/prompts/`
 
 ---
 
+## Memory Reconciliation
+
+The `reconcile_memories(user_id, n=50)` pipeline step reads up to N most-recent active facts for a user and asks the LLM to identify two orthogonal outcomes in one pass:
+
+- **Duplicates** — two or more facts that restate the same claim in different words. Resolution: collapse into one merged fact; the originals are soft-deleted with `supersede_reason="duplicate"` and `superseded_by` set to the merged fact's id.
+- **Contradictions** — two facts that assert opposing claims about the same subject. Resolution: keep the winner (more recent first, higher confidence as tiebreaker), soft-delete the loser with `supersede_reason="contradiction"` and `superseded_by` set to the winner.
+
+### Why one pass
+
+Detecting contradictions semantically requires the LLM to see the candidate pool as a whole — paraphrased ("user prefers aisle seats") and contradictory ("user is vegetarian" vs "user loves steak") facts often have very different embedding vectors and would never co-occur in any cosine cluster. Putting all N candidates into one prompt lets the LLM do the semantic reasoning across both axes simultaneously. The pipeline returns `{"kept": int, "merged": int, "contradicted": int}`.
+
+### Loser preservation
+
+Soft-deleted facts stay in the container with their `supersede_reason`, `superseded_at`, and `superseded_by` fields populated. Default reads (`get_memories`, `search_cosmos`) filter them out via `superseded_by IS NULL`. To inspect the audit trail (e.g. "show everything that ever applied to this user"), opt out of the filter at the query level.
+
+### Write-time exact dedup
+
+Each fact written by `extract_memories` carries a `content_hash` (SHA-256 of normalized content, truncated to 32 hex chars; lowercase, whitespace-collapsed). Before upserting a freshly-extracted fact, the pipeline checks the hash against existing active facts and short-circuits if a match exists, incrementing the `exact_dedup_skipped` metric. This catches identical re-extractions cheaply without an LLM call.
+
+### Tunable
+
+`DEDUP_EVERY_N` (default 5) controls how often `reconcile_memories` runs in the auto-trigger path. Set to `0` to disable. The candidate cap `n` (default 50) is tunable per call; larger values give the LLM a wider view at higher token cost.
+
+---
+
 ## Automatic Processing (Change Feed)
 
 In addition to on-demand processing via the SDK, the toolkit includes a Cosmos DB change feed trigger that **automatically** starts processing orchestrations when enough new turns have been written.

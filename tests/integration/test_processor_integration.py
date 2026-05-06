@@ -44,7 +44,7 @@ class TestInProcessProcessNowEndToEnd:
             "episodic_count": 0,
             "updated_count": 0,
         }
-        pipeline.deduplicate_facts.return_value = {"deduplicated": 0}
+        pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
 
         processor = InProcessProcessor(pipeline=pipeline)
         client = _build_client(processor=processor)
@@ -72,7 +72,7 @@ class TestInProcessProcessNowEndToEnd:
         client.get_thread.assert_called_once_with(thread_id="thread-paris", user_id="u-paris", memory_type="turn")
         pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
-        pipeline.deduplicate_facts.assert_called_once_with("u-paris")
+        pipeline.reconcile_memories.assert_called_once_with("u-paris")
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +97,11 @@ class TestDurableProcessNowEndToEnd:
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary is None
         assert result.extracted_counts == {}
-        assert result.deduplicated_count == 0
+        assert result.reconciled_count == 0
 
         pipeline.generate_thread_summary.assert_not_called()
         pipeline.extract_memories.assert_not_called()
-        pipeline.deduplicate_facts.assert_not_called()
+        pipeline.reconcile_memories.assert_not_called()
 
         debug_msgs = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
         assert any("process_thread no-op" in m for m in debug_msgs)

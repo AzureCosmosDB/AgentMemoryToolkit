@@ -191,23 +191,23 @@ class TestExtractMemoriesOrchestrator:
                     "episodic_count": 0,
                     "updated_count": 0,
                 },  # em_ExtractMemories
-                {"deduplicated": 1},  # em_DeduplicateFacts
+                {"kept": 0, "merged": 1, "contradicted": 0},  # em_ReconcileMemories
             ],
         )
 
         assert [c[0] for c in ctx._yielded_calls] == [
             "em_ExtractMemories",
-            "em_DeduplicateFacts",
+            "em_ReconcileMemories",
         ]
         assert result["persisted"] is True
         assert result["extracted"] == {"facts_count": 2, "procedural_count": 1, "episodic_count": 0, "updated_count": 0}
-        assert result["dedup"] == {"deduplicated": 1}
+        assert result["dedup"] == {"kept": 0, "merged": 1, "contradicted": 0}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_extract_payload_carries_user_thread_and_limit(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": 5}, {"deduplicated": 2}])
+        _drive(gen, [{"facts": 5}, {"kept": 0, "merged": 2, "contradicted": 0}])
 
         extract_payload = ctx._yielded_calls[0][2]
         assert extract_payload == {"user_id": "u", "thread_id": "t", "limit": 20}

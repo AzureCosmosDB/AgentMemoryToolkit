@@ -7,29 +7,29 @@ from unittest.mock import MagicMock
 from agent_memory_toolkit.processors import InProcessProcessor, ProcessThreadResult
 
 
-def test_process_thread_calls_summarize_extract_dedup_in_order():
+def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary_u_t", "type": "summary"}
     pipeline.extract_memories.return_value = {"facts": 2, "episodic": 1, "procedural": 0}
-    pipeline.deduplicate_facts.return_value = {"merged": 2, "superseded": 1, "kept": 5}
+    pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 1, "kept": 5}
 
     proc = InProcessProcessor(pipeline=pipeline)
     result = proc.process_thread(user_id="u1", thread_id="t1", turns=[])
 
-    # Order of calls: summary -> extract -> dedup
+    # Order of calls: summary -> extract -> reconcile
     method_order = [c[0] for c in pipeline.method_calls]
     assert method_order == [
         "generate_thread_summary",
         "extract_memories",
-        "deduplicate_facts",
+        "reconcile_memories",
     ]
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.deduplicate_facts.assert_called_once_with("u1")
+    pipeline.reconcile_memories.assert_called_once_with("u1")
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary_u_t", "type": "summary"}
-    assert result.deduplicated_count == 3
+    assert result.reconciled_count == 3
     assert result.elapsed_ms >= 0
 
 
@@ -37,26 +37,12 @@ def test_process_thread_handles_non_dict_summary():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = None
     pipeline.extract_memories.return_value = {"facts": 0}
-    pipeline.deduplicate_facts.return_value = {}
+    pipeline.reconcile_memories.return_value = {}
 
     proc = InProcessProcessor(pipeline=pipeline)
     result = proc.process_thread(user_id="u1", thread_id="t1", turns=[])
     assert result.thread_summary is None
-    assert result.deduplicated_count == 0
-
-
-def test_extract_dedup_count_ignores_legacy_keys():
-    """Legacy ``{"deduplicated": N}`` payloads should yield 0, not N.
-
-    The pipeline's contract is ``{"kept", "merged", "superseded"}``;
-    legacy keys are not honored so stale callers can't fake a count.
-    """
-    assert InProcessProcessor._extract_dedup_count({"deduplicated": 7}) == 0
-    assert InProcessProcessor._extract_dedup_count({"merged": 3, "superseded": 2}) == 5
-    assert InProcessProcessor._extract_dedup_count({"merged": 4}) == 4
-    assert InProcessProcessor._extract_dedup_count({"superseded": 1}) == 1
-    assert InProcessProcessor._extract_dedup_count({}) == 0
-    assert InProcessProcessor._extract_dedup_count(None) == 0
+    assert result.reconciled_count == 0
 
 
 def test_generate_user_summary_passes_thread_ids():

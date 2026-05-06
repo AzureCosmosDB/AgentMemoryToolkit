@@ -33,7 +33,7 @@ class AsyncDurableFunctionProcessor:
             thread_id,
             len(turns) if turns else 0,
         )
-        return ProcessThreadResult(thread_summary=None, extracted_counts={}, deduplicated_count=0, elapsed_ms=0)
+        return ProcessThreadResult(thread_summary=None, extracted_counts={}, reconciled_count=0, elapsed_ms=0)
 
     async def process_extract_memories(
         self,
@@ -73,8 +73,12 @@ class AsyncDurableFunctionProcessor:
         )
         return UserSummaryResult(summary=None)
 
-    async def process_dedup(self, *, user_id: str) -> int:
-        logger.debug("AsyncDurableFunctionProcessor.process_dedup no-op user_id=%s", user_id)
+    async def process_reconcile(self, *, user_id: str, n: int = 50) -> int:
+        logger.debug(
+            "AsyncDurableFunctionProcessor.process_reconcile no-op user_id=%s n=%d",
+            user_id,
+            n,
+        )
         return 0
 
     async def generate_user_summary(

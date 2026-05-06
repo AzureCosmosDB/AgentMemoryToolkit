@@ -26,7 +26,7 @@ def test_process_thread_result_defaults():
     r = ProcessThreadResult()
     assert r.thread_summary is None
     assert r.extracted_counts == {}
-    assert r.deduplicated_count == 0
+    assert r.reconciled_count == 0
     assert r.elapsed_ms == 0
 
 

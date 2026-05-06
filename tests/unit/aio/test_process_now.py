@@ -31,7 +31,7 @@ async def test_process_now_with_inprocess_invokes_pipeline():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
-    pipeline.deduplicate_facts.return_value = {"deduplicated": 0}
+    pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
     client._pipeline = pipeline
     _patch_get_thread(client, [{"role": "user"}])
 
@@ -41,7 +41,7 @@ async def test_process_now_with_inprocess_invokes_pipeline():
     assert isinstance(client._processor, AsyncInProcessProcessor)
     pipeline.generate_thread_summary.assert_called_once_with("u", "t")
     pipeline.extract_memories.assert_called_once_with("u", "t")
-    pipeline.deduplicate_facts.assert_called_once_with("u")
+    pipeline.reconcile_memories.assert_called_once_with("u")
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_process_now_and_wait_inprocess_returns_true():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {}
-    pipeline.deduplicate_facts.return_value = {}
+    pipeline.reconcile_memories.return_value = {}
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 

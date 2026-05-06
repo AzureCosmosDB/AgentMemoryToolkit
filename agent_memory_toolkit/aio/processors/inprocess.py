@@ -66,9 +66,9 @@ class AsyncInProcessProcessor:
 
         thread_summary = await asyncio.to_thread(self._pipeline.generate_thread_summary, user_id, thread_id)
         extracted = await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id)
-        dedup = await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id)
+        reconciled = await asyncio.to_thread(self._pipeline.reconcile_memories, user_id)
 
-        deduped_count = self._extract_dedup_count(dedup)
+        deduped_count = self._extract_reconcile_count(reconciled)
 
         extracted_counts: dict[str, int] = (
             {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
@@ -78,7 +78,7 @@ class AsyncInProcessProcessor:
         return ProcessThreadResult(
             thread_summary=thread_summary if isinstance(thread_summary, dict) else None,
             extracted_counts=extracted_counts,
-            deduplicated_count=deduped_count,
+            reconciled_count=deduped_count,
             elapsed_ms=elapsed_ms,
         )
 
@@ -109,24 +109,24 @@ class AsyncInProcessProcessor:
         summary = await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
-    async def process_dedup(self, *, user_id: str) -> int:
-        dedup = await asyncio.to_thread(self._pipeline.deduplicate_facts, user_id)
-        return self._extract_dedup_count(dedup)
+    async def process_reconcile(self, *, user_id: str, n: int = 50) -> int:
+        reconciled = await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, n)
+        return self._extract_reconcile_count(reconciled)
 
     @staticmethod
-    def _extract_dedup_count(dedup: Any) -> int:
-        """Sum the merged + superseded facts from a ``deduplicate_facts`` result.
+    def _extract_reconcile_count(reconciled: Any) -> int:
+        """Sum ``merged + contradicted`` from a ``reconcile_memories`` result.
 
-        ``ProcessingPipeline.deduplicate_facts`` returns a dict with
-        ``{"kept", "merged", "superseded"}`` — both ``merged`` and
-        ``superseded`` represent facts that were consolidated, so they
-        contribute to the dedup-count metric.
+        ``ProcessingPipeline.reconcile_memories`` returns a dict with
+        ``{"kept", "merged", "contradicted"}`` — both ``merged`` and
+        ``contradicted`` represent facts that were consolidated or retired,
+        so they contribute to the dedup-count metric.
         """
-        if not isinstance(dedup, dict):
+        if not isinstance(reconciled, dict):
             return 0
-        merged = dedup.get("merged", 0) if isinstance(dedup.get("merged"), int) else 0
-        superseded = dedup.get("superseded", 0) if isinstance(dedup.get("superseded"), int) else 0
-        return merged + superseded
+        merged = reconciled.get("merged", 0) if isinstance(reconciled.get("merged"), int) else 0
+        contradicted = reconciled.get("contradicted", 0) if isinstance(reconciled.get("contradicted"), int) else 0
+        return merged + contradicted
 
     async def generate_user_summary(
         self,

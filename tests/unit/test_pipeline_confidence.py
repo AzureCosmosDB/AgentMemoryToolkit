@@ -163,214 +163,6 @@ def test_extract_procedural_carries_confidence():
     assert pr["confidence"] == pytest.approx(0.95)
 
 
-# ---------------------------------------------------------------------------
-# Dedup MERGE confidence preservation.
-#
-# A merged fact carries ``max(non-null source confidences)`` plus a
-# ``merged_from_count`` so ``get_memories(min_confidence=...)`` doesn't
-# silently exclude every dedup result. When no source has a confidence,
-# the field is omitted entirely (rather than synthesizing 0.5).
-# ---------------------------------------------------------------------------
-
-
-class TestDedupMergeConfidence:
-    def _build_pipeline(self):
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
-
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
-        pipeline._embeddings = MagicMock()
-        pipeline._embeddings.generate.return_value = [0.1] * 8
-        pipeline._upsert_memory = MagicMock()
-        pipeline._mark_superseded = MagicMock(return_value=True)
-        pipeline._container = MagicMock()
-        return pipeline
-
-    def test_merge_carries_max_confidence_and_count(self):
-        import json
-
-        pipeline = self._build_pipeline()
-        facts = [
-            {
-                "id": "f1",
-                "user_id": "u1",
-                "thread_id": "t1",
-                "content": "User likes coffee.",
-                "confidence": 0.6,
-                "embedding": [0.1] * 8,
-            },
-            {
-                "id": "f2",
-                "user_id": "u1",
-                "thread_id": "t1",
-                "content": "User likes coffee in the morning.",
-                "confidence": 0.9,
-                "embedding": [0.1] * 8,
-            },
-        ]
-        pipeline._container.query_items.return_value = iter(facts)
-
-        with (
-            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
-            patch.object(
-                pipeline,
-                "_run_prompty",
-                return_value=(
-                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
-                    '"merged_text":"User likes coffee in the morning.","salience":0.7}]}'
-                ),
-            ),
-            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
-        ):
-            pipeline.deduplicate_facts(user_id="u1")
-
-        merged_doc = pipeline._upsert_memory.call_args.args[0]
-        assert merged_doc["confidence"] == 0.9
-        assert merged_doc["metadata"]["merged_from_count"] == 2
-
-    def test_merge_omits_confidence_when_no_sources_have_it(self):
-        """Sources without confidence → merged doc has no confidence (legacy data)."""
-        import json
-
-        pipeline = self._build_pipeline()
-        facts = [
-            {"id": "f1", "user_id": "u1", "thread_id": "t1", "content": "a", "embedding": [0.1] * 8},
-            {"id": "f2", "user_id": "u1", "thread_id": "t1", "content": "b", "embedding": [0.1] * 8},
-        ]
-        pipeline._container.query_items.return_value = iter(facts)
-
-        with (
-            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
-            patch.object(
-                pipeline,
-                "_run_prompty",
-                return_value=(
-                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],"merged_text":"merged","salience":0.5}]}'
-                ),
-            ),
-            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
-        ):
-            pipeline.deduplicate_facts(user_id="u1")
-
-        merged_doc = pipeline._upsert_memory.call_args.args[0]
-        assert "confidence" not in merged_doc
-
-    def test_merge_unions_tags_across_all_sources(self):
-        import json
-
-        pipeline = self._build_pipeline()
-        facts = [
-            {
-                "id": "f1",
-                "user_id": "u1",
-                "thread_id": "t-billing",
-                "content": "User asked about billing.",
-                "tags": ["sys:fact", "topic:billing", "src:thread-1"],
-                "embedding": [0.1] * 8,
-            },
-            {
-                "id": "f2",
-                "user_id": "u1",
-                "thread_id": "t-account",
-                "content": "User asked about account.",
-                "tags": ["sys:fact", "topic:account", "src:thread-2"],
-                "embedding": [0.1] * 8,
-            },
-        ]
-        pipeline._container.query_items.return_value = iter(facts)
-
-        with (
-            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
-            patch.object(
-                pipeline,
-                "_run_prompty",
-                return_value=(
-                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
-                    '"merged_text":"User asked about billing and account.","salience":0.7}]}'
-                ),
-            ),
-            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
-        ):
-            pipeline.deduplicate_facts(user_id="u1")
-
-        merged_doc = pipeline._upsert_memory.call_args.args[0]
-        # Both topic tags must survive; sys:fact deduplicated.
-        assert "topic:billing" in merged_doc["tags"]
-        assert "topic:account" in merged_doc["tags"]
-        assert "src:thread-1" in merged_doc["tags"]
-        assert "src:thread-2" in merged_doc["tags"]
-        assert merged_doc["tags"].count("sys:fact") == 1
-
-    def test_merge_takes_max_salience_when_llm_omits_it(self):
-        """LLM may omit ``salience`` from MERGE actions; use max source salience.
-
-        Read-path filters (``min_salience``, salience-based ranking) would
-        otherwise downgrade or drop the merged fact relative to its source
-        components — dedup actively losing signal.
-        """
-        import json
-
-        pipeline = self._build_pipeline()
-        facts = [
-            {
-                "id": "f1",
-                "user_id": "u1",
-                "thread_id": "t1",
-                "content": "x",
-                "salience": 0.4,
-                "embedding": [0.1] * 8,
-            },
-            {
-                "id": "f2",
-                "user_id": "u1",
-                "thread_id": "t1",
-                "content": "y",
-                "salience": 0.9,
-                "embedding": [0.1] * 8,
-            },
-        ]
-        pipeline._container.query_items.return_value = iter(facts)
-
-        with (
-            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
-            patch.object(
-                pipeline,
-                "_run_prompty",
-                return_value=('{"actions":[{"action":"MERGE","source_ids":["f1","f2"],"merged_text":"merged"}]}'),
-            ),
-            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
-        ):
-            pipeline.deduplicate_facts(user_id="u1")
-
-        merged_doc = pipeline._upsert_memory.call_args.args[0]
-        assert merged_doc["salience"] == 0.9
-
-    def test_merge_prefers_llm_salience_over_max_when_provided(self):
-        import json
-
-        pipeline = self._build_pipeline()
-        facts = [
-            {"id": "f1", "user_id": "u1", "thread_id": "t1", "content": "x", "salience": 0.9, "embedding": [0.1] * 8},
-            {"id": "f2", "user_id": "u1", "thread_id": "t1", "content": "y", "salience": 0.8, "embedding": [0.1] * 8},
-        ]
-        pipeline._container.query_items.return_value = iter(facts)
-
-        with (
-            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
-            patch.object(
-                pipeline,
-                "_run_prompty",
-                return_value=(
-                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],"merged_text":"merged","salience":0.5}]}'
-                ),
-            ),
-            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
-        ):
-            pipeline.deduplicate_facts(user_id="u1")
-
-        merged_doc = pipeline._upsert_memory.call_args.args[0]
-        assert merged_doc["salience"] == 0.5
-
-
 class TestMarkSupersededDoesNotMutate:
     """``_mark_superseded`` must not mutate its input dict before the write.
 
@@ -390,12 +182,14 @@ class TestMarkSupersededDoesNotMutate:
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
 
-        result = pipeline._mark_superseded(old_doc, "fact-2")
+        result = pipeline._mark_superseded(old_doc, "fact-2", reason="duplicate")
 
         assert result is True
         assert old_doc == snapshot
         body = pipeline._container.replace_item.call_args.kwargs["body"]
         assert body["superseded_by"] == "fact-2"
+        assert body["supersede_reason"] == "duplicate"
+        assert "superseded_at" in body
         assert pipeline._container.replace_item.call_args.kwargs["match_condition"] == MatchConditions.IfNotModified
 
     def test_input_dict_unchanged_on_failure(self):
@@ -410,7 +204,7 @@ class TestMarkSupersededDoesNotMutate:
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
 
-        result = pipeline._mark_superseded(old_doc, "fact-2")
+        result = pipeline._mark_superseded(old_doc, "fact-2", reason="contradiction")
 
         assert result is False
         assert old_doc == snapshot

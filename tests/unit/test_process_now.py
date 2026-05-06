@@ -31,7 +31,7 @@ def test_process_now_with_inprocess_invokes_pipeline():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s", "type": "summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
-    pipeline.deduplicate_facts.return_value = {"deduplicated": 0}
+    pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
     client._pipeline = pipeline  # short-circuit lazy build
     _patch_get_thread(client, [{"role": "user", "content": "hi"}])
 
@@ -41,7 +41,7 @@ def test_process_now_with_inprocess_invokes_pipeline():
     assert isinstance(client._processor, InProcessProcessor)
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.deduplicate_facts.assert_called_once_with("u1")
+    pipeline.reconcile_memories.assert_called_once_with("u1")
 
 
 def test_process_now_with_durable_is_noop():
@@ -56,7 +56,7 @@ def test_process_now_with_durable_is_noop():
     assert result.thread_summary is None
     pipeline.generate_thread_summary.assert_not_called()
     pipeline.extract_memories.assert_not_called()
-    pipeline.deduplicate_facts.assert_not_called()
+    pipeline.reconcile_memories.assert_not_called()
 
 
 def test_process_now_requires_cosmos():
@@ -70,7 +70,7 @@ def test_process_now_and_wait_inprocess_returns_true():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {}
-    pipeline.deduplicate_facts.return_value = {}
+    pipeline.reconcile_memories.return_value = {}
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 

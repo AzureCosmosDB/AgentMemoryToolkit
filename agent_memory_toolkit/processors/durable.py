@@ -38,7 +38,7 @@ class DurableFunctionProcessor:
             thread_id,
             len(turns) if turns else 0,
         )
-        return ProcessThreadResult(thread_summary=None, extracted_counts={}, deduplicated_count=0, elapsed_ms=0)
+        return ProcessThreadResult(thread_summary=None, extracted_counts={}, reconciled_count=0, elapsed_ms=0)
 
     def process_extract_memories(
         self,
@@ -78,8 +78,12 @@ class DurableFunctionProcessor:
         )
         return UserSummaryResult(summary=None)
 
-    def process_dedup(self, *, user_id: str) -> int:
-        logger.debug("DurableFunctionProcessor.process_dedup no-op user_id=%s", user_id)
+    def process_reconcile(self, *, user_id: str, n: int = 50) -> int:
+        logger.debug(
+            "DurableFunctionProcessor.process_reconcile no-op user_id=%s n=%d",
+            user_id,
+            n,
+        )
         return 0
 
     def generate_user_summary(

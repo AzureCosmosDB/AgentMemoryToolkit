@@ -10,11 +10,11 @@ from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor, Process
 
 
 @pytest.mark.asyncio
-async def test_process_thread_calls_summarize_extract_dedup_in_order():
+async def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
-    pipeline.deduplicate_facts.return_value = {"merged": 2, "superseded": 0, "kept": 3}
+    pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 0, "kept": 3}
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     result = await proc.process_thread(user_id="u", thread_id="t", turns=[])
@@ -23,11 +23,11 @@ async def test_process_thread_calls_summarize_extract_dedup_in_order():
     assert method_order == [
         "generate_thread_summary",
         "extract_memories",
-        "deduplicate_facts",
+        "reconcile_memories",
     ]
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary"}
-    assert result.deduplicated_count == 2
+    assert result.reconciled_count == 2
 
 
 @pytest.mark.asyncio

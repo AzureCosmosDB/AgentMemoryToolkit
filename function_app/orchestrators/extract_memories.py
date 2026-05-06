@@ -1,6 +1,6 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``ExtractMemories`` → ``DeduplicateFacts``.
+Chain: ``ExtractMemories`` → ``ReconcileMemories``.
 
 The pipeline writes memories to Cosmos DB during ``ExtractMemories``; the
 Function App does not delete or tombstone any memories on its own. Memories
@@ -45,7 +45,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     )
 
     dedup = yield context.call_activity_with_retry(
-        "em_DeduplicateFacts",
+        "em_ReconcileMemories",
         retry,
         {"user_id": user_id},
     )
@@ -95,7 +95,7 @@ def em_ExtractMemories(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
-def em_DeduplicateFacts(payload: dict) -> dict:
+def em_ReconcileMemories(payload: dict) -> dict:
     user_id = payload["user_id"]
     pipeline = get_pipeline()
-    return pipeline.deduplicate_facts(user_id=user_id) or {}
+    return pipeline.reconcile_memories(user_id=user_id) or {}

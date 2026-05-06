@@ -28,7 +28,7 @@ class ProcessThreadResult:
 
     thread_summary: Optional[dict[str, Any]] = None
     extracted_counts: dict[str, int] = field(default_factory=dict)
-    deduplicated_count: int = 0
+    reconciled_count: int = 0
     elapsed_ms: int = 0
 
 
@@ -49,7 +49,7 @@ class MemoryProcessor(Protocol):
     The protocol exposes both a fused :meth:`process_thread` (used by
     :meth:`CosmosMemoryClient.process_now`) and per-step methods
     (:meth:`process_extract_memories`, :meth:`process_thread_summary`,
-    :meth:`process_user_summary`, :meth:`process_dedup`) used by the
+    :meth:`process_user_summary`, :meth:`process_reconcile`) used by the
     auto-trigger path so that ``FACT_EXTRACTION_EVERY_N`` /
     ``THREAD_SUMMARY_EVERY_N`` / ``USER_SUMMARY_EVERY_N`` actually fire
     independently per their own cadence - matching the function-app
@@ -86,10 +86,11 @@ class MemoryProcessor(Protocol):
         thread_ids: Optional[list[str]] = None,
     ) -> UserSummaryResult: ...
 
-    def process_dedup(
+    def process_reconcile(
         self,
         *,
         user_id: str,
+        n: int = 50,
     ) -> int: ...
 
     def generate_user_summary(

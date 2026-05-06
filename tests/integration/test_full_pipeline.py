@@ -8,7 +8,7 @@ Cosmos DB queries and vector / hybrid search.
 The Azure Function host is **not** required — the same ProcessingPipeline
 that the change-feed trigger invokes is also exposed directly on
 ``CosmosMemoryClient`` (``extract_memories``, ``generate_thread_summary``,
-``generate_user_summary``, ``deduplicate_facts``).
+``generate_user_summary``, ``reconcile``).
 
 Enable by setting::
 
@@ -310,7 +310,7 @@ class TestTaggingAndSalience:
             _cleanup(agent_memory, unique_user_id)
 
 
-class TestDeduplication:
+class TestReconciliation:
     def test_dedup_near_duplicate_facts(self, agent_memory, unique_user_id, unique_thread_id):
         try:
             for content in [
@@ -334,14 +334,13 @@ class TestDeduplication:
             )
             assert len(before) >= 4
 
-            stats = agent_memory.deduplicate_facts(
+            stats = agent_memory.reconcile(
                 user_id=unique_user_id,
-                similarity_threshold=0.85,
             )
             assert isinstance(stats, dict)
-            assert "kept" in stats and "merged" in stats and "superseded" in stats
-            assert stats["merged"] + stats["superseded"] >= 1, (
-                f"Expected at least one near-duplicate to be merged/superseded, got {stats}"
+            assert "kept" in stats and "merged" in stats and "contradicted" in stats
+            assert stats["merged"] + stats["contradicted"] >= 1, (
+                f"Expected at least one near-duplicate to be merged/contradicted, got {stats}"
             )
 
             active = [
@@ -350,5 +349,135 @@ class TestDeduplication:
                 if not m.get("superseded_by")
             ]
             assert len(active) < len(before)
+        finally:
+            _cleanup(agent_memory, unique_user_id)
+
+    def test_reconcile_resolves_contradiction(self, agent_memory, unique_user_id, unique_thread_id):
+        try:
+            contradictory_facts = [
+                "User is strictly vegetarian and never eats meat.",
+                "User loves a good ribeye steak.",
+                "User often orders the bone-in pork chop at steakhouses.",
+            ]
+            for content in contradictory_facts:
+                agent_memory.add_cosmos(
+                    user_id=unique_user_id,
+                    role="user",
+                    content=content,
+                    memory_type="fact",
+                    thread_id=unique_thread_id,
+                    salience=0.7,
+                )
+
+            before = agent_memory.get_memories(
+                user_id=unique_user_id,
+                memory_type="fact",
+            )
+            assert len(before) == len(contradictory_facts)
+
+            stats = agent_memory.reconcile(user_id=unique_user_id)
+            assert isinstance(stats, dict)
+            assert stats.get("contradicted", 0) >= 1, f"Expected at least one contradiction to be resolved, got {stats}"
+
+            all_facts = agent_memory.get_memories(
+                user_id=unique_user_id,
+                memory_type="fact",
+                include_superseded=True,
+            )
+            contradicted = [m for m in all_facts if m.get("supersede_reason") == "contradiction"]
+            assert len(contradicted) >= 1, "Expected at least one record marked supersede_reason=contradiction"
+            sample = contradicted[0]
+            assert isinstance(sample.get("superseded_at"), str) and len(sample["superseded_at"]) > 0
+            assert isinstance(sample.get("superseded_by"), str) and len(sample["superseded_by"]) > 0
+
+            active = [m for m in all_facts if not m.get("superseded_by")]
+            assert len(active) < len(before), (
+                f"Active fact count should shrink after contradiction resolution; "
+                f"before={len(before)} active={len(active)}"
+            )
+        finally:
+            _cleanup(agent_memory, unique_user_id)
+
+    def test_extract_content_hash_short_circuit(self, agent_memory, unique_user_id, unique_thread_id):
+        try:
+            agent_memory.add_cosmos(
+                user_id=unique_user_id,
+                role="user",
+                content="My favorite color is teal.",
+                thread_id=unique_thread_id,
+            )
+            agent_memory.add_cosmos(
+                user_id=unique_user_id,
+                role="agent",
+                content="Got it, teal is a great color.",
+                thread_id=unique_thread_id,
+            )
+            time.sleep(1)
+
+            agent_memory.process_now(user_id=unique_user_id, thread_id=unique_thread_id)
+            facts_after_first = [
+                m
+                for m in agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+                if not m.get("superseded_by")
+            ]
+            assert len(facts_after_first) >= 1, "First extraction should produce at least one fact"
+            assert all(len(m.get("content_hash") or "") == 32 for m in facts_after_first), (
+                "All extracted facts should carry a content_hash of length 32"
+            )
+
+            agent_memory.process_now(user_id=unique_user_id, thread_id=unique_thread_id)
+            facts_after_second = [
+                m
+                for m in agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+                if not m.get("superseded_by")
+            ]
+            assert len(facts_after_second) <= len(facts_after_first), (
+                f"Re-extraction should not grow active fact count; "
+                f"first={len(facts_after_first)} second={len(facts_after_second)}"
+            )
+        finally:
+            _cleanup(agent_memory, unique_user_id)
+
+    def test_reconcile_writes_supersede_metadata(self, agent_memory, unique_user_id, unique_thread_id):
+        try:
+            paraphrases = [
+                "The user lives in Seattle and works at Microsoft as a data engineer.",
+                "User resides in Seattle, WA, employed by Microsoft as a data engineer.",
+                "The user is based in Seattle and is a data engineer at Microsoft.",
+                "User lives in Seattle; works at Microsoft on the data engineering team.",
+                "The user works as a data engineer at Microsoft in Seattle.",
+            ]
+            for content in paraphrases:
+                agent_memory.add_cosmos(
+                    user_id=unique_user_id,
+                    role="user",
+                    content=content,
+                    memory_type="fact",
+                    thread_id=unique_thread_id,
+                    salience=0.7,
+                )
+
+            stats = agent_memory.reconcile(user_id=unique_user_id)
+            assert isinstance(stats, dict)
+            assert stats.get("merged", 0) + stats.get("contradicted", 0) >= 1, (
+                f"Expected at least one merge/contradiction across paraphrases, got {stats}"
+            )
+
+            all_facts = agent_memory.get_memories(
+                user_id=unique_user_id,
+                memory_type="fact",
+                include_superseded=True,
+            )
+            losers = [m for m in all_facts if m.get("supersede_reason") is not None]
+            assert len(losers) >= 1, "Expected at least one superseded record"
+
+            sample_loser = losers[0]
+            assert sample_loser["supersede_reason"] in {"duplicate", "contradiction"}
+            assert isinstance(sample_loser["superseded_at"], str) and len(sample_loser["superseded_at"]) > 0
+            assert isinstance(sample_loser["superseded_by"], str) and len(sample_loser["superseded_by"]) > 0
+
+            survivor_id = sample_loser["superseded_by"]
+            live = [m for m in all_facts if not m.get("superseded_by")]
+            assert any(m["id"] == survivor_id for m in live), "supersede_by must point at a live record"
         finally:
             _cleanup(agent_memory, unique_user_id)

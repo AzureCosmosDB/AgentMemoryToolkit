@@ -19,7 +19,7 @@ def test_process_thread_returns_empty_result():
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary is None
     assert result.extracted_counts == {}
-    assert result.deduplicated_count == 0
+    assert result.reconciled_count == 0
     assert result.elapsed_ms == 0
 
 

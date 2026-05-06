@@ -229,6 +229,9 @@ class AsyncCosmosMemoryClient:
         self._pipeline: Any = None
         # Sync Cosmos client for the pipeline
         self._sync_cosmos_client: Any = None
+        # Sync EmbeddingsClient owned by the pipeline. Tracked so close()
+        # can drain its httpx pool.
+        self._sync_embeddings_client: Any = None
 
         # Pluggable async backend that owns summarize/extract/dedup. ``None``
         # means lazily build an :class:`AsyncInProcessProcessor` on first use.
@@ -281,6 +284,15 @@ class AsyncCosmosMemoryClient:
                     pass
             self._sync_cosmos_client = None
         await self._embeddings_client.close()
+        sync_embeddings = getattr(self, "_sync_embeddings_client", None)
+        if sync_embeddings is not None:
+            close = getattr(sync_embeddings, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            self._sync_embeddings_client = None
         # Async client's ChatClient is shared with the sync pipeline; close
         # its sync httpx pool too so we don't leak across __aexit__.
         try:
@@ -701,6 +713,13 @@ class AsyncCosmosMemoryClient:
         write call returns promptly even when extraction/summary takes
         seconds. Failures in the background task are logged via a
         done-callback and never surface to the caller.
+
+        ``local_memory`` is **not** cleared on success — repeat calls
+        re-upsert the same documents (idempotent on ``id``, but consumes
+        RU and re-emits change-feed events). Auto-trigger uses a tracked
+        per-(user, thread) delta so repeated pushes do not re-fire
+        extraction on already-pushed turns. Call :meth:`clear_local`
+        explicitly if you want strict flush-and-reset semantics.
         """
         await self._require_cosmos()
         if batch_size <= 0:
@@ -1245,7 +1264,6 @@ class AsyncCosmosMemoryClient:
             logger.warning("Failed to create sync Cosmos client for pipeline: %s", exc)
             sync_container = None
 
-        # Pipeline needs a sync embeddings client
         sync_embeddings = EmbeddingsClient(
             endpoint=self._ai_foundry_endpoint,
             credential=self._sync_ai_foundry_credential,
@@ -1253,6 +1271,9 @@ class AsyncCosmosMemoryClient:
             model=self._embedding_deployment_name,
             dimensions=self._embedding_dimensions,
         )
+        # Owned by this client (separate httpx pool from the async embeddings
+        # client); close() must drain it or long-lived async services leak FDs.
+        self._sync_embeddings_client = sync_embeddings
 
         if sync_container is not None:
             self._pipeline = ProcessingPipeline(

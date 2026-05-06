@@ -272,6 +272,13 @@ def test_user_threshold_crossing_starts_user_summary():
     user_summary_starts = [n for n, _ in started if n == "UserSummaryOrchestrator"]
     assert len(user_summary_starts) == 1
 
+    # Payload must include the contributing thread_ids so the orchestrator
+    # can scope the user-summary query (avoids a full cross-partition scan).
+    us_call = next(c for c in starter.start_new.await_args_list if c.args[0] == "UserSummaryOrchestrator")
+    payload = us_call.kwargs["client_input"]
+    assert payload["user_id"] == "u1"
+    assert sorted(payload["thread_ids"]) == ["t0", "t1", "t2", "t3"]
+
 
 @patch.dict(
     os.environ,

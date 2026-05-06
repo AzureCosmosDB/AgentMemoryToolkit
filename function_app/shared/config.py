@@ -18,6 +18,18 @@ entirely. When the env var is unset or invalid the documented default is
 applied (so an out-of-the-box deploy actually summarizes/extracts) and a
 warning is logged for invalid values. Use the ``get_*_every_n()`` helpers
 rather than calling ``_parse_threshold`` directly.
+
+Threshold-crossing semantics in the change-feed trigger
+-------------------------------------------------------
+A single change-feed batch advances each counter by the entire batch's
+contribution in one ETag-guarded write. Even if the resulting jump crosses
+several ``EVERY_N`` boundaries (e.g. ``EVERY_N=10`` and a batch of 100
+turns advances a counter from 0 → 100), exactly **one** orchestrator is
+started — keyed on the new counter value — and it folds in only the
+trailing ``MAX_BATCH_SIZE`` items. For high-throughput bursts this means
+summarization is coarser than ``EVERY_N`` alone implies. Operators who
+need finer per-boundary fan-out should lower ``MAX_BATCH_SIZE`` and raise
+``EVERY_N`` proportionally, or process upstream in smaller batches.
 """
 
 from __future__ import annotations

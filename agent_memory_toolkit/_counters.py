@@ -279,12 +279,16 @@ def _build_counter_doc(
         "created_at": existing.get("created_at", now) if existing else now,
         "updated_at": now,
     }
-    # Preserve FA-managed LSN replay-dedup field if present; only initialize
+    # Preserve FA-managed LSN replay-dedup fields if present; only initialize
     # to None when seeding the document for the first time. Mutating an
     # existing FA-written LSN to None would invalidate the FA's monotonicity
-    # assumption on the next change-feed redelivery.
+    # assumption on the next change-feed redelivery. ``last_batch_old_count``
+    # is paired with ``last_batch_lsn`` for cached-result replay; if we
+    # overwrote it with the SDK's local ``old_count``, a redelivered batch
+    # would replay an inconsistent ``(old, new)`` and re-fire orchestrators.
     if existing is not None and "last_batch_lsn" in existing:
         doc["last_batch_lsn"] = existing.get("last_batch_lsn")
+        doc["last_batch_old_count"] = existing.get("last_batch_old_count", old_count)
     else:
         doc["last_batch_lsn"] = None
     # Carry over auto-trigger failure breadcrumbs so they aren't blown away

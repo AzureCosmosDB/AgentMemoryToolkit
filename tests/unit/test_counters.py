@@ -45,6 +45,32 @@ class TestBuildCounterDoc:
         assert doc["last_batch_lsn"] == 42
         assert doc["created_at"] == "2024-01-01T00:00:00Z"
 
+    def test_preserves_fa_last_batch_old_count(self):
+        """SDK writes must preserve the FA's cached pre-batch counter value.
+
+        ``last_batch_old_count`` pairs with ``last_batch_lsn`` for cached
+        replay of an FA-driven batch. If the SDK overwrote it with its
+        own ``old_count`` (which reflects only the SDK's local delta), a
+        change-feed redelivery would replay an inconsistent ``(old, new)``
+        pair and re-fire orchestrators against already-summarized data.
+        """
+        existing = {
+            "count": 15,
+            "last_batch_lsn": 5,
+            "last_batch_old_count": 8,
+            "created_at": "2024-01-01T00:00:00Z",
+        }
+        doc = _build_counter_doc(
+            counter_id="thread:u:t",
+            user_id="u",
+            thread_id="t",
+            new_count=20,
+            old_count=15,
+            existing=existing,
+        )
+        assert doc["last_batch_lsn"] == 5
+        assert doc["last_batch_old_count"] == 8
+
     def test_preserves_failure_breadcrumbs(self):
         existing = {
             "last_batch_lsn": 7,

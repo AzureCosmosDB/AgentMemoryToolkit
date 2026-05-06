@@ -924,6 +924,13 @@ class CosmosMemoryClient:
         logged and swallowed so writes never fail because of background
         processing.
 
+        ``local_memory`` is **not** cleared on success — repeat calls
+        re-upsert the same documents (idempotent on ``id``, but consumes
+        RU and re-emits change-feed events). Auto-trigger uses a tracked
+        per-(user, thread) delta so repeated pushes do not re-fire
+        extraction on already-pushed turns. Call :meth:`clear_local`
+        explicitly if you want strict flush-and-reset semantics.
+
         Parameters
         ----------
         batch_size : int

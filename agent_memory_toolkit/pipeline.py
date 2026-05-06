@@ -273,17 +273,17 @@ class ProcessingPipeline:
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
         etag = old_doc.get("_etag")
-        old_doc["superseded_by"] = superseder_id
+        new_doc = {**old_doc, "superseded_by": superseder_id}
         try:
             if etag:
                 self._container.replace_item(
-                    item=old_doc["id"],
-                    body=old_doc,
+                    item=new_doc["id"],
+                    body=new_doc,
                     match_condition=MatchConditions.IfNotModified,
                     etag=etag,
                 )
             else:
-                self._container.upsert_item(body=old_doc)
+                self._container.upsert_item(body=new_doc)
             return True
         except CosmosAccessConditionFailedError:
             logger.info(
@@ -1069,6 +1069,13 @@ class ProcessingPipeline:
                     ]
                     merged_confidence = max(source_confidences) if source_confidences else None
 
+                    source_saliences = [
+                        s for f in cluster_facts if f["id"] in source_ids and (s := f.get("salience")) is not None
+                    ]
+                    merged_salience = act.get("salience")
+                    if merged_salience is None and source_saliences:
+                        merged_salience = max(source_saliences)
+
                     merged_doc: dict[str, Any] = {
                         "id": det_id,
                         "user_id": user_id,
@@ -1081,7 +1088,7 @@ class ProcessingPipeline:
                             "merged_from": source_ids,
                             "merged_from_count": len(source_ids),
                         },
-                        "salience": act.get("salience"),
+                        "salience": merged_salience,
                         "supersedes_ids": source_ids,
                         "tags": merged_tags,
                         "created_at": now,

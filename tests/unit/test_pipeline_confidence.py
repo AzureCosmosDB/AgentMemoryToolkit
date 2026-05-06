@@ -299,3 +299,118 @@ class TestDedupMergeConfidence:
         assert "src:thread-1" in merged_doc["tags"]
         assert "src:thread-2" in merged_doc["tags"]
         assert merged_doc["tags"].count("sys:fact") == 1
+
+    def test_merge_takes_max_salience_when_llm_omits_it(self):
+        """LLM may omit ``salience`` from MERGE actions; use max source salience.
+
+        Read-path filters (``min_salience``, salience-based ranking) would
+        otherwise downgrade or drop the merged fact relative to its source
+        components — dedup actively losing signal.
+        """
+        import json
+
+        pipeline = self._build_pipeline()
+        facts = [
+            {
+                "id": "f1",
+                "user_id": "u1",
+                "thread_id": "t1",
+                "content": "x",
+                "salience": 0.4,
+                "embedding": [0.1] * 8,
+            },
+            {
+                "id": "f2",
+                "user_id": "u1",
+                "thread_id": "t1",
+                "content": "y",
+                "salience": 0.9,
+                "embedding": [0.1] * 8,
+            },
+        ]
+        pipeline._container.query_items.return_value = iter(facts)
+
+        with (
+            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
+            patch.object(
+                pipeline,
+                "_run_prompty",
+                return_value=('{"actions":[{"action":"MERGE","source_ids":["f1","f2"],"merged_text":"merged"}]}'),
+            ),
+            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
+        ):
+            pipeline.deduplicate_facts(user_id="u1")
+
+        merged_doc = pipeline._upsert_memory.call_args.args[0]
+        assert merged_doc["salience"] == 0.9
+
+    def test_merge_prefers_llm_salience_over_max_when_provided(self):
+        import json
+
+        pipeline = self._build_pipeline()
+        facts = [
+            {"id": "f1", "user_id": "u1", "thread_id": "t1", "content": "x", "salience": 0.9, "embedding": [0.1] * 8},
+            {"id": "f2", "user_id": "u1", "thread_id": "t1", "content": "y", "salience": 0.8, "embedding": [0.1] * 8},
+        ]
+        pipeline._container.query_items.return_value = iter(facts)
+
+        with (
+            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
+            patch.object(
+                pipeline,
+                "_run_prompty",
+                return_value=(
+                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],"merged_text":"merged","salience":0.5}]}'
+                ),
+            ),
+            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
+        ):
+            pipeline.deduplicate_facts(user_id="u1")
+
+        merged_doc = pipeline._upsert_memory.call_args.args[0]
+        assert merged_doc["salience"] == 0.5
+
+
+class TestMarkSupersededDoesNotMutate:
+    """``_mark_superseded`` must not mutate its input dict before the write.
+
+    If the write fails (412/transient), callers retrying would otherwise see
+    a dict already carrying ``superseded_by`` and lose the ability to detect
+    "no, this fact has not yet been marked superseded" downstream.
+    """
+
+    def test_input_dict_unchanged_on_success(self):
+        from azure.core import MatchConditions
+
+        from agent_memory_toolkit.pipeline import ProcessingPipeline
+
+        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline._container = MagicMock()
+
+        old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
+        snapshot = dict(old_doc)
+
+        result = pipeline._mark_superseded(old_doc, "fact-2")
+
+        assert result is True
+        assert old_doc == snapshot
+        body = pipeline._container.replace_item.call_args.kwargs["body"]
+        assert body["superseded_by"] == "fact-2"
+        assert pipeline._container.replace_item.call_args.kwargs["match_condition"] == MatchConditions.IfNotModified
+
+    def test_input_dict_unchanged_on_failure(self):
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        from agent_memory_toolkit.pipeline import ProcessingPipeline
+
+        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline._container = MagicMock()
+        pipeline._container.replace_item.side_effect = CosmosAccessConditionFailedError(message="412", response=None)
+
+        old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
+        snapshot = dict(old_doc)
+
+        result = pipeline._mark_superseded(old_doc, "fact-2")
+
+        assert result is False
+        assert old_doc == snapshot

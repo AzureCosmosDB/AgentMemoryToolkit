@@ -22,6 +22,7 @@ bp = df.Blueprint()
 def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
     user_id = payload["user_id"]
+    thread_ids = payload.get("thread_ids") or None
     max_batch = config.get_max_batch_size()
 
     retry = default_retry_options()
@@ -29,7 +30,7 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     user_summary = yield context.call_activity_with_retry(
         "us_GenerateUserSummary",
         retry,
-        {"user_id": user_id, "limit": max_batch},
+        {"user_id": user_id, "limit": max_batch, "thread_ids": thread_ids},
     )
 
     yield context.call_activity_with_retry(
@@ -54,8 +55,9 @@ def us_GenerateUserSummary(payload: dict) -> dict:
     """
     user_id = payload["user_id"]
     limit = payload.get("limit")
+    thread_ids = payload.get("thread_ids") or None
     pipeline = get_pipeline()
-    summary = pipeline.generate_user_summary(user_id=user_id, recent_k=limit)
+    summary = pipeline.generate_user_summary(user_id=user_id, recent_k=limit, thread_ids=thread_ids)
     logger.info("UserSummary generated user=%s", user_id)
     return summary
 

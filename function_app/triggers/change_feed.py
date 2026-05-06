@@ -94,6 +94,11 @@ async def process_changefeed_batch(
     thread_max_lsn: dict[tuple[str, str], int] = {}
     user_max_lsn: dict[str, int] = {}
 
+    # Track which threads contributed to each user counter so the user-summary
+    # orchestrator can scope its query to those threads (avoids a full
+    # cross-partition scan on the user's whole memory set).
+    user_thread_ids: dict[str, set[str]] = defaultdict(set)
+
     for doc in documents:
         if doc.get("type") != "turn":
             continue
@@ -105,6 +110,7 @@ async def process_changefeed_batch(
 
         thread_counts[(user_id, thread_id)] += 1
         user_counts[user_id] += 1
+        user_thread_ids[user_id].add(thread_id)
 
         lsn = doc.get("_lsn")
         if lsn is not None:
@@ -182,7 +188,11 @@ async def process_changefeed_batch(
                     starter,
                     "UserSummaryOrchestrator",
                     instance_id,
-                    {"user_id": user_id, "count": new_count},
+                    {
+                        "user_id": user_id,
+                        "count": new_count,
+                        "thread_ids": sorted(user_thread_ids.get(user_id, set())),
+                    },
                     orchestration_errors,
                 )
 

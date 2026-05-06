@@ -266,7 +266,7 @@ class TestUserSummaryOrchestrator:
         }
 
     @patch.object(us_mod, "default_retry_options", return_value=MagicMock())
-    def test_payloads_only_carry_user_id_and_limit(self, _retry):
+    def test_payloads_only_carry_user_id_limit_and_thread_ids(self, _retry):
         ctx = _make_context({"user_id": "alice"})
         gen = self._orchestrator()(ctx)
         _drive(gen, [{"id": "us"}, {}])
@@ -274,11 +274,23 @@ class TestUserSummaryOrchestrator:
         gen_payload = ctx._yielded_calls[0][2]
         persist_payload = ctx._yielded_calls[1][2]
 
-        assert gen_payload == {"user_id": "alice", "limit": 20}
+        assert gen_payload == {"user_id": "alice", "limit": 20, "thread_ids": None}
         assert persist_payload == {"user_id": "alice", "user_summary": {"id": "us"}}
-        # Critically: thread_id is NOT in any payload.
         for payload in (gen_payload, persist_payload):
             assert "thread_id" not in payload
+
+    @patch.object(us_mod, "default_retry_options", return_value=MagicMock())
+    def test_payload_passes_thread_ids_when_provided(self, _retry):
+        ctx = _make_context({"user_id": "alice", "thread_ids": ["t1", "t2"]})
+        gen = self._orchestrator()(ctx)
+        _drive(gen, [{"id": "us"}, {}])
+
+        gen_payload = ctx._yielded_calls[0][2]
+        assert gen_payload == {
+            "user_id": "alice",
+            "limit": 20,
+            "thread_ids": ["t1", "t2"],
+        }
 
     @patch.object(us_mod, "default_retry_options", return_value=MagicMock())
     def test_user_summary_id_returned(self, _retry):

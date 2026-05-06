@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
-from .exceptions import ValidationError
+from .exceptions import LLMError, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -301,16 +301,24 @@ class ProcessingPipeline:
             return False
 
     @staticmethod
-    def _parse_llm_json(text: str) -> dict[str, Any]:
+    def _parse_llm_json(text: str | None) -> dict[str, Any]:
         """Parse JSON from an LLM response, stripping markdown fences."""
+        if text is None:
+            raise LLMError("LLM returned no content (None response body)")
         cleaned = text.strip()
         if cleaned.startswith("```"):
-            # Remove opening fence (possibly with language hint)
-            first_newline = cleaned.index("\n")
-            cleaned = cleaned[first_newline + 1 :]
+            first_newline = cleaned.find("\n")
+            if first_newline >= 0:
+                cleaned = cleaned[first_newline + 1 :]
+            else:
+                cleaned = cleaned.lstrip("`").lstrip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
-        return json.loads(cleaned.strip())
+        try:
+            return json.loads(cleaned.strip())
+        except json.JSONDecodeError as exc:
+            preview = (text or "")[:200].replace("\n", " ")
+            raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
 
     # -----------------------------------------------------------------------
     # Public API
@@ -651,7 +659,9 @@ class ProcessingPipeline:
             self._upsert_memory(doc)
 
         result = {
-            "facts_count": sum(1 for d in docs_to_embed if d["type"] == "fact"),
+            "facts_count": sum(
+                1 for d in docs_to_embed if d["type"] == "fact" and "sys:unclassified" not in d.get("tags", [])
+            ),
             "procedural_count": sum(1 for d in docs_to_embed if d["type"] == "procedural"),
             "episodic_count": sum(1 for d in docs_to_embed if d["type"] == "episodic"),
             "unclassified_count": sum(1 for d in docs_to_embed if "sys:unclassified" in d.get("tags", [])),
@@ -703,6 +713,8 @@ class ProcessingPipeline:
             since = existing_summary["updated_at"]
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
+
+        query_started_at = datetime.now(timezone.utc).isoformat()
 
         items = list(
             self._container.query_items(
@@ -762,7 +774,6 @@ class ProcessingPipeline:
         topic_tags = [f"topic:{t}" for t in topics]
         tags = ["sys:summary"] + topic_tags
 
-        now = datetime.now(timezone.utc).isoformat()
         summary_doc: dict[str, Any] = {
             "id": summary_id,
             "user_id": user_id,
@@ -779,8 +790,8 @@ class ProcessingPipeline:
                 "recent_k": recent_k,
                 "incremental_update": existing_summary is not None,
             },
-            "created_at": existing_summary["created_at"] if existing_summary else now,
-            "updated_at": now,
+            "created_at": existing_summary["created_at"] if existing_summary else query_started_at,
+            "updated_at": query_started_at,
         }
 
         self._upsert_memory(summary_doc)
@@ -833,6 +844,8 @@ class ProcessingPipeline:
             query += f" AND c.thread_id IN ({placeholders})"
             for i, tid in enumerate(thread_ids):
                 parameters.append({"name": f"@tid{i}", "value": tid})
+
+        query_started_at = datetime.now(timezone.utc).isoformat()
 
         items = list(
             self._container.query_items(
@@ -904,7 +917,6 @@ class ProcessingPipeline:
             all_thread_ids = sorted(new_thread_ids)
             total_memory_count = len(items)
 
-        now = datetime.now(timezone.utc).isoformat()
         summary_doc: dict[str, Any] = {
             "id": user_summary_id,
             "user_id": user_id,
@@ -923,8 +935,8 @@ class ProcessingPipeline:
                 "recent_k": recent_k,
                 "incremental_update": existing_summary is not None,
             },
-            "created_at": existing_summary["created_at"] if existing_summary else now,
-            "updated_at": now,
+            "created_at": existing_summary["created_at"] if existing_summary else query_started_at,
+            "updated_at": query_started_at,
         }
 
         self._upsert_memory(summary_doc)
@@ -1040,6 +1052,18 @@ class ProcessingPipeline:
                         cluster_facts[0],
                     )
 
+                    merged_tags: list[str] = []
+                    seen_tags: set[str] = set()
+                    for f in cluster_facts:
+                        if f["id"] not in source_ids:
+                            continue
+                        for t in f.get("tags", []):
+                            if t not in seen_tags:
+                                seen_tags.add(t)
+                                merged_tags.append(t)
+                    if not merged_tags:
+                        merged_tags = ["sys:fact"]
+
                     source_confidences = [
                         c for f in cluster_facts if f["id"] in source_ids and (c := f.get("confidence")) is not None
                     ]
@@ -1059,7 +1083,7 @@ class ProcessingPipeline:
                         },
                         "salience": act.get("salience"),
                         "supersedes_ids": source_ids,
-                        "tags": source_fact.get("tags", ["sys:fact"]),
+                        "tags": merged_tags,
                         "created_at": now,
                     }
                     if merged_confidence is not None:

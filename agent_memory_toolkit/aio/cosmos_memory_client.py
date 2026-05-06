@@ -113,6 +113,7 @@ class AsyncCosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
+        self._unflushed_turn_counts: dict[tuple[str, Optional[str]], int] = {}
 
         self._background_tasks: set[asyncio.Task[Any]] = set()
         try:
@@ -155,6 +156,8 @@ class AsyncCosmosMemoryClient:
         # accidentally close a user-supplied credential or leak one we created.
         self._owns_cosmos_credential = False
         self._owns_ai_foundry_credential = False
+        self._owns_sync_cosmos_credential = False
+        self._owns_sync_ai_foundry_credential = False
         if self._cosmos_credential is None and self._cosmos_key:
             self._cosmos_credential = self._cosmos_key
         # Keep a sync credential for the pipeline's sync Cosmos container
@@ -188,6 +191,7 @@ class AsyncCosmosMemoryClient:
                     from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
 
                     self._sync_cosmos_credential = SyncDefaultAzureCredential()
+                    self._owns_sync_cosmos_credential = True
                 except ImportError:
                     self._sync_cosmos_credential = None
             # Sync credential for AI Foundry (used by sync ChatClient inside
@@ -197,6 +201,7 @@ class AsyncCosmosMemoryClient:
                     from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
 
                     self._sync_ai_foundry_credential = SyncDefaultAzureCredential()
+                    self._owns_sync_ai_foundry_credential = True
                 except ImportError:
                     self._sync_ai_foundry_credential = None
 
@@ -300,9 +305,11 @@ class AsyncCosmosMemoryClient:
                     await close()
                 except Exception:
                     pass
-        # Sync credentials (Cosmos + AI Foundry fallback) close synchronously.
-        for sync_cred in (self._sync_cosmos_credential, self._sync_ai_foundry_credential):
-            if sync_cred is None:
+        for owns, sync_cred in (
+            (self._owns_sync_cosmos_credential, self._sync_cosmos_credential),
+            (self._owns_sync_ai_foundry_credential, self._sync_ai_foundry_credential),
+        ):
+            if not owns or sync_cred is None:
                 continue
             close = getattr(sync_cred, "close", None)
             if callable(close):
@@ -343,6 +350,9 @@ class AsyncCosmosMemoryClient:
             salience=salience,
         )
         self.local_memory.append(memory)
+        if memory_type == "turn":
+            key = (user_id, thread_id)
+            self._unflushed_turn_counts[key] = self._unflushed_turn_counts.get(key, 0) + 1
         logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
 
     def get_local(
@@ -701,11 +711,6 @@ class AsyncCosmosMemoryClient:
             batch_size,
         )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
-        turn_counts: dict[tuple[str, str], int] = {}
-        for r in records:
-            if str(getattr(r, "memory_type", "")) == "turn":
-                key = (r.user_id, r.thread_id)
-                turn_counts[key] = turn_counts.get(key, 0) + 1
 
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
@@ -716,6 +721,9 @@ class AsyncCosmosMemoryClient:
                 raise CosmosOperationError(f"Async push_to_cosmos batch upsert failed: {exc}") from exc
 
         logger.info("Async upserted batch of %d records", len(records))
+
+        turn_counts = self._unflushed_turn_counts
+        self._unflushed_turn_counts = {}
 
         if turn_counts:
             try:

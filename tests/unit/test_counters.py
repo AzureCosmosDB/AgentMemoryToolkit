@@ -2,7 +2,7 @@
 
 Covers counter-doc construction (LSN preservation, failure breadcrumbs)
 and ``stamp_failure_sync`` — the helpers that let SDK and FA share a
-counter container without trampling each other (Round 4 fixes #8 and #10).
+counter container without trampling each other.
 """
 
 from __future__ import annotations
@@ -66,8 +66,8 @@ class TestBuildCounterDoc:
 
 class TestStampFailureSync:
     def test_writes_failure_fields_via_patch_item(self):
-        """Round 5 fix #2: stamp_failure_sync must use ``patch_item`` so it
-        can never lose-update concurrent count increments.
+        """``stamp_failure_sync`` must use ``patch_item`` so it can never
+        lose-update concurrent count increments.
         """
         container = MagicMock()
 
@@ -104,8 +104,8 @@ class TestStampFailureSync:
 
 
 class TestBuildCounterDocOwnerStamping:
-    """Round 5 fix #6: ``last_owner`` is stamped advisory metadata so a
-    second backend (or a future operator audit) can see who last wrote.
+    """``last_owner`` is stamped as advisory metadata so a second backend
+    (or a future operator audit) can see who last wrote the counter.
     """
 
     def test_stamps_last_owner_when_provided(self):

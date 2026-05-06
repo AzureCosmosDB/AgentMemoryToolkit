@@ -121,7 +121,7 @@ def test_extract_routes_unclassified_to_fact_with_tag():
     assert doc["confidence"] == pytest.approx(0.45)
     assert doc["metadata"]["unclassified_reason"] == "could be fact or episodic"
     assert result["unclassified_count"] == 1
-    assert result["facts_count"] == 1
+    assert result["facts_count"] == 0
 
 
 def test_extract_episodic_carries_confidence():
@@ -164,11 +164,12 @@ def test_extract_procedural_carries_confidence():
 
 
 # ---------------------------------------------------------------------------
-# MERGE confidence preservation (Round 4 fix #5).
+# Dedup MERGE confidence preservation.
 #
-# Before: dedup MERGE branch never set ``confidence``, so every merged fact
-# was silently excluded from ``get_memories(min_confidence=...)``. We now
-# carry forward ``max(non-null source confidences)`` plus ``merged_from_count``.
+# A merged fact carries ``max(non-null source confidences)`` plus a
+# ``merged_from_count`` so ``get_memories(min_confidence=...)`` doesn't
+# silently exclude every dedup result. When no source has a confidence,
+# the field is omitted entirely (rather than synthesizing 0.5).
 # ---------------------------------------------------------------------------
 
 
@@ -252,3 +253,49 @@ class TestDedupMergeConfidence:
 
         merged_doc = pipeline._upsert_memory.call_args.args[0]
         assert "confidence" not in merged_doc
+
+    def test_merge_unions_tags_across_all_sources(self):
+        import json
+
+        pipeline = self._build_pipeline()
+        facts = [
+            {
+                "id": "f1",
+                "user_id": "u1",
+                "thread_id": "t-billing",
+                "content": "User asked about billing.",
+                "tags": ["sys:fact", "topic:billing", "src:thread-1"],
+                "embedding": [0.1] * 8,
+            },
+            {
+                "id": "f2",
+                "user_id": "u1",
+                "thread_id": "t-account",
+                "content": "User asked about account.",
+                "tags": ["sys:fact", "topic:account", "src:thread-2"],
+                "embedding": [0.1] * 8,
+            },
+        ]
+        pipeline._container.query_items.return_value = iter(facts)
+
+        with (
+            patch.object(pipeline, "_cluster_by_similarity", return_value=[[0, 1]]),
+            patch.object(
+                pipeline,
+                "_run_prompty",
+                return_value=(
+                    '{"actions":[{"action":"MERGE","source_ids":["f1","f2"],'
+                    '"merged_text":"User asked about billing and account.","salience":0.7}]}'
+                ),
+            ),
+            patch.object(pipeline, "_parse_llm_json", side_effect=lambda s: json.loads(s)),
+        ):
+            pipeline.deduplicate_facts(user_id="u1")
+
+        merged_doc = pipeline._upsert_memory.call_args.args[0]
+        # Both topic tags must survive; sys:fact deduplicated.
+        assert "topic:billing" in merged_doc["tags"]
+        assert "topic:account" in merged_doc["tags"]
+        assert "src:thread-1" in merged_doc["tags"]
+        assert "src:thread-2" in merged_doc["tags"]
+        assert merged_doc["tags"].count("sys:fact") == 1

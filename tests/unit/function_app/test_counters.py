@@ -259,3 +259,34 @@ class TestIncrementExisting:
 
         assert (old, new) == (9, 13)
         assert container.upsert_item.await_count == 1
+
+    def test_out_of_order_replay_is_noop(self):
+        """When the redelivered batch's LSN is *less than* the stored LSN
+        (lease re-balance / host crash redelivering an old batch after a
+        newer one already landed), the increment is a no-op — return
+        (current, current) so threshold-crossing logic doesn't fire a
+        spurious extract/dedup. We use ``>=`` not
+        ``==`` for replay detection."""
+        container = _make_container()
+        container.read_item.return_value = {
+            "id": "thread:u1:t1",
+            "count": 10,
+            "last_batch_lsn": 200,
+            "last_batch_old_count": 5,
+            "_etag": "etag-A",
+        }
+
+        old, new = asyncio.run(
+            increment_counter_by(
+                container,
+                "thread:u1:t1",
+                "u1",
+                "t1",
+                5,
+                batch_max_lsn=100,
+            )
+        )
+
+        assert (old, new) == (10, 10)
+        assert container.upsert_item.await_count == 0
+        assert container.create_item.await_count == 0

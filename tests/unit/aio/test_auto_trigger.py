@@ -2,7 +2,7 @@
 
 The async client schedules ``_maybe_auto_trigger`` as a background
 ``asyncio.Task`` instead of awaiting it inline, so the user's write call
-returns as soon as the Cosmos upserts complete (Round 4 fix #6).
+returns as soon as the Cosmos upserts complete.
 """
 
 from __future__ import annotations
@@ -59,3 +59,83 @@ class TestAsyncAutoTriggerNonBlocking:
             # Drain the background task so pytest doesn't warn about a
             # destroyed-but-pending task at teardown.
             await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+
+class TestPushToCosmosUnflushedDelta:
+    """``push_to_cosmos`` must use the unflushed-add delta, not a recount
+    of ``local_memory``, so callers that retain the buffer don't re-fire
+    extract/dedup/summary on already-processed turns."""
+
+    @pytest.mark.asyncio
+    async def test_repeat_push_does_not_re_increment(self, monkeypatch):
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+
+        client = AsyncCosmosMemoryClient(use_default_credential=False)
+
+        async def fake_upsert(body):
+            return body
+
+        client._container_client = MagicMock()
+        client._container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._counter_container_client = MagicMock()
+
+        client.add_local(user_id="u1", role="user", thread_id="t1", content="a")
+        client.add_local(user_id="u1", role="user", thread_id="t1", content="b")
+
+        captured: list[dict] = []
+
+        async def capture(turn_counts):
+            captured.append(dict(turn_counts))
+
+        with patch.object(client, "_maybe_auto_trigger", side_effect=capture):
+            await client.push_to_cosmos()
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+            # First push: trigger sees the 2 unflushed turns.
+            assert captured == [{("u1", "t1"): 2}]
+            # local_memory is intentionally retained.
+            assert len(client.local_memory) == 2
+
+            captured.clear()
+            # Second push WITHOUT new add_local. The unflushed delta is now
+            # empty so the trigger must NOT fire (or, if it fires, must see
+            # an empty dict and short-circuit).
+            await client.push_to_cosmos()
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+            # No new background task with non-empty turn_counts.
+            for tc in captured:
+                assert tc == {}, f"Re-pushed buffer wrongly fired trigger: {tc}"
+
+    @pytest.mark.asyncio
+    async def test_only_new_adds_count_after_partial_push(self, monkeypatch):
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+
+        client = AsyncCosmosMemoryClient(use_default_credential=False)
+
+        async def fake_upsert(body):
+            return body
+
+        client._container_client = MagicMock()
+        client._container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._counter_container_client = MagicMock()
+
+        client.add_local(user_id="u1", role="user", thread_id="t1", content="a")
+
+        captured: list[dict] = []
+
+        async def capture(turn_counts):
+            captured.append(dict(turn_counts))
+
+        with patch.object(client, "_maybe_auto_trigger", side_effect=capture):
+            await client.push_to_cosmos()
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+            assert captured == [{("u1", "t1"): 1}]
+
+            captured.clear()
+            # Add ONE more turn. local_memory now has 2 entries but the
+            # delta passed to the trigger must be 1.
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="b")
+            await client.push_to_cosmos()
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+            assert captured == [{("u1", "t1"): 1}]

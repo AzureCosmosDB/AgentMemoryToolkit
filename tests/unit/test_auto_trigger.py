@@ -113,9 +113,9 @@ def test_push_to_cosmos_skips_when_counter_container_unavailable(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # Per-step trigger gating — each *_EVERY_N fires its own pipeline step
-# independently (Round 4 fix #3). The InProcess backend mirrors the
-# function-app split-orchestrator behavior so the two backends produce the
-# same memory contents for the same chat history.
+# independently. The InProcess backend mirrors the function-app
+# split-orchestrator behavior so the two backends produce the same memory
+# contents for the same chat history.
 # ---------------------------------------------------------------------------
 
 
@@ -193,8 +193,8 @@ class TestPerStepAutoTrigger:
 
 
 # ---------------------------------------------------------------------------
-# Owner exclusivity (Round 4 fix #4) — MEMORY_PROCESSOR_OWNER ensures only
-# one of {SDK auto-trigger, FA change-feed processor} runs against a shared
+# Owner exclusivity — MEMORY_PROCESSOR_OWNER ensures only one of
+# {SDK auto-trigger, FA change-feed processor} runs against a shared
 # container, preventing double-extraction / double-dedup.
 # ---------------------------------------------------------------------------
 

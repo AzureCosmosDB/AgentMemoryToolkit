@@ -90,10 +90,14 @@ async def increment_counter_by(
       times on HTTP 412.
     * Uses ``create_item`` for the first-write path, retrying on HTTP 409 in
       case multiple Function workers raced to seed the counter.
-    * If ``batch_max_lsn`` matches the LSN persisted on the existing doc, this
-      is treated as a change-feed replay and we return the cached
-      ``(pre_batch_count, current_count)`` **without writing** so the
-      threshold-crossing semantics are preserved without double-counting.
+    * If ``batch_max_lsn`` is *less than or equal to* the LSN persisted on the
+      existing doc, this is treated as a change-feed replay (immediate or
+      after a lease re-balance / host crash where checkpoints regressed) and
+      we return without writing. For the equal case we return the cached
+      ``(pre_batch_count, current_count)`` so threshold-crossing semantics
+      hold; for the strict-less case we return ``(current, current)`` (no
+      crossing) because some other batch already advanced the counter past
+      this one.
     * Preserves SDK-written failure breadcrumbs (``last_failure_at`` /
       ``last_failure_reason``) so monitors don't flap when the FA writes
       after an SDK failure stamp.
@@ -123,18 +127,35 @@ async def increment_counter_by(
             )
 
         # ---- Replay detection via LSN ----
+        # Use ``>=`` not ``==`` so out-of-order redeliveries (lease
+        # re-balance, host crash → checkpoint regression where another
+        # batch landed in between) also short-circuit. For the exact
+        # match we replay the cached result; for the strict-greater case
+        # we return (current, current) — no threshold crossing — because
+        # the batch's effect is already absorbed in a later state we have
+        # no cached pre-batch value for.
         if (
             batch_max_lsn is not None
             and existing_doc is not None
-            and existing_doc.get("last_batch_lsn") == batch_max_lsn
+            and existing_doc.get("last_batch_lsn") is not None
+            and existing_doc["last_batch_lsn"] >= batch_max_lsn
         ):
-            replay_old = existing_doc.get("last_batch_old_count", old_count)
+            stored_lsn = existing_doc["last_batch_lsn"]
+            if stored_lsn == batch_max_lsn:
+                replay_old = existing_doc.get("last_batch_old_count", old_count)
+                logger.info(
+                    "Counter replay detected counter_id=%s lsn=%s, returning cached result",
+                    counter_id,
+                    batch_max_lsn,
+                )
+                return (replay_old, old_count)
             logger.info(
-                "Counter replay detected counter_id=%s lsn=%s, returning cached result",
+                "Counter out-of-order replay counter_id=%s redelivered_lsn=%s stored_lsn=%s; no-op",
                 counter_id,
                 batch_max_lsn,
+                stored_lsn,
             )
-            return (replay_old, old_count)
+            return (old_count, old_count)
 
         new_count = old_count + count
         new_doc = {

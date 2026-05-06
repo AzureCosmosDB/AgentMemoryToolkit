@@ -112,6 +112,7 @@ class CosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
+        self._unflushed_turn_counts: dict[tuple[str, Optional[str]], int] = {}
         self._warned_owner_skip: bool = False
         self._warned_counter_unreachable: bool = False
 
@@ -278,6 +279,9 @@ class CosmosMemoryClient:
             salience=salience,
         )
         self.local_memory.append(memory)
+        if memory_type == "turn":
+            key = (user_id, thread_id)
+            self._unflushed_turn_counts[key] = self._unflushed_turn_counts.get(key, 0) + 1
         logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
 
     def get_local(
@@ -935,7 +939,6 @@ class CosmosMemoryClient:
             batch_size,
         )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
-        turn_counts: dict[tuple[str, str], int] = {}
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
             for record in batch:
@@ -944,10 +947,10 @@ class CosmosMemoryClient:
                     self._container_client.upsert_item(body=body)
                 except Exception as exc:
                     raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
-                if str(getattr(record, "memory_type", "")) == "turn":
-                    key = (record.user_id, record.thread_id)
-                    turn_counts[key] = turn_counts.get(key, 0) + 1
         logger.info("Upserted batch of %d records", len(records))
+
+        turn_counts = self._unflushed_turn_counts
+        self._unflushed_turn_counts = {}
 
         try:
             self._maybe_auto_trigger(turn_counts)

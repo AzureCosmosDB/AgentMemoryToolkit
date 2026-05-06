@@ -398,7 +398,9 @@ def test_lsn_replay_does_not_double_increment():
 
 
 # ---------------------------------------------------------------------------
-# MEMORY_PROCESSOR_OWNER exclusivity (Round 5 — PR #7 comment #8)
+# MEMORY_PROCESSOR_OWNER exclusivity — the change-feed trigger must
+# respect the owner env var the same way the SDK auto-trigger does, so a
+# shared Cosmos container is processed by exactly one backend.
 # ---------------------------------------------------------------------------
 
 

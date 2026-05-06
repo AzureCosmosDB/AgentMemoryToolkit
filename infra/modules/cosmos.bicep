@@ -184,6 +184,7 @@ resource counterContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
           '/thread_id'
         ]
       }
+      defaultTtl: 7776000
     }
   }
 }

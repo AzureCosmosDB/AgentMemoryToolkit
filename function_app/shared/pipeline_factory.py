@@ -22,6 +22,7 @@ def get_pipeline():
 
     from azure.identity import DefaultAzureCredential
 
+    from agent_memory_toolkit._utils import _resolve_embedding_dimensions
     from agent_memory_toolkit.chat import ChatClient
     from agent_memory_toolkit.embeddings import EmbeddingsClient
     from agent_memory_toolkit.pipeline import ProcessingPipeline
@@ -29,6 +30,8 @@ def get_pipeline():
     credential = DefaultAzureCredential()
     container = get_memories_container()
     ai_endpoint = config.get_ai_foundry_endpoint()
+
+    embedding_dimensions = _resolve_embedding_dimensions(None)
 
     llm = ChatClient(
         endpoint=ai_endpoint,
@@ -39,6 +42,7 @@ def get_pipeline():
         endpoint=ai_endpoint,
         credential=credential,
         model=config.get_embedding_deployment_name(),
+        dimensions=embedding_dimensions,
     )
 
     _pipeline = ProcessingPipeline(container, llm, embeddings)

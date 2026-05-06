@@ -47,6 +47,9 @@ param aiFoundryEndpoint string
 @description('Embedding model deployment name.')
 param embeddingDeploymentName string = 'text-embedding-3-large'
 
+@description('Embedding output dimensions. MUST match the dimensions configured in the Cosmos memories container vectorEmbeddingPolicy (default 1536).')
+param embeddingDimensions int = 1536
+
 @description('LLM model deployment name.')
 param chatDeploymentName string = 'gpt-4o-mini'
 
@@ -250,6 +253,15 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME'
           value: embeddingDeploymentName
+        }
+        {
+          // Pins the embedding output dim. Without this, text-embedding-3-large
+          // returns its native 3072-dim vectors and Cosmos accepts them silently —
+          // but DiskANN (configured for 1536 in cosmos.bicep) cannot match
+          // them, so every FA-written memory becomes invisible to vector /
+          // hybrid search. Must equal cosmos.bicep vectorEmbeddingPolicy dimensions.
+          name: 'AI_FOUNDRY_EMBEDDING_DIMENSIONS'
+          value: string(embeddingDimensions)
         }
         {
           name: 'AI_FOUNDRY_CHAT_DEPLOYMENT_NAME'

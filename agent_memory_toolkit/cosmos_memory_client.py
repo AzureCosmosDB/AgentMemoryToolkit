@@ -112,9 +112,8 @@ class CosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
-        # One-shot WARN guard for MEMORY_PROCESSOR_OWNER=durable skip path
-        # (see _maybe_auto_trigger).
         self._warned_owner_skip: bool = False
+        self._warned_counter_unreachable: bool = False
 
         # Store kwargs directly
         self._cosmos_endpoint = cosmos_endpoint
@@ -219,6 +218,16 @@ class CosmosMemoryClient:
             self._container_client = None
             self._counter_container_client = None
             logger.info("Cosmos client closed")
+        # Drain LLM/embeddings httpx pools — openai.AzureOpenAI keeps them
+        # open across `with` blocks otherwise.
+        try:
+            self._chat_client.close_sync()
+        except Exception:
+            pass
+        try:
+            self._embeddings_client.close()
+        except Exception:
+            pass
         # Close credentials we created ourselves (sync DefaultAzureCredential
         # holds an underlying token cache + HTTP transport).
         for owns, cred in (
@@ -595,6 +604,9 @@ class CosmosMemoryClient:
         operator brought their own memory container without provisioning a
         counter container). Auto-trigger callers must tolerate ``None`` and
         skip the increment.
+
+        Logs a one-shot WARN on first failure so operators don't silently
+        lose all memory processing because of a missing counter container.
         """
         if self._counter_container_client is not None:
             return self._counter_container_client
@@ -605,12 +617,18 @@ class CosmosMemoryClient:
             self._counter_container_client = db.get_container_client(self._cosmos_counter_container)
             return self._counter_container_client
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "Counter container %s/%s unreachable; auto-trigger disabled: %s",
-                self._cosmos_database,
-                self._cosmos_counter_container,
-                exc,
-            )
+            if not self._warned_counter_unreachable:
+                self._warned_counter_unreachable = True
+                logger.warning(
+                    "Counter container %s/%s unreachable (%s: %s); "
+                    "auto-trigger DISABLED for the lifetime of this client. "
+                    "Provision the container or set MEMORY_PROCESSOR_OWNER=durable "
+                    "if processing runs in the Function App.",
+                    self._cosmos_database,
+                    self._cosmos_counter_container,
+                    type(exc).__name__,
+                    exc,
+                )
             return None
 
     def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
@@ -720,6 +738,15 @@ class CosmosMemoryClient:
             fire_summary = n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
             fire_dedup = n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
 
+            # Order matters: extract → dedup → summary.
+            # Each step gates on its OWN threshold (independent crossings),
+            # but when multiple thresholds cross in the same batch we still
+            # want the data flow to be: write fresh facts, deduplicate them,
+            # then fold the deduplicated set into the summary. Reordering
+            # would risk a summary that includes since-removed duplicates
+            # or omits just-extracted facts. DO NOT reorder without
+            # updating the equivalent block in aio/cosmos_memory_client.py
+            # and function_app/orchestrators/.
             if fire_extract:
                 try:
                     processor.process_extract_memories(user_id=user_id, thread_id=thread_id)

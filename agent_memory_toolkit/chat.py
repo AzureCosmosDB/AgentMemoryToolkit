@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -62,10 +63,18 @@ def _make_sync_token_provider_for_async(credential: Any, scope: str):
 def _unsupported_param(exc: Exception) -> str | None:
     """If *exc* is a 400 about an unsupported sampling param, return its name."""
     msg = str(exc).lower()
-    if "400" not in msg and "unsupported" not in msg and "does not support" not in msg:
+    if "400" not in msg:
+        return None
+    if not (
+        "does not support" in msg
+        or "is not supported" in msg
+        or "unsupported parameter" in msg
+        or "unsupported value" in msg
+    ):
         return None
     for p in _SAMPLING_PARAMS:
-        if p in msg:
+        pattern = rf"(?<![a-z_]){re.escape(p)}(?![a-z_])"
+        if re.search(pattern, msg):
             return p
     return None
 
@@ -434,3 +443,19 @@ class ChatClient:
         if self._async_client is not None:
             await self._async_client.close()
             self._async_client = None
+
+    def close_sync(self) -> None:
+        """Close the underlying sync HTTP client, if one has been created.
+
+        ``openai.AzureOpenAI`` owns an httpx connection pool that leaks
+        across ``with`` blocks unless closed explicitly. Sync callers should
+        invoke this from their own ``close()`` to drain the pool.
+        """
+        if self._client is not None:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            self._client = None

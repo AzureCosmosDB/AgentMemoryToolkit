@@ -115,18 +115,14 @@ class AsyncCosmosMemoryClient:
         self.local_memory: list[dict[str, Any]] = []
 
         self._background_tasks: set[asyncio.Task[Any]] = set()
-        # Backpressure for fire-and-forget auto-trigger tasks. Without a
-        # cap, FACT_EXTRACTION_EVERY_N=1 + a burst of pushes spawns one
-        # extract pipeline per push and slams AI Foundry. Configurable via
-        # MEMORY_AUTO_TRIGGER_CONCURRENCY (default 4).
         try:
             _max = int(os.environ.get("MEMORY_AUTO_TRIGGER_CONCURRENCY", "4"))
         except ValueError:
             _max = 4
         self._auto_trigger_semaphore: asyncio.Semaphore = asyncio.Semaphore(max(1, _max))
-        # One-shot WARN guard: skip-due-to-MEMORY_PROCESSOR_OWNER=durable
-        # would otherwise log on every push.
         self._warned_owner_skip: bool = False
+        self._warned_counter_unreachable: bool = False
+        self._pipeline_init_error: Exception | None = None
 
         # Store kwargs directly
         self._cosmos_endpoint = cosmos_endpoint
@@ -249,16 +245,23 @@ class AsyncCosmosMemoryClient:
     async def close(self) -> None:
         """Close all underlying async clients.
 
-        Drains any in-flight fire-and-forget auto-trigger tasks first so
-        they don't continue running against torn-down Cosmos/embeddings
-        handles.
+        Cancels any in-flight fire-and-forget auto-trigger tasks first so
+        ``close()`` / ``__aexit__`` doesn't block for tens of seconds while
+        a mid-LLM extract runs to completion. Auto-trigger work is
+        recoverable on the next push, so cancellation is safe.
         """
-        # Drain fire-and-forget auto-trigger tasks before tearing down the
-        # underlying clients, otherwise an in-flight extract+dedup will
-        # crash with CosmosOperationError mid-shutdown.
+        # Cancel + bounded-wait. Without the cancel, an in-flight extract+dedup
+        # can hold close() for tens of seconds. With cancel + 5s wait we
+        # guarantee bounded shutdown latency; remaining tasks raise
+        # CancelledError and will be retried on the next push_to_cosmos.
         pending = list(self._background_tasks)
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            for task in pending:
+                task.cancel()
+            try:
+                await asyncio.wait(pending, timeout=5.0)
+            except Exception:
+                pass
         if self._cosmos_client is not None:
             await self._cosmos_client.close()
             self._cosmos_client = None
@@ -273,6 +276,16 @@ class AsyncCosmosMemoryClient:
                     pass
             self._sync_cosmos_client = None
         await self._embeddings_client.close()
+        # Async client's ChatClient is shared with the sync pipeline; close
+        # its sync httpx pool too so we don't leak across __aexit__.
+        try:
+            self._chat_client.close_sync()
+        except Exception:
+            pass
+        try:
+            await self._chat_client.close()
+        except Exception:
+            pass
         if self._owns_cosmos_credential and self._cosmos_credential is not None:
             close = getattr(self._cosmos_credential, "close", None)
             if close is not None:
@@ -1213,7 +1226,14 @@ class AsyncCosmosMemoryClient:
             sync_db = sync_client.get_database_client(self._cosmos_database)
             sync_container = sync_db.get_container_client(self._cosmos_container)
             self._sync_cosmos_client = sync_client
+            self._pipeline_init_error = None
         except Exception as exc:
+            # Capture the real failure so _require_pipeline can surface it
+            # later — the alternative is the user calls connect_cosmos()
+            # successfully, then sees CosmosNotConnectedError("call
+            # connect_cosmos() first") on the first extract, with the real
+            # cause buried in an old WARN.
+            self._pipeline_init_error = exc
             logger.warning("Failed to create sync Cosmos client for pipeline: %s", exc)
             sync_container = None
 
@@ -1268,6 +1288,14 @@ class AsyncCosmosMemoryClient:
     def _require_pipeline(self) -> None:
         """Raise if the processing pipeline is not available."""
         if self._pipeline is None:
+            if self._pipeline_init_error is not None:
+                raise CosmosNotConnectedError(
+                    "Processing pipeline failed to initialize "
+                    f"({type(self._pipeline_init_error).__name__}: "
+                    f"{self._pipeline_init_error}). The async client connected "
+                    "but the sync Cosmos client used by the pipeline could "
+                    "not be built. Check credentials and endpoint."
+                ) from self._pipeline_init_error
             raise CosmosNotConnectedError(
                 "Processing pipeline requires Cosmos DB connection. "
                 "Call connect_cosmos() or create_memory_store() first."
@@ -1281,7 +1309,11 @@ class AsyncCosmosMemoryClient:
         return self._processor
 
     def _get_counter_container(self) -> Any:
-        """Lazy handle to the counter container (best-effort, returns None on failure)."""
+        """Lazy handle to the counter container (best-effort, returns None on failure).
+
+        Logs a one-shot WARN on first failure so operators don't silently
+        lose all memory processing because of a missing counter container.
+        """
         if self._counter_container_client is not None:
             return self._counter_container_client
         if self._cosmos_client is None:
@@ -1291,12 +1323,18 @@ class AsyncCosmosMemoryClient:
             self._counter_container_client = db.get_container_client(self._cosmos_counter_container)
             return self._counter_container_client
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "Counter container %s/%s unreachable; auto-trigger disabled: %s",
-                self._cosmos_database,
-                self._cosmos_counter_container,
-                exc,
-            )
+            if not self._warned_counter_unreachable:
+                self._warned_counter_unreachable = True
+                logger.warning(
+                    "Counter container %s/%s unreachable (%s: %s); "
+                    "auto-trigger DISABLED for the lifetime of this client. "
+                    "Provision the container or set MEMORY_PROCESSOR_OWNER=durable "
+                    "if processing runs in the Function App.",
+                    self._cosmos_database,
+                    self._cosmos_counter_container,
+                    type(exc).__name__,
+                    exc,
+                )
             return None
 
     async def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
@@ -1421,6 +1459,14 @@ class AsyncCosmosMemoryClient:
             fire_summary = n_summary > 0 and crosses_threshold(old_count, new_count, n_summary)
             fire_dedup = n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
 
+            # Order matters: extract → dedup → summary.
+            # Each step gates on its OWN threshold (independent crossings),
+            # but when multiple thresholds cross in the same batch we still
+            # want the data flow to be: write fresh facts, deduplicate them,
+            # then fold the deduplicated set into the summary. Reordering
+            # would risk a summary that includes since-removed duplicates
+            # or omits just-extracted facts. Keep in sync with the sync
+            # client and function_app/orchestrators/.
             if fire_extract:
                 try:
                     await processor.process_extract_memories(user_id=user_id, thread_id=thread_id)

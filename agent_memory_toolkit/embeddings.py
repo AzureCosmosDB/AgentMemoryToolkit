@@ -153,3 +153,18 @@ class EmbeddingsClient:
         # the caller receives embeddings in the same order as the input.
         sorted_data = sorted(response.data, key=lambda d: d.index)
         return [item.embedding for item in sorted_data]
+
+    def close(self) -> None:
+        """Close the underlying sync HTTP client, if one has been created.
+
+        ``openai.AzureOpenAI`` owns an httpx connection pool that leaks
+        across ``with`` blocks unless closed explicitly.
+        """
+        if self._client is not None:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            self._client = None

@@ -101,7 +101,7 @@ class TestConstructor:
 class TestAddLocal:
     def test_add_local_valid(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="hi")
+        mem.add_local(user_id="u1", role="user", content="hi", thread_id="t1")
 
         assert len(mem.local_memory) == 1
         m = mem.local_memory[0]
@@ -131,7 +131,7 @@ class TestAddLocal:
     def test_add_local_invalid_role(self):
         mem = _make_client()
         with pytest.raises(ValidationError, match="role must be one of"):
-            mem.add_local(user_id="u1", role="invalid", content="hi")
+            mem.add_local(user_id="u1", role="invalid", content="hi", thread_id="t1")
 
     def test_add_local_invalid_type(self):
         mem = _make_client()
@@ -142,16 +142,16 @@ class TestAddLocal:
 class TestGetLocal:
     def test_get_local_no_filter(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a")
-        mem.add_local(user_id="u2", role="agent", content="b")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
+        mem.add_local(user_id="u2", role="agent", content="b", thread_id="t1")
         results = mem.get_local()
         assert len(results) == 2
 
     def test_get_local_with_filters(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a")
-        mem.add_local(user_id="u1", role="agent", content="b")
-        mem.add_local(user_id="u2", role="user", content="c")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
+        mem.add_local(user_id="u1", role="agent", content="b", thread_id="t1")
+        mem.add_local(user_id="u2", role="user", content="c", thread_id="t1")
 
         results = mem.get_local(user_id="u1", role="user")
         assert len(results) == 1
@@ -159,7 +159,7 @@ class TestGetLocal:
 
     def test_get_local_by_id(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="x")
+        mem.add_local(user_id="u1", role="user", content="x", thread_id="t1")
         mid = mem.local_memory[0]["id"]
         results = mem.get_local(memory_id=mid)
         assert len(results) == 1
@@ -169,7 +169,7 @@ class TestGetLocal:
 class TestUpdateLocal:
     def test_update_local_success(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="old")
+        mem.add_local(user_id="u1", role="user", content="old", thread_id="t1")
         mid = mem.local_memory[0]["id"]
         mem.update_local(memory_id=mid, content="new")
         assert mem.local_memory[0]["content"] == "new"
@@ -182,7 +182,7 @@ class TestUpdateLocal:
 
     def test_update_local_partial(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="old", memory_type="turn")
+        mem.add_local(user_id="u1", role="user", content="old", memory_type="turn", thread_id="t1")
         mid = mem.local_memory[0]["id"]
         mem.update_local(memory_id=mid, metadata={"k": "v"})
         m = mem.local_memory[0]
@@ -193,8 +193,8 @@ class TestUpdateLocal:
 class TestDeleteLocal:
     def test_delete_local_success(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a")
-        mem.add_local(user_id="u1", role="agent", content="b")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
+        mem.add_local(user_id="u1", role="agent", content="b", thread_id="t1")
         mid = mem.local_memory[0]["id"]
         mem.delete_local(mid)
         assert len(mem.local_memory) == 1
@@ -364,8 +364,8 @@ class TestAddCosmos:
 class TestPushToCosmos:
     async def test_push_to_cosmos(self):
         mem, container = _connected_client()
-        mem.add_local(user_id="u1", role="user", content="a")
-        mem.add_local(user_id="u1", role="agent", content="b")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
+        mem.add_local(user_id="u1", role="agent", content="b", thread_id="t1")
 
         await mem.push_to_cosmos(batch_size=5)
 
@@ -373,7 +373,7 @@ class TestPushToCosmos:
 
     async def test_push_to_cosmos_not_connected(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
         with pytest.raises(CosmosNotConnectedError):
             await mem.push_to_cosmos()
 

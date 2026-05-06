@@ -227,15 +227,22 @@ class ProcessingPipeline:
         self,
         user_id: str,
         memory_types: list[str],
-        limit: int = 100,
+        limit: int = 200,
     ) -> list[dict[str, Any]]:
-        """Query active (non-superseded) memories for reconciliation context."""
+        """Query active (non-superseded) memories for reconciliation context.
+
+        Results are ordered by ``c._ts DESC`` so the most recently written
+        memories survive the cap — without ORDER BY, Cosmos returns rows
+        in implementation-defined order and the dedup comparison set is
+        non-deterministic.
+        """
         type_placeholders = ", ".join(f"@mtype{i}" for i in range(len(memory_types)))
         query = (
             f"SELECT TOP {limit} * FROM c "
             f"WHERE c.user_id = @user_id "
             f"AND c.type IN ({type_placeholders}) "
-            f"AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null)"
+            f"AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null) "
+            f"ORDER BY c._ts DESC"
         )
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
@@ -355,6 +362,7 @@ class ProcessingPipeline:
             self._container.query_items(
                 query=query,
                 parameters=parameters,
+                partition_key=[user_id, thread_id],
             )
         )
 
@@ -720,6 +728,7 @@ class ProcessingPipeline:
             self._container.query_items(
                 query=query,
                 parameters=parameters,
+                partition_key=[user_id, thread_id],
             )
         )
 

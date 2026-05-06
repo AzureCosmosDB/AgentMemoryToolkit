@@ -88,7 +88,7 @@ class TestConstructor:
 class TestAddLocal:
     def test_add_local_valid(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="hello")
+        mem.add_local(user_id="u1", role="user", content="hello", thread_id="t1")
 
         assert len(mem.local_memory) == 1
         m = mem.local_memory[0]
@@ -120,27 +120,38 @@ class TestAddLocal:
     def test_add_local_invalid_role(self):
         mem = _make_client()
         with pytest.raises(ValidationError, match="role must be one of"):
-            mem.add_local(user_id="u1", role="invalid", content="hi")
+            mem.add_local(user_id="u1", role="invalid", content="hi", thread_id="t1")
 
     def test_add_local_invalid_type(self):
         mem = _make_client()
         with pytest.raises(ValidationError, match="type must be one of"):
             mem.add_local(user_id="u1", role="user", content="hi", memory_type="bad")
 
+    def test_add_local_turn_requires_thread_id(self):
+        mem = _make_client()
+        with pytest.raises(ValidationError, match="thread_id is required"):
+            mem.add_local(user_id="u1", role="user", content="hi")
+
+    def test_add_local_non_turn_thread_id_optional(self):
+        mem = _make_client()
+        # Non-turn types (summary, fact, etc.) are user-scoped; thread_id is optional.
+        mem.add_local(user_id="u1", role="user", content="profile", memory_type="user_summary")
+        assert len(mem.local_memory) == 1
+
 
 class TestGetLocal:
     def test_get_local_no_filters(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a")
-        mem.add_local(user_id="u2", role="agent", content="b")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
+        mem.add_local(user_id="u2", role="agent", content="b", thread_id="t1")
 
         results = mem.get_local()
         assert len(results) == 2
 
     def test_get_local_with_filters(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a", memory_type="turn")
-        mem.add_local(user_id="u1", role="agent", content="b", memory_type="turn")
+        mem.add_local(user_id="u1", role="user", content="a", memory_type="turn", thread_id="t1")
+        mem.add_local(user_id="u1", role="agent", content="b", memory_type="turn", thread_id="t1")
         mem.add_local(user_id="u2", role="user", content="c", memory_type="summary")
 
         results = mem.get_local(user_id="u1", role="user", memory_type="turn")
@@ -149,8 +160,8 @@ class TestGetLocal:
 
     def test_get_local_by_id(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="target")
-        mem.add_local(user_id="u1", role="user", content="other")
+        mem.add_local(user_id="u1", role="user", content="target", thread_id="t1")
+        mem.add_local(user_id="u1", role="user", content="other", thread_id="t1")
         mid = mem.local_memory[0]["id"]
 
         results = mem.get_local(memory_id=mid)
@@ -161,7 +172,7 @@ class TestGetLocal:
 class TestUpdateLocal:
     def test_update_local_success(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="old")
+        mem.add_local(user_id="u1", role="user", content="old", thread_id="t1")
         mid = mem.local_memory[0]["id"]
 
         mem.update_local(mid, content="new", metadata={"k": "v"})
@@ -178,7 +189,7 @@ class TestUpdateLocal:
 
     def test_update_local_partial(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="old")
+        mem.add_local(user_id="u1", role="user", content="old", thread_id="t1")
         mid = mem.local_memory[0]["id"]
 
         mem.update_local(mid, role="agent", metadata={"k": "v"})
@@ -192,7 +203,7 @@ class TestUpdateLocal:
 class TestDeleteLocal:
     def test_delete_local_success(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="x")
+        mem.add_local(user_id="u1", role="user", content="x", thread_id="t1")
         mid = mem.local_memory[0]["id"]
 
         mem.delete_local(mid)
@@ -380,8 +391,8 @@ class TestAddCosmos:
 class TestPushToCosmos:
     def test_push_to_cosmos(self):
         mem, container = _connected_client()
-        mem.add_local(user_id="u1", role="user", content="a")
-        mem.add_local(user_id="u1", role="agent", content="b")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
+        mem.add_local(user_id="u1", role="agent", content="b", thread_id="t1")
 
         mem.push_to_cosmos()
 
@@ -389,7 +400,7 @@ class TestPushToCosmos:
 
     def test_push_to_cosmos_not_connected(self):
         mem = _make_client()
-        mem.add_local(user_id="u1", role="user", content="a")
+        mem.add_local(user_id="u1", role="user", content="a", thread_id="t1")
         with pytest.raises(CosmosNotConnectedError):
             mem.push_to_cosmos()
 
@@ -397,6 +408,37 @@ class TestPushToCosmos:
         mem, _ = _connected_client()
         with pytest.raises(ValueError, match="batch_size must be greater than 0"):
             mem.push_to_cosmos(batch_size=0)
+
+    def test_push_to_cosmos_embeds_non_turn_memories(self):
+        """Non-turn memories must be embedded on push so vector search works."""
+        mem, container = _connected_client()
+        # Wire a fake embeddings client that returns a deterministic vector.
+        embed_calls: list[str] = []
+
+        def _generate(text: str) -> list[float]:
+            embed_calls.append(text)
+            return [0.1, 0.2, 0.3]
+
+        mem._embeddings_client = MagicMock()
+        mem._embeddings_client.generate.side_effect = _generate
+
+        mem.add_local(
+            user_id="u1",
+            role="user",
+            content="user prefers dark mode",
+            memory_type="fact",
+        )
+        mem.add_local(user_id="u1", role="user", content="hello", thread_id="t1")  # turn
+
+        mem.push_to_cosmos()
+
+        # Only the fact (non-turn) should have triggered embedding.
+        assert embed_calls == ["user prefers dark mode"]
+        upserted_bodies = [c.kwargs["body"] for c in container.upsert_item.call_args_list]
+        fact_body = next(b for b in upserted_bodies if b["type"] == "fact")
+        turn_body = next(b for b in upserted_bodies if b["type"] == "turn")
+        assert fact_body["embedding"] == [0.1, 0.2, 0.3]
+        assert "embedding" not in turn_body
 
 
 class TestGetMemories:

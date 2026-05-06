@@ -120,11 +120,18 @@ class InProcessProcessor:
 
     @staticmethod
     def _extract_dedup_count(dedup: Any) -> int:
-        if isinstance(dedup, dict):
-            for key in ("deduplicated", "merged", "removed", "deduplicated_count"):
-                if key in dedup and isinstance(dedup[key], int):
-                    return dedup[key]
-        return 0
+        """Sum the merged + superseded facts from a ``deduplicate_facts`` result.
+
+        ``ProcessingPipeline.deduplicate_facts`` returns a dict with
+        ``{"kept", "merged", "superseded"}`` — both ``merged`` and
+        ``superseded`` represent facts that were consolidated, so they
+        contribute to the dedup-count metric.
+        """
+        if not isinstance(dedup, dict):
+            return 0
+        merged = dedup.get("merged", 0) if isinstance(dedup.get("merged"), int) else 0
+        superseded = dedup.get("superseded", 0) if isinstance(dedup.get("superseded"), int) else 0
+        return merged + superseded
 
     def generate_user_summary(
         self,

@@ -281,6 +281,8 @@ class ChatClient:
         )
 
         attempt = 0
+        unsupported_strips = 0
+        max_unsupported_strips = 5
         while True:
             try:
                 response = client.chat.completions.create(**kwargs)
@@ -315,13 +317,14 @@ class ChatClient:
                 # this does NOT consume a retry slot since it's a request-shape
                 # repair, not a transient failure.
                 bad_param = _unsupported_param(exc) if status == 400 else None
-                if bad_param and bad_param in kwargs:
+                if bad_param and bad_param in kwargs and unsupported_strips < max_unsupported_strips:
                     logger.warning(
                         "LLM model=%s rejected '%s'; retrying without it.",
                         self._model,
                         bad_param,
                     )
                     kwargs.pop(bad_param, None)
+                    unsupported_strips += 1
                     continue
                 if status in _RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
@@ -379,6 +382,8 @@ class ChatClient:
         )
 
         attempt = 0
+        unsupported_strips = 0
+        max_unsupported_strips = 5
         while True:
             try:
                 response = await client.chat.completions.create(**kwargs)
@@ -411,13 +416,14 @@ class ChatClient:
                 # Strip-unsupported-param: request-shape repair, not a transient
                 # failure — does NOT consume a retry slot.
                 bad_param = _unsupported_param(exc) if status == 400 else None
-                if bad_param and bad_param in kwargs:
+                if bad_param and bad_param in kwargs and unsupported_strips < max_unsupported_strips:
                     logger.warning(
                         "LLM model=%s rejected '%s'; retrying without it.",
                         self._model,
                         bad_param,
                     )
                     kwargs.pop(bad_param, None)
+                    unsupported_strips += 1
                     continue
                 if status in _RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)

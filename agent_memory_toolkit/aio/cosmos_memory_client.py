@@ -113,7 +113,7 @@ class AsyncCosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
-        self._unflushed_turn_counts: dict[tuple[str, Optional[str]], int] = {}
+        self._unflushed_turn_counts: dict[tuple[str, str], int] = {}
 
         self._background_tasks: set[asyncio.Task[Any]] = set()
         try:
@@ -363,6 +363,11 @@ class AsyncCosmosMemoryClient:
         )
         self.local_memory.append(memory)
         if memory_type == "turn":
+            if not thread_id:
+                raise ValidationError(
+                    "thread_id is required for memory_type='turn' so the auto-trigger "
+                    "counter can group turns per conversation. Set thread_id explicitly."
+                )
             key = (user_id, thread_id)
             self._unflushed_turn_counts[key] = self._unflushed_turn_counts.get(key, 0) + 1
         logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
@@ -491,6 +496,8 @@ class AsyncCosmosMemoryClient:
         try:
             from azure.cosmos.aio import CosmosClient
 
+            await self._drain_cosmos_client()
+
             client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
             db = client.get_database_client(self._cosmos_database)
             container_handle = db.get_container_client(self._cosmos_container)
@@ -572,6 +579,8 @@ class AsyncCosmosMemoryClient:
         try:
             from azure.cosmos import PartitionKey, ThroughputProperties
             from azure.cosmos.aio import CosmosClient
+
+            await self._drain_cosmos_client()
 
             client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
 
@@ -731,9 +740,23 @@ class AsyncCosmosMemoryClient:
         )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
 
+        async def _embed_and_serialize(record: MemoryRecord) -> dict[str, Any]:
+            body = record.to_cosmos_dict()
+            if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
+                try:
+                    body["embedding"] = await self._embeddings_client.generate(body["content"])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "push_to_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
+                        record.id,
+                        exc,
+                    )
+            return body
+
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            tasks = [self._container_client.upsert_item(body=r.to_cosmos_dict()) for r in batch]
+            bodies = await asyncio.gather(*(_embed_and_serialize(r) for r in batch))
+            tasks = [self._container_client.upsert_item(body=b) for b in bodies]
             try:
                 await asyncio.gather(*tasks)
             except Exception as exc:
@@ -1247,7 +1270,7 @@ class AsyncCosmosMemoryClient:
                 try:
                     close()
                 except Exception:
-                    pass
+                    logger.warning("Failed to close prior sync Cosmos client", exc_info=True)
             self._sync_cosmos_client = None
 
         prior_sync_embeddings = getattr(self, "_sync_embeddings_client", None)
@@ -1257,8 +1280,22 @@ class AsyncCosmosMemoryClient:
                 try:
                     close()
                 except Exception:
-                    pass
+                    logger.warning("Failed to close prior sync EmbeddingsClient", exc_info=True)
             self._sync_embeddings_client = None
+
+    async def _drain_cosmos_client(self) -> None:
+        """Close any prior async Cosmos client before reassigning the field."""
+        prior = self._cosmos_client
+        if prior is None:
+            return
+        close = getattr(prior, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception:
+                logger.warning("Failed to close prior async Cosmos client during reconnect", exc_info=True)
+        self._cosmos_client = None
+        self._container_client = None
 
     def _init_pipeline(self) -> None:
         """Initialize the ProcessingPipeline with a sync container client.

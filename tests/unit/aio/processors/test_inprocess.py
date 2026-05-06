@@ -14,7 +14,7 @@ async def test_process_thread_calls_summarize_extract_dedup_in_order():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
-    pipeline.deduplicate_facts.return_value = {"deduplicated": 2}
+    pipeline.deduplicate_facts.return_value = {"merged": 2, "superseded": 0, "kept": 3}
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     result = await proc.process_thread(user_id="u", thread_id="t", turns=[])

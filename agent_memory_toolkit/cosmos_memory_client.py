@@ -112,7 +112,7 @@ class CosmosMemoryClient:
     ) -> None:
         # Local store
         self.local_memory: list[dict[str, Any]] = []
-        self._unflushed_turn_counts: dict[tuple[str, Optional[str]], int] = {}
+        self._unflushed_turn_counts: dict[tuple[str, str], int] = {}
         self._warned_owner_skip: bool = False
         self._warned_counter_unreachable: bool = False
 
@@ -280,6 +280,11 @@ class CosmosMemoryClient:
         )
         self.local_memory.append(memory)
         if memory_type == "turn":
+            if not thread_id:
+                raise ValidationError(
+                    "thread_id is required for memory_type='turn' so the auto-trigger "
+                    "counter can group turns per conversation. Set thread_id explicitly."
+                )
             key = (user_id, thread_id)
             self._unflushed_turn_counts[key] = self._unflushed_turn_counts.get(key, 0) + 1
         logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
@@ -408,6 +413,8 @@ class CosmosMemoryClient:
         try:
             from azure.cosmos import CosmosClient
 
+            self._drain_cosmos_client()
+
             client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
             db = client.get_database_client(self._cosmos_database)
             container_handle = db.get_container_client(self._cosmos_container)
@@ -489,6 +496,8 @@ class CosmosMemoryClient:
         try:
             from azure.cosmos import CosmosClient, PartitionKey, ThroughputProperties
 
+            self._drain_cosmos_client()
+
             client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
 
             db = client.create_database_if_not_exists(id=self._cosmos_database)
@@ -558,6 +567,24 @@ class CosmosMemoryClient:
             embeddings_client=self._embeddings_client,
         )
         self._warn_on_embedding_dim_mismatch()
+
+    def _drain_cosmos_client(self) -> None:
+        """Close any prior Cosmos client before reassigning the field.
+
+        Repeated ``connect_cosmos`` / ``create_memory_store`` calls on the
+        same instance must not leak the prior client's httpx pool / FDs.
+        """
+        prior = self._cosmos_client
+        if prior is None:
+            return
+        close = getattr(prior, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.warning("Failed to close prior Cosmos client during reconnect", exc_info=True)
+        self._cosmos_client = None
+        self._container_client = None
 
     def _warn_on_embedding_dim_mismatch(self) -> None:
         """Log a WARNING if the resolved embedding dim differs from the container's policy.
@@ -950,6 +977,15 @@ class CosmosMemoryClient:
             batch = records[start : start + batch_size]
             for record in batch:
                 body = record.to_cosmos_dict()
+                if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
+                    try:
+                        body["embedding"] = self._embeddings_client.generate(body["content"])
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "push_to_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
+                            record.id,
+                            exc,
+                        )
                 try:
                     self._container_client.upsert_item(body=body)
                 except Exception as exc:

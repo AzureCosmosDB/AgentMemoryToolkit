@@ -227,7 +227,7 @@ class ProcessingPipeline:
         self,
         user_id: str,
         memory_types: list[str],
-        limit: int = 200,
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Query active (non-superseded) memories for reconciliation context.
 

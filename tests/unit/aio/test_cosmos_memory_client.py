@@ -138,6 +138,15 @@ class TestAddLocal:
         with pytest.raises(ValidationError, match="type must be one of"):
             mem.add_local(user_id="u1", role="user", content="hi", memory_type="bad")
 
+    def test_add_local_turn_requires_thread_id(self):
+        mem = _make_client()
+        with pytest.raises(ValidationError, match="thread_id is required"):
+            mem.add_local(user_id="u1", role="user", content="hi")
+        # Validation must run BEFORE append — otherwise an orphan turn
+        # with thread_id=None would persist and pollute pk on push.
+        assert mem.local_memory == []
+        assert mem._unflushed_turn_counts == {}
+
 
 class TestGetLocal:
     def test_get_local_no_filter(self):

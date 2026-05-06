@@ -278,13 +278,13 @@ class CosmosMemoryClient:
             ttl=ttl,
             salience=salience,
         )
+        if memory_type == "turn" and not thread_id:
+            raise ValidationError(
+                "thread_id is required for memory_type='turn' so the auto-trigger "
+                "counter can group turns per conversation. Set thread_id explicitly."
+            )
         self.local_memory.append(memory)
         if memory_type == "turn":
-            if not thread_id:
-                raise ValidationError(
-                    "thread_id is required for memory_type='turn' so the auto-trigger "
-                    "counter can group turns per conversation. Set thread_id explicitly."
-                )
             key = (user_id, thread_id)
             self._unflushed_turn_counts[key] = self._unflushed_turn_counts.get(key, 0) + 1
         logger.debug("add_local id=%s role=%s type=%s", memory["id"], role, memory_type)
@@ -585,6 +585,7 @@ class CosmosMemoryClient:
                 logger.warning("Failed to close prior Cosmos client during reconnect", exc_info=True)
         self._cosmos_client = None
         self._container_client = None
+        self._pipeline = None
 
     def _warn_on_embedding_dim_mismatch(self) -> None:
         """Log a WARNING if the resolved embedding dim differs from the container's policy.

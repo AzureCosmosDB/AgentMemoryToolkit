@@ -138,7 +138,8 @@ class TestAddLocal:
 
     def test_add_local_non_turn_thread_id_optional(self):
         mem = _make_client()
-        # Non-turn types (summary, fact, etc.) are user-scoped; thread_id is optional.
+        # Non-turn types (summary, fact, etc.) accept an omitted thread_id;
+        # _make_memory auto-generates a UUID for hierarchical-PK validity.
         mem.add_local(user_id="u1", role="user", content="profile", memory_type="user_summary")
         assert len(mem.local_memory) == 1
 
@@ -443,6 +444,26 @@ class TestPushToCosmos:
         turn_body = next(b for b in upserted_bodies if b["type"] == "turn")
         assert fact_body["embedding"] == [0.1, 0.2, 0.3]
         assert "embedding" not in turn_body
+
+    def test_push_to_cosmos_caches_embeddings_in_local_memory(self):
+        """Repeat push_to_cosmos() must not re-embed the same non-turn records."""
+        mem, container = _connected_client()
+        embed_calls: list[list[str]] = []
+
+        def _generate_batch(texts: list[str]) -> list[list[float]]:
+            embed_calls.append(list(texts))
+            return [[0.5, 0.6, 0.7] for _ in texts]
+
+        mem._embeddings_client = MagicMock()
+        mem._embeddings_client.generate_batch.side_effect = _generate_batch
+
+        mem.add_local(user_id="u1", role="user", content="fact one", memory_type="fact")
+        mem.push_to_cosmos()
+        mem.push_to_cosmos()
+
+        # Second push should not re-embed — embedding is cached on local_memory.
+        assert embed_calls == [["fact one"]]
+        assert mem.local_memory[0]["embedding"] == [0.5, 0.6, 0.7]
 
 
 class TestGetMemories:

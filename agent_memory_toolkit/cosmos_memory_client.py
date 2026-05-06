@@ -995,6 +995,9 @@ class CosmosMemoryClient:
                     vectors = self._embeddings_client.generate_batch(to_embed_text)
                     for i, vec in zip(to_embed_idx, vectors):
                         bodies[i]["embedding"] = vec
+                        # Persist the embedding back to local_memory so a
+                        # repeat push_to_cosmos() doesn't re-embed.
+                        self.local_memory[start + i]["embedding"] = vec
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "push_to_cosmos: batch embedding generation failed (%s); "

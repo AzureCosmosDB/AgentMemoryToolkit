@@ -696,17 +696,39 @@ class ProcessingPipeline:
             existing_proc_hashes.add(content_hash)
 
         # ---- 7. Process episodic ----
+        # Episodic memories are tied to a specific situation, scope, or context
+        # (past, present, or planned). The only required fields are
+        # ``scope_type`` and ``scope_value``. The ``situation``/``action_taken``/
+        # ``outcome`` triple is now optional and is only present for past events
+        # with a clear outcome.
         for ep in episodic:
-            situation = ep.get("situation")
-            action_taken = ep.get("action_taken")
-            outcome = ep.get("outcome")
-            if not (situation and action_taken and outcome):
+            scope_type_raw = ep.get("scope_type")
+            scope_value_raw = ep.get("scope_value")
+            scope_type = scope_type_raw.strip() if isinstance(scope_type_raw, str) else None
+            scope_value = scope_value_raw.strip() if isinstance(scope_value_raw, str) else None
+            if not scope_type or not scope_value:
                 logger.warning(
-                    "extract_memories: dropping malformed episodic (missing situation/action_taken/outcome): %r",
+                    "extract_memories: dropping malformed episodic (missing scope_type/scope_value): %r",
                     ep,
                 )
                 continue
-            text = f"{situation} → {action_taken} → {outcome}"
+
+            situation = ep.get("situation")
+            action_taken = ep.get("action_taken")
+            outcome = ep.get("outcome")
+
+            # Deterministic content fallback chain:
+            #   1. LLM-provided ``summary`` (most meaningful when supplied),
+            #   2. ``situation → action_taken → outcome`` arrow form when all three are present,
+            #   3. a minimal scope-derived fallback so the doc still has embeddable content.
+            summary = ep.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                text = summary.strip()
+            elif situation and action_taken and outcome:
+                text = f"{situation} → {action_taken} → {outcome}"
+            else:
+                text = f"For the user's {scope_value} {scope_type}, intent recorded."
+
             content_hash = compute_content_hash(text)
             seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
             det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
@@ -727,11 +749,15 @@ class ProcessingPipeline:
                 "content": text,
                 "content_hash": content_hash,
                 "confidence": confidence,
+                "scope_type": scope_type,
+                "scope_value": scope_value,
                 "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
                 "metadata": {
-                    "situation": ep.get("situation"),
-                    "action_taken": ep.get("action_taken"),
-                    "outcome": ep.get("outcome"),
+                    "scope_type": scope_type,
+                    "scope_value": scope_value,
+                    "situation": situation,
+                    "action_taken": action_taken,
+                    "outcome": outcome,
                     "reasoning": ep.get("reasoning"),
                     "outcome_valence": ep.get("outcome_valence"),
                     "lesson": ep.get("lesson"),

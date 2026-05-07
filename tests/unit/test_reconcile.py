@@ -76,7 +76,7 @@ class TestNormalizeAndHash:
         assert h1 == h2 == h3
         # 32 hex chars
         assert len(h1) == 32
-        all(c in "0123456789abcdef" for c in h1)
+        assert all(c in "0123456789abcdef" for c in h1)
 
     def test_content_hash_distinguishes_distinct_contents(self):
         assert compute_content_hash("a") != compute_content_hash("b")
@@ -1028,3 +1028,212 @@ class TestDedupPoolSizeThreshold:
 
         monkeypatch.setenv("DEDUP_POOL_SIZE", "0")
         assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Round 17 fixes
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileMergedIdDeterministic:
+    """RD#1: merged_id is deterministic on (user, content_hash) so cycles are idempotent."""
+
+    def test_same_merged_content_yields_same_id_across_runs(self):
+        import hashlib
+
+        p = _make_pipeline()
+        upserts: list[dict] = []
+        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container.query_items.return_value = iter(
+            [_fact("a1", "User likes coffee"), _fact("a2", "User enjoys coffee")]
+        )
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User likes coffee",
+                            "source_ids": ["a1", "a2"],
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p.reconcile_memories("u1")
+        first_id = upserts[0]["id"]
+        # Predict id from public formula:
+        ch = compute_content_hash("User likes coffee")
+        expected = "fact_" + hashlib.sha256(f"u1:merged:{ch}".encode()).hexdigest()[:32]
+        assert first_id == expected
+        # Second run: different source ids, identical canonical merged
+        # content → identical merged id (idempotent upsert).
+        upserts.clear()
+        p._container.query_items.return_value = iter(
+            [_fact("b1", "User likes coffee"), _fact("b2", "user LIKES coffee")]
+        )
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User likes coffee",
+                            "source_ids": ["b1", "b2"],
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p.reconcile_memories("u1")
+        assert upserts[0]["id"] == first_id
+
+
+class TestReconcileSupersedesIdsFiltered:
+    """RD#4: hallucinated source_ids are scrubbed from supersedes_ids."""
+
+    def test_hallucinated_source_ids_filtered(self):
+        p = _make_pipeline()
+        upserts: list[dict] = []
+        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container.query_items.return_value = iter([_fact("real1", "X"), _fact("real2", "Y")])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "X and Y",
+                            "source_ids": ["real1", "real2", "ghost_id_404"],
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p.reconcile_memories("u1")
+        assert upserts, "merged doc should have been upserted"
+        assert "ghost_id_404" not in upserts[0]["supersedes_ids"]
+        assert set(upserts[0]["supersedes_ids"]) == {"real1", "real2"}
+
+
+class TestReconcileTransitiveSupersedes:
+    """RD#1 follow-on: prior chain hops survive into the new merged record."""
+
+    def test_prior_supersedes_ids_preserved_in_chain(self):
+        p = _make_pipeline()
+        upserts: list[dict] = []
+        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        # f1 was itself a previously-merged record carrying its own provenance.
+        f1 = _fact("f1", "X v1")
+        f1["supersedes_ids"] = ["older_a", "older_b"]
+        f2 = _fact("f2", "X v2")
+        p._container.query_items.return_value = iter([f1, f2])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [{"merged_content": "X canonical", "source_ids": ["f1", "f2"]}],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p.reconcile_memories("u1")
+        sup = upserts[0]["supersedes_ids"]
+        assert "f1" in sup and "f2" in sup
+        assert "older_a" in sup and "older_b" in sup
+
+
+class TestReconcileMergedMetadata:
+    """RD#3: merged docs carry a positive merged_via signal."""
+
+    def test_merged_doc_has_metadata(self):
+        p = _make_pipeline()
+        upserts: list[dict] = []
+        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container.query_items.return_value = iter([_fact("x1", "A"), _fact("x2", "B")])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [{"merged_content": "A and B", "source_ids": ["x1", "x2"]}],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p.reconcile_memories("u1")
+        meta = upserts[0].get("metadata") or {}
+        assert meta.get("merged_via") == "reconcile"
+        assert meta.get("merged_from_count") == 2
+
+
+class TestReconcileOrphanCleanup:
+    """PR#2: when ALL supersede attempts lose the ETag race, the merged doc is deleted."""
+
+    def test_orphan_merged_doc_is_deleted_when_no_supersede_succeeds(self):
+        p = _make_pipeline()
+        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        # Every supersede attempt loses the race → orphan merged doc.
+        p._mark_superseded = MagicMock(return_value=False)
+        p._container.query_items.return_value = iter([_fact("o1", "A"), _fact("o2", "B")])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [{"merged_content": "A&B", "source_ids": ["o1", "o2"]}],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        result = p.reconcile_memories("u1")
+        # delete_item must be called to clean up the orphan.
+        assert p._container.delete_item.called
+        # No facts merged (no supersede succeeded).
+        assert result["merged"] == 0
+
+
+class TestReconcileContradictionWinnerNotInKeptIds:
+    """RD#5+#13: contradiction winners are absent from kept_ids — must NOT trigger warning."""
+
+    def test_clean_contradiction_does_not_warn_about_kept_mismatch(self, caplog):
+        import logging
+
+        p = _make_pipeline()
+        p._container.query_items.return_value = iter([_fact("w1", "A is true"), _fact("l1", "A is false")])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [],
+                    "contradicted_pairs": [{"winner_id": "w1", "loser_id": "l1"}],
+                    # LLM correctly omits w1 from kept_ids (it lives under contradicted_pairs).
+                    "kept_ids": [],
+                }
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="agent_memory_toolkit.pipeline"):
+            result = p.reconcile_memories("u1")
+        assert result["contradicted"] == 1
+        # No "kept_ids mismatch" warnings on a clean LLM response.
+        warns = [r for r in caplog.records if "kept_ids mismatch" in r.getMessage()]
+        assert warns == []
+
+
+class TestReconcileNullCheckUsesIsNull:
+    """PR#1: query uses IS_NULL(c.superseded_by), not the broken `= null`."""
+
+    def test_query_uses_is_null(self):
+        p = _make_pipeline()
+        p._container.query_items.return_value = iter([])
+        p._run_prompty = MagicMock(return_value=json.dumps({}))
+        p.reconcile_memories("u1")
+        # query_items is called with the SQL string in the `query` kwarg.
+        call = p._container.query_items.call_args
+        sql = (call.kwargs.get("query") or call.args[0]) if call else ""
+        assert "IS_NULL(c.superseded_by)" in sql
+        assert "c.superseded_by = null" not in sql

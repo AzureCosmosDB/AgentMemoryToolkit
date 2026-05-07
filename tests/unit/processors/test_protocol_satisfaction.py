@@ -55,7 +55,6 @@ class _FullDummy:
         self,
         *,
         user_id: str,
-        n: int = 50,
     ) -> int:
         return 0
 

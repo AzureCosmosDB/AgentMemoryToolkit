@@ -90,7 +90,6 @@ class MemoryProcessor(Protocol):
         self,
         *,
         user_id: str,
-        n: int = 50,
     ) -> int: ...
 
     def generate_user_summary(

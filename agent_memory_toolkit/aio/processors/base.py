@@ -53,7 +53,6 @@ class AsyncMemoryProcessor(Protocol):
         self,
         *,
         user_id: str,
-        n: int = 50,
     ) -> int: ...
 
     async def generate_user_summary(

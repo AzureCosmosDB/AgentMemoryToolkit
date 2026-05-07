@@ -251,7 +251,7 @@ class ProcessingPipeline:
             f"SELECT TOP {limit} * FROM c "
             f"WHERE c.user_id = @user_id "
             f"AND c.type IN ({type_placeholders}) "
-            f"AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null) "
+            f"AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
             f"ORDER BY c._ts DESC"
         )
         parameters: list[dict[str, Any]] = [
@@ -1096,7 +1096,7 @@ class ProcessingPipeline:
             f"SELECT TOP {n} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = 'fact' "
-            "AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null) "
+            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
             "ORDER BY c.created_at DESC"
         )
         parameters: list[dict[str, Any]] = [
@@ -1170,6 +1170,12 @@ class ProcessingPipeline:
         consumed_source_ids: set[str] = set()
         # Set of contradiction loser IDs that were *actually* superseded.
         consumed_loser_ids: set[str] = set()
+        # Original-pool winner IDs from successfully-applied contradictions.
+        # The LLM emits winners under ``contradicted_pairs``, never under
+        # ``kept_ids`` — so the kept-cross-check at the end must subtract
+        # them from the expected-kept set or every clean run looks like a
+        # mismatch.
+        contradiction_winner_ids_in_pool: set[str] = set()
 
         # ---- 4. Apply duplicate_groups FIRST ----
         for group in duplicate_groups:
@@ -1189,6 +1195,12 @@ class ProcessingPipeline:
                     source_ids,
                 )
                 continue
+
+            # Filtered, hallucination-free view of the source ids that
+            # actually exist in the pool. Used both for ``supersedes_ids``
+            # on the merged record and for the deterministic merged-id
+            # below so the merged doc faithfully represents reality.
+            valid_source_ids = [sid for sid in source_ids if sid in facts_by_id]
 
             # Sort source_docs by Cosmos _ts DESC so the merged record's
             # partition (thread_id) is picked deterministically from the
@@ -1215,6 +1227,21 @@ class ProcessingPipeline:
                         seen_smi.add(smi)
                         merged_source_memory_ids.append(smi)
 
+            # Transitive supersedes_ids: include any prior chain hops the
+            # source docs already absorbed so the merged record carries
+            # the full provenance, not just the immediate parent layer.
+            merged_supersedes: list[str] = []
+            seen_sup: set[str] = set()
+            for sid in valid_source_ids:
+                if sid not in seen_sup:
+                    seen_sup.add(sid)
+                    merged_supersedes.append(sid)
+            for src in source_docs:
+                for prior in src.get("supersedes_ids", []) or []:
+                    if prior and prior not in seen_sup:
+                        seen_sup.add(prior)
+                        merged_supersedes.append(prior)
+
             # Newest source's thread_id wins (after _ts-desc sort above).
             recent_thread_id = source_docs[0].get("thread_id", "")
 
@@ -1235,8 +1262,19 @@ class ProcessingPipeline:
                 else _max_or_none(src.get("salience") for src in source_docs)
             )
 
+            # Deterministic merged id keyed on (user, "merged", content_hash)
+            # so re-running reconcile on the same merged content produces an
+            # idempotent upsert instead of a fresh UUID each cycle. Stable
+            # ids also keep the supersede chain shallow: a future paraphrase
+            # that gets folded into the same canonical merged content will
+            # see the same id rather than chaining through a new UUID.
+            merged_content_hash = compute_content_hash(merged_content)
+            merged_id_seed = f"{user_id}:merged:{merged_content_hash}"
+            merged_id = "fact_" + hashlib.sha256(merged_id_seed.encode()).hexdigest()[:32]
+
             try:
                 merged_record = MemoryRecord(
+                    id=merged_id,
                     user_id=user_id,
                     role="system",
                     memory_type=MemoryType.fact,
@@ -1244,10 +1282,14 @@ class ProcessingPipeline:
                     thread_id=recent_thread_id or f"__reconciled__:{user_id}",
                     confidence=confidence_val,
                     salience=salience_val,
-                    supersedes_ids=list(source_ids),
+                    supersedes_ids=merged_supersedes,
                     source_memory_ids=merged_source_memory_ids,
                     tags=merged_tags,
-                    content_hash=compute_content_hash(merged_content),
+                    content_hash=merged_content_hash,
+                    metadata={
+                        "merged_via": "reconcile",
+                        "merged_from_count": len(valid_source_ids),
+                    },
                 )
             except Exception:
                 logger.exception(
@@ -1283,13 +1325,11 @@ class ProcessingPipeline:
                 continue
             merged_docs_by_id[merged_record.id] = merged_doc
 
-            for sid in source_ids:
+            group_supersede_count = 0
+            for sid in valid_source_ids:
                 src_doc = facts_by_id.get(sid)
                 if src_doc is None:
-                    logger.debug(
-                        "reconcile_memories: hallucinated source_id=%s (not in pool)",
-                        sid,
-                    )
+                    # Defensive — already filtered above, kept for clarity.
                     continue
                 # Only update redirect/consumed-set on *successful* supersede.
                 # Losing the ETag race means another writer beat us; the
@@ -1297,8 +1337,33 @@ class ProcessingPipeline:
                 # not be treated as consumed.
                 if self._mark_superseded(src_doc, merged_record.id, reason="duplicate"):
                     merged += 1
+                    group_supersede_count += 1
                     source_to_merged_id[sid] = merged_record.id
                     consumed_source_ids.add(sid)
+
+            # If every supersede attempt for this group lost its ETag race
+            # (or the LLM gave us only hallucinated source_ids), the merged
+            # doc is an orphan — it claims supersedes_ids but none of the
+            # claimed sources are actually retired, so reads would surface
+            # both the merged doc and the "originals". Hard-delete it so
+            # the next reconcile cycle can try afresh.
+            if group_supersede_count == 0:
+                logger.warning(
+                    "reconcile_memories: no sources successfully superseded "
+                    "for merged id=%s; deleting orphan merged doc",
+                    merged_record.id,
+                )
+                try:
+                    self._container.delete_item(
+                        item=merged_record.id,
+                        partition_key=[user_id, merged_doc["thread_id"]],
+                    )
+                except Exception:
+                    logger.exception(
+                        "reconcile_memories: failed to delete orphan merged id=%s",
+                        merged_record.id,
+                    )
+                merged_docs_by_id.pop(merged_record.id, None)
 
         # ---- 5. Apply contradicted_pairs SECOND with dangling-id resolution ----
         for pair in contradicted_pairs:
@@ -1343,9 +1408,14 @@ class ProcessingPipeline:
             loser_doc = facts_by_id.get(resolved_loser_id)
             if loser_doc is None and resolved_loser_id != loser_id:
                 # The original loser was just merged. Reuse the in-memory
-                # merged doc rather than a cross-partition query — we own
-                # the (user_id, thread_id) partition and just wrote it,
-                # so this also keeps the supersede ETag chain stable.
+                # merged doc so we skip a cross-partition re-fetch — we
+                # own the (user_id, thread_id) partition and just wrote
+                # it. Note: this in-memory copy has no ``_etag`` (we
+                # don't capture the upsert response), so the supersede
+                # below falls through ``_mark_superseded``'s upsert
+                # branch instead of the ETag-protected ``replace_item``
+                # branch. That's acceptable here because no concurrent
+                # writer can touch a doc we just minted in this call.
                 loser_doc = merged_docs_by_id.get(resolved_loser_id)
 
             if loser_doc is None:
@@ -1362,22 +1432,32 @@ class ProcessingPipeline:
                 # cross-check below can reconcile against the input pool.
                 if loser_id in facts_by_id:
                     consumed_loser_ids.add(loser_id)
+                # If the winner is an original pool member (not a freshly
+                # minted merged doc), record it so the kept-cross-check
+                # doesn't flag a clean run.
+                if winner_id in facts_by_id:
+                    contradiction_winner_ids_in_pool.add(winner_id)
 
-        # Count kept directly: facts the pipeline did NOT *successfully*
-        # consume as a duplicate-source or contradiction-loser. Cross-check
-        # against the LLM's kept_ids and warn on mismatch (catches
-        # hallucinated IDs and double-counting).
+        # The pipeline's "kept" semantic = facts that survive as live
+        # records in the pool. The LLM's ``kept_ids`` semantic =
+        # everything *not* mentioned in duplicate_groups or
+        # contradicted_pairs. They differ by exactly the contradiction
+        # winners (winners survive but are listed under contradicted_pairs).
         consumed_ids = consumed_source_ids | consumed_loser_ids
         kept_actual = {fid for fid in facts_by_id.keys() if fid not in consumed_ids}
         kept = len(kept_actual)
+        # Cross-check: the LLM's kept_ids set should equal kept_actual
+        # minus the contradiction winners. Mismatch usually means the LLM
+        # hallucinated an id or double-counted a fact across categories.
+        expected_llm_kept = kept_actual - contradiction_winner_ids_in_pool
         llm_kept_set = {kid for kid in llm_kept_ids if kid in facts_by_id}
-        if llm_kept_set != kept_actual:
-            logger.warning(
-                "reconcile_memories: kept_ids mismatch (llm=%d valid=%d, pipeline=%d). "
-                "Possible LLM hallucinated IDs or double-counted facts.",
+        if llm_kept_set != expected_llm_kept:
+            logger.info(
+                "reconcile_memories: kept_ids mismatch (llm=%d valid=%d, expected=%d). "
+                "Likely a hallucinated or double-counted fact id.",
                 len(llm_kept_ids),
                 len(llm_kept_set),
-                kept,
+                len(expected_llm_kept),
             )
         result = {"kept": kept, "merged": merged, "contradicted": contradicted}
         logger.info("reconcile_memories completed: %s", result)

@@ -137,6 +137,8 @@ Each fact written by `extract_memories` carries a `content_hash` (SHA-256 of nor
 
 `DEDUP_EVERY_N` (default 5) controls how often `reconcile_memories` runs in the auto-trigger path. Set to `0` to disable. The candidate cap `n` (default 50) is tunable per call; larger values give the LLM a wider view at higher token cost.
 
+> **Indexing note.** The reconcile pool query orders by `created_at` (matching the prompt's "more recent first" tiebreaker). Cosmos's default indexing policy includes every property, so this works out of the box. If you customize the indexing policy to reduce write RU, ensure `/created_at/?` remains indexed or the query will fail with a 400 (`Order-by over a non-indexed path`).
+
 ---
 
 ## Automatic Processing (Change Feed)

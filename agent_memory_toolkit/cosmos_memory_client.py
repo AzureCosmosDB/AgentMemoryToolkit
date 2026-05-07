@@ -695,7 +695,6 @@ class CosmosMemoryClient:
             PROCESSOR_OWNER_DURABLE,
             PROCESSOR_OWNER_INPROCESS,
             get_dedup_every_n,
-            get_dedup_pool_size,
             get_fact_extraction_every_n,
             get_processor_owner,
             get_thread_summary_every_n,
@@ -803,7 +802,7 @@ class CosmosMemoryClient:
 
             if fire_dedup:
                 try:
-                    processor.process_reconcile(user_id=user_id, n=get_dedup_pool_size())
+                    processor.process_reconcile(user_id=user_id)
                 except Exception as exc:
                     logger.warning(
                         "Auto-trigger process_reconcile failed for %s: %s",

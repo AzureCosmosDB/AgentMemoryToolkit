@@ -113,9 +113,15 @@ class InProcessProcessor:
         summary = self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
-    def process_reconcile(self, *, user_id: str, n: int = 50) -> int:
-        """Run reconciliation standalone. Returns count of facts merged + contradicted."""
-        reconciled = self._pipeline.reconcile_memories(user_id, n=n)
+    def process_reconcile(self, *, user_id: str) -> int:
+        """Run reconciliation standalone. Returns count of facts merged + contradicted.
+
+        Pool size is read from ``DEDUP_POOL_SIZE`` (env-tunable, default 50,
+        capped at 500) so the auto-trigger and the standalone path agree.
+        """
+        from ..thresholds import get_dedup_pool_size
+
+        reconciled = self._pipeline.reconcile_memories(user_id, n=get_dedup_pool_size())
         return self._extract_reconcile_count(reconciled)
 
     @staticmethod

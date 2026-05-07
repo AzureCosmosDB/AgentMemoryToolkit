@@ -1136,24 +1136,21 @@ class AsyncCosmosMemoryClient:
         items.reverse()
         return items
 
-    async def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
-        """Retrieve user summary documents from Cosmos DB, newest first."""
+    async def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
         await self._require_cosmos()
 
-        query = (
-            "SELECT c.id, c.user_id, c.thread_id, c.role, c.type, "
-            "c.content, c.metadata, c.created_at "
-            "FROM c WHERE c.user_id = @user_id AND c.type = 'user_summary' "
-            "ORDER BY c.created_at DESC"
-        )
-        parameters = [{"name": "@user_id", "value": user_id}]
-        logger.debug("async get_user_summary query: %s", query)
-
         try:
-            items_iter = self._container_client.query_items(query=query, parameters=parameters)
-            return [item async for item in items_iter]
+            return await self._container_client.read_item(
+                item=f"user_summary_{user_id}",
+                partition_key=[user_id, "__user_summary__"],
+            )
+        except CosmosResourceNotFoundError:
+            return None
         except Exception as exc:
-            raise CosmosOperationError(f"async get_user_summary query failed: {exc}") from exc
+            raise CosmosOperationError(f"async get_user_summary read failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Tag operations

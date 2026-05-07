@@ -80,7 +80,7 @@ def _run_ticket_3_greeting(mem: CosmosMemoryClient, user_id: str, ticket: str) -
     facts = mem.get_memories(user_id=user_id, memory_types=["fact"])
     print("Profile content (truncated):")
     if profile:
-        print(f"  {profile[0]['content'][:200]}…")
+        print(f"  {profile['content'][:200]}…")
     print("\nKnown facts:")
     for f in facts[:8]:
         print(f"  • {f['content']}")

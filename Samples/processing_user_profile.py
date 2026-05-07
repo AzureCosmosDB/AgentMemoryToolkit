@@ -101,8 +101,11 @@ def main() -> None:
     print(json.dumps(doc.get("metadata", {}).get("structured_summary"), indent=2))
 
     _banner("Read profile back from Cosmos")
-    for s in mem.get_user_summary(user_id):
-        print(f"  • {s['content'][:200]}…")
+    summary = mem.get_user_summary(user_id)
+    if summary:
+        print(f"  • {summary['content'][:200]}…")
+    else:
+        print("  (no summary stored yet)")
 
     print("\nDone.")
 

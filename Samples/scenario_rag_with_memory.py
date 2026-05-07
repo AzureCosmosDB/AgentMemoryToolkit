@@ -182,9 +182,8 @@ def run_demo() -> None:
 
     summaries = mem.get_user_summary(user_id=user_id)
     if summaries:
-        print(f"  Found {len(summaries)} summary document(s):")
-        for s in summaries:
-            print(f"    • {s.get('content', '')[:120]}")
+        print("  Found user summary:")
+        print(f"    • {summaries.get('content', '')[:120]}")
     else:
         print("  No summary available yet (generate one via generate_thread_summary).")
 
@@ -204,7 +203,7 @@ def run_demo() -> None:
 
     # 4c. User summary context
     summary_context = (
-        summaries[0].get("content", "") if summaries else "No summary available."
+        summaries.get("content", "") if summaries else "No summary available."
     )
 
     augmented_prompt = textwrap.dedent(f"""\

@@ -212,9 +212,9 @@ class TestUserSummary:
             assert doc.get("id"), f"Expected user_summary doc with id, got {doc}"
             assert doc.get("type") == "user_summary"
 
-            summaries = agent_memory.get_user_summary(unique_user_id)
-            assert len(summaries) >= 1
-            combined = " ".join(s.get("content", "") for s in summaries).lower()
+            summary = agent_memory.get_user_summary(unique_user_id)
+            assert summary is not None, "Expected user_summary doc to be readable after generation"
+            combined = summary.get("content", "").lower()
             assert any(t in combined for t in ("pasta", "italian", "cooking", "fettuccine"))
             assert any(t in combined for t in ("running", "run", "morning"))
         finally:

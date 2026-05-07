@@ -502,16 +502,27 @@ class TestDeleteCosmos:
 
 
 class TestGetUserSummary:
-    async def test_filters_by_type(self):
+    async def test_returns_doc_when_present(self):
         mem, container = _connected_client()
-        doc = _make_doc(type="user_summary")
-        container.query_items = MagicMock(return_value=AsyncIterator([doc]))
+        doc = _make_doc(type="user_summary", id="user_summary_u1")
+        container.read_item = AsyncMock(return_value=doc)
 
         result = await mem.get_user_summary(user_id="u1")
 
-        call_kwargs = container.query_items.call_args.kwargs
-        assert "user_summary" in call_kwargs["query"]
-        assert result == [doc]
+        call_kwargs = container.read_item.call_args.kwargs
+        assert call_kwargs["item"] == "user_summary_u1"
+        assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
+        assert result == doc
+
+    async def test_returns_none_when_absent(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        mem, container = _connected_client()
+        container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
+
+        result = await mem.get_user_summary(user_id="u1")
+
+        assert result is None
 
 
 # ===================================================================

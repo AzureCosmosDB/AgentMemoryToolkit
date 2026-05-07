@@ -105,22 +105,30 @@ Identify how the instruction was communicated:
 
 ---
 
-## 3. Episodic — Past Experiences
+## 3. Episodic — Situated Memories
 
-Extract specific experiences following the **situation → action_taken → outcome** pattern. These are concrete events that happened, not general rules.
+Extract memories that are tied to a **specific situation, scope, or context** the user is in. Episodic covers three cases:
 
-### Outcome Valence
-- `positive` — The action led to a good result
-- `negative` — The action led to a bad result or failure
-- `mixed` — Partially successful with trade-offs
-- `neutral` — Outcome was neither notably good nor bad
+- **Planned / in-flight** — a stated intent or preference scoped to a particular trip, project, event, session, or other bounded context that has not yet finished.
+- **Past with outcome** — a completed event the user described, following the `situation → action_taken → outcome` pattern.
+- **Ongoing context** — a temporary state of affairs that will not persist as a standing fact (e.g. "right now I'm focused on X").
 
-### Episodic Formatting Rules
-- **situation**: Describe the context or problem faced — what was happening and why it mattered
-- **action_taken**: What was specifically tried or done
-- **outcome**: What actually happened as a result
-- **reasoning**: Why it worked or failed (if stated or clearly implied) — set to null if unknown
-- **lesson**: A transferable takeaway that could apply to future situations — set to null if none
+### Required Fields
+- **scope_type** — short, free-form noun describing the kind of context (e.g. `trip`, `project`, `event`, `session`, `release`, `campaign`). Pick whatever vocabulary fits the user's domain. Do not invent a value if one is not implied — if no scope is present, the memory probably belongs in fact or procedural.
+- **scope_value** — the specific instance of that scope (e.g. `Paris 2025`, `Acme revamp`, `Q3 launch`).
+
+Both must be non-empty.
+
+### Optional Fields (include only when applicable)
+- **situation** — the context or problem faced (present for past/in-flight events)
+- **action_taken** — what was specifically tried or done (present for past events)
+- **outcome** — what actually happened as a result (present only when the event has concluded)
+- **outcome_valence** — `positive` | `negative` | `mixed` | `neutral` (present only with `outcome`)
+- **reasoning** — why it worked or failed
+- **lesson** — a transferable takeaway
+- **domain** — topic area
+
+For planned/in-flight or ongoing-context memories, leave `situation`, `action_taken`, `outcome`, `outcome_valence`, `reasoning`, and `lesson` as `null`. The scope fields alone carry the meaning.
 
 ---
 
@@ -137,9 +145,10 @@ This produces:
 - **Episodic**: Situation: Redis session storage timing out under load → Action: Switched to DynamoDB → Outcome: Stable performance → Lesson: DynamoDB handles session storage load better than Redis for this team's use case
 
 When in doubt:
-- If it's a **state** ("X is true") → Fact
+- If it's a **standing state** ("X is true", with no bounded context) → Fact
 - If it's a **rule** ("Do X" / "Don't do Y") → Procedural
 - If it's a **story** ("We tried X and Y happened") → Episodic
+- If it's a **state scoped to a particular context** — a trip, project, event, session, release, campaign, or any other bounded container — → Episodic, with `scope_type` and `scope_value` filled in. The classic trap is a preference that sounds general but is qualified by "for this trip / on this project / just for today" — those are episodic, not fact.
 
 ---
 
@@ -171,6 +180,14 @@ Do NOT extract:
 - Redundant memories — if the same information appears multiple times, extract it only once
 - Raw agent reasoning or intermediate steps that did not produce a confirmed outcome
 - Memories that are only meaningful within the context of this conversation and have no future reference value
+
+### Scoped intents are NOT facts
+A statement that only applies inside a particular trip, project, event, session, or other bounded context is an **episodic** memory, not a fact. Examples that look like facts but are NOT:
+- "For this Paris trip, I want luxury accommodations." → episodic (`scope_type=trip`, `scope_value=Paris`)
+- "On the Acme project, we'll use TypeScript strict mode." → episodic (`scope_type=project`, `scope_value=Acme`)
+- "Just for today, please give me short answers." → episodic (`scope_type=session`, `scope_value=today`)
+
+A fact is a standing claim that holds outside any specific context. The test: if you cannot drop the scope qualifier ("for this trip", "on this project", "just for today") without changing the meaning, it belongs in `episodic`, not `facts`.
 
 ---
 
@@ -372,6 +389,52 @@ Do NOT extract:
 }
 ```
 
+### Example 4: Standing preference vs. scoped intent
+
+**Conversation:**
+> User: "I usually prefer budget hotels."
+> User: "For this Paris trip, I want luxury accommodations."
+
+The first statement is a standing preference and belongs in `facts`. The second is qualified by "for this Paris trip" — dropping the scope changes the meaning, so it belongs in `episodic` with the scope captured structurally. The two memories coexist; the trip-scoped intent never enters the fact pool and never collides with the standing preference.
+
+**Output:**
+```json
+{
+  "facts": [
+    {
+      "text": "The user usually prefers budget hotels.",
+      "category": "preference",
+      "subject": "user",
+      "predicate": "hotel_preference",
+      "object": "budget hotels",
+      "confidence": 0.95,
+      "salience": 0.7,
+      "temporal_context": null,
+      "tags": ["topic:travel", "topic:hotels"],
+      "action": "ADD",
+      "supersedes_id": null
+    }
+  ],
+  "procedural": [],
+  "episodic": [
+    {
+      "scope_type": "trip",
+      "scope_value": "Paris",
+      "situation": null,
+      "action_taken": null,
+      "outcome": null,
+      "outcome_valence": null,
+      "reasoning": null,
+      "lesson": null,
+      "domain": "travel",
+      "confidence": 0.95,
+      "salience": 0.8,
+      "tags": ["topic:travel", "topic:hotels", "topic:luxury"]
+    }
+  ]
+}
+```
+
 ---
 
 ## Output Format
@@ -411,13 +474,15 @@ You must output ONLY valid JSON matching the schema below. No preamble, no expla
   ],
   "episodic": [
     {
-      "situation": "context/problem",
-      "action_taken": "what was tried",
-      "outcome": "what happened",
-      "reasoning": "why it worked/failed or null",
-      "outcome_valence": "positive|negative|mixed|neutral",
-      "lesson": "transferable takeaway or null",
-      "domain": "topic area",
+      "scope_type": "trip|project|event|session|release|campaign|... (free-form, required, non-empty)",
+      "scope_value": "specific instance, e.g. Paris 2025 (required, non-empty)",
+      "situation": "context/problem, or null",
+      "action_taken": "what was tried, or null",
+      "outcome": "what happened, or null",
+      "outcome_valence": "positive|negative|mixed|neutral, or null",
+      "reasoning": "why it worked/failed, or null",
+      "lesson": "transferable takeaway, or null",
+      "domain": "topic area or null",
       "confidence": 0.8,
       "salience": 0.7,
       "tags": ["topic:x"]

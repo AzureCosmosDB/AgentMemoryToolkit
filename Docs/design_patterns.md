@@ -162,7 +162,7 @@ Search across all memories (or filter by type) to find the most relevant context
 facts = await mem.search_cosmos(
     search_terms="database migration requirements",
     user_id="user-1",
-    memory_type="fact",
+    memory_types=["fact"],
     top_k=10,
 )
 
@@ -185,10 +185,10 @@ profile = await mem.get_user_summary(user_id="user-1")
 
 ```python
 # All summaries for a user
-summaries = await mem.get_memories(user_id="user-1", memory_type="summary")
+summaries = await mem.get_memories(user_id="user-1", memory_types=["summary"])
 
 # All facts
-facts = await mem.get_memories(user_id="user-1", memory_type="fact")
+facts = await mem.get_memories(user_id="user-1", memory_types=["fact"])
 
 # Filter by thread_id
 thread_turns = await mem.get_memories(user_id="user-1", thread_id=THREAD_ID)
@@ -204,7 +204,7 @@ A typical chat application lifecycle looks like this:
 New session starts
   │
   ├─ Retrieve user summary          (get_user_summary)
-  ├─ Semantic search for prior facts (search_cosmos, type="fact")
+  ├─ Semantic search for prior facts (search_cosmos, memory_types=["fact"])
   │
   │  ┌── Conversation loop ──┐
   │  │ Store each turn        │  (add_cosmos)
@@ -221,7 +221,7 @@ New session starts
 ```python
 # --- Session start ---
 profile = await mem.get_user_summary(user_id="user-1")
-relevant = await mem.search_cosmos("topic of interest", user_id="user-1", memory_type="fact", top_k=5)
+relevant = await mem.search_cosmos("topic of interest", user_id="user-1", memory_types=["fact"], top_k=5)
 
 # Build system prompt with profile and relevant facts
 system_prompt = build_prompt(profile, relevant)
@@ -280,7 +280,7 @@ await mem.extract_facts(user_id="user-1", thread_id="research-thread")
 facts = await mem.search_cosmos(
     search_terms="source database schema foreign keys",
     user_id="user-1",
-    memory_type="fact",
+    memory_types=["fact"],
     top_k=10,
 )
 

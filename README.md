@@ -202,7 +202,7 @@ Filter at retrieval time:
 
 ```python
 results = memory.search_cosmos("user preferences", user_id="u1", min_confidence=0.7)
-high_conf_facts = memory.get_memories(user_id="u1", memory_type="fact", min_confidence=0.7)
+high_conf_facts = memory.get_memories(user_id="u1", memory_types=["fact"], min_confidence=0.7)
 ```
 
 ### Memory Reconciliation

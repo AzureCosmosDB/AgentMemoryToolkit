@@ -294,7 +294,7 @@ class CosmosMemoryClient:
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve memories from the local store.
 
@@ -302,11 +302,11 @@ class CosmosMemoryClient:
         memory is returned. Filters are combined with AND logic.
         """
         logger.debug(
-            "get_local memory_id=%s user_id=%s role=%s type=%s",
+            "get_local memory_id=%s user_id=%s role=%s types=%s",
             memory_id,
             user_id,
             role,
-            memory_type,
+            memory_types,
         )
         results = self.local_memory
 
@@ -316,8 +316,9 @@ class CosmosMemoryClient:
             results = [m for m in results if m["user_id"] == user_id]
         if role is not None:
             results = [m for m in results if m["role"] == role]
-        if memory_type is not None:
-            results = [m for m in results if m["type"] == memory_type]
+        if memory_types:
+            type_set = set(memory_types)
+            results = [m for m in results if m["type"] in type_set]
 
         return results
 
@@ -1027,7 +1028,7 @@ class CosmosMemoryClient:
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
         tags: Optional[list[str]] = None,
         any_tags: Optional[list[str]] = None,
@@ -1043,7 +1044,9 @@ class CosmosMemoryClient:
             user_id: Filter by user id.
             thread_id: Filter by thread id.
             role: Filter by role.
-            memory_type: Filter by type (raw, summary, fact, etc.).
+            memory_types: List of types to match (e.g. ``["fact"]`` or
+                ``["fact", "procedural", "episodic"]``). ``None`` (default) or
+                an empty list returns all types.
             recent_k: If specified, return only the *k* most recent documents
                 (ordered by ``_ts`` descending, then reversed to chronological).
             tags: AND filter — all specified tags must be present.
@@ -1057,12 +1060,12 @@ class CosmosMemoryClient:
         """
         self._require_cosmos()
         logger.debug(
-            "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
+            "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s types=%s recent_k=%s",
             memory_id,
             user_id,
             thread_id,
             role,
-            memory_type,
+            memory_types,
             recent_k,
         )
 
@@ -1071,7 +1074,7 @@ class CosmosMemoryClient:
             user_id=user_id,
             thread_id=thread_id,
             role=role,
-            memory_type=memory_type,
+            memory_types=memory_types,
             min_confidence=min_confidence,
         )
 
@@ -1221,7 +1224,7 @@ class CosmosMemoryClient:
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
         hybrid_search: bool = False,
         top_k: int = 5,
@@ -1239,10 +1242,6 @@ class CosmosMemoryClient:
         3. Optionally filters by the remaining keyword parameters.
         4. Returns up to *top_k* results ordered by similarity.
 
-        Args:
-            min_confidence: Cosmos-side filter — only return memories with
-                ``confidence >= min_confidence``. Memories without confidence
-                (e.g. raw ``turn`` records) are excluded when set.
         """
         self._require_cosmos()
         _validate_hybrid_search(hybrid_search, search_terms)
@@ -1265,7 +1264,7 @@ class CosmosMemoryClient:
         qb = _build_memory_query_builder(
             user_id=user_id,
             role=role,
-            memory_type=memory_type,
+            memory_types=memory_types,
             thread_id=thread_id,
             min_confidence=min_confidence,
         )
@@ -1337,7 +1336,7 @@ class CosmosMemoryClient:
         self,
         thread_id: str,
         user_id: Optional[str] = None,
-        memory_type: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
         tags: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
@@ -1352,7 +1351,8 @@ class CosmosMemoryClient:
         qb = _QueryBuilder()
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         qb.add_filter("c.user_id", "@user_id", user_id)
-        qb.add_filter("c.type", "@memory_type", memory_type)
+        if memory_types:
+            qb.add_in_filter("c.type", "@memory_type_", list(memory_types))
 
         # Tag filters
         if tags:
@@ -1386,29 +1386,21 @@ class CosmosMemoryClient:
         items.reverse()
         return items
 
-    def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
-        """Retrieve user summary documents from Cosmos DB, newest first."""
+    def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
         self._require_cosmos()
 
-        query = (
-            "SELECT c.id, c.user_id, c.thread_id, c.role, c.type, "
-            "c.content, c.metadata, c.created_at "
-            "FROM c WHERE c.user_id = @user_id AND c.type = 'user_summary' "
-            "ORDER BY c.created_at DESC"
-        )
-        parameters = [{"name": "@user_id", "value": user_id}]
-        logger.debug("get_user_summary query: %s", query)
-
         try:
-            return list(
-                self._container_client.query_items(
-                    query=query,
-                    parameters=parameters,
-                    enable_cross_partition_query=True,
-                )
+            return self._container_client.read_item(
+                item=f"user_summary_{user_id}",
+                partition_key=[user_id, "__user_summary__"],
             )
+        except CosmosResourceNotFoundError:
+            return None
         except Exception as exc:
-            raise CosmosOperationError(f"get_user_summary query failed: {exc}") from exc
+            raise CosmosOperationError(f"get_user_summary read failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Tag operations
@@ -1492,7 +1484,7 @@ class CosmosMemoryClient:
         return self.search_cosmos(
             search_terms=search_terms,
             user_id=user_id,
-            memory_type="episodic",
+            memory_types=["episodic"],
             top_k=top_k,
             min_salience=min_salience,
             include_superseded=include_superseded,
@@ -1609,7 +1601,7 @@ class CosmosMemoryClient:
         processor = self._get_processor()
 
         try:
-            turns = self.get_thread(thread_id=thread_id, user_id=user_id, memory_type="turn")
+            turns = self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"])
         except Exception:  # pragma: no cover - best-effort load
             turns = []
 
@@ -1633,7 +1625,7 @@ class CosmosMemoryClient:
         For :class:`InProcessProcessor` this is just :meth:`process_now`
         followed by ``True`` (the in-process pipeline is synchronous). For
         :class:`DurableFunctionProcessor` this polls
-        ``get_memories(memory_type="summary", ...)`` every 0.5s until a
+        ``get_memories(memory_types=["summary"], ...)`` every 0.5s until a
         summary appears or the timeout expires.
 
         Polling uses ``get_memories`` (filter-only, no embeddings) so this
@@ -1663,7 +1655,7 @@ class CosmosMemoryClient:
                 results = self.get_memories(
                     user_id=user_id,
                     thread_id=thread_id,
-                    memory_type="summary",
+                    memory_types=["summary"],
                     recent_k=1,
                 )
             except Exception:

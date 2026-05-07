@@ -159,7 +159,7 @@ class TestGetLocal:
         mem.add_local(user_id="u1", role="agent", content="b", memory_type="turn", thread_id="t1")
         mem.add_local(user_id="u2", role="user", content="c", memory_type="summary")
 
-        results = mem.get_local(user_id="u1", role="user", memory_type="turn")
+        results = mem.get_local(user_id="u1", role="user", memory_types=["turn"])
         assert len(results) == 1
         assert results[0]["content"] == "a"
 
@@ -490,7 +490,7 @@ class TestGetMemories:
             user_id="u1",
             thread_id="t1",
             role="user",
-            memory_type="turn",
+            memory_types=["turn"],
         )
 
         call_kwargs = container.query_items.call_args.kwargs
@@ -502,7 +502,7 @@ class TestGetMemories:
         assert "@user_id" in param_names
         assert "@thread_id" in param_names
         assert "@role" in param_names
-        assert "@memory_type" in param_names
+        assert "@memory_type_0" in param_names
 
     def test_recent_k(self):
         mem, container = _connected_client()
@@ -581,16 +581,27 @@ class TestDeleteCosmos:
 
 
 class TestGetUserSummary:
-    def test_filters_by_type(self):
+    def test_returns_doc_when_present(self):
         mem, container = _connected_client()
-        doc = _make_doc(type="user_summary")
-        container.query_items.return_value = [doc]
+        doc = _make_doc(type="user_summary", id="user_summary_u1")
+        container.read_item.return_value = doc
 
         result = mem.get_user_summary(user_id="u1")
 
-        call_kwargs = container.query_items.call_args.kwargs
-        assert "user_summary" in call_kwargs["query"]
-        assert result == [doc]
+        call_kwargs = container.read_item.call_args.kwargs
+        assert call_kwargs["item"] == "user_summary_u1"
+        assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
+        assert result == doc
+
+    def test_returns_none_when_absent(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        mem, container = _connected_client()
+        container.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+
+        result = mem.get_user_summary(user_id="u1")
+
+        assert result is None
 
 
 # ===================================================================

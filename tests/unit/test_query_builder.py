@@ -183,3 +183,46 @@ def test_combined_filters_with_all_new_methods():
     assert "NOT IS_DEFINED(c.superseded_by)" in where
     params = qb.get_parameters()
     assert len(params) == 2  # filter + array_contains, null/undefined adds no params
+
+
+# ---------------------------------------------------------------------------
+# add_in_filter
+# ---------------------------------------------------------------------------
+
+
+def test_add_in_filter_multiple_values():
+    qb = _QueryBuilder()
+    qb.add_in_filter("c.type", "@memory_type_", ["fact", "procedural", "episodic"])
+    where = qb.build_where()
+    assert where == " WHERE c.type IN (@memory_type_0, @memory_type_1, @memory_type_2)"
+    params = qb.get_parameters()
+    assert params == [
+        {"name": "@memory_type_0", "value": "fact"},
+        {"name": "@memory_type_1", "value": "procedural"},
+        {"name": "@memory_type_2", "value": "episodic"},
+    ]
+
+
+def test_add_in_filter_single_value():
+    qb = _QueryBuilder()
+    qb.add_in_filter("c.type", "@t_", ["fact"])
+    assert qb.build_where() == " WHERE c.type IN (@t_0)"
+    assert qb.get_parameters() == [{"name": "@t_0", "value": "fact"}]
+
+
+def test_add_in_filter_empty_list_skipped():
+    qb = _QueryBuilder()
+    qb.add_in_filter("c.type", "@t_", [])
+    assert qb.build_where() == ""
+    assert qb.get_parameters() == []
+
+
+def test_add_in_filter_combined_with_other_filters():
+    qb = _QueryBuilder()
+    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_in_filter("c.type", "@t_", ["fact", "procedural"])
+    where = qb.build_where()
+    assert "c.user_id = @uid" in where
+    assert "c.type IN (@t_0, @t_1)" in where
+    assert " AND " in where
+    assert len(qb.get_parameters()) == 3

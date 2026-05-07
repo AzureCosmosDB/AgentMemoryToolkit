@@ -20,9 +20,14 @@ from .exceptions import LLMError, ValidationError
 logger = logging.getLogger(__name__)
 
 
+def _is_real_number(v: Any) -> bool:
+    """True for ``int``/``float`` excluding ``bool`` (``isinstance(True, int)`` is True)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _max_or_none(values: Any) -> Optional[float]:
-    """Return max of numeric values, ignoring None / non-numeric. None if empty."""
-    nums = [float(v) for v in values if isinstance(v, (int, float))]
+    """Return max of numeric values, ignoring None / non-numeric / bool. None if empty."""
+    nums = [float(v) for v in values if _is_real_number(v)]
     return max(nums) if nums else None
 
 
@@ -398,14 +403,32 @@ class ProcessingPipeline:
                 user_id,
                 thread_id,
             )
-            return {"facts_count": 0, "procedural_count": 0, "episodic_count": 0, "updated_count": 0}
+            return {
+                "facts_count": 0,
+                "procedural_count": 0,
+                "episodic_count": 0,
+                "unclassified_count": 0,
+                "updated_count": 0,
+                "exact_dedup_skipped": 0,
+            }
 
         # ---- 2. Load existing memories for reconciliation ----
         existing = self._load_existing_memories(user_id, ["fact", "procedural"])
         # Pre-compute exact-content hashes from existing memories for the
         # write-time short-circuit. Saves the embedding call and the upsert
         # RU on identical re-extractions across runs.
-        existing_hashes: set[str] = {f["content_hash"] for f in existing if f.get("content_hash")}
+        #
+        # Hashes are bucketed *by type* — a fact with the same normalized
+        # text as an existing procedural must NOT be silently dropped, because
+        # they're semantically different memory kinds and the LLM's
+        # classification would be erased. Unclassified items are persisted as
+        # facts so they share the fact bucket.
+        existing_fact_hashes: set[str] = {
+            m["content_hash"] for m in existing if m.get("type") == "fact" and m.get("content_hash")
+        }
+        existing_proc_hashes: set[str] = {
+            m["content_hash"] for m in existing if m.get("type") == "procedural" and m.get("content_hash")
+        }
         existing_text = ""
         if existing:
             lines = []
@@ -457,7 +480,7 @@ class ProcessingPipeline:
             # UPDATEs go through unchanged - they explicitly target an old
             # record by id and need to write the supersession link.
             new_content_hash = compute_content_hash(text)
-            if action == "ADD" and new_content_hash in existing_hashes:
+            if action == "ADD" and new_content_hash in existing_fact_hashes:
                 logger.debug(
                     "extract_memories: skipping exact-dup fact hash=%s user_id=%s thread_id=%s",
                     new_content_hash,
@@ -466,7 +489,7 @@ class ProcessingPipeline:
                 )
                 exact_dedup_skipped += 1
                 continue
-            det_id = f"fact_{hashlib.sha256(f'{user_id}:{thread_id}:{new_content_hash}'.encode()).hexdigest()[:16]}"
+            det_id = f"fact_{hashlib.sha256(f'{user_id}:{thread_id}:{new_content_hash}'.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in fact.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted"] + topic_tags
@@ -537,7 +560,7 @@ class ProcessingPipeline:
             embed_texts.append(text)
             # Record this fact's hash so a later candidate in the same batch
             # with identical content also short-circuits.
-            existing_hashes.add(new_content_hash)
+            existing_fact_hashes.add(new_content_hash)
 
         # ---- 6. Process procedural ----
         for proc in procedural:
@@ -553,7 +576,17 @@ class ProcessingPipeline:
                 )
                 continue
             content_hash = compute_content_hash(text)
-            det_id = f"proc_{hashlib.sha256(f'{user_id}:{content_hash}'.encode()).hexdigest()[:16]}"
+            # Same write-time exact-dedup short-circuit as facts. UPDATEs
+            # bypass — they explicitly target an old record by id.
+            if action == "ADD" and content_hash in existing_proc_hashes:
+                logger.debug(
+                    "extract_memories: skipping exact-dup procedural hash=%s user_id=%s",
+                    content_hash,
+                    user_id,
+                )
+                exact_dedup_skipped += 1
+                continue
+            det_id = f"proc_{hashlib.sha256(f'{user_id}:{content_hash}'.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in proc.get("tags", [])]
             tags = ["sys:procedural", "sys:auto-extracted"] + topic_tags
@@ -607,6 +640,9 @@ class ProcessingPipeline:
 
             docs_to_embed.append(doc)
             embed_texts.append(text)
+            # Record this procedural's hash so a later candidate in the same
+            # batch with identical content also short-circuits.
+            existing_proc_hashes.add(content_hash)
 
         # ---- 7. Process episodic ----
         for ep in episodic:
@@ -621,7 +657,7 @@ class ProcessingPipeline:
                 continue
             text = f"{situation} → {action_taken} → {outcome}"
             content_hash = compute_content_hash(text)
-            det_id = f"ep_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:16]}"
+            det_id = f"ep_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in ep.get("tags", [])]
             tags = ["sys:episodic", "sys:auto-extracted"] + topic_tags
@@ -667,7 +703,18 @@ class ProcessingPipeline:
             if not text:
                 continue
             content_hash = compute_content_hash(text)
-            det_id = f"unc_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:16]}"
+            # Unclassified items are persisted as facts → share the fact
+            # bucket for the write-time exact-dedup short-circuit.
+            if content_hash in existing_fact_hashes:
+                logger.debug(
+                    "extract_memories: skipping exact-dup unclassified hash=%s user_id=%s thread_id=%s",
+                    content_hash,
+                    user_id,
+                    thread_id,
+                )
+                exact_dedup_skipped += 1
+                continue
+            det_id = f"unc_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in item.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags
@@ -695,6 +742,9 @@ class ProcessingPipeline:
 
             docs_to_embed.append(doc)
             embed_texts.append(text)
+            # Unclassified items are persisted as facts → record in the
+            # fact bucket so later batch candidates short-circuit.
+            existing_fact_hashes.add(content_hash)
 
         # ---- 9. Generate embeddings in batch ----
         if embed_texts:
@@ -1038,15 +1088,16 @@ class ProcessingPipeline:
         logger.info("reconcile_memories started user_id=%s n=%d", user_id, n)
 
         # ---- 1. Load up to N most recent active facts ----
-        # ORDER BY c._ts DESC keeps the TOP cap deterministic across
-        # physical partitions and surfaces the freshest facts to the
-        # LLM (recency is a tiebreaker the prompt relies on).
+        # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
+        # physical partitions and matches the dedup prompt's tiebreaker
+        # ("more recent created_at first"). Cosmos's _ts is the last-write
+        # timestamp, which would diverge from created_at after any UPDATE.
         query = (
             f"SELECT TOP {n} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = 'fact' "
             "AND (NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null) "
-            "ORDER BY c._ts DESC"
+            "ORDER BY c.created_at DESC"
         )
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
@@ -1067,10 +1118,17 @@ class ProcessingPipeline:
             return {"kept": len(facts), "merged": 0, "contradicted": 0}
 
         # ---- 2. Format the facts pool for the prompt ----
+        # ``json.dumps`` escapes embedded quotes and pipes inside content so
+        # the visual grammar (`| Field:` separators, `"<text>"` quoting)
+        # stays unambiguous even on adversarial inputs like
+        # ``She said "hi" | weird``. IDs are kept raw because they're
+        # deterministic alphanumerics — quoting them risks the LLM copying
+        # the quotes back into ``source_ids``.
         lines: list[str] = []
         for i, cf in enumerate(facts, 1):
+            content_quoted = json.dumps(cf.get("content", ""), ensure_ascii=False)
             lines.append(
-                f'{i}. ID: {cf["id"]} | Content: "{cf.get("content", "")}" | '
+                f"{i}. ID: {cf['id']} | Content: {content_quoted} | "
                 f"Confidence: {cf.get('confidence', 'N/A')} | "
                 f"Salience: {cf.get('salience', 'N/A')} | "
                 f"Created: {cf.get('created_at', 'N/A')}"
@@ -1097,8 +1155,21 @@ class ProcessingPipeline:
         contradicted = 0
         # Tracks source_id -> merged_id rewrites so contradictions whose
         # winner/loser landed in a duplicate group can be redirected to
-        # the surviving merged document.
+        # the surviving merged document. Only updated on *successful*
+        # supersede so stale redirects don't survive ETag races.
         source_to_merged_id: dict[str, str] = {}
+        # Cache of merged docs we just upserted, keyed by merged_id. Lets
+        # the contradiction redirector reuse the in-memory dict instead of
+        # a cross-partition Cosmos round-trip for a doc we own. Also keeps
+        # the chain ETag-stable when the same merged doc absorbs both a
+        # duplicate group and a contradiction redirect in the same call.
+        merged_docs_by_id: dict[str, dict[str, Any]] = {}
+        # Set of source IDs that were *actually* superseded (counts toward
+        # ``merged``). Used by the kept-count cross-check below — earlier
+        # versions counted attempts and undercounted on ETag races.
+        consumed_source_ids: set[str] = set()
+        # Set of contradiction loser IDs that were *actually* superseded.
+        consumed_loser_ids: set[str] = set()
 
         # ---- 4. Apply duplicate_groups FIRST ----
         for group in duplicate_groups:
@@ -1147,19 +1218,20 @@ class ProcessingPipeline:
             # Newest source's thread_id wins (after _ts-desc sort above).
             recent_thread_id = source_docs[0].get("thread_id", "")
 
-            # If LLM omitted confidence/salience, fall back to max across
-            # the source docs so merged facts don't silently drop below
-            # min_confidence / min_salience filters.
+            # If LLM omitted confidence/salience (or returned a non-positive
+            # placeholder, or a JSON ``true`` masquerading as numeric), fall
+            # back to max across the source docs so merged facts don't
+            # silently drop below min_confidence / min_salience filters.
             llm_conf = group.get("confidence")
             confidence_val = (
                 float(llm_conf)
-                if isinstance(llm_conf, (int, float)) and llm_conf > 0
+                if _is_real_number(llm_conf) and llm_conf > 0
                 else _max_or_none(src.get("confidence") for src in source_docs)
             )
             llm_sal = group.get("salience")
             salience_val = (
                 float(llm_sal)
-                if isinstance(llm_sal, (int, float)) and llm_sal > 0
+                if _is_real_number(llm_sal) and llm_sal > 0
                 else _max_or_none(src.get("salience") for src in source_docs)
             )
 
@@ -1186,15 +1258,30 @@ class ProcessingPipeline:
 
             # Generate embedding for the merged content so retrieval can
             # rank it against future queries from the moment it lands.
+            # If embedding fails, abort this duplicate group entirely:
+            # writing a merged doc with no embedding and then superseding
+            # the sources would create a search-index hole until the next
+            # reconcile retried. Better to leave the duplicates in place.
             try:
                 merged_record.embedding = self._embeddings.generate(merged_content)
             except Exception:
                 logger.exception(
-                    "reconcile_memories: embedding failed for merged id=%s",
+                    "reconcile_memories: embedding failed for merged id=%s; "
+                    "aborting duplicate group to avoid search-index hole",
                     merged_record.id,
                 )
+                continue
 
-            self._upsert_memory(merged_record.to_cosmos_dict())
+            merged_doc = merged_record.to_cosmos_dict()
+            try:
+                self._upsert_memory(merged_doc)
+            except Exception:
+                logger.exception(
+                    "reconcile_memories: upsert failed for merged id=%s; aborting duplicate group",
+                    merged_record.id,
+                )
+                continue
+            merged_docs_by_id[merged_record.id] = merged_doc
 
             for sid in source_ids:
                 src_doc = facts_by_id.get(sid)
@@ -1204,9 +1291,14 @@ class ProcessingPipeline:
                         sid,
                     )
                     continue
+                # Only update redirect/consumed-set on *successful* supersede.
+                # Losing the ETag race means another writer beat us; the
+                # source doc is still active from our perspective and should
+                # not be treated as consumed.
                 if self._mark_superseded(src_doc, merged_record.id, reason="duplicate"):
                     merged += 1
-                source_to_merged_id[sid] = merged_record.id
+                    source_to_merged_id[sid] = merged_record.id
+                    consumed_source_ids.add(sid)
 
         # ---- 5. Apply contradicted_pairs SECOND with dangling-id resolution ----
         for pair in contradicted_pairs:
@@ -1223,6 +1315,19 @@ class ProcessingPipeline:
             resolved_winner = source_to_merged_id.get(winner_id, winner_id)
             resolved_loser_id = source_to_merged_id.get(loser_id, loser_id)
 
+            # Validate the (resolved) winner. The LLM is instructed never to
+            # invent IDs — if it does, refuse to write a dangling
+            # ``superseded_by`` pointer that breaks the audit trail.
+            if resolved_winner not in facts_by_id and resolved_winner not in merged_docs_by_id:
+                logger.warning(
+                    "reconcile_memories: hallucinated winner_id=%s (resolved=%s) "
+                    "not in pool or merged set; skipping pair %r",
+                    winner_id,
+                    resolved_winner,
+                    pair,
+                )
+                continue
+
             if resolved_winner == resolved_loser_id:
                 # Both sides collapsed into the same merged doc — the
                 # contradiction is moot. Drop it silently.
@@ -1237,27 +1342,11 @@ class ProcessingPipeline:
 
             loser_doc = facts_by_id.get(resolved_loser_id)
             if loser_doc is None and resolved_loser_id != loser_id:
-                # The original loser was just merged. Fetch the merged doc
-                # from Cosmos so we can attach the contradiction reason.
-                try:
-                    q = "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid"
-                    results = list(
-                        self._container.query_items(
-                            query=q,
-                            parameters=[
-                                {"name": "@id", "value": resolved_loser_id},
-                                {"name": "@uid", "value": user_id},
-                            ],
-                            enable_cross_partition_query=True,
-                        )
-                    )
-                    if results:
-                        loser_doc = results[0]
-                except Exception:
-                    logger.exception(
-                        "reconcile_memories: failed to fetch redirected loser id=%s",
-                        resolved_loser_id,
-                    )
+                # The original loser was just merged. Reuse the in-memory
+                # merged doc rather than a cross-partition query — we own
+                # the (user_id, thread_id) partition and just wrote it,
+                # so this also keeps the supersede ETag chain stable.
+                loser_doc = merged_docs_by_id.get(resolved_loser_id)
 
             if loser_doc is None:
                 logger.warning(
@@ -1269,20 +1358,16 @@ class ProcessingPipeline:
 
             if self._mark_superseded(loser_doc, resolved_winner, reason="contradiction"):
                 contradicted += 1
+                # Track the *original* loser_id from the LLM so the kept
+                # cross-check below can reconcile against the input pool.
+                if loser_id in facts_by_id:
+                    consumed_loser_ids.add(loser_id)
 
-        # Count kept directly: facts the pipeline did NOT consume as a
-        # duplicate-source or contradiction-loser. Cross-check against the
-        # LLM's kept_ids and warn on mismatch (catches hallucinated IDs
-        # and double-counting).
-        consumed_ids: set[str] = set()
-        for group in duplicate_groups:
-            for sid in group.get("source_ids") or []:
-                if sid in facts_by_id:
-                    consumed_ids.add(sid)
-        for pair in contradicted_pairs:
-            lid = pair.get("loser_id")
-            if lid and lid in facts_by_id:
-                consumed_ids.add(lid)
+        # Count kept directly: facts the pipeline did NOT *successfully*
+        # consume as a duplicate-source or contradiction-loser. Cross-check
+        # against the LLM's kept_ids and warn on mismatch (catches
+        # hallucinated IDs and double-counting).
+        consumed_ids = consumed_source_ids | consumed_loser_ids
         kept_actual = {fid for fid in facts_by_id.keys() if fid not in consumed_ids}
         kept = len(kept_actual)
         llm_kept_set = {kid for kid in llm_kept_ids if kid in facts_by_id}

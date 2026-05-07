@@ -22,6 +22,10 @@ DEFAULT_USER_SUMMARY_EVERY_N = 20
 # when FACT_EXTRACTION_EVERY_N=1. Default 5 = one dedup sweep per 5 extracts.
 # Set to 1 to dedup on every extract; set to 0 to disable entirely.
 DEFAULT_DEDUP_EVERY_N = 5
+# Pool size for the auto-trigger reconcile sweep. Mirrors the ``n``
+# parameter of :py:meth:`ProcessingPipeline.reconcile_memories`. Hard cap
+# of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
+DEFAULT_DEDUP_POOL_SIZE = 50
 
 # Owner exclusivity — declares which backend is authoritative for the shared
 # memories + counter container. When set, the *other* backend skips its
@@ -69,6 +73,24 @@ def get_dedup_every_n() -> int:
     return _parse_threshold("DEDUP_EVERY_N", DEFAULT_DEDUP_EVERY_N)
 
 
+def get_dedup_pool_size() -> int:
+    """Pool size for the auto-trigger reconcile sweep (``n`` param of
+    :py:meth:`ProcessingPipeline.reconcile_memories`). Hard-capped at 500 by
+    the pipeline; values above are clamped to 500 with a WARN."""
+    raw = _parse_threshold("DEDUP_POOL_SIZE", DEFAULT_DEDUP_POOL_SIZE)
+    if raw == 0:
+        # 0 isn't meaningful for a pool size — fall back to default.
+        logger.warning(
+            "DEDUP_POOL_SIZE=0 is invalid for a pool size; using default %d",
+            DEFAULT_DEDUP_POOL_SIZE,
+        )
+        return DEFAULT_DEDUP_POOL_SIZE
+    if raw > 500:
+        logger.warning("DEDUP_POOL_SIZE=%d exceeds hard cap; clamping to 500", raw)
+        return 500
+    return raw
+
+
 def get_processor_owner() -> Optional[str]:
     """Return the configured ``MEMORY_PROCESSOR_OWNER`` or ``None``.
 
@@ -104,11 +126,13 @@ __all__ = [
     "DEFAULT_THREAD_SUMMARY_EVERY_N",
     "DEFAULT_USER_SUMMARY_EVERY_N",
     "DEFAULT_DEDUP_EVERY_N",
+    "DEFAULT_DEDUP_POOL_SIZE",
     "PROCESSOR_OWNER_INPROCESS",
     "PROCESSOR_OWNER_DURABLE",
     "get_fact_extraction_every_n",
     "get_thread_summary_every_n",
     "get_user_summary_every_n",
     "get_dedup_every_n",
+    "get_dedup_pool_size",
     "get_processor_owner",
 ]

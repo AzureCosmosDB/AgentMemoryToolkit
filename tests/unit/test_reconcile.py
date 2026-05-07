@@ -583,3 +583,448 @@ class TestExactDedupShortCircuit:
         fact_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
         assert len(fact_docs) == 1
         assert fact_docs[0]["content_hash"] == compute_content_hash("User loves tea")
+
+
+# ---------------------------------------------------------------------------
+# Additional regression tests for round-16 review fixes.
+# ---------------------------------------------------------------------------
+
+
+class TestExactDedupCrossTypeIsolation:
+    """Hash buckets must be type-scoped: a procedural with the same
+    normalized text as an LLM-extracted fact (or vice versa) must NOT
+    silently drop the new memory."""
+
+    def _build(self) -> ProcessingPipeline:
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.1] * 8
+        p._embeddings.generate_batch.return_value = [[0.1] * 8]
+        p._container = MagicMock()
+        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        return p
+
+    def test_fact_not_dropped_when_only_procedural_has_same_hash(self):
+        p = self._build()
+        text = "Always reply in Spanish"
+        # Existing PROCEDURAL with that text — must NOT poison the FACT bucket.
+        existing = [
+            {
+                "id": "proc_existing",
+                "type": "procedural",
+                "content": text,
+                "content_hash": compute_content_hash(text),
+                "thread_id": "__procedural__",
+                "tags": ["sys:procedural"],
+            }
+        ]
+        p._container.query_items.return_value = iter(
+            [
+                {
+                    "id": "turn-1",
+                    "role": "user",
+                    "content": "x",
+                    "type": "turn",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        )
+        p._load_existing_memories = MagicMock(return_value=existing)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [
+                        {
+                            "text": text,
+                            "confidence": 0.9,
+                            "salience": 0.6,
+                            "action": "ADD",
+                            "tags": ["sys:fact"],
+                        }
+                    ],
+                    "procedural": [],
+                    "episodic": [],
+                    "unclassified": [],
+                }
+            )
+        )
+        out = p.extract_memories("u1", "t1")
+        assert out["exact_dedup_skipped"] == 0
+        fact_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
+        assert len(fact_docs) == 1
+        assert fact_docs[0]["content"] == text
+
+    def test_procedural_not_dropped_when_only_fact_has_same_hash(self):
+        p = self._build()
+        text = "Use Celsius for temperatures"
+        existing = [
+            {
+                "id": "fact_existing",
+                "type": "fact",
+                "content": text,
+                "content_hash": compute_content_hash(text),
+                "thread_id": "t1",
+                "tags": ["sys:fact"],
+            }
+        ]
+        p._container.query_items.return_value = iter(
+            [
+                {
+                    "id": "turn-1",
+                    "role": "user",
+                    "content": "x",
+                    "type": "turn",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        )
+        p._load_existing_memories = MagicMock(return_value=existing)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [],
+                    "procedural": [
+                        {
+                            "instruction": text,
+                            "confidence": 0.9,
+                            "salience": 0.6,
+                            "action": "ADD",
+                            "tags": [],
+                        }
+                    ],
+                    "episodic": [],
+                    "unclassified": [],
+                }
+            )
+        )
+        out = p.extract_memories("u1", "t1")
+        assert out["exact_dedup_skipped"] == 0
+        proc_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
+        assert len(proc_docs) == 1
+
+    def test_procedural_short_circuits_on_existing_procedural_hash(self):
+        p = self._build()
+        text = "Be terse in code reviews"
+        existing = [
+            {
+                "id": "proc_existing",
+                "type": "procedural",
+                "content": text,
+                "content_hash": compute_content_hash(text),
+                "thread_id": "__procedural__",
+                "tags": ["sys:procedural"],
+            }
+        ]
+        p._container.query_items.return_value = iter(
+            [
+                {
+                    "id": "turn-1",
+                    "role": "user",
+                    "content": "x",
+                    "type": "turn",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        )
+        p._load_existing_memories = MagicMock(return_value=existing)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [],
+                    "procedural": [
+                        {
+                            "instruction": text,
+                            "confidence": 0.9,
+                            "salience": 0.6,
+                            "action": "ADD",
+                            "tags": [],
+                        }
+                    ],
+                    "episodic": [],
+                    "unclassified": [],
+                }
+            )
+        )
+        out = p.extract_memories("u1", "t1")
+        assert out["exact_dedup_skipped"] >= 1
+        proc_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
+        assert len(proc_docs) == 0
+
+
+class TestExtractEarlyReturnShape:
+    """The no-memories early-return must include every key the success
+    path returns; otherwise callers using ``result["exact_dedup_skipped"]``
+    KeyError on empty threads."""
+
+    def test_empty_thread_returns_full_dict_shape(self):
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        p._container.query_items.return_value = iter([])  # no items
+        out = p.extract_memories("u1", "t-empty")
+        for key in (
+            "facts_count",
+            "procedural_count",
+            "episodic_count",
+            "unclassified_count",
+            "updated_count",
+            "exact_dedup_skipped",
+        ):
+            assert key in out, f"missing key: {key}"
+            assert out[key] == 0
+
+
+class TestReconcileEmbeddingFailureAborts:
+    """If embedding generation fails for the merged content, the duplicate
+    group must be aborted entirely — no upsert, no supersede — so we don't
+    create a search-index hole."""
+
+    def test_embedding_failure_skips_upsert_and_supersede(self):
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        facts = [
+            _fact("f1", "alpha"),
+            _fact("f2", "alpha-restated"),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "alpha (consolidated)",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.side_effect = RuntimeError("rate limit")
+        result = p.reconcile_memories("u1")
+        # Embedding failed → abort: nothing upserted, nothing superseded.
+        p._upsert_memory.assert_not_called()
+        p._mark_superseded.assert_not_called()
+        assert result == {"kept": 2, "merged": 0, "contradicted": 0}
+
+
+class TestReconcileSupersedeRaceCounting:
+    """When ``_mark_superseded`` returns False (lost ETag race), the source
+    must NOT be added to ``source_to_merged_id`` or counted as consumed —
+    otherwise contradictions get redirected to a doc that doesn't claim
+    the source, and ``kept`` undercounts."""
+
+    def test_failed_supersede_does_not_consume_source(self):
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        facts = [
+            _fact("f1", "alpha"),
+            _fact("f2", "alpha-restated"),
+            _fact("f3", "beta"),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "alpha (consolidated)",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": ["f3"],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        # Both supersede attempts lose the race.
+        p._mark_superseded = MagicMock(return_value=False)
+        result = p.reconcile_memories("u1")
+        # Sources stay active: kept counts ALL three originals.
+        assert result == {"kept": 3, "merged": 0, "contradicted": 0}
+
+
+class TestReconcileWinnerValidation:
+    """Hallucinated ``winner_id`` must be refused — never write a dangling
+    ``superseded_by`` that breaks the audit trail."""
+
+    def test_hallucinated_winner_id_skipped(self):
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        facts = [
+            _fact("f1", "user is vegetarian"),
+            _fact("f2", "user loves ribeye"),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [],
+                    "contradicted_pairs": [
+                        {
+                            "winner_id": "fact_does_not_exist",  # hallucinated
+                            "loser_id": "f1",
+                            "reason": "x",
+                        }
+                    ],
+                    "kept_ids": ["f1", "f2"],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        result = p.reconcile_memories("u1")
+        # Refuse to write a dangling superseded_by pointer.
+        p._mark_superseded.assert_not_called()
+        assert result == {"kept": 2, "merged": 0, "contradicted": 0}
+
+    def test_resolved_winner_via_merge_redirect_is_accepted(self):
+        """If winner_id refers to a fact that was just absorbed into a
+        duplicate group, the merged_id must satisfy the validation."""
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        facts = [
+            _fact("f1", "alpha"),
+            _fact("f2", "alpha-paraphrased"),
+            _fact("f3", "contradicts alpha"),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "alpha (consolidated)",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                        }
+                    ],
+                    "contradicted_pairs": [
+                        # winner_id=f1 was absorbed into the merged group;
+                        # redirect must resolve and validate cleanly.
+                        {"winner_id": "f1", "loser_id": "f3", "reason": "x"},
+                    ],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        result = p.reconcile_memories("u1")
+        assert result["contradicted"] == 1
+
+
+class TestReconcileBoolNotNumeric:
+    """``True`` and ``False`` are instances of ``int`` in Python — they must
+    NOT be treated as numeric LLM-supplied confidence/salience."""
+
+    def test_bool_confidence_falls_back_to_max_source(self):
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        facts = [
+            _fact("f1", "alpha", confidence=0.7, salience=0.5),
+            _fact("f2", "alpha-restated", confidence=0.85, salience=0.6),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "alpha",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": True,  # JSON boolean — must be ignored
+                            "salience": False,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        p.reconcile_memories("u1")
+        merged_doc = p._upsert_memory.call_args.args[0]
+        # NOT 1.0 (True coerced) and NOT 0.0 (False coerced); fallback to max source.
+        assert merged_doc["confidence"] == 0.85
+        assert merged_doc["salience"] == 0.6
+
+
+class TestReconcileFactsTextEscapesContent:
+    """Content with ``"`` or ``|`` must not break the prompt grammar."""
+
+    def test_special_chars_in_content_are_json_escaped(self):
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._container = MagicMock()
+        facts = [
+            _fact("f1", 'She said "hi" | weird'),
+            _fact("f2", "normal text"),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        captured: dict[str, str] = {}
+
+        def _capture(name, inputs):
+            captured["facts_text"] = inputs["facts_text"]
+            return json.dumps({"duplicate_groups": [], "contradicted_pairs": [], "kept_ids": ["f1", "f2"]})
+
+        p._run_prompty = MagicMock(side_effect=_capture)
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p.reconcile_memories("u1")
+        # The embedded `"` must be escaped (\\") — not raw — and the
+        # Content: field must remain JSON-quoted so the LLM can parse it
+        # as a single string even though the original text contained ``|``.
+        text = captured["facts_text"]
+        line_one = text.splitlines()[0]
+        assert '\\"hi\\"' in line_one
+        # Quoted content block survives intact.
+        assert 'Content: "She said \\"hi\\" | weird"' in line_one
+        # The id, confidence, salience, created fields all still parseable
+        # (4 well-defined separators after the json-quoted content block).
+        assert line_one.startswith("1. ID: f1 | Content: ")
+        assert " | Confidence: 0.8 | Salience: 0.5 | Created:" in line_one
+
+
+class TestDedupPoolSizeThreshold:
+    def test_pool_size_default(self, monkeypatch):
+        from agent_memory_toolkit.thresholds import DEFAULT_DEDUP_POOL_SIZE, get_dedup_pool_size
+
+        monkeypatch.delenv("DEDUP_POOL_SIZE", raising=False)
+        assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE
+
+    def test_pool_size_override(self, monkeypatch):
+        from agent_memory_toolkit.thresholds import get_dedup_pool_size
+
+        monkeypatch.setenv("DEDUP_POOL_SIZE", "100")
+        assert get_dedup_pool_size() == 100
+
+    def test_pool_size_clamped_to_500(self, monkeypatch):
+        from agent_memory_toolkit.thresholds import get_dedup_pool_size
+
+        monkeypatch.setenv("DEDUP_POOL_SIZE", "9999")
+        assert get_dedup_pool_size() == 500
+
+    def test_pool_size_zero_falls_back_to_default(self, monkeypatch):
+        from agent_memory_toolkit.thresholds import DEFAULT_DEDUP_POOL_SIZE, get_dedup_pool_size
+
+        monkeypatch.setenv("DEDUP_POOL_SIZE", "0")
+        assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE

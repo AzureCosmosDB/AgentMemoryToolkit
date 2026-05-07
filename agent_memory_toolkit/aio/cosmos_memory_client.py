@@ -1553,6 +1553,7 @@ class AsyncCosmosMemoryClient:
             thread_counter_id,
             user_counter_id,
         )
+        from ..thresholds import get_dedup_pool_size
 
         user_batch_counts: dict[str, int] = {}
 
@@ -1607,7 +1608,7 @@ class AsyncCosmosMemoryClient:
 
             if fire_dedup:
                 try:
-                    await processor.process_reconcile(user_id=user_id)
+                    await processor.process_reconcile(user_id=user_id, n=get_dedup_pool_size())
                 except Exception as exc:
                     logger.warning(
                         "Auto-trigger process_reconcile failed for %s: %s",

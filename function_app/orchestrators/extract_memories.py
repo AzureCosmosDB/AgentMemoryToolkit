@@ -98,4 +98,9 @@ def em_ExtractMemories(payload: dict) -> dict:
 def em_ReconcileMemories(payload: dict) -> dict:
     user_id = payload["user_id"]
     pipeline = get_pipeline()
-    return pipeline.reconcile_memories(user_id=user_id) or {}
+    # Honor DEDUP_POOL_SIZE on the FA path so a single env var configures
+    # the pool size for both the SDK auto-trigger and the FA change-feed
+    # processor (parity with DEDUP_EVERY_N).
+    from agent_memory_toolkit.thresholds import get_dedup_pool_size
+
+    return pipeline.reconcile_memories(user_id=user_id, n=get_dedup_pool_size()) or {}

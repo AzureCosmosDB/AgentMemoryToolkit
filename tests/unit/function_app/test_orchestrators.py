@@ -179,7 +179,7 @@ class TestExtractMemoriesOrchestrator:
         return _user_function(em_mod.ExtractMemoriesOrchestrator)
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
-    def test_happy_path_calls_two_activities_in_order(self, _retry):
+    def test_extract_only_when_reconcile_flag_absent(self, _retry):
         ctx = _make_context({"user_id": "u1", "thread_id": "t1"})
         gen = self._orchestrator()(ctx)
         result, _ = _drive(
@@ -190,35 +190,40 @@ class TestExtractMemoriesOrchestrator:
                     "procedural_count": 1,
                     "episodic_count": 0,
                     "updated_count": 0,
-                },  # em_ExtractMemories
-                {"kept": 0, "merged": 1, "contradicted": 0},  # em_ReconcileMemories
+                },
             ],
         )
 
-        assert [c[0] for c in ctx._yielded_calls] == [
-            "em_ExtractMemories",
-            "em_ReconcileMemories",
-        ]
+        assert [c[0] for c in ctx._yielded_calls] == ["em_ExtractMemories"]
         assert result["persisted"] is True
-        assert result["extracted"] == {"facts_count": 2, "procedural_count": 1, "episodic_count": 0, "updated_count": 0}
+        assert result["extracted"]["facts_count"] == 2
+        assert result["reconciled"] is None
+
+    @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
+    def test_chains_reconcile_when_flag_true(self, _retry):
+        ctx = _make_context({"user_id": "u1", "thread_id": "t1", "reconcile": True})
+        gen = self._orchestrator()(ctx)
+        result, _ = _drive(
+            gen,
+            [
+                {"facts_count": 2, "procedural_count": 0, "episodic_count": 0, "updated_count": 0},
+                {"kept": 0, "merged": 1, "contradicted": 0},
+            ],
+        )
+
+        names = [c[0] for c in ctx._yielded_calls]
+        assert names == ["em_ExtractMemories", "em_ReconcileMemories"]
+        assert ctx._yielded_calls[1][2] == {"user_id": "u1"}
         assert result["reconciled"] == {"kept": 0, "merged": 1, "contradicted": 0}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_extract_payload_carries_user_thread_and_limit(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": 5}, {"kept": 0, "merged": 2, "contradicted": 0}])
+        _drive(gen, [{"facts": 5}])
 
         extract_payload = ctx._yielded_calls[0][2]
         assert extract_payload == {"user_id": "u", "thread_id": "t", "limit": 20}
-
-    @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
-    def test_dedup_payload_only_carries_user_id(self, _retry):
-        ctx = _make_context({"user_id": "u", "thread_id": "t"})
-        gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": 0}, {}])
-        dedup_payload = ctx._yielded_calls[1][2]
-        assert dedup_payload == {"user_id": "u"}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_activity_failure_propagates(self, _retry):

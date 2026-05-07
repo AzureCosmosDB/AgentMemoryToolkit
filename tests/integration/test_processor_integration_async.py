@@ -68,7 +68,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
         client.get_thread.assert_awaited_once_with(thread_id="thread-paris", user_id="u-paris", memory_type="turn")
         pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
-        pipeline.reconcile_memories.assert_called_once_with("u-paris")
+        pipeline.reconcile_memories.assert_called_once_with("u-paris", 50)
 
 
 # ---------------------------------------------------------------------------

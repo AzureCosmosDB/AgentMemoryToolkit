@@ -17,6 +17,7 @@ place to avoid requiring a real Cosmos / LLM / embeddings stack.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import MagicMock
 
@@ -1339,6 +1340,39 @@ class TestReconcileEtagFlowsThroughMergedDocCache:
         assert merged_doc_passed.get("_etag") == "etag-from-cosmos"
 
 
+class TestReconcileSkipsSingleSourceDuplicateGroup:
+    """A `duplicate_group` with only one valid `source_id` is a no-op
+    masquerading as a merge — it would supersede a single fact with a
+    near-identical clone (extra row, no signal) and could redirect a
+    later contradiction's loser_id onto a merged doc that represents
+    nothing real. Skip such groups."""
+
+    def test_single_source_duplicate_group_does_not_create_merged_doc(self):
+        p = _make_pipeline()
+        p._upsert_memory = MagicMock(side_effect=lambda d: dict(d, _etag="e"))
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container.query_items.return_value = iter([_fact("f1", "User likes tea"), _fact("f2", "User likes coffee")])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {"merged_content": "User likes tea", "source_ids": ["f1"]},
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": ["f1", "f2"],
+                }
+            )
+        )
+
+        out = p.reconcile_memories("u1")
+
+        # No merged record created; no source superseded as a duplicate.
+        merged_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
+        assert merged_upserts == []
+        assert p._mark_superseded.call_count == 0
+        assert out["merged"] == 0
+
+
 class TestFactsTextHandlesNullConfidence:
     """Pool facts with ``confidence=None`` / ``salience=None`` (legacy
     docs from before these fields existed) must render as ``N/A`` in the
@@ -1492,3 +1526,114 @@ class TestExtractUpdateSupersedeReason:
         assert p._mark_superseded.called
         call_kwargs = p._mark_superseded.call_args.kwargs
         assert call_kwargs.get("reason") == "update"
+
+
+class TestExtractUpdateSelfCollapseGuard:
+    """When an LLM emits ``UPDATE`` whose new content hashes to the same
+    deterministic id as the target (paraphrase-equivalent text), the
+    upsert would overwrite the audit metadata that ``_mark_superseded``
+    just stamped on the target. Treat as a no-op."""
+
+    def _build(self) -> ProcessingPipeline:
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [[0.1] * 8]
+        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container = MagicMock()
+        p._chat = MagicMock()
+        p._load_existing_memories = MagicMock(return_value=[])
+        return p
+
+    def test_fact_update_with_self_referential_id_is_skipped(self):
+        from agent_memory_toolkit._utils import compute_content_hash
+        from agent_memory_toolkit.pipeline import _ID_SEED_SEP
+
+        p = self._build()
+        text = "User likes tea"
+        seed = _ID_SEED_SEP.join(("u1", "t1", compute_content_hash(text)))
+        det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+
+        p._container.query_items.return_value = iter(
+            [
+                {
+                    "id": "turn-1",
+                    "role": "user",
+                    "content": "tea",
+                    "type": "turn",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        )
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [
+                        {
+                            "text": text,
+                            "confidence": 0.9,
+                            "salience": 0.6,
+                            "action": "UPDATE",
+                            "supersedes_id": det_id,
+                            "tags": ["sys:fact"],
+                        }
+                    ],
+                    "procedural": [],
+                    "episodic": [],
+                }
+            )
+        )
+
+        out = p.extract_memories("u1", "t1")
+
+        assert p._mark_superseded.call_count == 0
+        fact_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
+        assert fact_upserts == []
+        assert out["facts_count"] == 0
+
+    def test_procedural_update_with_self_referential_id_is_skipped(self):
+        from agent_memory_toolkit._utils import compute_content_hash
+        from agent_memory_toolkit.pipeline import _ID_SEED_SEP
+
+        p = self._build()
+        text = "Greet the user casually"
+        seed = _ID_SEED_SEP.join(("u1", compute_content_hash(text)))
+        det_id = f"proc_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+
+        turns = [
+            {
+                "id": "turn-1",
+                "role": "user",
+                "content": "be casual",
+                "type": "turn",
+                "created_at": "2024-01-01T00:00:00+00:00",
+            }
+        ]
+        p._container.query_items = MagicMock(side_effect=[iter(turns), iter([])])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [],
+                    "procedural": [
+                        {
+                            "instruction": text,
+                            "confidence": 0.9,
+                            "salience": 0.6,
+                            "action": "UPDATE",
+                            "supersedes_id": det_id,
+                            "tags": ["sys:procedural"],
+                            "trigger": "any greeting",
+                            "category": "communication",
+                        }
+                    ],
+                    "episodic": [],
+                }
+            )
+        )
+
+        out = p.extract_memories("u1", "t1")
+
+        assert p._mark_superseded.call_count == 0
+        proc_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
+        assert proc_upserts == []
+        assert out["procedural_count"] == 0

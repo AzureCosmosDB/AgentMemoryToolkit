@@ -25,7 +25,7 @@ def test_process_thread_calls_summarize_extract_reconcile_in_order():
     ]
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.reconcile_memories.assert_called_once_with("u1")
+    pipeline.reconcile_memories.assert_called_once_with("u1", 50)
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary_u_t", "type": "summary"}

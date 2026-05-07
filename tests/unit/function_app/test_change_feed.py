@@ -491,3 +491,71 @@ def test_runs_normally_when_owner_unset(monkeypatch):
     assert container._state["thread:u1:t1"]["count"] == 2
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Reconcile gating (DEDUP_EVERY_N parity with SDK auto-trigger)
+# ---------------------------------------------------------------------------
+
+
+def _extract_payload(call):
+    if "client_input" in call.kwargs:
+        return call.kwargs["client_input"]
+    if len(call.args) >= 3:
+        return call.args[2]
+    return {}
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "USER_SUMMARY_EVERY_N": "0",
+        "DEDUP_EVERY_N": "5",
+    },
+    clear=False,
+)
+def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
+    """Reconcile threshold = FACT_EXTRACTION_EVERY_N * DEDUP_EVERY_N
+    (here 1 * 5 = 5). The change-feed signals reconcile via the
+    ``reconcile`` flag on the orchestrator payload — never as a separate
+    dispatch — so DEDUP_EVERY_N is honored on the FA path."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    # Batch of 4 turns: counter 0 -> 4. Extract crosses (n=1), reconcile (n=5) does not.
+    asyncio.run(process_changefeed_batch([_turn() for _ in range(4)], starter, counter_container=container))
+    extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
+    assert len(extract_calls) == 1
+    assert _extract_payload(extract_calls[0]).get("reconcile") is False
+
+    # Next batch: counter 4 -> 5. Reconcile threshold crossed, so the same
+    # extract dispatch carries reconcile=True.
+    starter.start_new.reset_mock()
+    asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
+    extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
+    assert len(extract_calls) == 1
+    payload = _extract_payload(extract_calls[0])
+    assert payload.get("reconcile") is True
+    assert payload.get("user_id") == "u1"
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "USER_SUMMARY_EVERY_N": "0",
+        "DEDUP_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_dedup_every_n_zero_keeps_reconcile_flag_false():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(process_changefeed_batch([_turn() for _ in range(20)], starter, counter_container=container))
+    extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
+    assert extract_calls, "extract should still fire when n_facts > 0"
+    assert all(_extract_payload(c).get("reconcile") is False for c in extract_calls)

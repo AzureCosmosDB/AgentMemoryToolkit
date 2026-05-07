@@ -41,7 +41,7 @@ async def test_process_now_with_inprocess_invokes_pipeline():
     assert isinstance(client._processor, AsyncInProcessProcessor)
     pipeline.generate_thread_summary.assert_called_once_with("u", "t")
     pipeline.extract_memories.assert_called_once_with("u", "t")
-    pipeline.reconcile_memories.assert_called_once_with("u")
+    pipeline.reconcile_memories.assert_called_once_with("u", 50)
 
 
 @pytest.mark.asyncio

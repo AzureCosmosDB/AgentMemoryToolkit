@@ -41,7 +41,7 @@ def test_process_now_with_inprocess_invokes_pipeline():
     assert isinstance(client._processor, InProcessProcessor)
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.reconcile_memories.assert_called_once_with("u1")
+    pipeline.reconcile_memories.assert_called_once_with("u1", 50)
 
 
 def test_process_now_with_durable_is_noop():

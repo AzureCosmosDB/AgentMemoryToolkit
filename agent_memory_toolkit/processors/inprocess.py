@@ -66,9 +66,11 @@ class InProcessProcessor:
         """
         start = time.monotonic()
 
+        from ..thresholds import get_dedup_pool_size
+
         thread_summary = self._pipeline.generate_thread_summary(user_id, thread_id)
         extracted = self._pipeline.extract_memories(user_id, thread_id)
-        reconciled = self._pipeline.reconcile_memories(user_id)
+        reconciled = self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
 
         deduped_count = self._extract_reconcile_count(reconciled)
 

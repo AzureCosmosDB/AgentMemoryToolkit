@@ -1,6 +1,12 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``ExtractMemories`` → ``ReconcileMemories``.
+Chain: ``ExtractMemories`` followed by an optional ``ReconcileMemories``
+activity. Reconciliation is gated by the change-feed trigger (which
+tracks the per-user/thread turn counter) and signaled to the
+orchestrator via the ``reconcile`` flag on its input payload. This
+matches the SDK auto-trigger contract: extract every
+``FACT_EXTRACTION_EVERY_N`` turns; reconcile every
+``FACT_EXTRACTION_EVERY_N * DEDUP_EVERY_N`` turns.
 
 The pipeline writes memories to Cosmos DB during ``ExtractMemories``; the
 Function App does not delete or tombstone any memories on its own. Memories
@@ -34,6 +40,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
+    should_reconcile = bool(payload.get("reconcile", False))
     max_batch = config.get_max_batch_size()
 
     retry = default_retry_options()
@@ -44,11 +51,13 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         {"user_id": user_id, "thread_id": thread_id, "limit": max_batch},
     )
 
-    reconciled = yield context.call_activity_with_retry(
-        "em_ReconcileMemories",
-        retry,
-        {"user_id": user_id},
-    )
+    reconciled = None
+    if should_reconcile:
+        reconciled = yield context.call_activity_with_retry(
+            "em_ReconcileMemories",
+            retry,
+            {"user_id": user_id},
+        )
 
     return {
         "persisted": True,
@@ -98,9 +107,6 @@ def em_ExtractMemories(payload: dict) -> dict:
 def em_ReconcileMemories(payload: dict) -> dict:
     user_id = payload["user_id"]
     pipeline = get_pipeline()
-    # Honor DEDUP_POOL_SIZE on the FA path so a single env var configures
-    # the pool size for both the SDK auto-trigger and the FA change-feed
-    # processor (parity with DEDUP_EVERY_N).
     from agent_memory_toolkit.thresholds import get_dedup_pool_size
 
     return pipeline.reconcile_memories(user_id=user_id, n=get_dedup_pool_size()) or {}

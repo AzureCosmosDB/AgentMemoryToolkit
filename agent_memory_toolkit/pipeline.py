@@ -530,6 +530,20 @@ class ProcessingPipeline:
             }
 
             if action == "UPDATE" and fact.get("supersedes_id"):
+                # If the new content hashes to the same deterministic id
+                # as the target (UPDATE refines metadata but text is
+                # unchanged), the upsert below would overwrite the
+                # ``superseded_by``/``supersede_reason`` audit metadata
+                # we are about to stamp on the target — and the new doc
+                # would carry a self-referential ``supersedes_ids``
+                # entry. Treat as a no-op and let the existing record
+                # stand.
+                if det_id == fact["supersedes_id"]:
+                    logger.debug(
+                        "extract_memories: skipping UPDATE — det_id == supersedes_id (%s)",
+                        det_id,
+                    )
+                    continue
                 doc["supersedes_ids"] = [fact["supersedes_id"]]
                 # Mark old memory as superseded
                 try:
@@ -640,6 +654,16 @@ class ProcessingPipeline:
             }
 
             if action == "UPDATE" and proc.get("supersedes_id"):
+                # Same self-overwrite guard as the fact UPDATE branch:
+                # if the new content hashes to the same det_id as the
+                # target, the upsert below would erase the audit
+                # metadata we are about to stamp on it.
+                if det_id == proc["supersedes_id"]:
+                    logger.debug(
+                        "extract_memories: skipping procedural UPDATE — det_id == supersedes_id (%s)",
+                        det_id,
+                    )
+                    continue
                 doc["supersedes_ids"] = [proc["supersedes_id"]]
                 try:
                     q = (
@@ -1236,6 +1260,13 @@ class ProcessingPipeline:
             # on the merged record and for the deterministic merged-id
             # below so the merged doc faithfully represents reality.
             valid_source_ids = [sid for sid in source_ids if sid in facts_by_id]
+
+            if len(valid_source_ids) < 2:
+                logger.debug(
+                    "reconcile_memories: skipping single-source duplicate_group %r",
+                    source_ids,
+                )
+                continue
 
             # Sort source_docs by Cosmos _ts DESC so the merged record's
             # partition (thread_id) is picked deterministically from the

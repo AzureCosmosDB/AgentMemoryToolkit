@@ -84,6 +84,11 @@ async def process_changefeed_batch(
     n_thread = config.get_thread_summary_every_n()
     n_facts = config.get_fact_extraction_every_n()
     n_user = config.get_user_summary_every_n()
+    n_dedup = config.get_dedup_every_n()
+
+    # Reconcile fires every (n_facts * n_dedup) turns, matching the SDK
+    # auto-trigger contract. Disabled when either knob is 0.
+    n_dedup_turns = n_facts * n_dedup if (n_facts > 0 and n_dedup > 0) else 0
 
     if n_thread == 0 and n_facts == 0 and n_user == 0:
         return  # all orchestrators disabled
@@ -161,11 +166,19 @@ async def process_changefeed_batch(
 
             if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
                 instance_id = f"extract:{user_id}:{thread_id}:{new_count}"
+                should_reconcile = bool(
+                    n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
+                )
                 await _safe_start(
                     starter,
                     "ExtractMemoriesOrchestrator",
                     instance_id,
-                    {"user_id": user_id, "thread_id": thread_id, "count": new_count},
+                    {
+                        "user_id": user_id,
+                        "thread_id": thread_id,
+                        "count": new_count,
+                        "reconcile": should_reconcile,
+                    },
                     orchestration_errors,
                 )
 

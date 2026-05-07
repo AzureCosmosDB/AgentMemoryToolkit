@@ -57,6 +57,7 @@ USER_COUNTER_THREAD_ID = "__counters__"
 # ---------------------------------------------------------------------------
 
 from agent_memory_toolkit.thresholds import (  # noqa: E402
+    DEFAULT_DEDUP_EVERY_N,
     DEFAULT_FACT_EXTRACTION_EVERY_N,
     DEFAULT_THREAD_SUMMARY_EVERY_N,
     DEFAULT_USER_SUMMARY_EVERY_N,
@@ -146,6 +147,18 @@ def get_user_summary_every_n() -> int:
     return _parse_threshold(
         "USER_SUMMARY_EVERY_N",
         DEFAULT_USER_SUMMARY_EVERY_N,
+    )
+
+
+def get_dedup_every_n() -> int:
+    """Threshold (in extract cycles) for triggering reconciliation. ``0`` disables.
+
+    Reconcile fires every ``FACT_EXTRACTION_EVERY_N * DEDUP_EVERY_N`` turns,
+    matching the SDK auto-trigger contract.
+    """
+    return _parse_threshold(
+        "DEDUP_EVERY_N",
+        DEFAULT_DEDUP_EVERY_N,
     )
 
 

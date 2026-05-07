@@ -44,7 +44,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         {"user_id": user_id, "thread_id": thread_id, "limit": max_batch},
     )
 
-    dedup = yield context.call_activity_with_retry(
+    reconciled = yield context.call_activity_with_retry(
         "em_ReconcileMemories",
         retry,
         {"user_id": user_id},
@@ -53,7 +53,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     return {
         "persisted": True,
         "extracted": extracted,
-        "dedup": dedup,
+        "reconciled": reconciled,
     }
 
 

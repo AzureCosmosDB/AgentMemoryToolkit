@@ -24,12 +24,12 @@ Produce a clean reconciliation that:
 
 ## Three Orthogonal Outcomes (mutually exclusive, exhaustive)
 
-Every input fact must end up in **exactly one** of these three places:
+Every input fact must end up in **at least one** of these three places:
 - `duplicate_groups[*].source_ids` — the fact is a paraphrase of one or more other facts.
 - `contradicted_pairs[*]` — the fact is either the `winner_id` or the `loser_id` of a contradiction.
 - `kept_ids` — the fact is unique: neither paraphrased by nor in opposition to anything else.
 
-No fact may appear in more than one bucket. No input fact may be omitted from the output.
+The only legal multi-membership is the dual case described in the **Interaction Rule** below: a duplicate-group source that is also a contradiction loser/winner. Otherwise, place each fact in exactly one bucket. No input fact may be omitted from the output.
 
 ## What is a DUPLICATE
 

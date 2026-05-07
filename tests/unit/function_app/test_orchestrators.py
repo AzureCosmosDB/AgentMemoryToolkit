@@ -201,7 +201,7 @@ class TestExtractMemoriesOrchestrator:
         ]
         assert result["persisted"] is True
         assert result["extracted"] == {"facts_count": 2, "procedural_count": 1, "episodic_count": 0, "updated_count": 0}
-        assert result["dedup"] == {"kept": 0, "merged": 1, "contradicted": 0}
+        assert result["reconciled"] == {"kept": 0, "merged": 1, "contradicted": 0}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_extract_payload_carries_user_thread_and_limit(self, _retry):

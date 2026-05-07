@@ -19,6 +19,13 @@ from .exceptions import LLMError, ValidationError
 
 logger = logging.getLogger(__name__)
 
+# Separator for deterministic id seeds. Using NUL ensures user_id /
+# thread_id values can never collide with literal section markers
+# (e.g. a thread literally named ``"merged"`` cannot collide with the
+# reconcile-merge id namespace). Defined as a module constant because
+# escape sequences are not permitted inside f-strings on Python 3.11.
+_ID_SEED_SEP = "\x00"
+
 
 def _is_real_number(v: Any) -> bool:
     """True for ``int``/``float`` excluding ``bool`` (``isinstance(True, int)`` is True)."""
@@ -271,7 +278,9 @@ class ProcessingPipeline:
 
     def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Upsert a single memory document to Cosmos DB."""
-        self._container.upsert_item(body=doc)
+        response = self._container.upsert_item(body=doc)
+        if isinstance(response, dict):
+            return response
         return doc
 
     def _mark_superseded(
@@ -489,7 +498,8 @@ class ProcessingPipeline:
                 )
                 exact_dedup_skipped += 1
                 continue
-            det_id = f"fact_{hashlib.sha256(f'{user_id}:{thread_id}:{new_content_hash}'.encode()).hexdigest()[:32]}"
+            seed = _ID_SEED_SEP.join((user_id, thread_id, new_content_hash))
+            det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in fact.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted"] + topic_tags
@@ -586,7 +596,8 @@ class ProcessingPipeline:
                 )
                 exact_dedup_skipped += 1
                 continue
-            det_id = f"proc_{hashlib.sha256(f'{user_id}:{content_hash}'.encode()).hexdigest()[:32]}"
+            seed = _ID_SEED_SEP.join((user_id, content_hash))
+            det_id = f"proc_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in proc.get("tags", [])]
             tags = ["sys:procedural", "sys:auto-extracted"] + topic_tags
@@ -657,7 +668,8 @@ class ProcessingPipeline:
                 continue
             text = f"{situation} → {action_taken} → {outcome}"
             content_hash = compute_content_hash(text)
-            det_id = f"ep_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:32]}"
+            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
+            det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in ep.get("tags", [])]
             tags = ["sys:episodic", "sys:auto-extracted"] + topic_tags
@@ -714,7 +726,8 @@ class ProcessingPipeline:
                 )
                 exact_dedup_skipped += 1
                 continue
-            det_id = f"unc_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:32]}"
+            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
+            det_id = f"unc_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in item.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags
@@ -1127,11 +1140,17 @@ class ProcessingPipeline:
         lines: list[str] = []
         for i, cf in enumerate(facts, 1):
             content_quoted = json.dumps(cf.get("content", ""), ensure_ascii=False)
+            conf_raw = cf.get("confidence")
+            sal_raw = cf.get("salience")
+            conf_str = conf_raw if _is_real_number(conf_raw) else "N/A"
+            sal_str = sal_raw if _is_real_number(sal_raw) else "N/A"
+            created_raw = cf.get("created_at")
+            created_str = created_raw if created_raw else "N/A"
             lines.append(
                 f"{i}. ID: {cf['id']} | Content: {content_quoted} | "
-                f"Confidence: {cf.get('confidence', 'N/A')} | "
-                f"Salience: {cf.get('salience', 'N/A')} | "
-                f"Created: {cf.get('created_at', 'N/A')}"
+                f"Confidence: {conf_str} | "
+                f"Salience: {sal_str} | "
+                f"Created: {created_str}"
             )
         facts_text = "\n".join(lines)
 
@@ -1245,20 +1264,23 @@ class ProcessingPipeline:
             # Newest source's thread_id wins (after _ts-desc sort above).
             recent_thread_id = source_docs[0].get("thread_id", "")
 
-            # If LLM omitted confidence/salience (or returned a non-positive
-            # placeholder, or a JSON ``true`` masquerading as numeric), fall
-            # back to max across the source docs so merged facts don't
-            # silently drop below min_confidence / min_salience filters.
+            # If LLM omitted confidence/salience, returned a non-positive
+            # placeholder, returned a JSON ``true`` masquerading as numeric,
+            # or returned an out-of-range value (e.g. 1.05 — common when
+            # models confuse percent with [0,1]), fall back to max across
+            # the source docs. Out-of-range without a fallback would let
+            # ``MemoryRecord(...)`` raise on Pydantic validation and the
+            # blanket except below would silently drop the entire group.
             llm_conf = group.get("confidence")
             confidence_val = (
                 float(llm_conf)
-                if _is_real_number(llm_conf) and llm_conf > 0
+                if _is_real_number(llm_conf) and 0 < llm_conf <= 1
                 else _max_or_none(src.get("confidence") for src in source_docs)
             )
             llm_sal = group.get("salience")
             salience_val = (
                 float(llm_sal)
-                if _is_real_number(llm_sal) and llm_sal > 0
+                if _is_real_number(llm_sal) and 0 < llm_sal <= 1
                 else _max_or_none(src.get("salience") for src in source_docs)
             )
 
@@ -1269,7 +1291,7 @@ class ProcessingPipeline:
             # that gets folded into the same canonical merged content will
             # see the same id rather than chaining through a new UUID.
             merged_content_hash = compute_content_hash(merged_content)
-            merged_id_seed = f"{user_id}:merged:{merged_content_hash}"
+            merged_id_seed = _ID_SEED_SEP.join((user_id, "merged", merged_content_hash))
             merged_id = "fact_" + hashlib.sha256(merged_id_seed.encode()).hexdigest()[:32]
 
             try:
@@ -1316,7 +1338,7 @@ class ProcessingPipeline:
 
             merged_doc = merged_record.to_cosmos_dict()
             try:
-                self._upsert_memory(merged_doc)
+                merged_doc = self._upsert_memory(merged_doc)
             except Exception:
                 logger.exception(
                     "reconcile_memories: upsert failed for merged id=%s; aborting duplicate group",
@@ -1341,29 +1363,24 @@ class ProcessingPipeline:
                     source_to_merged_id[sid] = merged_record.id
                     consumed_source_ids.add(sid)
 
-            # If every supersede attempt for this group lost its ETag race
-            # (or the LLM gave us only hallucinated source_ids), the merged
-            # doc is an orphan — it claims supersedes_ids but none of the
-            # claimed sources are actually retired, so reads would surface
-            # both the merged doc and the "originals". Hard-delete it so
-            # the next reconcile cycle can try afresh.
+            # If every supersede attempt for this group failed (typically
+            # an ETag race against a concurrent reconcile that already
+            # superseded the same sources to the *same* deterministic
+            # merged id), do NOT delete the merged doc. A delete here
+            # would orphan the sources whose ``superseded_by`` already
+            # points at this merged id — they'd become invisible to
+            # default reads (filter ``superseded_by IS NULL``) and to the
+            # reconcile pool, causing permanent data loss. The merged doc
+            # is idempotent (deterministic id), so leaving it in place is
+            # consistent with whatever the winning concurrent writer
+            # produced.
             if group_supersede_count == 0:
-                logger.warning(
-                    "reconcile_memories: no sources successfully superseded "
-                    "for merged id=%s; deleting orphan merged doc",
+                logger.info(
+                    "reconcile_memories: no sources superseded for merged id=%s "
+                    "(likely ETag race with concurrent reconcile); leaving "
+                    "merged doc in place — idempotent upsert is self-healing",
                     merged_record.id,
                 )
-                try:
-                    self._container.delete_item(
-                        item=merged_record.id,
-                        partition_key=[user_id, merged_doc["thread_id"]],
-                    )
-                except Exception:
-                    logger.exception(
-                        "reconcile_memories: failed to delete orphan merged id=%s",
-                        merged_record.id,
-                    )
-                merged_docs_by_id.pop(merged_record.id, None)
 
         # ---- 5. Apply contradicted_pairs SECOND with dangling-id resolution ----
         for pair in contradicted_pairs:
@@ -1452,12 +1469,14 @@ class ProcessingPipeline:
         expected_llm_kept = kept_actual - contradiction_winner_ids_in_pool
         llm_kept_set = {kid for kid in llm_kept_ids if kid in facts_by_id}
         if llm_kept_set != expected_llm_kept:
+            symdiff = sorted(llm_kept_set ^ expected_llm_kept)[:10]
             logger.info(
                 "reconcile_memories: kept_ids mismatch (llm=%d valid=%d, expected=%d). "
-                "Likely a hallucinated or double-counted fact id.",
+                "Likely a hallucinated or double-counted fact id. Sample diff (≤10): %s",
                 len(llm_kept_ids),
                 len(llm_kept_set),
                 len(expected_llm_kept),
+                symdiff,
             )
         result = {"kept": kept, "merged": merged, "contradicted": contradicted}
         logger.info("reconcile_memories completed: %s", result)

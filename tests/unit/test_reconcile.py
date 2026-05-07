@@ -364,26 +364,15 @@ class TestReconcileMemories:
             _fact("f3", "User loves the window seat"),
         ]
         p._container.query_items.return_value = iter(facts)
-        # Capture the merged doc fetched via the dangling-resolution query.
-        # Configure side_effect to return facts first, then merged-doc lookup.
-        first_call = iter(facts)
-        merged_doc_holder: dict = {}
 
-        def query_items_side_effect(query, parameters=None, **kwargs):
-            # Pool query
-            if "TOP" in query:
-                return first_call
-            # Dangling-id resolver query: returns the merged doc by id
-            if merged_doc_holder.get("doc"):
-                return iter([merged_doc_holder["doc"]])
-            return iter([])
-
-        p._container.query_items.side_effect = query_items_side_effect
-
+        # The dangling-loser redirect resolves through the in-memory
+        # ``merged_docs_by_id`` cache populated when the merged doc is
+        # upserted — no second Cosmos query is issued. The upsert
+        # response carries the ``_etag`` that flows through the cache.
         def upsert(doc):
-            merged_doc_holder["doc"] = dict(doc)  # snapshot for resolver
-            merged_doc_holder["doc"]["_etag"] = "merged-etag"
-            return doc
+            snap = dict(doc)
+            snap["_etag"] = "merged-etag"
+            return snap
 
         p._upsert_memory.side_effect = upsert
 
@@ -532,8 +521,8 @@ class TestExactDedupShortCircuit:
                             "tags": ["sys:fact"],
                         }
                     ],
-                    "procedurals": [],
-                    "episodics": [],
+                    "procedural": [],
+                    "episodic": [],
                 }
             )
         )
@@ -572,8 +561,8 @@ class TestExactDedupShortCircuit:
                             "tags": ["sys:fact"],
                         }
                     ],
-                    "procedurals": [],
-                    "episodics": [],
+                    "procedural": [],
+                    "episodic": [],
                 }
             )
         )
@@ -1066,7 +1055,10 @@ class TestReconcileMergedIdDeterministic:
         first_id = upserts[0]["id"]
         # Predict id from public formula:
         ch = compute_content_hash("User likes coffee")
-        expected = "fact_" + hashlib.sha256(f"u1:merged:{ch}".encode()).hexdigest()[:32]
+        from agent_memory_toolkit.pipeline import _ID_SEED_SEP
+
+        seed = _ID_SEED_SEP.join(("u1", "merged", ch))
+        expected = "fact_" + hashlib.sha256(seed.encode()).hexdigest()[:32]
         assert first_id == expected
         # Second run: different source ids, identical canonical merged
         # content → identical merged id (idempotent upsert).
@@ -1173,13 +1165,21 @@ class TestReconcileMergedMetadata:
         assert meta.get("merged_from_count") == 2
 
 
-class TestReconcileOrphanCleanup:
-    """PR#2: when ALL supersede attempts lose the ETag race, the merged doc is deleted."""
+class TestReconcileNoOrphanDeleteOnRace:
+    """When ALL supersede attempts lose the ETag race, the merged doc must
+    NOT be deleted: deleting it would orphan any sources whose
+    ``superseded_by`` was already pointed at this deterministic merged id
+    by the concurrent-reconcile winner — those sources would become
+    invisible to default reads (filter ``superseded_by IS NULL``) and to
+    the reconcile pool, causing permanent data loss. The merged doc is
+    idempotent (deterministic id) so leaving it in place is consistent."""
 
-    def test_orphan_merged_doc_is_deleted_when_no_supersede_succeeds(self):
+    def test_orphan_merged_doc_is_not_deleted_when_no_supersede_succeeds(self):
         p = _make_pipeline()
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
-        # Every supersede attempt loses the race → orphan merged doc.
+        # Every supersede attempt loses the race → without the fix, the
+        # merged doc would be hard-deleted. With the fix, the merged doc
+        # stays as-is and the loss path is logged at INFO.
         p._mark_superseded = MagicMock(return_value=False)
         p._container.query_items.return_value = iter([_fact("o1", "A"), _fact("o2", "B")])
         p._run_prompty = MagicMock(
@@ -1192,8 +1192,9 @@ class TestReconcileOrphanCleanup:
             )
         )
         result = p.reconcile_memories("u1")
-        # delete_item must be called to clean up the orphan.
-        assert p._container.delete_item.called
+        # delete_item must NOT be called — orphan-delete path was the
+        # data-loss bug fixed in this round.
+        assert not p._container.delete_item.called
         # No facts merged (no supersede succeeded).
         assert result["merged"] == 0
 
@@ -1237,3 +1238,113 @@ class TestReconcileNullCheckUsesIsNull:
         sql = (call.kwargs.get("query") or call.args[0]) if call else ""
         assert "IS_NULL(c.superseded_by)" in sql
         assert "c.superseded_by = null" not in sql
+
+
+# ---------------------------------------------------------------------------
+# Round-18 regression tests: out-of-range LLM numbers, etag flow on merged
+# docs, and ``confidence=None`` rendering in facts_text.
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileClampsConfidenceAndSalience:
+    """LLM emitting values outside (0, 1] (e.g. 1.05 from a model that
+    confused percent with [0,1]) must NOT propagate to MemoryRecord — the
+    Pydantic validator would reject and the blanket except in reconcile
+    would silently drop the entire merge group. Out-of-range values must
+    fall back to ``max(source.*)``."""
+
+    def test_out_of_range_confidence_falls_back_to_source_max(self):
+        p = _make_pipeline()
+        upserts: list[dict] = []
+        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
+        p._container.query_items.return_value = iter(
+            [
+                _fact("f1", "User likes coffee", confidence=0.7, salience=0.6),
+                _fact("f2", "User enjoys coffee", confidence=0.85, salience=0.8),
+            ]
+        )
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User likes coffee",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 1.05,
+                            "salience": 1.5,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        result = p.reconcile_memories("u1")
+        assert result["merged"] == 2
+        assert len(upserts) == 1
+        assert upserts[0]["confidence"] == pytest.approx(0.85)
+        assert upserts[0]["salience"] == pytest.approx(0.8)
+
+
+class TestReconcileEtagFlowsThroughMergedDocCache:
+    """``_upsert_memory`` must return the response (which carries the
+    fresh ``_etag``). Without this, supersedes on the in-memory merged
+    doc fall through to ``upsert_item`` with no concurrency protection."""
+
+    def test_merged_docs_by_id_carries_etag_from_upsert_response(self):
+        p = _make_pipeline()
+        captured_doc: dict = {}
+
+        def upsert_response(doc):
+            response = dict(doc)
+            response["_etag"] = "etag-from-cosmos"
+            captured_doc["resp"] = response
+            return response
+
+        p._upsert_memory = MagicMock(side_effect=upsert_response)
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container.query_items.return_value = iter([_fact("f1", "User likes tea"), _fact("f2", "User enjoys tea")])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [{"merged_content": "User likes tea", "source_ids": ["f1", "f2"]}],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p.reconcile_memories("u1")
+        assert captured_doc["resp"].get("_etag") == "etag-from-cosmos"
+
+
+class TestFactsTextHandlesNullConfidence:
+    """Pool facts with ``confidence=None`` / ``salience=None`` (legacy
+    docs from before these fields existed) must render as ``N/A`` in the
+    prompt body, never as the literal string ``None``."""
+
+    def test_none_fields_render_as_na_in_facts_text(self):
+        p = _make_pipeline()
+        captured_prompt: dict = {}
+
+        def capture_prompty(name, inputs):
+            captured_prompt["facts_text"] = inputs.get("facts_text", "")
+            return json.dumps(
+                {
+                    "duplicate_groups": [],
+                    "contradicted_pairs": [],
+                    "kept_ids": ["f-null-1", "f-null-2"],
+                }
+            )
+
+        p._run_prompty = MagicMock(side_effect=capture_prompty)
+        legacy1 = _fact("f-null-1", "Legacy fact with no confidence", confidence=None, salience=None)
+        legacy1["created_at"] = None
+        legacy2 = _fact("f-null-2", "Another legacy fact", confidence=None, salience=None)
+        legacy2["created_at"] = None
+        p._container.query_items.return_value = iter([legacy1, legacy2])
+        p.reconcile_memories("u1")
+        text = captured_prompt["facts_text"]
+        assert "Confidence: N/A" in text
+        assert "Salience: N/A" in text
+        assert "Created: N/A" in text
+        assert "None" not in text

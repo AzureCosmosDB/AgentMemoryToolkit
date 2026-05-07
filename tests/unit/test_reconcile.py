@@ -1288,33 +1288,55 @@ class TestReconcileClampsConfidenceAndSalience:
 
 class TestReconcileEtagFlowsThroughMergedDocCache:
     """``_upsert_memory`` must return the response (which carries the
-    fresh ``_etag``). Without this, supersedes on the in-memory merged
-    doc fall through to ``upsert_item`` with no concurrency protection."""
+    fresh ``_etag``) so the in-memory ``merged_docs_by_id`` cache can
+    feed it into a downstream supersede on the contradiction-redirect
+    path. Without it, ``_mark_superseded`` falls through to
+    ``upsert_item`` with no concurrency protection.
 
-    def test_merged_docs_by_id_carries_etag_from_upsert_response(self):
+    This test exercises the full path: a duplicate group folds f1 + f2
+    into a fresh merged doc M, then a contradiction names f2 as the
+    loser. The pipeline must redirect the contradiction to M and call
+    ``_mark_superseded(M, ...)`` with M carrying the etag returned from
+    the upsert.
+    """
+
+    def test_supersede_on_merged_doc_receives_doc_with_etag(self):
         p = _make_pipeline()
-        captured_doc: dict = {}
 
         def upsert_response(doc):
             response = dict(doc)
             response["_etag"] = "etag-from-cosmos"
-            captured_doc["resp"] = response
             return response
 
         p._upsert_memory = MagicMock(side_effect=upsert_response)
         p._mark_superseded = MagicMock(return_value=True)
-        p._container.query_items.return_value = iter([_fact("f1", "User likes tea"), _fact("f2", "User enjoys tea")])
+        p._container.query_items.return_value = iter(
+            [
+                _fact("f1", "User likes tea"),
+                _fact("f2", "User enjoys tea"),
+                _fact("f3", "User hates all hot drinks"),
+            ]
+        )
         p._run_prompty = MagicMock(
             return_value=json.dumps(
                 {
                     "duplicate_groups": [{"merged_content": "User likes tea", "source_ids": ["f1", "f2"]}],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
+                    "contradicted_pairs": [{"winner_id": "f3", "loser_id": "f2", "reason": "contradicts merged"}],
+                    "kept_ids": ["f3"],
                 }
             )
         )
         p.reconcile_memories("u1")
-        assert captured_doc["resp"].get("_etag") == "etag-from-cosmos"
+
+        # The third call to _mark_superseded targets the merged doc
+        # (loser f2 was redirected through merged_docs_by_id). That
+        # doc must carry the _etag returned by _upsert_memory — proving
+        # the response actually flowed through the cache and not just
+        # the locally-built dict.
+        assert p._mark_superseded.call_count == 3
+        contradiction_call = p._mark_superseded.call_args_list[-1]
+        merged_doc_passed = contradiction_call.args[0]
+        assert merged_doc_passed.get("_etag") == "etag-from-cosmos"
 
 
 class TestFactsTextHandlesNullConfidence:
@@ -1348,3 +1370,125 @@ class TestFactsTextHandlesNullConfidence:
         assert "Salience: N/A" in text
         assert "Created: N/A" in text
         assert "None" not in text
+
+
+class TestExtractUpdateSupersedeReason:
+    """Extract-time UPDATE actions stamp ``supersede_reason="update"``,
+    distinct from reconcile-time ``"duplicate"`` (paraphrase merge) and
+    ``"contradiction"`` (semantic conflict). The extract prompt defines
+    UPDATE as "contradicts or refines an existing memory" — labelling
+    these as ``"duplicate"`` makes audit trails ambiguous."""
+
+    def _build(self) -> ProcessingPipeline:
+        p = ProcessingPipeline.__new__(ProcessingPipeline)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [[0.1] * 8]
+        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        p._container = MagicMock()
+        p._chat = MagicMock()
+        p._load_existing_memories = MagicMock(
+            return_value=[
+                {
+                    "id": "fact_old",
+                    "type": "fact",
+                    "content": "User likes coffee",
+                    "content_hash": "h_old",
+                }
+            ]
+        )
+        p._container.read_item = MagicMock(
+            return_value={"id": "fact_old", "type": "fact", "content": "User likes coffee"}
+        )
+        p._container.query_items.return_value = iter(
+            [
+                {
+                    "id": "turn-1",
+                    "role": "user",
+                    "content": "I love tea now",
+                    "type": "turn",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        )
+        return p
+
+    def test_fact_update_uses_reason_update_not_duplicate(self):
+        p = self._build()
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [
+                        {
+                            "text": "User now prefers tea over coffee",
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                            "action": "UPDATE",
+                            "supersedes_id": "fact_old",
+                            "tags": ["sys:fact"],
+                        }
+                    ],
+                    "procedural": [],
+                    "episodic": [],
+                }
+            )
+        )
+        p.extract_memories("u1", "t1")
+        assert p._mark_superseded.called
+        call_kwargs = p._mark_superseded.call_args.kwargs
+        assert call_kwargs.get("reason") == "update"
+
+    def test_procedural_update_uses_reason_update_not_duplicate(self):
+        p = self._build()
+        p._load_existing_memories = MagicMock(
+            return_value=[
+                {
+                    "id": "proc_old",
+                    "type": "procedural",
+                    "content": "Always greet the user formally",
+                    "content_hash": "h_proc_old",
+                }
+            ]
+        )
+        # First query_items → turns; second → lookup of proc_old by id.
+        turns = [
+            {
+                "id": "turn-1",
+                "role": "user",
+                "content": "be casual",
+                "type": "turn",
+                "created_at": "2024-01-01T00:00:00+00:00",
+            }
+        ]
+        old_proc = [
+            {
+                "id": "proc_old",
+                "type": "procedural",
+                "content": "Always greet the user formally",
+            }
+        ]
+        p._container.query_items = MagicMock(side_effect=[iter(turns), iter(old_proc)])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [],
+                    "procedural": [
+                        {
+                            "instruction": "Greet the user casually with their first name",
+                            "confidence": 0.9,
+                            "salience": 0.8,
+                            "action": "UPDATE",
+                            "supersedes_id": "proc_old",
+                            "tags": ["sys:procedural"],
+                            "trigger": "any greeting",
+                            "category": "communication",
+                        }
+                    ],
+                    "episodic": [],
+                }
+            )
+        )
+        p.extract_memories("u1", "t1")
+        assert p._mark_superseded.called
+        call_kwargs = p._mark_superseded.call_args.kwargs
+        assert call_kwargs.get("reason") == "update"

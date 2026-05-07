@@ -110,7 +110,7 @@ class AsyncInProcessProcessor:
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
     async def process_reconcile(self, *, user_id: str) -> int:
-        from ..thresholds import get_dedup_pool_size
+        from ...thresholds import get_dedup_pool_size
 
         reconciled = await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, get_dedup_pool_size())
         return self._extract_reconcile_count(reconciled)

@@ -1724,16 +1724,24 @@ class AsyncCosmosMemoryClient:
     async def reconcile(
         self,
         user_id: str,
-        n: int = 50,
+        n: Optional[int] = None,
     ) -> dict[str, int]:
         """Reconcile a user's facts via the contradiction-aware dedup pass.
+
+        ``n`` defaults to the ``DEDUP_POOL_SIZE`` env var (via
+        :func:`agent_memory_toolkit.thresholds.get_dedup_pool_size`) so
+        explicit calls honour the same operator knob the auto-trigger
+        path uses. Pass an integer to override.
 
         Pipeline calls are dispatched to a worker thread via
         :func:`asyncio.to_thread` to avoid blocking the event loop.
         """
+        from ..thresholds import get_dedup_pool_size
+
         await self._require_cosmos()
         self._require_pipeline()
-        return await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, n)
+        pool = n if n is not None else get_dedup_pool_size()
+        return await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, pool)
 
     # ------------------------------------------------------------------
     # Processor delegation

@@ -288,13 +288,13 @@ class ProcessingPipeline:
         old_doc: dict[str, Any],
         superseder_id: str,
         *,
-        reason: Literal["duplicate", "contradiction"],
+        reason: Literal["duplicate", "contradiction", "update"],
     ) -> bool:
         """Atomically set ``superseded_by`` on ``old_doc`` using ETag protection.
 
         Also stamps ``supersede_reason`` and ``superseded_at`` so apps can
-        distinguish a duplicate-collapse from a contradiction-resolution at
-        audit time.
+        distinguish a duplicate-collapse from a contradiction-resolution
+        from an extract-time refinement (``update``) at audit time.
 
         Supersession is advisory — losing a race here just means another writer
         already marked the same memory, so we log and return False instead of
@@ -537,7 +537,17 @@ class ProcessingPipeline:
                         item=fact["supersedes_id"],
                         partition_key=[user_id, thread_id],
                     )
-                    if self._mark_superseded(old_mem, det_id, reason="duplicate"):
+                    # Skip if the target was already retired by an earlier
+                    # extract or a reconcile cycle - re-superseding it
+                    # would clobber the prior ``superseded_by`` link and
+                    # narrow the audit chain.
+                    if old_mem.get("superseded_by"):
+                        logger.debug(
+                            "extract_memories: skipping UPDATE — target %s already superseded by %s",
+                            fact["supersedes_id"],
+                            old_mem.get("superseded_by"),
+                        )
+                    elif self._mark_superseded(old_mem, det_id, reason="update"):
                         updated_count += 1
                 except Exception:
                     # Try cross-partition query if direct read fails
@@ -546,7 +556,10 @@ class ProcessingPipeline:
                         fact["supersedes_id"],
                     )
                     try:
-                        q = "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid"
+                        q = (
+                            "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
+                            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+                        )
                         results = list(
                             self._container.query_items(
                                 query=q,
@@ -557,7 +570,7 @@ class ProcessingPipeline:
                                 enable_cross_partition_query=True,
                             )
                         )
-                        if results and self._mark_superseded(results[0], det_id, reason="duplicate"):
+                        if results and self._mark_superseded(results[0], det_id, reason="update"):
                             updated_count += 1
                     except Exception as exc:
                         logger.warning(
@@ -629,7 +642,10 @@ class ProcessingPipeline:
             if action == "UPDATE" and proc.get("supersedes_id"):
                 doc["supersedes_ids"] = [proc["supersedes_id"]]
                 try:
-                    q = "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid"
+                    q = (
+                        "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
+                        "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+                    )
                     results = list(
                         self._container.query_items(
                             query=q,
@@ -640,7 +656,7 @@ class ProcessingPipeline:
                             enable_cross_partition_query=True,
                         )
                     )
-                    if results and self._mark_superseded(results[0], det_id, reason="duplicate"):
+                    if results and self._mark_superseded(results[0], det_id, reason="update"):
                         updated_count += 1
                 except Exception as exc:
                     logger.warning(
@@ -1427,12 +1443,12 @@ class ProcessingPipeline:
                 # The original loser was just merged. Reuse the in-memory
                 # merged doc so we skip a cross-partition re-fetch — we
                 # own the (user_id, thread_id) partition and just wrote
-                # it. Note: this in-memory copy has no ``_etag`` (we
-                # don't capture the upsert response), so the supersede
-                # below falls through ``_mark_superseded``'s upsert
-                # branch instead of the ETag-protected ``replace_item``
-                # branch. That's acceptable here because no concurrent
-                # writer can touch a doc we just minted in this call.
+                # it. This in-memory copy carries the ``_etag`` returned
+                # by ``_upsert_memory``'s captured upsert response, so
+                # the supersede below takes the ETag-protected
+                # ``replace_item`` branch — concurrency-safe against any
+                # other reconcile that may have touched the same merged
+                # id in parallel.
                 loser_doc = merged_docs_by_id.get(resolved_loser_id)
 
             if loser_doc is None:

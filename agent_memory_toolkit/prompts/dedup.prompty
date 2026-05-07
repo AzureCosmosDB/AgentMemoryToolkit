@@ -100,14 +100,16 @@ You must output ONLY valid JSON matching this exact schema. No preamble, no expl
 ```json
 {
   "duplicate_groups": [
-    {"merged_content": "string", "source_ids": ["id1", "id2"], "confidence": 0.0, "salience": 0.0}
+    {"merged_content": "<string>", "source_ids": ["<id1>", "<id2>"], "confidence": "<max source confidence, float 0..1>", "salience": "<max source salience, float 0..1>"}
   ],
   "contradicted_pairs": [
-    {"winner_id": "string", "loser_id": "string", "reason": "string"}
+    {"winner_id": "<id>", "loser_id": "<id>", "reason": "<string>"}
   ],
-  "kept_ids": ["id3", "id4"]
+  "kept_ids": ["<id>", "<id>"]
 }
 ```
+
+The `confidence` and `salience` values **must** be real numbers between 0 and 1 in the actual output — the angle-bracket text above is a placeholder for the schema. Compute them as the maximum across source facts in the group. Do **not** echo the literal placeholder text. If you cannot determine confidence or salience, omit the field entirely (the pipeline will fall back to `max(source.*)` from the source records).
 
 If a bucket is empty, emit it as an empty array (`[]`) rather than omitting the key.
 

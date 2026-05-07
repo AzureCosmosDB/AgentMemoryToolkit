@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -37,10 +38,30 @@ DEFAULT_TTL_BY_TYPE: dict[str, int | None] = {
 # ---------------------------------------------------------------------------
 
 
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_for_hash(text: str) -> str:
+    """Lowercase + collapse whitespace for write-time exact-dedup.
+
+    Deliberately conservative: lowercase, strip, and collapse internal runs
+    of whitespace to a single space. Punctuation and word order still matter.
+    The point is to catch *identical* re-extractions cheaply — paraphrases
+    are handled by the reconciliation LLM pass.
+    """
+    return _WHITESPACE_RE.sub(" ", text.strip().lower())
+
+
 def compute_content_hash(content: str) -> str:
-    """SHA-256 of whitespace-normalized content. Does NOT lowercase."""
-    normalized = " ".join(content.split())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    """SHA-256 of normalized text, truncated to 32 hex chars.
+
+    Normalization: lowercase + whitespace collapse (see ``_normalize_for_hash``).
+    32 chars (128 bits) is plenty for collision avoidance within a single
+    user's memory set and keeps the field compact in Cosmos documents.
+    Used uniformly across facts, procedural, and episodic memories so the
+    ``content_hash`` field has a single, stable shape regardless of type.
+    """
+    return hashlib.sha256(_normalize_for_hash(content).encode("utf-8")).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------------------

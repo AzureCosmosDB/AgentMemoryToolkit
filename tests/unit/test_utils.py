@@ -54,7 +54,7 @@ def test_build_container_kwargs_omits_offer_throughput_when_none():
 def test_compute_content_hash_basic():
     h = compute_content_hash("hello world")
     assert isinstance(h, str)
-    assert len(h) == 64  # SHA-256 hex
+    assert len(h) == 32  # SHA-256 hex truncated to 32 chars (128 bits)
 
 
 def test_compute_content_hash_whitespace_normalized():
@@ -63,10 +63,14 @@ def test_compute_content_hash_whitespace_normalized():
     assert h1 == h2
 
 
-def test_compute_content_hash_preserves_case():
+def test_compute_content_hash_case_insensitive():
     h1 = compute_content_hash("Hello World")
     h2 = compute_content_hash("hello world")
-    assert h1 != h2  # case is preserved
+    assert h1 == h2  # normalized: lowercased
+
+
+def test_compute_content_hash_truncated_to_32_chars():
+    assert len(compute_content_hash("anything")) == 32
 
 
 def test_compute_content_hash_strips():

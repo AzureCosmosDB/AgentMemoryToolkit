@@ -207,7 +207,9 @@ high_conf_facts = memory.get_memories(user_id="u1", memory_type="fact", min_conf
 
 ### Memory Reconciliation
 
-`reconcile_memories(user_id, n=50)` collapses paraphrased duplicates and resolves semantic contradictions in a single LLM pass over the N most-recent active facts. Both outcomes soft-delete the loser with a `supersede_reason` of `"duplicate"` or `"contradiction"`. See [docs/concepts.md](docs/concepts.md#memory-reconciliation) for details.
+`reconcile_memories(user_id, n=50)` collapses paraphrased duplicates and resolves semantic contradictions in a single LLM pass over the N most-recent active facts. Both outcomes soft-delete the loser with a `supersede_reason` of `"duplicate"` or `"contradiction"`. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
+
+> **Cost note.** Each reconciliation makes one LLM call covering up to `n` facts (default 50, hard cap 500). With auto-trigger, this fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user. The previous cosine-cluster pre-filter was removed deliberately — it could not catch semantic contradictions like "vegetarian" vs "ribeye steak" — so the LLM is now invoked whenever there are ≥ 2 active facts. Tune `DEDUP_EVERY_N` upward (or override `n` per call) if you need to bound LLM cost more tightly.
 
 | New `MemoryRecord` field | Meaning |
 |---|---|

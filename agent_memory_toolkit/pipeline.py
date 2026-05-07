@@ -10,7 +10,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -21,31 +20,10 @@ from .exceptions import LLMError, ValidationError
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Reconciliation hashing helpers
-# ---------------------------------------------------------------------------
-
-_WHITESPACE_RE = re.compile(r"\s+")
-
-
-def _normalize_for_hash(text: str) -> str:
-    """Lowercase + collapse whitespace for write-time exact-dedup.
-
-    Deliberately conservative: lowercase, strip, and collapse internal runs
-    of whitespace to a single space. Punctuation and word order still matter.
-    The point is to catch *identical* re-extractions cheaply — paraphrases
-    are handled by the reconciliation LLM pass.
-    """
-    return _WHITESPACE_RE.sub(" ", text.strip().lower())
-
-
-def _content_hash(text: str) -> str:
-    """SHA-256 of the normalized text, truncated to 32 hex chars.
-
-    32 chars (128 bits) is plenty for collision avoidance within a single
-    user's fact set and keeps the field compact in Cosmos documents.
-    """
-    return hashlib.sha256(_normalize_for_hash(text).encode("utf-8")).hexdigest()[:32]
+def _max_or_none(values: Any) -> Optional[float]:
+    """Return max of numeric values, ignoring None / non-numeric. None if empty."""
+    nums = [float(v) for v in values if isinstance(v, (int, float))]
+    return max(nums) if nums else None
 
 
 class ProcessingPipeline:
@@ -478,7 +456,7 @@ class ProcessingPipeline:
             # content already exists are skipped before embedding/upsert.
             # UPDATEs go through unchanged - they explicitly target an old
             # record by id and need to write the supersession link.
-            new_content_hash = _content_hash(text)
+            new_content_hash = compute_content_hash(text)
             if action == "ADD" and new_content_hash in existing_hashes:
                 logger.debug(
                     "extract_memories: skipping exact-dup fact hash=%s user_id=%s thread_id=%s",
@@ -488,8 +466,7 @@ class ProcessingPipeline:
                 )
                 exact_dedup_skipped += 1
                 continue
-            content_hash = compute_content_hash(text)
-            det_id = f"fact_{hashlib.sha256(f'{user_id}:{thread_id}:{content_hash}'.encode()).hexdigest()[:16]}"
+            det_id = f"fact_{hashlib.sha256(f'{user_id}:{thread_id}:{new_content_hash}'.encode()).hexdigest()[:16]}"
 
             topic_tags = [f"topic:{t}" for t in fact.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted"] + topic_tags
@@ -1055,6 +1032,8 @@ class ProcessingPipeline:
             raise ValidationError("user_id is required")
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:
             raise ValidationError(f"n must be a positive integer, got {n!r}")
+        if n > 500:
+            raise ValidationError(f"n must be <= 500 to bound prompt size and LLM cost, got {n}")
 
         logger.info("reconcile_memories started user_id=%s n=%d", user_id, n)
 
@@ -1107,10 +1086,10 @@ class ProcessingPipeline:
 
         duplicate_groups = parsed.get("duplicate_groups", []) or []
         contradicted_pairs = parsed.get("contradicted_pairs", []) or []
-        # ``kept_ids`` is informational only; the actual ``kept`` count is
-        # derived from len(facts) - merged - contradicted to match what the
-        # pipeline really did, not what the LLM said.
-        _ = parsed.get("kept_ids", []) or []
+        # ``kept_ids`` from the LLM is used below as a cross-check for
+        # accounting drift (hallucinated IDs, double-counting). The actual
+        # kept count is computed from facts minus consumed losers.
+        llm_kept_ids = list(parsed.get("kept_ids", []) or [])
 
         facts_by_id: dict[str, dict[str, Any]] = {f["id"]: f for f in facts}
 
@@ -1140,6 +1119,11 @@ class ProcessingPipeline:
                 )
                 continue
 
+            # Sort source_docs by Cosmos _ts DESC so the merged record's
+            # partition (thread_id) is picked deterministically from the
+            # newest source — independent of the LLM's source_ids order.
+            source_docs.sort(key=lambda d: d.get("_ts", 0), reverse=True)
+
             # Union tags across all source docs (preserve order, dedupe).
             merged_tags: list[str] = []
             seen_tags: set[str] = set()
@@ -1160,12 +1144,24 @@ class ProcessingPipeline:
                         seen_smi.add(smi)
                         merged_source_memory_ids.append(smi)
 
-            # Facts come back newest-first (ORDER BY c._ts DESC), so the
-            # first source doc is the most recent — pick its thread_id.
+            # Newest source's thread_id wins (after _ts-desc sort above).
             recent_thread_id = source_docs[0].get("thread_id", "")
 
-            confidence_val = group.get("confidence")
-            salience_val = group.get("salience")
+            # If LLM omitted confidence/salience, fall back to max across
+            # the source docs so merged facts don't silently drop below
+            # min_confidence / min_salience filters.
+            llm_conf = group.get("confidence")
+            confidence_val = (
+                float(llm_conf)
+                if isinstance(llm_conf, (int, float)) and llm_conf > 0
+                else _max_or_none(src.get("confidence") for src in source_docs)
+            )
+            llm_sal = group.get("salience")
+            salience_val = (
+                float(llm_sal)
+                if isinstance(llm_sal, (int, float)) and llm_sal > 0
+                else _max_or_none(src.get("salience") for src in source_docs)
+            )
 
             try:
                 merged_record = MemoryRecord(
@@ -1173,13 +1169,13 @@ class ProcessingPipeline:
                     role="system",
                     memory_type=MemoryType.fact,
                     content=merged_content,
-                    thread_id=recent_thread_id or "__reconciled__",
+                    thread_id=recent_thread_id or f"__reconciled__:{user_id}",
                     confidence=confidence_val,
                     salience=salience_val,
                     supersedes_ids=list(source_ids),
                     source_memory_ids=merged_source_memory_ids,
                     tags=merged_tags,
-                    content_hash=_content_hash(merged_content),
+                    content_hash=compute_content_hash(merged_content),
                 )
             except Exception:
                 logger.exception(
@@ -1274,7 +1270,30 @@ class ProcessingPipeline:
             if self._mark_superseded(loser_doc, resolved_winner, reason="contradiction"):
                 contradicted += 1
 
-        kept = max(0, len(facts) - merged - contradicted)
+        # Count kept directly: facts the pipeline did NOT consume as a
+        # duplicate-source or contradiction-loser. Cross-check against the
+        # LLM's kept_ids and warn on mismatch (catches hallucinated IDs
+        # and double-counting).
+        consumed_ids: set[str] = set()
+        for group in duplicate_groups:
+            for sid in group.get("source_ids") or []:
+                if sid in facts_by_id:
+                    consumed_ids.add(sid)
+        for pair in contradicted_pairs:
+            lid = pair.get("loser_id")
+            if lid and lid in facts_by_id:
+                consumed_ids.add(lid)
+        kept_actual = {fid for fid in facts_by_id.keys() if fid not in consumed_ids}
+        kept = len(kept_actual)
+        llm_kept_set = {kid for kid in llm_kept_ids if kid in facts_by_id}
+        if llm_kept_set != kept_actual:
+            logger.warning(
+                "reconcile_memories: kept_ids mismatch (llm=%d valid=%d, pipeline=%d). "
+                "Possible LLM hallucinated IDs or double-counted facts.",
+                len(llm_kept_ids),
+                len(llm_kept_set),
+                kept,
+            )
         result = {"kept": kept, "merged": merged, "contradicted": contradicted}
         logger.info("reconcile_memories completed: %s", result)
         return result

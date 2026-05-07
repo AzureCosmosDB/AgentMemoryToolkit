@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit import pipeline as pipeline_mod
+from agent_memory_toolkit._utils import _normalize_for_hash, compute_content_hash
 from agent_memory_toolkit.exceptions import ValidationError
 from agent_memory_toolkit.pipeline import ProcessingPipeline
 
@@ -61,25 +61,25 @@ def _fact(fid: str, content: str, **extra) -> dict:
 
 class TestNormalizeAndHash:
     def test_normalize_for_hash_lowercases_and_collapses_whitespace(self):
-        assert pipeline_mod._normalize_for_hash("Hello   World") == "hello world"
-        assert pipeline_mod._normalize_for_hash("  Hello\tWorld\n") == "hello world"
-        assert pipeline_mod._normalize_for_hash("HELLO") == "hello"
+        assert _normalize_for_hash("Hello   World") == "hello world"
+        assert _normalize_for_hash("  Hello\tWorld\n") == "hello world"
+        assert _normalize_for_hash("HELLO") == "hello"
 
     def test_normalize_for_hash_handles_empty(self):
-        assert pipeline_mod._normalize_for_hash("") == ""
-        assert pipeline_mod._normalize_for_hash("   ") == ""
+        assert _normalize_for_hash("") == ""
+        assert _normalize_for_hash("   ") == ""
 
     def test_content_hash_stable_across_paraphrase_whitespace_case(self):
-        h1 = pipeline_mod._content_hash("User likes coffee")
-        h2 = pipeline_mod._content_hash("user   LIKES coffee")
-        h3 = pipeline_mod._content_hash("user likes coffee")
+        h1 = compute_content_hash("User likes coffee")
+        h2 = compute_content_hash("user   LIKES coffee")
+        h3 = compute_content_hash("user likes coffee")
         assert h1 == h2 == h3
         # 32 hex chars
         assert len(h1) == 32
         all(c in "0123456789abcdef" for c in h1)
 
     def test_content_hash_distinguishes_distinct_contents(self):
-        assert pipeline_mod._content_hash("a") != pipeline_mod._content_hash("b")
+        assert compute_content_hash("a") != compute_content_hash("b")
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +129,145 @@ class TestReconcileMemories:
             p.reconcile_memories("u1", n=0)
         with pytest.raises(ValidationError):
             p.reconcile_memories("u1", n=-3)
+        with pytest.raises(ValidationError, match="<= 500"):
+            p.reconcile_memories("u1", n=501)
+
+    def test_merge_falls_back_to_max_source_confidence_salience_when_llm_omits(self):
+        """If the LLM omits or zero-fills confidence/salience on a duplicate
+        group, the merged record must inherit max(source_*) so it doesn't
+        silently drop below ``min_confidence`` / ``min_salience`` filters."""
+        p = _make_pipeline()
+        facts = [
+            _fact("f1", "User likes aisle seats", confidence=0.92, salience=0.7),
+            _fact("f2", "User prefers aisle seats on flights", confidence=0.85, salience=0.65),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User prefers aisle seats",
+                            "source_ids": ["f1", "f2"],
+                            # confidence/salience deliberately omitted
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        p.reconcile_memories("u1")
+        merged_doc = p._upsert_memory.call_args.args[0]
+        assert merged_doc["confidence"] == 0.92  # max of 0.92, 0.85
+        assert merged_doc["salience"] == 0.7  # max of 0.7, 0.65
+
+    def test_merge_treats_zero_confidence_as_omitted(self):
+        """gpt-4o-mini sometimes echoes the literal placeholder. A zero
+        confidence/salience on the LLM output must trigger the same
+        max(source_*) fallback as omission."""
+        p = _make_pipeline()
+        facts = [
+            _fact("f1", "User likes coffee", confidence=0.9, salience=0.8),
+            _fact("f2", "User loves coffee in the mornings", confidence=0.95, salience=0.85),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User loves coffee in the mornings",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 0.0,
+                            "salience": 0.0,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        p.reconcile_memories("u1")
+        merged_doc = p._upsert_memory.call_args.args[0]
+        assert merged_doc["confidence"] == 0.95
+        assert merged_doc["salience"] == 0.85
+
+    def test_merged_doc_thread_id_picked_from_newest_source_by_ts(self):
+        """Merged record's thread_id (partition key) must come from the
+        source with the highest Cosmos ``_ts``, independent of the order
+        the LLM lists ``source_ids`` in."""
+        p = _make_pipeline()
+        # f-old has lower _ts; f-new has higher. LLM lists them in the
+        # "wrong" order (old first) — pipeline must still pick f-new's
+        # thread_id for the merged doc.
+        f_old = _fact("f-old", "User likes coffee", thread_id="thread-old")
+        f_old["_ts"] = 100
+        f_new = _fact("f-new", "User loves coffee", thread_id="thread-new")
+        f_new["_ts"] = 999
+        p._container.query_items.return_value = iter([f_new, f_old])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User loves coffee",
+                            "source_ids": ["f-old", "f-new"],
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        p.reconcile_memories("u1")
+        merged_doc = p._upsert_memory.call_args.args[0]
+        assert merged_doc["thread_id"] == "thread-new"
+
+    def test_synthetic_partition_is_user_scoped_when_no_thread_id(self):
+        """If every source somehow lacks a thread_id, the synthetic
+        fallback must be scoped per-user to avoid cross-tenant collisions."""
+        p = _make_pipeline()
+        f1 = _fact("f1", "alpha", thread_id="")
+        f2 = _fact("f2", "alpha-restated", thread_id="")
+        p._container.query_items.return_value = iter([f1, f2])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "alpha",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock()
+        p._mark_superseded = MagicMock(return_value=True)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.0]
+        p.reconcile_memories("user-abc")
+        merged_doc = p._upsert_memory.call_args.args[0]
+        assert merged_doc["thread_id"] == "__reconciled__:user-abc"
 
     def test_empty_pool(self):
         p = _make_pipeline()
@@ -354,7 +493,7 @@ class TestExactDedupShortCircuit:
         return p
 
     def test_extract_skips_when_content_hash_matches_existing(self):
-        from agent_memory_toolkit.pipeline import _content_hash
+        from agent_memory_toolkit._utils import compute_content_hash
 
         p = self._build()
         existing_text = "User likes coffee"
@@ -363,7 +502,7 @@ class TestExactDedupShortCircuit:
                 "id": "fact_existing",
                 "type": "fact",
                 "content": existing_text,
-                "content_hash": _content_hash(existing_text),
+                "content_hash": compute_content_hash(existing_text),
                 "thread_id": "t1",
                 "tags": ["sys:fact"],
             }
@@ -407,7 +546,7 @@ class TestExactDedupShortCircuit:
         assert all(call.args[0].get("type") != "fact" for call in p._upsert_memory.call_args_list)
 
     def test_extract_writes_content_hash_on_new_facts(self):
-        from agent_memory_toolkit.pipeline import _content_hash
+        from agent_memory_toolkit._utils import compute_content_hash
 
         p = self._build()
         p._load_existing_memories = MagicMock(return_value=[])
@@ -443,4 +582,4 @@ class TestExactDedupShortCircuit:
 
         fact_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
         assert len(fact_docs) == 1
-        assert fact_docs[0]["content_hash"] == _content_hash("User loves tea")
+        assert fact_docs[0]["content_hash"] == compute_content_hash("User loves tea")

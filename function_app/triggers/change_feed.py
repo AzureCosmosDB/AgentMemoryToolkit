@@ -166,9 +166,7 @@ async def process_changefeed_batch(
 
             if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
                 instance_id = f"extract:{user_id}:{thread_id}:{new_count}"
-                should_reconcile = bool(
-                    n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
-                )
+                should_reconcile = bool(n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns))
                 await _safe_start(
                     starter,
                     "ExtractMemoriesOrchestrator",

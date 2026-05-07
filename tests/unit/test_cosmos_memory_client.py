@@ -159,7 +159,7 @@ class TestGetLocal:
         mem.add_local(user_id="u1", role="agent", content="b", memory_type="turn", thread_id="t1")
         mem.add_local(user_id="u2", role="user", content="c", memory_type="summary")
 
-        results = mem.get_local(user_id="u1", role="user", memory_type="turn")
+        results = mem.get_local(user_id="u1", role="user", memory_types=["turn"])
         assert len(results) == 1
         assert results[0]["content"] == "a"
 
@@ -490,7 +490,7 @@ class TestGetMemories:
             user_id="u1",
             thread_id="t1",
             role="user",
-            memory_type="turn",
+            memory_types=["turn"],
         )
 
         call_kwargs = container.query_items.call_args.kwargs
@@ -502,7 +502,7 @@ class TestGetMemories:
         assert "@user_id" in param_names
         assert "@thread_id" in param_names
         assert "@role" in param_names
-        assert "@memory_type" in param_names
+        assert "@memory_type_0" in param_names
 
     def test_recent_k(self):
         mem, container = _connected_client()

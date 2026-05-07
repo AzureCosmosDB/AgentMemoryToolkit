@@ -135,7 +135,7 @@ class TestThreadSummary:
             summaries = agent_memory.get_memories(
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
-                memory_type="summary",
+                memory_types=["summary"],
             )
             assert len(summaries) >= 1
         finally:
@@ -167,7 +167,7 @@ class TestExtractMemories:
             total = stats.get("facts_count", 0) + stats.get("procedural_count", 0) + stats.get("episodic_count", 0)
             assert total >= 1, f"Expected at least one memory extracted, got {stats}"
 
-            facts = agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+            facts = agent_memory.get_memories(user_id=unique_user_id, memory_types=["fact"])
             assert len(facts) >= 1, "Expected at least one fact (Seattle / Microsoft / Python)"
 
             for f in facts:
@@ -330,7 +330,7 @@ class TestReconciliation:
 
             before = agent_memory.get_memories(
                 user_id=unique_user_id,
-                memory_type="fact",
+                memory_types=["fact"],
             )
             assert len(before) >= 4
 
@@ -345,7 +345,7 @@ class TestReconciliation:
 
             active = [
                 m
-                for m in agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+                for m in agent_memory.get_memories(user_id=unique_user_id, memory_types=["fact"])
                 if not m.get("superseded_by")
             ]
             assert len(active) < len(before)
@@ -371,7 +371,7 @@ class TestReconciliation:
 
             before = agent_memory.get_memories(
                 user_id=unique_user_id,
-                memory_type="fact",
+                memory_types=["fact"],
             )
             assert len(before) == len(contradictory_facts)
 
@@ -381,7 +381,7 @@ class TestReconciliation:
 
             all_facts = agent_memory.get_memories(
                 user_id=unique_user_id,
-                memory_type="fact",
+                memory_types=["fact"],
                 include_superseded=True,
             )
             contradicted = [m for m in all_facts if m.get("supersede_reason") == "contradiction"]
@@ -417,7 +417,7 @@ class TestReconciliation:
             agent_memory.process_now(user_id=unique_user_id, thread_id=unique_thread_id)
             facts_after_first = [
                 m
-                for m in agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+                for m in agent_memory.get_memories(user_id=unique_user_id, memory_types=["fact"])
                 if not m.get("superseded_by")
             ]
             assert len(facts_after_first) >= 1, "First extraction should produce at least one fact"
@@ -428,7 +428,7 @@ class TestReconciliation:
             agent_memory.process_now(user_id=unique_user_id, thread_id=unique_thread_id)
             facts_after_second = [
                 m
-                for m in agent_memory.get_memories(user_id=unique_user_id, memory_type="fact")
+                for m in agent_memory.get_memories(user_id=unique_user_id, memory_types=["fact"])
                 if not m.get("superseded_by")
             ]
             assert len(facts_after_second) <= len(facts_after_first), (
@@ -465,7 +465,7 @@ class TestReconciliation:
 
             all_facts = agent_memory.get_memories(
                 user_id=unique_user_id,
-                memory_type="fact",
+                memory_types=["fact"],
                 include_superseded=True,
             )
             losers = [m for m in all_facts if m.get("supersede_reason") is not None]

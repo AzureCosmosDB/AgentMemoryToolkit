@@ -312,16 +312,21 @@ def _build_memory_query_builder(
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     role: Optional[str] = None,
-    memory_type: Optional[str] = None,
+    memory_types: Optional[list[str]] = None,
     min_confidence: Optional[float] = None,
 ) -> _QueryBuilder:
-    """Return a :class:`_QueryBuilder` pre-loaded with the standard filters."""
+    """Return a :class:`_QueryBuilder` pre-loaded with the standard filters.
+
+    ``memory_types`` is a list of types (e.g. ``["fact", "procedural",
+    "episodic"]``); when ``None`` or empty no type filter is applied.
+    """
     qb = _QueryBuilder()
     qb.add_filter("c.id", "@memory_id", memory_id)
     qb.add_filter("c.user_id", "@user_id", user_id)
     qb.add_filter("c.thread_id", "@thread_id", thread_id)
     qb.add_filter("c.role", "@role", role)
-    qb.add_filter("c.type", "@memory_type", memory_type)
+    if memory_types:
+        qb.add_in_filter("c.type", "@memory_type_", list(memory_types))
     if min_confidence is not None and min_confidence > 0:
         qb.add_gte("c.confidence", "@min_confidence", min_confidence)
     return qb

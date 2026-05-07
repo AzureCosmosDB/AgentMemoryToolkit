@@ -377,7 +377,7 @@ for i in range(3):
 5. Verify the summary was created:
 
 ```python
-result = memory.get_memories(user_id="user-001", thread_id=thread_id, memory_type="summary")
+result = memory.get_memories(user_id="user-001", thread_id=thread_id, memory_types=["summary"])
 print(result)
 ```
 

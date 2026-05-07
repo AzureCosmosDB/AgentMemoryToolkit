@@ -75,7 +75,7 @@ def main() -> None:
     print(f"Extraction stats: {json.dumps(stats, indent=2)}\n")
 
     for kind in ("fact", "procedural", "episodic"):
-        items = mem.get_memories(user_id=user_id, memory_type=kind)
+        items = mem.get_memories(user_id=user_id, memory_types=[kind])
         print(f"{kind.upper()}S ({len(items)}):")
         for it in items:
             tags = ", ".join(it.get("tags") or [])

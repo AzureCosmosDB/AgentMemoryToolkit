@@ -87,7 +87,7 @@ def main() -> None:
     print(f"incremental_update flag: {doc2.get('metadata', {}).get('incremental_update')}")
 
     _banner("STEP 4 – read summaries from Cosmos")
-    for s in mem.get_memories(user_id=user_id, thread_id=thread_id, memory_type="summary"):
+    for s in mem.get_memories(user_id=user_id, thread_id=thread_id, memory_types=["summary"]):
         print(f"  • {s['id']} :: {s['content'][:120]}…")
 
     print("\nDone.")

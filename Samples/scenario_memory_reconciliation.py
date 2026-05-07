@@ -123,7 +123,7 @@ def main() -> None:
             print(f"  + {content}")
 
         banner("3. Active facts before reconcile")
-        before = mem.get_memories(user_id=unique_user_id, memory_type="fact")
+        before = mem.get_memories(user_id=unique_user_id, memory_types=["fact"])
         print_facts(before)
 
         banner("4. Running reconcile_memories")
@@ -131,7 +131,7 @@ def main() -> None:
         print(f"  stats: {dict(stats)}")
 
         banner("5. Active facts after reconcile (duplicates merged, contradictions resolved)")
-        after = mem.get_memories(user_id=unique_user_id, memory_type="fact")
+        after = mem.get_memories(user_id=unique_user_id, memory_types=["fact"])
         print_facts(after)
 
         banner("6. Audit trail (soft-deleted records)")

@@ -53,6 +53,17 @@ class _QueryBuilder:
             self._parameters.append({"name": pname, "value": val})
         self._conditions.append("(" + " OR ".join(parts) + ")")
 
+    def add_in_filter(self, field: str, param_base: str, values: list[Any]) -> None:
+        """Add a ``field IN (@p_0, @p_1, ...)`` filter."""
+        if not values:
+            return
+        parts: list[str] = []
+        for i, val in enumerate(values):
+            pname = f"{param_base}{i}"
+            parts.append(pname)
+            self._parameters.append({"name": pname, "value": val})
+        self._conditions.append(f"{field} IN ({', '.join(parts)})")
+
     def add_is_null_or_undefined(self, field: str) -> None:
         """Add ``(NOT IS_DEFINED(field) OR IS_NULL(field))`` filter."""
         self._conditions.append(f"(NOT IS_DEFINED({field}) OR IS_NULL({field}))")

@@ -10,7 +10,7 @@
 
 Agent Memory Toolkit is a Python library and Azure-backed reference implementation for storing, retrieving, and transforming agent memories over time. It combines a simple SDK for local and Cosmos DB operations with Durable Functions pipelines that generate thread summaries, extract facts, and build cross-thread user profiles. The toolkit also supports automatic processing via a Cosmos DB change feed trigger that fires these pipelines in the background when configurable message count thresholds are crossed. The toolkit is designed for agent applications that need both raw conversation history and higher-value derived memory that can be searched semantically later. It provides matching sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs so the same memory model can be used in scripts, services, notebooks, and larger agent systems.
 
-![Agent Memory Toolkit overview](overview.png)
+![Agent Memory Toolkit overview](Overview.png)
 
 ---
 

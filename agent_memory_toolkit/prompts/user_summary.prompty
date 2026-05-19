@@ -2,12 +2,11 @@
 name: user_summary
 description: Build a structured JSON user profile from one or more conversation threads.
 model:
-  apiType: chat
-  options:
+  api: chat
+  parameters:
     temperature: 0.2
-    additionalProperties:
-      response_format:
-        type: json_object
+    response_format:
+      type: json_object
 inputs:
   transcript:
     type: string

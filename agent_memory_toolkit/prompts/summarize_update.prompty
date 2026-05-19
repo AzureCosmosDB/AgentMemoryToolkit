@@ -2,12 +2,11 @@
 name: summarize_update
 description: Update an existing JSON thread summary with new messages.
 model:
-  apiType: chat
-  options:
+  api: chat
+  parameters:
     temperature: 0.2
-    additionalProperties:
-      response_format:
-        type: json_object
+    response_format:
+      type: json_object
 inputs:
   prior_summary:
     type: string

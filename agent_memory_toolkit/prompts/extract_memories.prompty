@@ -2,12 +2,11 @@
 name: extract_memories
 description: Extract facts, procedural rules, and episodic memories from a conversation, reconciled against existing memories.
 model:
-  apiType: chat
-  options:
+  api: chat
+  parameters:
     temperature: 0.0
-    additionalProperties:
-      response_format:
-        type: json_object
+    response_format:
+      type: json_object
 inputs:
   existing_facts:
     type: string

@@ -1,10 +1,10 @@
-"""Async variant of :mod:`scenario_remote_processor`.
+"""Async variant of ``Samples/Scenarios/scenario_remote_processor.py``.
 
 Wires :class:`AsyncDurableFunctionProcessor` to the
 :class:`AsyncCosmosMemoryClient` so the SDK only writes raw turns and the
 sibling Azure Function app handles summarization via the Cosmos change feed.
 
-See ``scenario_remote_processor.py`` for the prerequisites and behavior notes.
+See ``Samples/Scenarios/scenario_remote_processor.py`` for the prerequisites and behavior notes.
 """
 from __future__ import annotations
 

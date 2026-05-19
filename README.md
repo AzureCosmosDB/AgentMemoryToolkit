@@ -1,4 +1,4 @@
-# Azure Cosmos DB Agent Memory Toolkit - Public Preview
+# Azure Cosmos DB Agent Memory Toolkit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -8,48 +8,25 @@
 [![YouTube](https://img.shields.io/badge/YouTube-Azure%20Cosmos%20DB-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@AzureCosmosDB)
 
 
-Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming agent memories on Azure Cosmos DB. It gives your agent both raw conversation history and higher-value derived memory — thread summaries, extracted facts, and cross-thread user profiles — all searchable semantically. The processing pipeline can run **in-process** (zero infra) or in a sibling **Azure Durable Function app** that watches the Cosmos DB change feed. Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs are mirror-images of each other.
+Agent Memory Toolkit is a Python library and Azure-backed reference implementation for storing, retrieving, and transforming agent memories over time. It combines a simple SDK for local and Cosmos DB operations with Durable Functions pipelines that generate thread summaries, extract facts, and build cross-thread user profiles. The toolkit also supports automatic processing via a Cosmos DB change feed trigger that fires these pipelines in the background when configurable message count thresholds are crossed. The toolkit is designed for agent applications that need both raw conversation history and higher-value derived memory that can be searched semantically later. It provides matching sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs so the same memory model can be used in scripts, services, notebooks, and larger agent systems.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                                  YOUR AGENTIC APP                                    │
-│                   Uses CosmosMemoryClient / AsyncCosmosMemoryClient                  │
-└─────────────────────────────────────────┬────────────────────────────────────────────┘
-                                          │
-                                          ▼
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                        AGENT MEMORY TOOLKIT (Python SDK)                             │
-│                                                                                      │
-│  • Local in-memory CRUD                                                              │
-│  • Cosmos DB storage and retrieval                                                   │
-│  • Pluggable processor: in-process or remote Durable Function app                    │
-└──────────────────────────────────────────┬──────────────────────────────┬────────────┘
-                        │                                            │
-                        │ read / write                               │ Invoke processing pipeline
-                        ▼                                            ▼
-┌───────────────────────────────────┐                           ┌──────────────────────────────────┐
-│      AZURE COSMOS DB (NoSQL)      │                           │     AZURE DURABLE FUNCTIONS      │
-│                                   │                           │                                  │
-│  Stores:                          │                           │  Orchestrates memory processing: │
-│  • turns                          │                           │  • thread summaries              │
-│  • summaries                      │◄─── memory management ───►│  • fact extraction               │
-│  • facts                          │                           │  • user summaries                │
-│  • user summaries                 │                           │                                  │
-│                                   │                           │ On-demand (SDK) or automatic     │
-│  Supports query, vector, text     │    change feed trigger    │ (Cosmos DB change feed trigger). │
-│  search over stored memories.     │───────────────────────────►│                                  │
-└───────────────────────┬───────────┘                           └──────────────────┬───────────────┘
-                        │             embeddings and LLM-based processing          │
-                        └──────────────────────┬───────────────────────────────────┘
-                                               ▼
-                              ┌──────────────────────────────────┐
-                              │         MICROSOFT FOUNDRY        │
-                              │                                  │
-                              │  • Embeddings for search         │
-                              │  • Chat/LLM generation           │
-                              │                                  │
-                              └──────────────────────────────────┘
-```
+![Agent Memory Toolkit overview](Overview.png)
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Local memory store** | In-memory CRUD — no Azure needed for development |
+| **Cosmos DB integration** | CRUD, `push_to_cosmos()` bulk upload, semantic search, hierarchical partition key, vector + full-text indexes |
+| **Thread summaries** | `generate_thread_summary()` — LLM-generated, incrementally updated, embedded and stored |
+| **Fact extraction** | `extract_facts()` — discrete, independently searchable assertions from a thread |
+| **User summaries** | `generate_user_summary()` — cross-thread user profile, incrementally updated |
+| **Incremental updates** | Thread and user summaries use point-read + time-filtering to merge new data with existing summaries |
+| **Automatic processing** | Cosmos DB change feed trigger fires thread summaries, fact extraction, and user summaries when configurable message count thresholds are crossed |
+| **Externalized prompts** | LLM prompts live in editable Markdown files (`azure_functions/prompts/`) |
+| **Entra ID auth** | `DefaultAzureCredential` everywhere — `az login`, managed identities |
 
 ---
 
@@ -160,6 +137,20 @@ python Samples/quickstart_cosmos.py
 ```
 
 See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-agent, customer support, remote processor).
+
+---
+
+## Azure Resources
+
+| Resource | Purpose |
+|----------|---------|
+| **Cosmos DB for NoSQL** | Memory store with hierarchical partition key, vector index, full-text index |
+| **Azure OpenAI / AI Foundry** | Embedding model + chat model for summarization / fact extraction |
+| **Azure Functions** | Durable Functions orchestrator and activity functions |
+
+Automatic change feed processing stores lightweight counter documents in a dedicated `counter` container and also uses a `leases` container that is provisioned by `create_memory_store()`. Throughput defaults to `serverless`; set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to the memories, counter, and lease containers. See [concepts.md](Docs/concepts.md#automatic-processing-change-feed) for details.
+
+All services use **Entra ID** auth via `DefaultAzureCredential`.
 
 ---
 
@@ -290,16 +281,6 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 
 ---
 
-## Documentation
-
-- **[Docs/concepts.md](Docs/concepts.md)** — Memory types, threads, roles, embeddings, processing pipeline
-- **[Docs/design_patterns.md](Docs/design_patterns.md)** — Integration patterns for chat apps and multi-agent systems
-- **[Docs/local_testing.md](Docs/local_testing.md)** — Prerequisites, environment setup, running locally, debugging
-- **[Docs/azure_testing.md](Docs/azure_testing.md)** — Azure deployment, RBAC, cloud validation
-- **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, BYOR settings, counter-trigger tuning
-
----
-
 ## Project structure
 
 ```
@@ -315,11 +296,15 @@ tests/                  Unit + integration tests (pytest)
 
 ---
 
-## Migration notes
+## Documentation
 
-- **`agent_memory_toolkit.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
-- **New `processor=` kwarg.** Defaults to `InProcessProcessor()` — existing code keeps its current behavior with no edits.
-- **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.
+- **[concepts.md](Docs/concepts.md)** — Memory types, threads, roles, embeddings, processing pipeline
+- **[design_patterns.md](Docs/design_patterns.md)** — Integration patterns for chat apps and multi-agent systems
+- **[local_testing.md](Docs/local_testing.md)** — Prerequisites, environment setup, running locally, debugging
+- **[azure_testing.md](Docs/azure_testing.md)** — Azure deployment, RBAC, cloud validation
+- **[troubleshooting.md](Docs/troubleshooting.md)** — Common setup, auth, Cosmos DB, Durable Functions, search, and change feed failure modes
+
+---
 
 ## Trademark notice
 Trademarks This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow Microsoft’s Trademark & Brand Guidelines. Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party’s policies.

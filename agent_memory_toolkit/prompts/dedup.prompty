@@ -2,12 +2,11 @@
 name: dedup
 description: Reconcile a pool of active facts — collapse duplicates and resolve semantic contradictions in one pass.
 model:
-  apiType: chat
-  options:
+  api: chat
+  parameters:
     temperature: 0.0
-    additionalProperties:
-      response_format:
-        type: json_object
+    response_format:
+      type: json_object
 inputs:
   facts_text:
     type: string

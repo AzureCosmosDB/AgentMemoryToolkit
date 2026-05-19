@@ -2,12 +2,11 @@
 name: user_summary_update
 description: Update an existing JSON user profile with new conversation data.
 model:
-  apiType: chat
-  options:
+  api: chat
+  parameters:
     temperature: 0.2
-    additionalProperties:
-      response_format:
-        type: json_object
+    response_format:
+      type: json_object
 inputs:
   prior_summary:
     type: string

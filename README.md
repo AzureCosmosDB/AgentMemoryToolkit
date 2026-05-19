@@ -30,35 +30,6 @@ Agent Memory Toolkit is a Python library and Azure-backed reference implementati
 
 ---
 
-## Project Structure
-
-```
-agent_memory_toolkit/          Python library — sync API
-  cosmos_memory_client.py      CosmosMemoryClient — local CRUD, Cosmos DB, embeddings, processing
-  embeddings.py                EmbeddingsClient — Azure OpenAI embeddings (internal)
-  processing.py                ProcessingClient — Durable Functions polling (internal)
-  models.py                    Pydantic data models (MemoryRecord, enums)
-  exceptions.py                Custom exception hierarchy
-  _query_builder.py            Shared query builder (private)
-  _utils.py                    Shared helpers (private)
-  aio/                         Async API (mirrors azure.cosmos.aio convention)
-    cosmos_memory_client.py    AsyncCosmosMemoryClient
-    embeddings.py              AsyncEmbeddingsClient (internal)
-    processing.py              AsyncProcessingClient (internal)
-azure_functions/               Durable Functions — orchestrator, activities, HTTP trigger
-  prompts/                     LLM system prompts — summarize, facts, user_summary + update variants
-Samples/                       Categorized notebooks, quickstarts, processing examples, advanced flows, and scenarios
-  Notebooks/                   Demo notebooks
-  Quickstarts/                 Minimal local and Cosmos DB examples
-  Processing/                  Focused processing examples
-  Advanced/                    Advanced lifecycle and search examples
-  Scenarios/                   End-to-end scenario examples
-Docs/                          Documentation — concepts, local testing, Azure deployment
-tests/                         Unit + integration tests (pytest)
-```
-
----
-
 ## Quickstart
 
 ### 1. Install

@@ -1,5 +1,8 @@
 # Azure Cosmos DB Agent Memory Toolkit - Public Preview
 
+![Agent Memory Toolkit overview](Overview.png)
+
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Azure Cosmos DB](https://img.shields.io/badge/Azure-Cosmos%20DB-0078D4?logo=microsoft-azure)](https://azure.microsoft.com/en-us/products/cosmos-db/)
@@ -10,46 +13,6 @@
 
 Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming agent memories on Azure Cosmos DB. It gives your agent both raw conversation history and higher-value derived memory — thread summaries, extracted facts, and cross-thread user profiles — all searchable semantically. The processing pipeline can run **in-process** (zero infra) or in a sibling **Azure Durable Function app** that watches the Cosmos DB change feed. Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs are mirror-images of each other.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                                  YOUR AGENTIC APP                                    │
-│                   Uses CosmosMemoryClient / AsyncCosmosMemoryClient                  │
-└─────────────────────────────────────────┬────────────────────────────────────────────┘
-                                          │
-                                          ▼
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                        AGENT MEMORY TOOLKIT (Python SDK)                             │
-│                                                                                      │
-│  • Local in-memory CRUD                                                              │
-│  • Cosmos DB storage and retrieval                                                   │
-│  • Pluggable processor: in-process or remote Durable Function app                    │
-└──────────────────────────────────────────┬──────────────────────────────┬────────────┘
-                        │                                            │
-                        │ read / write                               │ Invoke processing pipeline
-                        ▼                                            ▼
-┌───────────────────────────────────┐                           ┌──────────────────────────────────┐
-│      AZURE COSMOS DB (NoSQL)      │                           │     AZURE DURABLE FUNCTIONS      │
-│                                   │                           │                                  │
-│  Stores:                          │                           │  Orchestrates memory processing: │
-│  • turns                          │                           │  • thread summaries              │
-│  • summaries                      │◄─── memory management ───►│  • fact extraction               │
-│  • facts                          │                           │  • user summaries                │
-│  • user summaries                 │                           │                                  │
-│                                   │                           │ On-demand (SDK) or automatic     │
-│  Supports query, vector, text     │    change feed trigger    │ (Cosmos DB change feed trigger). │
-│  search over stored memories.     │───────────────────────────►│                                  │
-└───────────────────────┬───────────┘                           └──────────────────┬───────────────┘
-                        │             embeddings and LLM-based processing          │
-                        └──────────────────────┬───────────────────────────────────┘
-                                               ▼
-                              ┌──────────────────────────────────┐
-                              │         MICROSOFT FOUNDRY        │
-                              │                                  │
-                              │  • Embeddings for search         │
-                              │  • Chat/LLM generation           │
-                              │                                  │
-                              └──────────────────────────────────┘
-```
 
 ---
 
@@ -156,7 +119,7 @@ print(memory.get_user_summary(user_id=USER))
 ### 4. Run a sample
 
 ```bash
-python Samples/quickstart_cosmos.py
+python Samples/Quickstarts/quickstart_cosmos.py
 ```
 
 See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-agent, customer support, remote processor).
@@ -273,6 +236,29 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 
 ---
 
+### Architecture overview
+
+```
++--------------------------+
+|        Agent app         |
++------------+-------------+
+             |
+             v
++--------------------------+      +--------------------------+
+| Agent Memory Toolkit     | <--> | Microsoft Foundry        |
+| Python sync/async SDK    |      | LLMs + embeddings        |
++------------+-------------+      +------------+-------------+
+             ^                                 ^
+             |                                 |
+             v                                 v
++--------------------------+      +--------------------------+
+| Azure Cosmos DB          | <--> | Azure Durable Functions  |
+| memories + search        |      | optional processing      |
++--------------------------+      +--------------------------+
+```
+
+---
+
 ## Public API reference
 
 | Symbol | Module | Purpose |
@@ -297,6 +283,7 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 - **[Docs/local_testing.md](Docs/local_testing.md)** — Prerequisites, environment setup, running locally, debugging
 - **[Docs/azure_testing.md](Docs/azure_testing.md)** — Azure deployment, RBAC, cloud validation
 - **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, BYOR settings, counter-trigger tuning
+- -**[Docs/troubleshooting.md](Docs/troubleshooting.md)** — Common issues and resolutions for setup, auth, Cosmos DB, embeddings, Durable Functions, vector search, change feed, etc.
 
 ---
 
@@ -308,7 +295,7 @@ agent_memory_toolkit/   Python SDK (sync + aio mirror)
 function_app/           Sibling Azure Durable Function app
 infra/                  Bicep modules + main.bicep for `azd up`
 azure.yaml              `azd` config — provisions Cosmos + AI Foundry + Function app
-Samples/                Demo notebooks + sample scripts
+Samples/                Categorized demo notebooks + sample scripts
 Docs/                   Conceptual + operational docs
 tests/                  Unit + integration tests (pytest)
 ```

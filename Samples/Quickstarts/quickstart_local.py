@@ -1,7 +1,7 @@
 """Quickstart: local-only CosmosMemoryClient demo (no cloud credentials needed).
 
 Run with:
-    python Samples/quickstart_local.py
+    python Samples/Quickstarts/quickstart_local.py
 """
 
 from agent_memory_toolkit import CosmosMemoryClient

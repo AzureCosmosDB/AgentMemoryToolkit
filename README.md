@@ -47,7 +47,12 @@ agent_memory_toolkit/          Python library — sync API
     processing.py              AsyncProcessingClient (internal)
 azure_functions/               Durable Functions — orchestrator, activities, HTTP trigger
   prompts/                     LLM system prompts — summarize, facts, user_summary + update variants
-Samples/                       Demo notebooks + sample scripts
+Samples/                       Categorized notebooks, quickstarts, processing examples, advanced flows, and scenarios
+  Notebooks/                   Demo notebooks
+  Quickstarts/                 Minimal local and Cosmos DB examples
+  Processing/                  Focused processing examples
+  Advanced/                    Advanced lifecycle and search examples
+  Scenarios/                   End-to-end scenario examples
 Docs/                          Documentation — concepts, local testing, Azure deployment
 tests/                         Unit + integration tests (pytest)
 ```
@@ -143,6 +148,14 @@ summary = memory.get_user_summary(user_id="user-001")
 > ```python
 > from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
 > ```
+
+---
+
+## Deploy Azure Resources
+
+The [`infra/`](infra/) folder contains the Bicep templates and Azure Developer CLI (`azd`) configuration for provisioning the toolkit's Azure resources end-to-end. It deploys Cosmos DB for NoSQL, AI Foundry model deployments, managed identity and RBAC assignments, and the Azure Function app used for Durable Functions processing.
+
+For deployment prerequisites, configuration options, bring-your-own-resource settings, and cleanup commands, see the [infra README](infra/README.md).
 
 ---
 

@@ -9,11 +9,11 @@ Use this guide when local memory works but Cosmos DB, embeddings, Durable Functi
 | Symptom | First checks |
 |---------|--------------|
 | Import errors | Install with `pip install -e ".[dev]"` and import `CosmosMemoryClient` or `AsyncCosmosMemoryClient`. |
-| Missing configuration | Verify `.env`, `azure_functions/local.settings.json`, and Azure Function App settings use the same endpoint, database, and container values. |
+| Missing configuration | Verify `.env`, `function_app/local.settings.json`, and Azure Function App settings use the same endpoint, database, container, and AI deployment values. |
 | Cosmos 401 or 403 | Run `az login` and confirm Cosmos DB data-plane RBAC is assigned. |
 | Cosmos operations fail before connecting | Call `create_memory_store()` or `connect_cosmos()` before cloud operations. |
-| Search returns no vector results | Confirm embeddings are generated and `EMBEDDING_DIMENSIONS` matches the container vector policy. |
-| Durable Function calls fail | Start the Functions host and check `ADF_ENDPOINT`, `ADF_KEY`, and the orchestrator route. |
+| Search returns no vector results | Confirm embeddings are generated and `AI_FOUNDRY_EMBEDDING_DIMENSIONS` matches the container vector policy. |
+| Durable Functions processing fails | Start the Functions host and check `function_app/local.settings.json`, the change feed trigger, and the orchestrator logs. |
 | Change feed does not create summaries or facts | Confirm change feed settings, thresholds, lease container, counter container, and that inserted documents have `type: "turn"`. |
 
 ---
@@ -24,7 +24,7 @@ Install the package from the repository root:
 
 ```bash
 pip install -e ".[dev]"
-pip install -r azure_functions/requirements.txt
+pip install -r function_app/requirements.txt
 ```
 
 The public clients are:
@@ -40,20 +40,44 @@ If notebooks cannot import the package, run them from the repo root with paths s
 
 ## 2. Configuration And Authentication
 
-For local runs, keep `.env` and `azure_functions/local.settings.json` aligned:
+For local runs, keep `.env`, `function_app/local.settings.json`, and deployed Function App settings aligned:
 
 ```env
 COSMOS_DB_ENDPOINT=https://<account>.documents.azure.com:443/
+COSMOS_DB__accountEndpoint=https://<account>.documents.azure.com:443/
+COSMOS_DB_KEY=
 COSMOS_DB_DATABASE=ai_memory
 COSMOS_DB_CONTAINER=memories
 COSMOS_DB_COUNTERS_CONTAINER=counter
 COSMOS_DB_LEASE_CONTAINER=leases
-AI_FOUNDRY_ENDPOINT=https://<project>.services.ai.azure.com/
-EMBEDDING_MODEL=text-embedding-3-large
-EMBEDDING_DIMENSIONS=1536
-ADF_ENDPOINT=http://localhost:7071/api
-ADF_KEY=
+COSMOS_DB_THROUGHPUT_MODE=serverless
+COSMOS_DB_AUTOSCALE_MAX_RU=1000
+
+AI_FOUNDRY_ENDPOINT=https://<account>.openai.azure.com/
+AI_FOUNDRY_API_KEY=
+AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
+AI_FOUNDRY_EMBEDDING_DIMENSIONS=1536
+AI_FOUNDRY_EMBEDDING_DATA_TYPE=float32
+AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION=cosine
+AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=<chat-deployment-name>
 ```
+
+The notebooks and samples pass these values into the client like this:
+
+| `.env` setting | Client argument |
+|---|---|
+| `COSMOS_DB_ENDPOINT` | `cosmos_endpoint` |
+| `COSMOS_DB_DATABASE` | `cosmos_database` |
+| `COSMOS_DB_CONTAINER` | `cosmos_container` |
+| `COSMOS_DB_COUNTERS_CONTAINER` | `cosmos_counter_container` |
+| `COSMOS_DB_LEASE_CONTAINER` | `cosmos_lease_container` |
+| `COSMOS_DB_KEY` | `cosmos_key` |
+| `AI_FOUNDRY_ENDPOINT` | `ai_foundry_endpoint` |
+| `AI_FOUNDRY_API_KEY` | `ai_foundry_api_key` |
+| `AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME` | `embedding_deployment_name` |
+| `AI_FOUNDRY_CHAT_DEPLOYMENT_NAME` | `chat_deployment_name` |
+
+`AI_FOUNDRY_EMBEDDING_DIMENSIONS`, `AI_FOUNDRY_EMBEDDING_DATA_TYPE`, and `AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION` are read by the toolkit when creating the Cosmos DB vector policy. The Function App also reads `COSMOS_DB__accountEndpoint` for its identity-based Cosmos DB trigger binding; set it to the same value as `COSMOS_DB_ENDPOINT`.
 
 Run `az login` before using `DefaultAzureCredential`.
 
@@ -89,8 +113,8 @@ Use `COSMOS_DB_THROUGHPUT_MODE=serverless` for the default setup. Use `autoscale
 Embedding failures usually mean one of these is wrong:
 
 - `AI_FOUNDRY_ENDPOINT`
-- `EMBEDDING_MODEL`
-- `EMBEDDING_DIMENSIONS`
+- `AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME`
+- `AI_FOUNDRY_EMBEDDING_DIMENSIONS`
 - Azure OpenAI / AI Services RBAC
 
 For hybrid search, `search_terms` is required when `hybrid_search=True`.
@@ -101,23 +125,17 @@ If search returns documents but scores look poor, check that records have an `em
 
 ## 5. Durable Functions Processing
 
-Thread summaries, fact extraction, and user summaries require the Functions host.
+Durable Functions processing requires the Functions host.
 
 Start local dependencies:
 
 ```bash
 azurite --silent --location /tmp/azurite --debug /tmp/azurite/debug.log
-cd azure_functions
+cd function_app
 func start
 ```
 
-The SDK posts to:
-
-```text
-<ADF_ENDPOINT>/orchestrators/memory_orchestrator
-```
-
-For local testing, `ADF_ENDPOINT` is usually `http://localhost:7071/api` and `ADF_KEY` is blank. For Azure, use the deployed Function App URL and set `ADF_KEY` if function-key auth is enabled.
+The SDK does not post to a Function endpoint. With `DurableFunctionProcessor`, the SDK writes turns to Cosmos DB and the deployed Function App picks them up from the Cosmos DB change feed. For local testing, keep `function_app/local.settings.json` aligned with `.env` and confirm the Functions host starts the change feed trigger.
 
 If orchestration polling times out, check the Functions logs first. The orchestration may still be running, or an activity may be waiting on Cosmos DB or the LLM endpoint.
 
@@ -129,8 +147,14 @@ Automatic processing requires these settings in the Functions app or `local.sett
 
 ```json
 "COSMOS_DB__accountEndpoint": "https://<account>.documents.azure.com:443/",
+"COSMOS_DB_ENDPOINT": "https://<account>.documents.azure.com:443/",
+"COSMOS_DB_DATABASE": "ai_memory",
+"COSMOS_DB_CONTAINER": "memories",
 "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 "COSMOS_DB_LEASE_CONTAINER": "leases",
+"AI_FOUNDRY_ENDPOINT": "https://<account>.openai.azure.com/",
+"AI_FOUNDRY_CHAT_DEPLOYMENT_NAME": "gpt-4o-mini",
+"AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME": "text-embedding-3-large",
 "THREAD_SUMMARY_EVERY_N": "5",
 "FACT_EXTRACTION_EVERY_N": "3",
 "USER_SUMMARY_EVERY_N": "10"
@@ -138,7 +162,7 @@ Automatic processing requires these settings in the Functions app or `local.sett
 
 Set a threshold to `"0"` to disable that processing type.
 
-Only documents with `type: "turn"` increment counters. Derived memories such as `summary`, `fact`, and `user_summary` do not trigger threshold counts.
+Cosmos DB memory documents store their category in the JSON `type` field. Only documents with `type: "turn"` increment counters. Derived memories with `type: "summary"`, `type: "fact"`, or `type: "user_summary"` do not trigger threshold counts.
 
 If nothing fires:
 
@@ -146,7 +170,7 @@ If nothing fires:
 - confirm the `leases` container exists
 - confirm the `counter` container is writable
 - insert enough new turn documents to cross the configured threshold
-- check for generated documents with `memory_type="summary"`, `memory_type="fact"`, or `get_user_summary(user_id=...)`
+- check for generated documents where the Cosmos JSON field is `type="summary"`, `type="fact"`, or `type="user_summary"`
 
 ---
 

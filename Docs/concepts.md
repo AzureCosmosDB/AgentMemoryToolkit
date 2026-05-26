@@ -119,7 +119,7 @@ Prompts for summarization and fact extraction live in `azure_functions/prompts/`
 The `reconcile_memories(user_id, n=50)` pipeline step reads up to N most-recent active facts for a user and asks the LLM to identify two orthogonal outcomes in one pass:
 
 - **Duplicates** — two or more facts that restate the same claim in different words. Resolution: collapse into one merged fact; the originals are soft-deleted with `supersede_reason="duplicate"` and `superseded_by` set to the merged fact's id.
-- **Contradictions** — two facts that assert opposing claims about the same subject. Resolution: keep the winner (more recent first, higher confidence as tiebreaker), soft-delete the loser with `supersede_reason="contradiction"` and `superseded_by` set to the winner.
+- **Contradictions** — two facts that assert opposing claims about the same subject. Resolution: keep the winner (more recent first, higher confidence as tiebreaker), soft-delete the loser with `supersede_reason="contradict"` and `superseded_by` set to the winner.
 
 ### Why one pass
 

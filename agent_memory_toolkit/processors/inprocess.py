@@ -156,6 +156,15 @@ class InProcessProcessor:
         summary = self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
+    def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Run procedural prompt synthesis through the in-process pipeline."""
+        return self._pipeline.synthesize_procedural(user_id=user_id, force=force)
+
     def close(self) -> None:
         """No-op; the SDK owns the pipeline lifecycle."""
         return None

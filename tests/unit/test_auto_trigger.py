@@ -30,7 +30,7 @@ def test_push_to_cosmos_fires_inprocess_trigger_per_turn(monkeypatch):
 
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = None
-    pipeline.extract_memories.return_value = {"facts_count": 1}
+    pipeline.extract_memories.return_value = {"fact_count": 1}
     pipeline.reconcile_memories.return_value = {}
     client._processor._pipeline = pipeline
 

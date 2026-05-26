@@ -35,8 +35,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
             "content": "Conversation about Paris.",
         }
         pipeline.extract_memories.return_value = {
-            "facts_count": 1,
-            "procedural_count": 0,
+            "fact_count": 1,
             "episodic_count": 0,
             "updated_count": 0,
         }
@@ -60,8 +59,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
             "content": "Conversation about Paris.",
         }
         assert result.extracted_counts == {
-            "facts_count": 1,
-            "procedural_count": 0,
+            "fact_count": 1,
             "episodic_count": 0,
             "updated_count": 0,
         }

@@ -95,7 +95,7 @@ class MemoryRecord(BaseModel):
     confidence: Optional[float] = None
     content_hash: Optional[str] = None
     superseded_by: Optional[str] = None
-    supersede_reason: Optional[Literal["duplicate", "contradiction", "update"]] = None
+    supersede_reason: Optional[Literal["duplicate", "contradict", "update"]] = None
     superseded_at: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
     source_memory_ids: list[str] = Field(default_factory=list)

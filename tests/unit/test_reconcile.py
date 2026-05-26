@@ -107,10 +107,10 @@ class TestMarkSupersededReason:
     def test_writes_reason_contradiction_and_at(self):
         p = self._build()
         old = {"id": "f1", "_etag": "e1", "content": "x"}
-        ok = p._mark_superseded(old, "f2", reason="contradiction")
+        ok = p._mark_superseded(old, "f2", reason="contradict")
         assert ok is True
         body = p._container.replace_item.call_args.kwargs["body"]
-        assert body["supersede_reason"] == "contradiction"
+        assert body["supersede_reason"] == "contradict"
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +349,7 @@ class TestReconcileMemories:
         call = p._mark_superseded.call_args
         assert call.args[0]["id"] == "f1"
         assert call.args[1] == "f2"
-        assert call.kwargs["reason"] == "contradiction"
+        assert call.kwargs["reason"] == "contradict"
 
     def test_mixed_pool_with_dangling_resolution(self):
         """Loser of a contradiction is also a duplicate source.
@@ -408,7 +408,7 @@ class TestReconcileMemories:
         # The third call should target the merged doc (fetched via resolver)
         # and use the merged record's id as the new winner id only if winner
         # also collapsed; here winner=f3 stays as-is.
-        assert last.kwargs["reason"] == "contradiction"
+        assert last.kwargs["reason"] == "contradict"
         # winner remains f3 (was not in any dup group)
         assert last.args[1] == "f3"
 
@@ -531,7 +531,7 @@ class TestExactDedupShortCircuit:
         out = p.extract_memories("u1", "t1")
 
         assert out["exact_dedup_skipped"] >= 1
-        assert out["facts_count"] == 0
+        assert out["fact_count"] == 0
         # No new fact upserted (the only ADD got short-circuited).
         assert all(call.args[0].get("type") != "fact" for call in p._upsert_memory.call_args_list)
 
@@ -581,9 +581,7 @@ class TestExactDedupShortCircuit:
 
 
 class TestExactDedupCrossTypeIsolation:
-    """Hash buckets must be type-scoped: a procedural with the same
-    normalized text as an LLM-extracted fact (or vice versa) must NOT
-    silently drop the new memory."""
+    """Existing non-fact hashes must not silently drop an extracted fact."""
 
     def _build(self) -> ProcessingPipeline:
         p = ProcessingPipeline.__new__(ProcessingPipeline)
@@ -645,102 +643,6 @@ class TestExactDedupCrossTypeIsolation:
         assert len(fact_docs) == 1
         assert fact_docs[0]["content"] == text
 
-    def test_procedural_not_dropped_when_only_fact_has_same_hash(self):
-        p = self._build()
-        text = "Use Celsius for temperatures"
-        existing = [
-            {
-                "id": "fact_existing",
-                "type": "fact",
-                "content": text,
-                "content_hash": compute_content_hash(text),
-                "thread_id": "t1",
-                "tags": ["sys:fact"],
-            }
-        ]
-        p._container.query_items.return_value = iter(
-            [
-                {
-                    "id": "turn-1",
-                    "role": "user",
-                    "content": "x",
-                    "type": "turn",
-                    "created_at": "2024-01-01T00:00:00+00:00",
-                }
-            ]
-        )
-        p._load_existing_memories = MagicMock(return_value=existing)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "facts": [],
-                    "procedural": [
-                        {
-                            "instruction": text,
-                            "confidence": 0.9,
-                            "salience": 0.6,
-                            "action": "ADD",
-                            "tags": [],
-                        }
-                    ],
-                    "episodic": [],
-                    "unclassified": [],
-                }
-            )
-        )
-        out = p.extract_memories("u1", "t1")
-        assert out["exact_dedup_skipped"] == 0
-        proc_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
-        assert len(proc_docs) == 1
-
-    def test_procedural_short_circuits_on_existing_procedural_hash(self):
-        p = self._build()
-        text = "Be terse in code reviews"
-        existing = [
-            {
-                "id": "proc_existing",
-                "type": "procedural",
-                "content": text,
-                "content_hash": compute_content_hash(text),
-                "thread_id": "__procedural__",
-                "tags": ["sys:procedural"],
-            }
-        ]
-        p._container.query_items.return_value = iter(
-            [
-                {
-                    "id": "turn-1",
-                    "role": "user",
-                    "content": "x",
-                    "type": "turn",
-                    "created_at": "2024-01-01T00:00:00+00:00",
-                }
-            ]
-        )
-        p._load_existing_memories = MagicMock(return_value=existing)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "facts": [],
-                    "procedural": [
-                        {
-                            "instruction": text,
-                            "confidence": 0.9,
-                            "salience": 0.6,
-                            "action": "ADD",
-                            "tags": [],
-                        }
-                    ],
-                    "episodic": [],
-                    "unclassified": [],
-                }
-            )
-        )
-        out = p.extract_memories("u1", "t1")
-        assert out["exact_dedup_skipped"] >= 1
-        proc_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
-        assert len(proc_docs) == 0
-
 
 class TestExtractEarlyReturnShape:
     """The no-memories early-return must include every key the success
@@ -753,8 +655,7 @@ class TestExtractEarlyReturnShape:
         p._container.query_items.return_value = iter([])  # no items
         out = p.extract_memories("u1", "t-empty")
         for key in (
-            "facts_count",
-            "procedural_count",
+            "fact_count",
             "episodic_count",
             "unclassified_count",
             "updated_count",
@@ -1409,7 +1310,7 @@ class TestFactsTextHandlesNullConfidence:
 class TestExtractUpdateSupersedeReason:
     """Extract-time UPDATE actions stamp ``supersede_reason="update"``,
     distinct from reconcile-time ``"duplicate"`` (paraphrase merge) and
-    ``"contradiction"`` (semantic conflict). The extract prompt defines
+    ``"contradict"`` (semantic conflict). The extract prompt defines
     UPDATE as "contradicts or refines an existing memory" — labelling
     these as ``"duplicate"`` makes audit trails ambiguous."""
 
@@ -1463,61 +1364,6 @@ class TestExtractUpdateSupersedeReason:
                         }
                     ],
                     "procedural": [],
-                    "episodic": [],
-                }
-            )
-        )
-        p.extract_memories("u1", "t1")
-        assert p._mark_superseded.called
-        call_kwargs = p._mark_superseded.call_args.kwargs
-        assert call_kwargs.get("reason") == "update"
-
-    def test_procedural_update_uses_reason_update_not_duplicate(self):
-        p = self._build()
-        p._load_existing_memories = MagicMock(
-            return_value=[
-                {
-                    "id": "proc_old",
-                    "type": "procedural",
-                    "content": "Always greet the user formally",
-                    "content_hash": "h_proc_old",
-                }
-            ]
-        )
-        # First query_items → turns; second → lookup of proc_old by id.
-        turns = [
-            {
-                "id": "turn-1",
-                "role": "user",
-                "content": "be casual",
-                "type": "turn",
-                "created_at": "2024-01-01T00:00:00+00:00",
-            }
-        ]
-        old_proc = [
-            {
-                "id": "proc_old",
-                "type": "procedural",
-                "content": "Always greet the user formally",
-            }
-        ]
-        p._container.query_items = MagicMock(side_effect=[iter(turns), iter(old_proc)])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "facts": [],
-                    "procedural": [
-                        {
-                            "instruction": "Greet the user casually with their first name",
-                            "confidence": 0.9,
-                            "salience": 0.8,
-                            "action": "UPDATE",
-                            "supersedes_id": "proc_old",
-                            "tags": ["sys:procedural"],
-                            "trigger": "any greeting",
-                            "category": "communication",
-                        }
-                    ],
                     "episodic": [],
                 }
             )
@@ -1589,7 +1435,7 @@ class TestExtractUpdateSelfCollapseGuard:
         assert p._mark_superseded.call_count == 0
         fact_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
         assert fact_upserts == []
-        assert out["facts_count"] == 0
+        assert out["fact_count"] == 0
 
     def test_procedural_update_with_self_referential_id_is_skipped(self):
         from agent_memory_toolkit._utils import compute_content_hash
@@ -1631,9 +1477,8 @@ class TestExtractUpdateSelfCollapseGuard:
             )
         )
 
-        out = p.extract_memories("u1", "t1")
+        p.extract_memories("u1", "t1")
 
         assert p._mark_superseded.call_count == 0
         proc_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
         assert proc_upserts == []
-        assert out["procedural_count"] == 0

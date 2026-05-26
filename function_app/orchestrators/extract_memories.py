@@ -77,7 +77,7 @@ def em_ExtractMemories(payload: dict) -> dict:
 
     Returns the per-type counts produced by ``pipeline.extract_memories``,
     shaped like
-    ``{"facts_count": N, "procedural_count": N, "episodic_count": N, "updated_count": N}``.
+    ``{"fact_count": N, "episodic_count": N, "updated_count": N}``.
     Salience-based filtering is delegated to the pipeline since it owns the
     schema.
 

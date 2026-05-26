@@ -164,7 +164,7 @@ class TestExtractMemories:
                 thread_id=unique_thread_id,
             )
             assert isinstance(stats, dict)
-            total = stats.get("facts_count", 0) + stats.get("procedural_count", 0) + stats.get("episodic_count", 0)
+            total = stats.get("fact_count", 0) + stats.get("episodic_count", 0)
             assert total >= 1, f"Expected at least one memory extracted, got {stats}"
 
             facts = agent_memory.get_memories(user_id=unique_user_id, memory_types=["fact"])
@@ -384,7 +384,7 @@ class TestReconciliation:
                 memory_types=["fact"],
                 include_superseded=True,
             )
-            contradicted = [m for m in all_facts if m.get("supersede_reason") == "contradiction"]
+            contradicted = [m for m in all_facts if m.get("supersede_reason") == "contradict"]
             assert len(contradicted) >= 1, "Expected at least one record marked supersede_reason=contradiction"
             sample = contradicted[0]
             assert isinstance(sample.get("superseded_at"), str) and len(sample["superseded_at"]) > 0
@@ -472,7 +472,7 @@ class TestReconciliation:
             assert len(losers) >= 1, "Expected at least one superseded record"
 
             sample_loser = losers[0]
-            assert sample_loser["supersede_reason"] in {"duplicate", "contradiction"}
+            assert sample_loser["supersede_reason"] in {"duplicate", "contradict"}
             assert isinstance(sample_loser["superseded_at"], str) and len(sample_loser["superseded_at"]) > 0
             assert isinstance(sample_loser["superseded_by"], str) and len(sample_loser["superseded_by"]) > 0
 

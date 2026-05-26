@@ -71,14 +71,13 @@ def test_extract_stamps_top_level_confidence_on_facts():
     assert facts[0]["confidence"] == pytest.approx(0.92)
     # confidence must NOT live under metadata anymore.
     assert "confidence" not in facts[0]["metadata"]
-    assert result["facts_count"] == 1
+    assert result["fact_count"] == 1
 
 
 def test_extract_defaults_confidence_to_half_when_missing():
     pipeline, upserted = _make_pipeline(
         {
             "facts": [{"text": "User likes coffee", "action": "ADD"}],
-            "procedural": [{"instruction": "Greet warmly", "action": "ADD"}],
             "episodic": [
                 {
                     "scope_type": "project",
@@ -123,7 +122,7 @@ def test_extract_routes_unclassified_to_fact_with_tag():
     assert doc["confidence"] == pytest.approx(0.45)
     assert doc["metadata"]["unclassified_reason"] == "could be fact or episodic"
     assert result["unclassified_count"] == 1
-    assert result["facts_count"] == 0
+    assert result["fact_count"] == 0
 
 
 def test_extract_episodic_carries_confidence():
@@ -145,26 +144,6 @@ def test_extract_episodic_carries_confidence():
     pipeline.extract_memories("u1", "t1")
     [ep] = [d for d in upserted if d["type"] == "episodic"]
     assert ep["confidence"] == pytest.approx(0.8)
-
-
-def test_extract_procedural_carries_confidence():
-    pipeline, upserted = _make_pipeline(
-        {
-            "procedural": [
-                {
-                    "instruction": "Use ruff format",
-                    "category": "workflow",
-                    "source": "explicit_instruction",
-                    "confidence": 0.95,
-                    "salience": 0.9,
-                    "action": "ADD",
-                }
-            ]
-        }
-    )
-    pipeline.extract_memories("u1", "t1")
-    [pr] = [d for d in upserted if d["type"] == "procedural"]
-    assert pr["confidence"] == pytest.approx(0.95)
 
 
 class TestMarkSupersededDoesNotMutate:
@@ -208,7 +187,7 @@ class TestMarkSupersededDoesNotMutate:
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
 
-        result = pipeline._mark_superseded(old_doc, "fact-2", reason="contradiction")
+        result = pipeline._mark_superseded(old_doc, "fact-2", reason="contradict")
 
         assert result is False
         assert old_doc == snapshot

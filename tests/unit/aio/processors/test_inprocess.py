@@ -70,8 +70,7 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
 async def test_process_extract_memories_invokes_pipeline_and_filters_to_ints():
     pipeline = MagicMock()
     pipeline.extract_memories.return_value = {
-        "facts_count": 3,
-        "procedural_count": 1,
+        "fact_count": 3,
         "non_int_field": "skip me",
     }
 
@@ -79,7 +78,7 @@ async def test_process_extract_memories_invokes_pipeline_and_filters_to_ints():
     result = await proc.process_extract_memories(user_id="u", thread_id="t")
 
     pipeline.extract_memories.assert_called_once_with("u", "t")
-    assert result == {"facts_count": 3, "procedural_count": 1}
+    assert result == {"fact_count": 3}
 
 
 @pytest.mark.asyncio

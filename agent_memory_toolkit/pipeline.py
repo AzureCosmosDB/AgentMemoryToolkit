@@ -288,7 +288,7 @@ class ProcessingPipeline:
         old_doc: dict[str, Any],
         superseder_id: str,
         *,
-        reason: Literal["duplicate", "contradiction", "update"],
+        reason: Literal["duplicate", "contradict", "update"],
     ) -> bool:
         """Atomically set ``superseded_by`` on ``old_doc`` using ETag protection.
 
@@ -371,7 +371,7 @@ class ProcessingPipeline:
         thread_id: str,
         recent_k: int | None = None,
     ) -> dict[str, int]:
-        """Extract facts, procedural rules, and episodic memories from a thread.
+        """Extract facts and episodic memories from a thread.
 
         Returns a summary dict with counts of extracted items.
         """
@@ -413,8 +413,7 @@ class ProcessingPipeline:
                 thread_id,
             )
             return {
-                "facts_count": 0,
-                "procedural_count": 0,
+                "fact_count": 0,
                 "episodic_count": 0,
                 "unclassified_count": 0,
                 "updated_count": 0,
@@ -422,21 +421,13 @@ class ProcessingPipeline:
             }
 
         # ---- 2. Load existing memories for reconciliation ----
-        existing = self._load_existing_memories(user_id, ["fact", "procedural"])
+        existing = self._load_existing_memories(user_id, ["fact"])
         # Pre-compute exact-content hashes from existing memories for the
         # write-time short-circuit. Saves the embedding call and the upsert
-        # RU on identical re-extractions across runs.
-        #
-        # Hashes are bucketed *by type* — a fact with the same normalized
-        # text as an existing procedural must NOT be silently dropped, because
-        # they're semantically different memory kinds and the LLM's
-        # classification would be erased. Unclassified items are persisted as
-        # facts so they share the fact bucket.
+        # RU on identical re-extractions across runs. Unclassified items are
+        # persisted as facts so they share the fact bucket.
         existing_fact_hashes: set[str] = {
             m["content_hash"] for m in existing if m.get("type") == "fact" and m.get("content_hash")
-        }
-        existing_proc_hashes: set[str] = {
-            m["content_hash"] for m in existing if m.get("type") == "procedural" and m.get("content_hash")
         }
         existing_text = ""
         if existing:
@@ -461,7 +452,6 @@ class ProcessingPipeline:
         # ---- 4. Parse LLM response ----
         parsed = self._parse_llm_json(response_text)
         facts = parsed.get("facts", [])
-        procedural = parsed.get("procedural", [])
         episodic = parsed.get("episodic", [])
         unclassified = parsed.get("unclassified", [])
 
@@ -599,103 +589,7 @@ class ProcessingPipeline:
             # with identical content also short-circuits.
             existing_fact_hashes.add(new_content_hash)
 
-        # ---- 6. Process procedural ----
-        for proc in procedural:
-            action = proc.get("action", "ADD").upper()
-            if action == "NONE":
-                continue
-
-            text = proc.get("instruction")
-            if not text:
-                logger.warning(
-                    "extract_memories: dropping malformed procedural (missing 'instruction'): %r",
-                    proc,
-                )
-                continue
-            content_hash = compute_content_hash(text)
-            # Same write-time exact-dedup short-circuit as facts. UPDATEs
-            # bypass — they explicitly target an old record by id.
-            if action == "ADD" and content_hash in existing_proc_hashes:
-                logger.debug(
-                    "extract_memories: skipping exact-dup procedural hash=%s user_id=%s",
-                    content_hash,
-                    user_id,
-                )
-                exact_dedup_skipped += 1
-                continue
-            seed = _ID_SEED_SEP.join((user_id, content_hash))
-            det_id = f"proc_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
-
-            topic_tags = [f"topic:{t}" for t in proc.get("tags", [])]
-            tags = ["sys:procedural", "sys:auto-extracted"] + topic_tags
-
-            confidence = proc.get("confidence")
-            if confidence is None:
-                confidence = 0.5
-
-            doc = {
-                "id": det_id,
-                "user_id": user_id,
-                "thread_id": "__procedural__",
-                "role": "system",
-                "type": "procedural",
-                "content": text,
-                "content_hash": content_hash,
-                "confidence": confidence,
-                "metadata": {
-                    "trigger": proc.get("trigger"),
-                    "category": proc.get("category"),
-                    "source": proc.get("source"),
-                    "priority": proc.get("priority"),
-                },
-                "salience": proc.get("salience"),
-                "tags": tags,
-                "created_at": now,
-            }
-
-            if action == "UPDATE" and proc.get("supersedes_id"):
-                # Same self-overwrite guard as the fact UPDATE branch:
-                # if the new content hashes to the same det_id as the
-                # target, the upsert below would erase the audit
-                # metadata we are about to stamp on it.
-                if det_id == proc["supersedes_id"]:
-                    logger.debug(
-                        "extract_memories: skipping procedural UPDATE — det_id == supersedes_id (%s)",
-                        det_id,
-                    )
-                    continue
-                doc["supersedes_ids"] = [proc["supersedes_id"]]
-                try:
-                    q = (
-                        "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
-                        "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
-                    )
-                    results = list(
-                        self._container.query_items(
-                            query=q,
-                            parameters=[
-                                {"name": "@id", "value": proc["supersedes_id"]},
-                                {"name": "@uid", "value": user_id},
-                            ],
-                            enable_cross_partition_query=True,
-                        )
-                    )
-                    if results and self._mark_superseded(results[0], det_id, reason="update"):
-                        updated_count += 1
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to mark superseded procedural memory %s: %s",
-                        proc["supersedes_id"],
-                        exc,
-                    )
-
-            docs_to_embed.append(doc)
-            embed_texts.append(text)
-            # Record this procedural's hash so a later candidate in the same
-            # batch with identical content also short-circuits.
-            existing_proc_hashes.add(content_hash)
-
-        # ---- 7. Process episodic ----
+        # ---- 6. Process episodic ----
         # Episodic memories are tied to a specific situation, scope, or context
         # (past, present, or planned). The only required fields are
         # ``scope_type`` and ``scope_value``. The ``situation``/``action_taken``/
@@ -771,11 +665,11 @@ class ProcessingPipeline:
             docs_to_embed.append(doc)
             embed_texts.append(text)
 
-        # ---- 8. Process unclassified ----
+        # ---- 7. Process unclassified ----
         # The LLM uses the `unclassified` bucket when it cannot confidently
-        # decide between fact / procedural / episodic. We persist these as
-        # facts (the most common type, retrieval already handles them well)
-        # tagged `sys:unclassified` so they're easy to audit and reclassify.
+        # decide between fact / episodic. We persist these as facts (the most
+        # common type, retrieval already handles them well) tagged
+        # `sys:unclassified` so they're easy to audit and reclassify.
         for item in unclassified:
             text = item.get("text")
             if not text:
@@ -825,22 +719,21 @@ class ProcessingPipeline:
             # fact bucket so later batch candidates short-circuit.
             existing_fact_hashes.add(content_hash)
 
-        # ---- 9. Generate embeddings in batch ----
+        # ---- 8. Generate embeddings in batch ----
         if embed_texts:
             logger.info("extract_memories generating embeddings for %d items", len(embed_texts))
             embeddings = self._embeddings.generate_batch(embed_texts)
             for doc, emb in zip(docs_to_embed, embeddings):
                 doc["embedding"] = emb
 
-        # ---- 10. Upsert all documents ----
+        # ---- 9. Upsert all documents ----
         for doc in docs_to_embed:
             self._upsert_memory(doc)
 
         result = {
-            "facts_count": sum(
+            "fact_count": sum(
                 1 for d in docs_to_embed if d["type"] == "fact" and "sys:unclassified" not in d.get("tags", [])
             ),
-            "procedural_count": sum(1 for d in docs_to_embed if d["type"] == "procedural"),
             "episodic_count": sum(1 for d in docs_to_embed if d["type"] == "episodic"),
             "unclassified_count": sum(1 for d in docs_to_embed if "sys:unclassified" in d.get("tags", [])),
             "updated_count": updated_count,
@@ -848,6 +741,205 @@ class ProcessingPipeline:
         }
         logger.info("extract_memories completed: %s", result)
         return result
+
+    def synthesize_procedural(
+        self,
+        user_id: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Synthesize the active procedural prompt for a user."""
+        if not user_id:
+            raise ValidationError("user_id is required")
+
+        logger.info("synthesize_procedural started user_id=%s force=%s", user_id, force)
+
+        active_filter = "(NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null)"
+
+        prior_docs = list(
+            self._container.query_items(
+                query=(
+                    "SELECT * FROM c WHERE c.user_id = @uid "
+                    "AND c.thread_id = @thread_id "
+                    "AND c.type = @type "
+                    f"AND {active_filter}"
+                ),
+                parameters=[
+                    {"name": "@uid", "value": user_id},
+                    {"name": "@thread_id", "value": "__procedural__"},
+                    {"name": "@type", "value": "procedural"},
+                ],
+                enable_cross_partition_query=True,
+            )
+        )
+        prior_docs.sort(key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)), reverse=True)
+        if len(prior_docs) > 1:
+            logger.warning("synthesize_procedural found multiple active docs user_id=%s count=%d", user_id, len(prior_docs))
+        prior_doc = prior_docs[0] if prior_docs else None
+
+        behavioral_fact_docs = list(
+            self._container.query_items(
+                query=(
+                    "SELECT * FROM c WHERE c.user_id = @uid "
+                    "AND c.type = @type "
+                    f"AND {active_filter} "
+                    "AND ((IS_DEFINED(c.metadata.category) "
+                    "AND c.metadata.category IN ('preference', 'requirement')) "
+                    "OR (IS_DEFINED(c.salience) AND c.salience >= @min_salience))"
+                ),
+                parameters=[
+                    {"name": "@uid", "value": user_id},
+                    {"name": "@type", "value": "fact"},
+                    {"name": "@min_salience", "value": 0.8},
+                ],
+                enable_cross_partition_query=True,
+            )
+        )
+        behavioral_fact_docs.sort(
+            key=lambda doc: (
+                float(doc.get("salience") or 0.0),
+                doc.get("created_at", ""),
+                doc.get("id", ""),
+            ),
+            reverse=True,
+        )
+        behavioral_fact_docs = [
+            doc
+            for doc in behavioral_fact_docs
+            if isinstance(doc.get("content"), str) and doc.get("content", "").strip()
+        ]
+        behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
+
+        episodic_docs = list(
+            self._container.query_items(
+                query=(
+                    "SELECT * FROM c WHERE c.user_id = @uid "
+                    "AND c.type = @type "
+                    f"AND {active_filter} "
+                    "AND IS_DEFINED(c.metadata.lesson) "
+                    "AND c.metadata.lesson != null"
+                ),
+                parameters=[
+                    {"name": "@uid", "value": user_id},
+                    {"name": "@type", "value": "episodic"},
+                ],
+                enable_cross_partition_query=True,
+            )
+        )
+        episodic_docs.sort(
+            key=lambda doc: (
+                float(doc.get("salience") or 0.0),
+                doc.get("created_at", ""),
+                doc.get("id", ""),
+            ),
+            reverse=True,
+        )
+        episodic_with_lessons = [
+            doc
+            for doc in episodic_docs
+            if isinstance(doc.get("metadata", {}).get("lesson"), str)
+            and doc.get("metadata", {}).get("lesson", "").strip()
+        ]
+        source_episodic_ids = [doc["id"] for doc in episodic_with_lessons]
+
+        current_source_ids = set(behavioral_fact_ids) | set(source_episodic_ids)
+        prior_source_ids = (
+            set(prior_doc.get("source_fact_ids") or []) | set(prior_doc.get("source_episodic_ids") or [])
+            if prior_doc
+            else set()
+        )
+        if prior_doc and not force and current_source_ids == prior_source_ids:
+            logger.info(
+                "synthesize_procedural unchanged user_id=%s fact_count=%d episodic_count=%d",
+                user_id,
+                len(behavioral_fact_ids),
+                len(source_episodic_ids),
+            )
+            return {"status": "unchanged", "procedural": prior_doc}
+
+        name_docs = list(
+            self._container.query_items(
+                query=(
+                    "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
+                    "AND c.type = @type "
+                    f"AND {active_filter} "
+                    "AND IS_DEFINED(c.metadata.category) "
+                    "AND c.metadata.category = @category "
+                    "AND IS_DEFINED(c.metadata.predicate) "
+                    "AND c.metadata.predicate = @predicate "
+                    "ORDER BY c._ts DESC"
+                ),
+                parameters=[
+                    {"name": "@uid", "value": user_id},
+                    {"name": "@type", "value": "fact"},
+                    {"name": "@category", "value": "biographical"},
+                    {"name": "@predicate", "value": "name"},
+                ],
+                enable_cross_partition_query=True,
+            )
+        )
+        user_name = "the user"
+        if name_docs:
+            metadata = name_docs[0].get("metadata") or {}
+            name_candidate = metadata.get("object")
+            if not isinstance(name_candidate, str) or not name_candidate.strip():
+                name_candidate = name_docs[0].get("content")
+            if isinstance(name_candidate, str) and name_candidate.strip():
+                user_name = name_candidate.strip()
+
+        def _render_bullets(values: list[str]) -> str:
+            cleaned = [value.strip() for value in values if isinstance(value, str) and value.strip()]
+            if not cleaned:
+                return "(none)"
+            return "\n".join(f"- {value}" for value in cleaned)
+
+        response_text = self._run_prompty(
+            "synthesize_procedural.prompty",
+            inputs={
+                "prior_prompt": (prior_doc.get("content") or "") if prior_doc else "",
+                "behavioral_facts": _render_bullets([doc.get("content", "") for doc in behavioral_fact_docs]),
+                "episodic_lessons": _render_bullets(
+                    [doc.get("metadata", {}).get("lesson", "") for doc in episodic_with_lessons]
+                ),
+                "user_name": user_name,
+            },
+        )
+
+        parsed = self._parse_llm_json(response_text)
+        system_prompt = parsed.get("system_prompt") if isinstance(parsed, dict) else None
+        if not isinstance(system_prompt, str) or not system_prompt.strip():
+            raise LLMError("synthesize_procedural returned JSON without a non-empty 'system_prompt' string")
+        system_prompt = system_prompt.strip()
+
+        new_seq = (int(prior_doc.get("version") or 0) + 1) if prior_doc else 1
+        new_id = f"proc_{user_id}_{new_seq}"
+        new_doc: dict[str, Any] = {
+            "id": new_id,
+            "user_id": user_id,
+            "thread_id": "__procedural__",
+            "type": "procedural",
+            "version": new_seq,
+            "content": system_prompt,
+            "source_fact_ids": behavioral_fact_ids,
+            "source_episodic_ids": source_episodic_ids,
+            "supersedes_ids": [prior_doc["id"]] if prior_doc else [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "role": "system",
+            "tags": ["sys:procedural", "sys:synthesized"],
+        }
+        self._container.upsert_item(body=new_doc)
+
+        if prior_doc:
+            self._mark_superseded(prior_doc, new_id, reason="update")
+
+        logger.info(
+            "synthesize_procedural synthesized user_id=%s version=%d fact_count=%d episodic_count=%d",
+            user_id,
+            new_seq,
+            len(behavioral_fact_ids),
+            len(source_episodic_ids),
+        )
+        return {"status": "synthesized", "procedural": new_doc}
 
     def generate_thread_summary(
         self,
@@ -1147,7 +1239,7 @@ class ProcessingPipeline:
         * **Duplicates** — a fresh merged fact is upserted; every source is
           soft-deleted with ``supersede_reason="duplicate"``.
         * **Contradictions** — the loser is soft-deleted with
-          ``supersede_reason="contradiction"`` and ``superseded_by`` set to
+          ``supersede_reason="contradict"`` and ``superseded_by`` set to
           the winner. Dangling references are resolved transparently when a
           contradicted id was just absorbed into a duplicate group.
 
@@ -1516,7 +1608,7 @@ class ProcessingPipeline:
                 )
                 continue
 
-            if self._mark_superseded(loser_doc, resolved_winner, reason="contradiction"):
+            if self._mark_superseded(loser_doc, resolved_winner, reason="contradict"):
                 contradicted += 1
                 # Track the *original* loser_id from the LLM so the kept
                 # cross-check below can reconcile against the input pool.

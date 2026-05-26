@@ -462,8 +462,8 @@ def test_supersede_reason_and_at_fields():
     rec_dup = MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="duplicate")
     assert rec_dup.supersede_reason == "duplicate"
 
-    rec_con = MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="contradiction")
-    assert rec_con.supersede_reason == "contradiction"
+    rec_con = MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="contradict")
+    assert rec_con.supersede_reason == "contradict"
 
     with pytest.raises(pydantic.ValidationError):
         MemoryRecord(user_id="u1", role="user", content="hello", supersede_reason="anything_else")

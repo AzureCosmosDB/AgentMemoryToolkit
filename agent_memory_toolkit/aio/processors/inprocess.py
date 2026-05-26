@@ -146,6 +146,15 @@ class AsyncInProcessProcessor:
         summary = await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
+    async def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Run procedural prompt synthesis through the in-process pipeline."""
+        return await asyncio.to_thread(self._pipeline.synthesize_procedural, user_id, force=force)
+
     async def close(self) -> None:
         return None
 

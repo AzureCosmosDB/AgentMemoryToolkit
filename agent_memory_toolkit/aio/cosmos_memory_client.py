@@ -1179,6 +1179,58 @@ class AsyncCosmosMemoryClient:
     # Procedural and episodic memory retrieval
     # ------------------------------------------------------------------
 
+    async def get_procedural_prompt(self, user_id: str) -> Optional[str]:
+        """Return the active synthesized procedural prompt for a user."""
+        await self._require_cosmos()
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
+        qb.add_filter("c.type", "@type", "procedural")
+        qb.add_is_null_or_undefined("c.superseded_by")
+
+        query = f"SELECT TOP 1 c.content, c.version FROM c{qb.build_where()} ORDER BY c.version DESC"
+        try:
+            items_iter = self._container_client.query_items(query=query, parameters=qb.get_parameters())
+            items = [item async for item in items_iter]
+        except Exception as exc:
+            raise CosmosOperationError(f"async get_procedural_prompt query failed: {exc}") from exc
+
+        if not items:
+            return None
+        return items[0].get("content")
+
+    async def get_procedural_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Return synthesized procedural docs for a user, newest first."""
+        await self._require_cosmos()
+        if limit <= 0:
+            return []
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
+        qb.add_filter("c.type", "@type", "procedural")
+
+        query = f"SELECT * FROM c{qb.build_where()} ORDER BY c.version DESC"
+        try:
+            items_iter = self._container_client.query_items(query=query, parameters=qb.get_parameters())
+            items = [item async for item in items_iter]
+        except Exception as exc:
+            raise CosmosOperationError(f"async get_procedural_history query failed: {exc}") from exc
+
+        def _is_active(doc: dict[str, Any]) -> bool:
+            return not doc.get("superseded_by")
+
+        items.sort(
+            key=lambda doc: (
+                1 if _is_active(doc) else 0,
+                int(doc.get("version") or 0),
+                int(doc.get("_ts") or 0),
+            ),
+            reverse=True,
+        )
+        return items[:limit]
+
     async def get_procedural_memories(
         self,
         user_id: str,
@@ -1244,14 +1296,7 @@ class AsyncCosmosMemoryClient:
 
     async def build_procedural_context(self, user_id: str) -> str:
         """Build formatted text for system prompt injection."""
-        memories = await self.get_procedural_memories(user_id)
-        if not memories:
-            return ""
-        lines = ["## Learned User Preferences"]
-        for m in memories:
-            priority = m.get("metadata", {}).get("priority", "should")
-            lines.append(f"- {m['content']} [{priority}]")
-        return "\n".join(lines)
+        return await self.get_procedural_prompt(user_id) or ""
 
     async def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
         """Build formatted context of relevant past experiences."""
@@ -1680,7 +1725,7 @@ class AsyncCosmosMemoryClient:
         thread_id: str,
         recent_k: Optional[int] = None,
     ) -> dict[str, int]:
-        """Extract facts, procedural, and episodic memories from a thread.
+        """Extract facts and episodic memories from a thread.
 
         Pipeline calls are dispatched to a worker thread via
         :func:`asyncio.to_thread` to avoid blocking the event loop on
@@ -1689,6 +1734,34 @@ class AsyncCosmosMemoryClient:
         await self._require_cosmos()
         self._require_pipeline()
         return await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id, recent_k)
+
+    async def synthesize_procedural(
+        self,
+        user_id: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Trigger synthesized procedural prompt generation for a user.
+
+        For DurableFunctionProcessor this returns a deferred status; synthesis
+        is auto-driven inside the Function App. ``force=True`` is only honored
+        by AsyncInProcessProcessor.
+        """
+        await self._require_cosmos()
+        processor = self._get_processor()
+        if not isinstance(processor, AsyncInProcessProcessor):
+            logger.debug("synthesize_procedural deferred to Function App auto-trigger user_id=%s", user_id)
+            return {
+                "status": "deferred",
+                "reason": "durable_auto_trigger",
+                "message": (
+                    "Procedural synthesis runs reactively in the Function App after each "
+                    "ExtractMemoriesOrchestrator pass. Use get_procedural_prompt() to read "
+                    "the synthesized prompt once it has been generated."
+                ),
+            }
+
+        return await processor.synthesize_procedural(user_id=user_id, force=force)
 
     async def generate_thread_summary(
         self,

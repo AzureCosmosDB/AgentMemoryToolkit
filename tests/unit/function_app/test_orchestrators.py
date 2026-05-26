@@ -186,8 +186,7 @@ class TestExtractMemoriesOrchestrator:
             gen,
             [
                 {
-                    "facts_count": 2,
-                    "procedural_count": 1,
+                    "fact_count": 2,
                     "episodic_count": 0,
                     "updated_count": 0,
                 },
@@ -196,7 +195,7 @@ class TestExtractMemoriesOrchestrator:
 
         assert [c[0] for c in ctx._yielded_calls] == ["em_ExtractMemories"]
         assert result["persisted"] is True
-        assert result["extracted"]["facts_count"] == 2
+        assert result["extracted"]["fact_count"] == 2
         assert result["reconciled"] is None
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
@@ -206,7 +205,7 @@ class TestExtractMemoriesOrchestrator:
         result, _ = _drive(
             gen,
             [
-                {"facts_count": 2, "procedural_count": 0, "episodic_count": 0, "updated_count": 0},
+                {"fact_count": 2, "episodic_count": 0, "updated_count": 0},
                 {"kept": 0, "merged": 1, "contradicted": 0},
             ],
         )

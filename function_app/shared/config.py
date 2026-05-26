@@ -6,6 +6,7 @@ Defaults:
 * ``FACT_EXTRACTION_EVERY_N``      — default 1 (per-turn extraction)
 * ``THREAD_SUMMARY_EVERY_N``       — default 10 (rolling summary cadence)
 * ``USER_SUMMARY_EVERY_N``         — default 20
+* ``PROCEDURAL_SYNTHESIS_AUTO``    — default true
 * ``MAX_BATCH_SIZE``               — default 20
 
 The fact-extraction default of ``1`` - every
@@ -14,10 +15,11 @@ workloads. Summaries default to ``10`` because each summary call sees the
 full recent context window and is the most expensive per-call operation.
 
 Setting any ``*_EVERY_N`` env var to ``"0"`` disables that orchestrator
-entirely. When the env var is unset or invalid the documented default is
-applied (so an out-of-the-box deploy actually summarizes/extracts) and a
-warning is logged for invalid values. Use the ``get_*_every_n()`` helpers
-rather than calling ``_parse_threshold`` directly.
+entirely. ``PROCEDURAL_SYNTHESIS_AUTO=false`` disables the chained
+procedural-synthesis sub-orchestrator. When an env var is unset or invalid the
+documented default is applied (so an out-of-the-box deploy actually
+summarizes/extracts) and a warning is logged for invalid values. Use the
+``get_*_every_n()`` helpers rather than calling ``_parse_threshold`` directly.
 
 Threshold-crossing semantics in the change-feed trigger
 -------------------------------------------------------
@@ -59,6 +61,7 @@ USER_COUNTER_THREAD_ID = "__counters__"
 from agent_memory_toolkit.thresholds import (  # noqa: E402
     DEFAULT_DEDUP_EVERY_N,
     DEFAULT_FACT_EXTRACTION_EVERY_N,
+    DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
     DEFAULT_THREAD_SUMMARY_EVERY_N,
     DEFAULT_USER_SUMMARY_EVERY_N,
 )
@@ -122,6 +125,19 @@ def _parse_float(name: str, default: float) -> float:
         return default
 
 
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
+    return default
+
+
 def get_max_batch_size() -> int:
     return _parse_int("MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE)
 
@@ -159,6 +175,14 @@ def get_dedup_every_n() -> int:
     return _parse_threshold(
         "DEDUP_EVERY_N",
         DEFAULT_DEDUP_EVERY_N,
+    )
+
+
+def get_procedural_synthesis_auto() -> bool:
+    """Enable chained procedural synthesis after extraction."""
+    return _parse_bool(
+        "PROCEDURAL_SYNTHESIS_AUTO",
+        DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
     )
 
 

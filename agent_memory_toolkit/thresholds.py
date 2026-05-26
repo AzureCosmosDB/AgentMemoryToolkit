@@ -27,6 +27,11 @@ DEFAULT_DEDUP_EVERY_N = 5
 # of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
 
+_TRUTHY = {"true", "1", "yes", "on", "t", "y"}
+_FALSY = {"false", "0", "no", "off", "f", "n"}
+
+DEFAULT_PROCEDURAL_SYNTHESIS_AUTO = True
+
 # Owner exclusivity — declares which backend is authoritative for the shared
 # memories + counter container. When set, the *other* backend skips its
 # auto-trigger and logs a loud warning. Default unset preserves today's
@@ -54,6 +59,19 @@ def _parse_threshold(name: str, default: int) -> int:
         )
         return default
     return parsed
+
+
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
+    return default
 
 
 def get_fact_extraction_every_n() -> int:
@@ -89,6 +107,17 @@ def get_dedup_pool_size() -> int:
         logger.warning("DEDUP_POOL_SIZE=%d exceeds hard cap; clamping to 500", raw)
         return 500
     return raw
+
+
+def get_procedural_synthesis_auto() -> bool:
+    """Whether procedural synthesis auto-fires after extract.
+
+    Set ``PROCEDURAL_SYNTHESIS_AUTO=false`` to disable chained synthesis in
+    function-app flows. In-process customers can still call
+    :meth:`CosmosMemoryClient.synthesize_procedural` explicitly with
+    ``force=True``.
+    """
+    return _parse_bool("PROCEDURAL_SYNTHESIS_AUTO", DEFAULT_PROCEDURAL_SYNTHESIS_AUTO)
 
 
 def get_processor_owner() -> Optional[str]:
@@ -127,6 +156,7 @@ __all__ = [
     "DEFAULT_USER_SUMMARY_EVERY_N",
     "DEFAULT_DEDUP_EVERY_N",
     "DEFAULT_DEDUP_POOL_SIZE",
+    "DEFAULT_PROCEDURAL_SYNTHESIS_AUTO",
     "PROCESSOR_OWNER_INPROCESS",
     "PROCESSOR_OWNER_DURABLE",
     "get_fact_extraction_every_n",
@@ -134,5 +164,6 @@ __all__ = [
     "get_user_summary_every_n",
     "get_dedup_every_n",
     "get_dedup_pool_size",
+    "get_procedural_synthesis_auto",
     "get_processor_owner",
 ]

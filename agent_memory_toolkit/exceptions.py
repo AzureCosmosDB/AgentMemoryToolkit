@@ -8,6 +8,8 @@ a single base class or handle specific failure modes individually.
 class AgentMemoryError(Exception):
     """Base exception for all Agent Memory Toolkit errors."""
 
+    error_code: str = ""
+
 
 class ConfigurationError(AgentMemoryError):
     """Raised when required configuration is missing or invalid.
@@ -18,6 +20,8 @@ class ConfigurationError(AgentMemoryError):
     Attributes:
         parameter: The name of the missing or invalid configuration parameter.
     """
+
+    error_code = "configuration"
 
     def __init__(self, message: str | None = None, *, parameter: str | None = None):
         self.parameter = parameter
@@ -32,9 +36,13 @@ class ValidationError(AgentMemoryError):
     Examples: invalid role, invalid memory_type, empty user_id.
     """
 
+    error_code = "validation"
+
 
 class CosmosNotConnectedError(AgentMemoryError):
     """Raised when a Cosmos DB operation is attempted without an active connection."""
+
+    error_code = "cosmos_not_connected"
 
     def __init__(self, message: str | None = None):
         super().__init__(message or "Cosmos DB is not connected. Call connect_cosmos() first.")
@@ -46,6 +54,8 @@ class CosmosOperationError(AgentMemoryError):
     Covers connection issues, query failures, and other Cosmos DB errors.
     """
 
+    error_code = "cosmos_operation"
+
 
 class MemoryNotFoundError(AgentMemoryError):
     """Raised when a memory document is not found.
@@ -55,6 +65,8 @@ class MemoryNotFoundError(AgentMemoryError):
         user_id: The user ID used in the lookup.
         thread_id: The thread ID used in the lookup.
     """
+
+    error_code = "memory_not_found"
 
     def __init__(
         self,
@@ -85,56 +97,9 @@ class MemoryNotFoundError(AgentMemoryError):
         return "Memory not found"
 
 
-class EmbeddingError(AgentMemoryError):
-    """Raised when embedding generation fails."""
-
-
 class LLMError(AgentMemoryError):
-    """Raised when an LLM chat completion call fails."""
+    """Raised when the LLM returns a response shape the SDK does not surface
+    as an exception (no choices, empty content, invalid JSON)."""
 
+    error_code = "llm"
 
-class ProcessingError(AgentMemoryError):
-    """Raised when the processing pipeline (Azure Durable Functions) returns an error."""
-
-
-class OrchestrationTimeoutError(AgentMemoryError):
-    """Raised when polling for an orchestration result exceeds the timeout.
-
-    Attributes:
-        timeout: The timeout value in seconds that was exceeded.
-        status_url: The URL to check the orchestration status.
-    """
-
-    def __init__(
-        self,
-        message: str | None = None,
-        *,
-        timeout: float | None = None,
-        status_url: str | None = None,
-    ):
-        self.timeout = timeout
-        self.status_url = status_url
-        if message is None:
-            message = self._build_message()
-        super().__init__(message)
-
-    def _build_message(self) -> str:
-        msg = "Orchestration timed out"
-        if self.timeout is not None:
-            msg = f"Orchestration did not complete within {self.timeout}s"
-        if self.status_url:
-            msg += f". Check status at: {self.status_url}"
-        return msg
-
-
-class AuthenticationError(AgentMemoryError):
-    """Raised when authentication to Azure services fails."""
-
-
-class DuplicateMemoryError(AgentMemoryError):
-    """Raised when an exact duplicate memory is detected during write."""
-
-    def __init__(self, existing_id: str, content_hash: str):
-        self.existing_id = existing_id
-        self.content_hash = content_hash
-        super().__init__(f"Duplicate memory detected (existing_id={existing_id}, hash={content_hash})")

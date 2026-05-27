@@ -1,10 +1,13 @@
 ---
 name: dedup
+version: v1
 description: Reconcile a pool of active facts — collapse duplicates and resolve semantic contradictions in one pass.
 model:
   apiType: chat
   options:
     temperature: 0.0
+    seed: 43
+    maxOutputTokens: 2000
     additionalProperties:
       response_format:
         type: json_object
@@ -61,6 +64,7 @@ Resolution: emit one entry in `contradicted_pairs` with:
 Pick the winner by:
 1. **More recent `created_at` first.**
 2. **Higher confidence as tiebreaker** if timestamps are equal or unavailable.
+3. **Alphabetically-first `id` wins** if both records have `N/A` created_at and tied confidence. This deterministic tiebreak avoids flapping across runs.
 
 A contradiction is a pair. If three or more facts mutually contradict, emit pairwise `contradicted_pairs` entries that together cover all losers against the single overall winner.
 
@@ -93,6 +97,16 @@ You will receive a numbered list of facts. Each line has the form:
 N. ID: <uuid> | Content: "<text>" | Confidence: 0.85 | Salience: 0.7 | Created: <iso8601>
 ```
 
+## Missing-Field Handling
+
+Some facts may show `Confidence: N/A`, `Salience: N/A`, or `Created: N/A`.
+
+- Treat `N/A` confidence/salience as **unknown** — omit those fields from the
+  `duplicate_groups` output; the pipeline will fall back to
+  `max(source.confidence)` / `max(source.salience)`.
+- Treat `N/A` created_at as **older than any real timestamp** for
+  winner-selection purposes (a fact with a real date beats one with N/A).
+
 ## Output Format
 
 You must output ONLY valid JSON matching this exact schema. No preamble, no explanation, no markdown fences — just the JSON object.
@@ -100,7 +114,7 @@ You must output ONLY valid JSON matching this exact schema. No preamble, no expl
 ```json
 {
   "duplicate_groups": [
-    {"merged_content": "<string>", "source_ids": ["<id1>", "<id2>"], "confidence": "<max source confidence, float 0..1>", "salience": "<max source salience, float 0..1>"}
+    {"merged_content": "<string>", "source_ids": ["<id1>", "<id2>"], "confidence": 0.0, "salience": 0.0}
   ],
   "contradicted_pairs": [
     {"winner_id": "<id>", "loser_id": "<id>", "reason": "<string>"}
@@ -108,8 +122,9 @@ You must output ONLY valid JSON matching this exact schema. No preamble, no expl
   "kept_ids": ["<id>", "<id>"]
 }
 ```
+<!-- confidence/salience: float 0..1, or omit the field if unknown -->
 
-The `confidence` and `salience` values **must** be real numbers between 0 and 1 in the actual output — the angle-bracket text above is a placeholder for the schema. Compute them as the maximum across source facts in the group. Do **not** echo the literal placeholder text. If you cannot determine confidence or salience, omit the field entirely (the pipeline will fall back to `max(source.*)` from the source records).
+The `confidence` and `salience` values **must** be real numbers between 0 and 1 in the actual output — the `0.0` above is a structural placeholder, not a literal value to echo. Compute them as the maximum across source facts in the group. If you cannot determine confidence or salience, omit the field entirely (the pipeline will fall back to `max(source.*)` from the source records).
 
 If a bucket is empty, emit it as an empty array (`[]`) rather than omitting the key.
 

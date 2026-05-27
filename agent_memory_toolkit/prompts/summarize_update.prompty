@@ -1,10 +1,13 @@
 ---
 name: summarize_update
+version: v1
 description: Update an existing JSON thread summary with new messages.
 model:
   apiType: chat
   options:
-    temperature: 0.2
+    temperature: 0.1
+    seed: 42
+    maxOutputTokens: 1500
     additionalProperties:
       response_format:
         type: json_object

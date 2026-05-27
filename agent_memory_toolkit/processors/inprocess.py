@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Optional
 
 from .base import ProcessThreadResult, UserSummaryResult
-
-logger = logging.getLogger(__name__)
 
 
 class InProcessProcessor:
@@ -40,8 +37,6 @@ class InProcessProcessor:
             pipeline = PipelineService(store, chat_client, embeddings_client)
 
         self._pipeline = pipeline
-
-    # -- MemoryProcessor protocol ------------------------------------------
 
     def process_thread(
         self,

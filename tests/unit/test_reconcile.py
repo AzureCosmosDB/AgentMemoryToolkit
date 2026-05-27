@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -466,11 +467,6 @@ class TestReconcileMemories:
         assert "TOP 7" in captured_query["sql"]
 
 
-# ---------------------------------------------------------------------------
-# Exact-dedup short-circuit at extract time (Change 5)
-# ---------------------------------------------------------------------------
-
-
 class TestExactDedupShortCircuit:
     def _build(self) -> PipelineService:
         p = PipelineService.__new__(PipelineService)
@@ -573,11 +569,6 @@ class TestExactDedupShortCircuit:
         fact_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
         assert len(fact_docs) == 1
         assert fact_docs[0]["content_hash"] == compute_content_hash("User loves tea")
-
-
-# ---------------------------------------------------------------------------
-# Additional regression tests for round-16 review fixes.
-# ---------------------------------------------------------------------------
 
 
 class TestExactDedupCrossTypeIsolation:
@@ -921,11 +912,6 @@ class TestDedupPoolSizeThreshold:
         assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE
 
 
-# ---------------------------------------------------------------------------
-# Round 17 fixes
-# ---------------------------------------------------------------------------
-
-
 class TestReconcileMergedIdDeterministic:
     """RD#1: merged_id is deterministic on (user, content_hash) so cycles are idempotent."""
 
@@ -1140,12 +1126,6 @@ class TestReconcileNullCheckUsesIsNull:
         sql = (call.kwargs.get("query") or call.args[0]) if call else ""
         assert "IS_NULL(c.superseded_by)" in sql
         assert "c.superseded_by = null" not in sql
-
-
-# ---------------------------------------------------------------------------
-# Round-18 regression tests: out-of-range LLM numbers, etag flow on merged
-# docs, and ``confidence=None`` rendering in facts_text.
-# ---------------------------------------------------------------------------
 
 
 class TestReconcileClampsConfidenceAndSalience:
@@ -1482,3 +1462,103 @@ class TestExtractUpdateSelfCollapseGuard:
         assert p._mark_superseded.call_count == 0
         proc_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "procedural"]
         assert proc_upserts == []
+
+
+class TestReconcileOutcomeTelemetry:
+    """``reconcile.outcome`` structured log line is emitted on every exit path
+    of ``reconcile_memories`` with timing + counts + prompt lineage."""
+
+    @staticmethod
+    def _outcome_records(caplog) -> list:
+        return [
+            r for r in caplog.records
+            if r.name == "agent_memory_toolkit.pipeline"
+            and r.getMessage() == "reconcile.outcome"
+        ]
+
+    def test_reconcile_emits_outcome_log_line_on_success(self, caplog):
+        p = _make_pipeline()
+        facts = [
+            _fact("f1", "User likes aisle seats", confidence=0.9, salience=0.7),
+            _fact("f2", "User prefers aisle seats on flights", confidence=0.85, salience=0.65),
+        ]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "duplicate_groups": [
+                        {
+                            "merged_content": "User prefers aisle seats on flights",
+                            "source_ids": ["f1", "f2"],
+                            "confidence": 0.9,
+                            "salience": 0.7,
+                        }
+                    ],
+                    "contradicted_pairs": [],
+                    "kept_ids": [],
+                }
+            )
+        )
+        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._mark_superseded = MagicMock(return_value=True)
+
+        with caplog.at_level(logging.INFO, logger="agent_memory_toolkit.pipeline"):
+            result = p.reconcile_memories("u1")
+
+        records = self._outcome_records(caplog)
+        assert len(records) == 1, f"expected exactly one reconcile.outcome record, got {len(records)}"
+        rec = records[0]
+        assert rec.operation == "reconcile_memories"
+        assert rec.user_id == "u1"
+        assert isinstance(rec.kept, int)
+        assert isinstance(rec.merged, int)
+        assert isinstance(rec.contradicted, int)
+        assert rec.kept == result["kept"]
+        assert rec.merged == result["merged"]
+        assert rec.contradicted == result["contradicted"]
+        assert rec.candidates_considered == len(facts)
+        assert isinstance(rec.duration_ms, float)
+        assert rec.duration_ms > 0.0
+        assert rec.prompt_id == "dedup.prompty"
+        assert rec.prompt_version == "v1"
+
+    def test_reconcile_emits_outcome_log_line_on_zero_candidates(self, caplog):
+        p = _make_pipeline()
+        p._container.query_items.return_value = iter([])
+        p._run_prompty = MagicMock()
+
+        with caplog.at_level(logging.INFO, logger="agent_memory_toolkit.pipeline"):
+            result = p.reconcile_memories("u1")
+
+        p._run_prompty.assert_not_called()
+        assert result == {"kept": 0, "merged": 0, "contradicted": 0}
+
+        records = self._outcome_records(caplog)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.candidates_considered == 0
+        assert rec.kept == 0
+        assert rec.merged == 0
+        assert rec.contradicted == 0
+        assert rec.user_id == "u1"
+        assert rec.operation == "reconcile_memories"
+        assert isinstance(rec.duration_ms, float)
+        assert rec.duration_ms > 0.0
+        assert rec.prompt_id == "dedup.prompty"
+        assert rec.prompt_version == "v1"
+
+    def test_reconcile_duration_ms_is_positive_float(self, caplog):
+        p = _make_pipeline()
+        facts = [_fact("only", "User is left-handed")]
+        p._container.query_items.return_value = iter(facts)
+        p._run_prompty = MagicMock()
+
+        with caplog.at_level(logging.INFO, logger="agent_memory_toolkit.pipeline"):
+            p.reconcile_memories("u1")
+
+        records = self._outcome_records(caplog)
+        assert len(records) == 1
+        rec = records[0]
+        assert isinstance(rec.duration_ms, float)
+        assert rec.duration_ms > 0.0
+        assert rec.candidates_considered == 1

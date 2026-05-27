@@ -171,7 +171,7 @@ def test_generate_exhausts_retries_on_rate_limit():
     mock_openai_client.chat.completions.create.side_effect = [rate_err] * 3
     client._client = mock_openai_client
 
-    with pytest.raises(LLMError, match="rate-limited"):
+    with pytest.raises(openai.RateLimitError, match="rate limited"):
         client.generate(
             [{"role": "user", "content": "test"}],
             max_retries=3,
@@ -184,14 +184,14 @@ def test_generate_exhausts_retries_on_rate_limit():
 # ---------------------------------------------------------------------------
 
 
-def test_generate_raises_llm_error_on_generic_exception():
+def test_generate_propagates_generic_exception():
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
 
     mock_openai_client = MagicMock()
     mock_openai_client.chat.completions.create.side_effect = RuntimeError("boom")
     client._client = mock_openai_client
 
-    with pytest.raises(LLMError, match="boom"):
+    with pytest.raises(RuntimeError, match="boom"):
         client.generate([{"role": "user", "content": "test"}])
 
 

@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
-from agent_memory_toolkit.exceptions import ConfigurationError, EmbeddingError
+from agent_memory_toolkit.aio.embeddings import AOAI_EMBEDDING_BATCH_SIZE, AsyncEmbeddingsClient
+from agent_memory_toolkit.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -154,7 +154,7 @@ async def test_generate_api_failure(client):
     mock_openai.embeddings.create = AsyncMock(side_effect=Exception("API down"))
     client._client = mock_openai
 
-    with pytest.raises(EmbeddingError, match="API down"):
+    with pytest.raises(Exception, match="API down"):
         await client.generate("hello")
 
 
@@ -195,8 +195,101 @@ async def test_generate_batch_api_failure(client):
     mock_openai.embeddings.create = AsyncMock(side_effect=Exception("timeout"))
     client._client = mock_openai
 
-    with pytest.raises(EmbeddingError, match="timeout"):
+    with pytest.raises(Exception, match="timeout"):
         await client.generate_batch(["hello"])
+
+
+# ===================================================================
+# generate_batch() — N=16 chunk guard
+# ===================================================================
+
+
+def test_default_batch_size_constant_is_16():
+    assert AOAI_EMBEDDING_BATCH_SIZE == 16
+
+
+def _chunked_create_side_effect():
+    """Return a side_effect that builds a per-chunk response shaped to inputs.
+
+    Encodes each input text ``"t{i}"`` as a single-float embedding ``[float(i)]``
+    so callers can assert end-to-end ordering after concatenation.
+    """
+
+    async def _create(*, input, model, **_):  # noqa: A002 - mirror OpenAI kwarg
+        items = []
+        for chunk_idx, text in enumerate(input):
+            global_i = int(text[1:])
+            item = MagicMock()
+            item.embedding = [float(global_i)]
+            item.index = chunk_idx
+            items.append(item)
+        resp = MagicMock()
+        resp.data = items
+        return resp
+
+    return _create
+
+
+async def test_generate_batch_small_calls_api_once(client):
+    mock_openai = MagicMock()
+    mock_openai.embeddings.create = AsyncMock(side_effect=_chunked_create_side_effect())
+    client._client = mock_openai
+
+    texts = [f"t{i}" for i in range(10)]
+    result = await client.generate_batch(texts)
+
+    assert len(result) == 10
+    assert result == [[float(i)] for i in range(10)]
+    assert mock_openai.embeddings.create.await_count == 1
+
+
+async def test_generate_batch_large_chunked_into_16_16_8(client):
+    mock_openai = MagicMock()
+    mock_openai.embeddings.create = AsyncMock(side_effect=_chunked_create_side_effect())
+    client._client = mock_openai
+
+    texts = [f"t{i}" for i in range(40)]
+    result = await client.generate_batch(texts)
+
+    assert mock_openai.embeddings.create.await_count == 3
+    chunk_sizes = [
+        len(call.kwargs["input"]) for call in mock_openai.embeddings.create.await_args_list
+    ]
+    assert chunk_sizes == [16, 16, 8]
+
+    assert len(result) == 40
+    assert result == [[float(i)] for i in range(40)]
+
+
+async def test_generate_batch_empty_no_api_call():
+    client = AsyncEmbeddingsClient(
+        endpoint="https://fake.openai.azure.com/",
+        api_key="fake-key",
+    )
+    mock_openai = MagicMock()
+    mock_openai.embeddings.create = AsyncMock()
+    client._client = mock_openai
+
+    result = await client.generate_batch([])
+
+    assert result == []
+    mock_openai.embeddings.create.assert_not_awaited()
+
+
+async def test_generate_batch_custom_batch_size(client):
+    mock_openai = MagicMock()
+    mock_openai.embeddings.create = AsyncMock(side_effect=_chunked_create_side_effect())
+    client._client = mock_openai
+
+    texts = [f"t{i}" for i in range(12)]
+    result = await client.generate_batch(texts, batch_size=5)
+
+    assert mock_openai.embeddings.create.await_count == 3
+    chunk_sizes = [
+        len(call.kwargs["input"]) for call in mock_openai.embeddings.create.await_args_list
+    ]
+    assert chunk_sizes == [5, 5, 2]
+    assert result == [[float(i)] for i in range(12)]
 
 
 # ===================================================================

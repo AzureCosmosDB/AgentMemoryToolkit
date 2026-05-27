@@ -7,7 +7,6 @@ exposes native ``async def`` methods, so every call here is a direct
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Optional
 
@@ -15,8 +14,6 @@ from agent_memory_toolkit.processors.base import (
     ProcessThreadResult,
     UserSummaryResult,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class AsyncInProcessProcessor:

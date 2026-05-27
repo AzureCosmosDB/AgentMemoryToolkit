@@ -11,14 +11,14 @@ The async counterpart lives in :mod:`agent_memory_toolkit.aio.chat` as
 
 from __future__ import annotations
 
-import logging
+from agent_memory_toolkit.logging import get_logger
 import re
 import time
 from typing import Any
 
 from .exceptions import ConfigurationError, LLMError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 RETRYABLE_STATUS_CODES = (429, 500, 503)
@@ -48,12 +48,6 @@ def unsupported_param(exc: Exception) -> str | None:
 
 def extract_content(response: Any, model: str) -> str:
     """Pull the assistant content out of a chat-completions response.
-
-    Raises ``LLMError`` when the model returned no content (content filter,
-    max-tokens-no-output, or certain reasoning-model paths). Without this
-    guard, downstream JSON parsing crashes with ``AttributeError: 'NoneType'
-    object has no attribute 'strip'`` and the actual root cause is invisible
-    in App Insights.
     """
     if not response.choices:
         raise LLMError(f"LLM returned no choices (model={model})")
@@ -96,7 +90,7 @@ class ChatClient:
         self._api_key = api_key
         self._model = model
         self._api_version = api_version
-        self._client: Any = None  # openai.AzureOpenAI (lazy)
+        self._client: Any = None
 
     def _ensure_client(self) -> Any:
         """Lazily create the ``AzureOpenAI`` client on first use."""
@@ -180,7 +174,10 @@ class ChatClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         LLMError
-            If the chat completion call fails after all retries.
+            If the response has no choices or no content (model-side issue
+            the SDK does not surface as an exception).
+        openai.RateLimitError, openai.APIError
+            Propagated from the SDK after retries are exhausted.
         """
         import openai
 
@@ -221,7 +218,7 @@ class ChatClient:
                     time.sleep(delay)
                     attempt += 1
                     continue
-                raise LLMError(f"LLM rate-limited after {max_retries} attempts: {exc}") from exc
+                raise
             except openai.APIError as exc:
                 status = getattr(exc, "status_code", None)
                 # Reasoning models (gpt-5, o-series) reject custom sampling
@@ -251,11 +248,7 @@ class ChatClient:
                     time.sleep(delay)
                     attempt += 1
                     continue
-                raise LLMError(f"LLM chat completion failed (status={status}): {exc}") from exc
-            except Exception as exc:
-                raise LLMError(f"LLM chat completion failed: {exc}") from exc
-
-        raise LLMError("LLM chat completion failed after all retries")  # pragma: no cover
+                raise
 
     def close(self) -> None:
         """Close the underlying sync HTTP client, if one has been created.

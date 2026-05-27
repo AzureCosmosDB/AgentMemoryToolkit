@@ -1,4 +1,4 @@
-"""Service protocol contracts for the memory client refactor."""
+"""Service protocol contracts for the memory client."""
 
 from __future__ import annotations
 

@@ -10,14 +10,13 @@ LLM call itself stays on the service.
 from __future__ import annotations
 
 import json
-import logging
 import os
+import re
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Optional
 
 from agent_memory_toolkit.exceptions import LLMError
-
-logger = logging.getLogger("agent_memory_toolkit.pipeline")
 
 # Separator for deterministic id seeds. Using NUL ensures user_id /
 # thread_id values can never collide with literal section markers
@@ -37,6 +36,9 @@ PROMPTY_OPTION_ALIASES = {
     "stopSequences": "stop",
     "allowMultipleToolCalls": "parallel_tool_calls",
 }
+
+_FRONT_MATTER_VERSION = re.compile(r"^version:\s*(\S+)\s*$", re.MULTILINE)
+DEFAULT_PROMPT_VERSION = "v1"
 
 
 def is_real_number(v: Any) -> bool:
@@ -222,34 +224,60 @@ def default_prompts_dir() -> str:
     return os.path.join(pkg_dir, "prompts")
 
 
+def _read_prompty_version(path: str | Path) -> str:
+    """Read the ``version:`` key from a prompty file's YAML front-matter.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[:end]
+    match = _FRONT_MATTER_VERSION.search(text)
+    return match.group(1) if match else DEFAULT_PROMPT_VERSION
+
+
 class PromptyLoader:
     """Caching prompty template loader.
 
     Pure-IO module-aware: only reads the filesystem; never calls the LLM.
     Shared by sync and async pipeline services so the prepared (messages,
-    params) tuple has identical formatting on both code paths.
+    params) pair has identical formatting on both code paths.
     """
 
     def __init__(self, prompts_dir: str | None = None) -> None:
         self._prompts_dir = prompts_dir if prompts_dir is not None else default_prompts_dir()
         self._cache: dict[str, Any] = {}
+        self._version_cache: dict[str, str] = {}
 
     @property
     def prompts_dir(self) -> str:
         return self._prompts_dir
 
+    def _path_for(self, filename: str) -> str:
+        return os.path.join(self._prompts_dir, filename)
+
     def load(self, filename: str) -> Any:
         cached = self._cache.get(filename)
         if cached is not None:
             return cached
-        import prompty  # local import to avoid a hard dependency at import time
+        import prompty
 
-        path = os.path.join(self._prompts_dir, filename)
-        loaded = prompty.load(path)
+        loaded = prompty.load(self._path_for(filename))
         self._cache[filename] = loaded
         return loaded
 
-    def prepare(self, filename: str, inputs: dict[str, Any]) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    def prompt_version(self, filename: str) -> str:
+        """Return the ``version:`` declared in the prompty front-matter."""
+        cached = self._version_cache.get(filename)
+        if cached is not None:
+            return cached
+        version = _read_prompty_version(self._path_for(filename))
+        self._version_cache[filename] = version
+        return version
+
+    def prepare(
+        self, filename: str, inputs: dict[str, Any]
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
         """Render a prompty template and return ``(messages, model_params)``."""
         import prompty
 

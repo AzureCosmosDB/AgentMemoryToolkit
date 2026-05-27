@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -15,6 +14,7 @@ from agent_memory_toolkit.exceptions import (
     CosmosOperationError,
     MemoryNotFoundError,
 )
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import MemoryRecord
 from agent_memory_toolkit.store._search_helpers import (
     add_salience_filter,
@@ -26,8 +26,9 @@ from agent_memory_toolkit.store._search_helpers import (
     require_search_terms,
     top_literal,
 )
+from agent_memory_toolkit.store.memory_store import _wrap_cosmos_exception
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AsyncMemoryStore:
@@ -94,7 +95,9 @@ class AsyncMemoryStore:
         try:
             response = await self._container.upsert_item(body=record)
         except Exception as exc:
-            raise CosmosOperationError(f"async add_cosmos upsert failed for record {record.get('id')}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"async add_cosmos upsert failed for record {record.get('id')}: {exc}"
+            ) from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.get("id"), record.get("role"), record.get("type"))
         return response if isinstance(response, dict) else record
 
@@ -148,7 +151,9 @@ class AsyncMemoryStore:
         try:
             await self._container.upsert_item(body=body)
         except Exception as exc:
-            raise CosmosOperationError(f"Async upsert failed for record {record.id}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"Async upsert failed for record {record.id}: {exc}"
+            ) from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
         return record.id
 
@@ -161,11 +166,14 @@ class AsyncMemoryStore:
             len(local_memory),
             batch_size,
         )
-        records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in local_memory]
+        # Local memory is intentionally schemaless (built via ``add_local``),
+        # so we treat each entry as a pre-built Cosmos body and skip the
+        # typed-model round-trip that strict reads use.
+        records = [dict(m) for m in local_memory]
 
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            bodies = [r.to_cosmos_dict() for r in batch]
+            bodies = [dict(r) for r in batch]
 
             to_embed_idx: list[int] = []
             to_embed_text: list[str] = []
@@ -191,7 +199,9 @@ class AsyncMemoryStore:
             try:
                 await asyncio.gather(*tasks)
             except Exception as exc:
-                raise CosmosOperationError(f"Async push_to_cosmos batch upsert failed: {exc}") from exc
+                raise _wrap_cosmos_exception(
+                    exc, message=f"Async push_to_cosmos batch upsert failed: {exc}"
+                ) from exc
 
         logger.info("Async upserted batch of %d records", len(records))
 
@@ -296,7 +306,9 @@ class AsyncMemoryStore:
         try:
             await self._container.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
-            raise CosmosOperationError(f"async update replace failed for {memory_id}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"async update replace failed for {memory_id}: {exc}"
+            ) from exc
 
         logger.info("Async updated record %s", memory_id)
 
@@ -319,7 +331,9 @@ class AsyncMemoryStore:
         try:
             await self._container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
-            raise CosmosOperationError(f"async delete failed for {memory_id}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"async delete failed for {memory_id}: {exc}"
+            ) from exc
 
         logger.info("Async deleted record %s", memory_id)
 
@@ -420,12 +434,14 @@ class AsyncMemoryStore:
             else:
                 await self._container.upsert_item(body=new_doc)
             return True
-        except CosmosAccessConditionFailedError:
-            logger.info(
+        except CosmosAccessConditionFailedError as exc:
+            logger.warning(
                 "supersede skipped (concurrent writer won) id=%s superseder=%s",
                 old_doc.get("id"),
                 superseder_id,
+                extra={"operation": "mark_superseded"},
             )
+            del exc
             return False
         except Exception:
             logger.exception("supersede failed id=%s superseder=%s", old_doc.get("id"), superseder_id)
@@ -509,8 +525,6 @@ class AsyncMemoryStore:
         if category is not None:
             items = [i for i in items if i.get("metadata", {}).get("category") == category]
         return items
-
-    # -- retrieval ----------------------------------------------------------
 
     async def search(
         self,

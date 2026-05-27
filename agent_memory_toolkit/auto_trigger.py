@@ -12,7 +12,7 @@ import :func:`maybe_trigger_steps`; the async variant lives in
 
 from __future__ import annotations
 
-import logging
+from agent_memory_toolkit.logging import get_logger
 from collections.abc import Mapping
 from typing import Any
 
@@ -20,7 +20,7 @@ from agent_memory_toolkit import _counters
 from agent_memory_toolkit import thresholds as default_thresholds
 from agent_memory_toolkit.processors import InProcessProcessor
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _WARNED_OWNER_SKIP: set[int] = set()
 

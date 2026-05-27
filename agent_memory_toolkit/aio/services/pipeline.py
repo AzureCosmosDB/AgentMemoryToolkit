@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+from agent_memory_toolkit.logging import get_logger
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -20,7 +21,14 @@ from typing import Any, Literal, Optional
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
 from agent_memory_toolkit.exceptions import LLMError, ValidationError
-from agent_memory_toolkit.models import MemoryRecord, MemoryType
+from agent_memory_toolkit.models import (
+    EpisodicRecord,
+    FactRecord,
+    ProceduralRecord,
+    ThreadSummaryRecord,
+    UserSummaryRecord,
+    construct_internal,
+)
 from agent_memory_toolkit.services._pipeline_helpers import (
     ID_SEED_SEP as _ID_SEED_SEP,
     PromptyLoader,
@@ -31,15 +39,15 @@ from agent_memory_toolkit.services._pipeline_helpers import (
     parse_llm_json,
 )
 
-logger = logging.getLogger("agent_memory_toolkit.pipeline.aio")
+logger = get_logger("agent_memory_toolkit.pipeline.aio")
 
 
 class _AsyncStoreContainerAdapter:
     """Async equivalent of ``services.pipeline._StoreContainerAdapter``.
 
-    Lets the lifted orchestration body use the same ``query_items``/
-    ``read_item``/``upsert_item`` shape as the sync path while delegating
-    to the underlying :class:`AsyncMemoryStore` primitives.
+    Exposes the ``query_items``/``read_item``/``upsert_item`` shape over
+    :class:`AsyncMemoryStore` so the orchestration body can match the sync
+    path.
     """
 
     def __init__(self, store: AsyncMemoryStore) -> None:
@@ -76,10 +84,6 @@ class AsyncPipelineService:
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
 
-    # -----------------------------------------------------------------------
-    # Private helpers
-    # -----------------------------------------------------------------------
-
     async def _run_prompty(
         self,
         filename: str,
@@ -89,6 +93,31 @@ class AsyncPipelineService:
         messages, params = self._prompty.prepare(filename, inputs)
         response = await self._chat_client.generate(messages, **params)
         return chat_text(response)
+
+    async def _embed_one(self, text: str) -> list[float]:
+        return await self._embeddings.generate(text)
+
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return await self._embeddings.generate_batch(texts)
+
+    def _prompt_lineage(self, filename: str) -> dict[str, str]:
+        """Return ``{prompt_id, prompt_version}`` for stamping a doc.
+
+        Safe no-op fallback (``prompt_version="v1"``) when the loader was
+        never initialised — happens in unit tests that build the service
+        via ``__new__`` to bypass real LLM/embedding clients.
+        """
+        loader = getattr(self, "_prompty", None)
+        version = loader.prompt_version(filename) if loader is not None else "v1"
+        return {"prompt_id": filename, "prompt_version": version}
+
+    def _validate_extracted_doc(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Run an extracted fact/episodic doc through its typed model."""
+        if doc.get("type") == "fact":
+            return construct_internal(FactRecord, doc).to_doc()
+        if doc.get("type") == "episodic":
+            return construct_internal(EpisodicRecord, doc).to_doc()
+        return doc
 
     @staticmethod
     def _chat_text(response: Any) -> str:
@@ -164,10 +193,6 @@ class AsyncPipelineService:
     def _parse_llm_json(text: str | None) -> dict[str, Any]:
         return parse_llm_json(text)
 
-    # -----------------------------------------------------------------------
-    # Public API
-    # -----------------------------------------------------------------------
-
     async def extract_memories(
         self,
         user_id: str,
@@ -206,7 +231,6 @@ class AsyncPipelineService:
         else:
             items = list(turns)
 
-        # Sort and trim
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:
             items = items[:recent_k]
@@ -315,16 +339,18 @@ class AsyncPipelineService:
                 "content": text,
                 "content_hash": new_content_hash,
                 "confidence": confidence,
+                **self._prompt_lineage("extract_memories.prompty"),
                 "metadata": {
-                    "category": fact.get("category"),
+                    "category": fact.get("category") or "general",
                     "subject": fact.get("subject"),
                     "predicate": fact.get("predicate"),
                     "object": fact.get("object"),
                     "temporal_context": fact.get("temporal_context"),
                 },
-                "salience": fact.get("salience"),
+                "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
                 "tags": tags,
                 "created_at": now,
+                "updated_at": now,
             }
 
             if action in {"UPDATE", "CONTRADICT"} and fact.get("supersedes_id"):
@@ -456,9 +482,8 @@ class AsyncPipelineService:
                 "content": text,
                 "content_hash": content_hash,
                 "confidence": confidence,
-                "scope_type": scope_type,
-                "scope_value": scope_value,
                 "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
+                **self._prompt_lineage("extract_memories.prompty"),
                 "metadata": {
                     "scope_type": scope_type,
                     "scope_value": scope_value,
@@ -466,13 +491,18 @@ class AsyncPipelineService:
                     "action_taken": action_taken,
                     "outcome": outcome,
                     "reasoning": ep.get("reasoning"),
-                    "outcome_valence": ep.get("outcome_valence"),
-                    "lesson": ep.get("lesson"),
+                    "outcome_valence": ep.get("outcome_valence") or "neutral",
+                    "lesson": ep.get("lesson") or (
+                        f"{situation} → {action_taken} → {outcome}"
+                        if situation and action_taken and outcome
+                        else text
+                    ),
                     "domain": ep.get("domain"),
                 },
                 "salience": ep.get("salience"),
                 "tags": tags,
                 "created_at": now,
+                "updated_at": now,
             }
 
             docs_to_embed.append(doc)
@@ -500,7 +530,7 @@ class AsyncPipelineService:
                 exact_dedup_skipped += 1
                 continue
             seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
-            det_id = f"unc_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+            det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
             topic_tags = [f"topic:{t}" for t in item.get("tags", [])]
             tags = ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags
@@ -518,12 +548,15 @@ class AsyncPipelineService:
                 "content": text,
                 "content_hash": content_hash,
                 "confidence": confidence,
+                **self._prompt_lineage("extract_memories.prompty"),
                 "metadata": {
+                    "category": "unclassified",
                     "unclassified_reason": item.get("reason"),
                 },
-                "salience": item.get("salience"),
+                "salience": item.get("salience") if item.get("salience") is not None else 0.5,
                 "tags": tags,
                 "created_at": now,
+                "updated_at": now,
             }
 
             docs_to_embed.append(doc)
@@ -535,13 +568,13 @@ class AsyncPipelineService:
         # ---- 8. Generate embeddings in batch ----
         if embed_texts:
             logger.info("extract_memories generating embeddings for %d items", len(embed_texts))
-            embeddings = await self._embeddings.generate_batch(embed_texts)
+            embeddings = await self._embed_batch(embed_texts)
             for doc, emb in zip(docs_to_embed, embeddings):
                 doc["embedding"] = emb
 
         # ---- 9. Upsert all documents ----
         for doc in docs_to_embed:
-            await self._upsert_memory(doc)
+            await self._upsert_memory(self._validate_extracted_doc(doc))
 
         result = {
             "fact_count": sum(
@@ -730,9 +763,21 @@ class AsyncPipelineService:
             "source_episodic_ids": source_episodic_ids,
             "supersedes_ids": [prior_doc["id"]] if prior_doc else [],
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "role": "system",
             "tags": ["sys:procedural", "sys:synthesized"],
+            **self._prompt_lineage("synthesize_procedural.prompty"),
+            "metadata": {},
         }
+        if not new_doc["source_fact_ids"]:
+            new_doc["source_fact_ids"] = list(new_doc.get("source_episodic_ids") or [])
+        if not new_doc["source_fact_ids"]:
+            logger.info(
+                "synthesize_procedural skipping write user_id=%s — no source facts or episodics",
+                user_id,
+            )
+            return {"status": "unchanged", "procedural": prior_doc}
+        new_doc = construct_internal(ProceduralRecord, new_doc).to_doc()
         await self._container.upsert_item(body=new_doc)
 
         if prior_doc:
@@ -826,11 +871,13 @@ class AsyncPipelineService:
                 "summarize_update.prompty",
                 inputs={"prior_summary": prior_text, "transcript": transcript},
             )
+            summary_prompt_filename = "summarize_update.prompty"
         else:
             response_text = await self._run_prompty(
                 "summarize.prompty",
                 inputs={"transcript": transcript},
             )
+            summary_prompt_filename = "summarize.prompty"
 
         # ---- 6. Parse response ----
         parsed = self._parse_llm_json(response_text)
@@ -838,7 +885,7 @@ class AsyncPipelineService:
         topics = parsed.get("topics", [])
 
         # ---- 7. Generate embedding from overview ----
-        summary_embedding = await self._embeddings.generate(overview)
+        summary_embedding = await self._embed_one(overview)
 
         # ---- 8. Build and upsert summary doc ----
         if existing_summary:
@@ -860,6 +907,7 @@ class AsyncPipelineService:
             "embedding": summary_embedding,
             "salience": 1.0,
             "tags": tags,
+            **self._prompt_lineage(summary_prompt_filename),
             "metadata": {
                 "structured_summary": parsed,
                 "source_count": total_source_count,
@@ -869,6 +917,7 @@ class AsyncPipelineService:
             "created_at": existing_summary["created_at"] if existing_summary else query_started_at,
             "updated_at": query_started_at,
         }
+        summary_doc = construct_internal(ThreadSummaryRecord, summary_doc).to_doc()
 
         await self._upsert_memory(summary_doc)
         logger.info(
@@ -975,11 +1024,13 @@ class AsyncPipelineService:
                 "user_summary_update.prompty",
                 inputs={"prior_summary": prior_text, "transcript": transcript},
             )
+            user_summary_prompt_filename = "user_summary_update.prompty"
         else:
             response_text = await self._run_prompty(
                 "user_summary.prompty",
                 inputs={"transcript": transcript},
             )
+            user_summary_prompt_filename = "user_summary.prompty"
 
         # ---- 6. Parse response ----
         parsed = self._parse_llm_json(response_text)
@@ -988,7 +1039,7 @@ class AsyncPipelineService:
         overview = "; ".join(key_facts) if key_facts else response_text
 
         # ---- 7. Generate embedding ----
-        summary_embedding = await self._embeddings.generate(overview)
+        summary_embedding = await self._embed_one(overview)
 
         # ---- 8. Accumulate metadata and upsert ----
         if existing_summary:
@@ -1010,6 +1061,7 @@ class AsyncPipelineService:
             "embedding": summary_embedding,
             "salience": 1.0,
             "tags": ["sys:user-summary"],
+            **self._prompt_lineage(user_summary_prompt_filename),
             "metadata": {
                 "structured_summary": parsed,
                 "source_thread_count": len(all_thread_ids),
@@ -1021,6 +1073,7 @@ class AsyncPipelineService:
             "created_at": existing_summary["created_at"] if existing_summary else query_started_at,
             "updated_at": query_started_at,
         }
+        summary_doc = construct_internal(UserSummaryRecord, summary_doc).to_doc()
 
         await self._upsert_memory(summary_doc)
         logger.info(
@@ -1029,6 +1082,30 @@ class AsyncPipelineService:
             total_memory_count,
         )
         return summary_doc
+
+    def _emit_reconcile_outcome(
+        self,
+        *,
+        started_at: float,
+        user_id: str,
+        candidates: int,
+        result: dict[str, int],
+    ) -> None:
+        duration_ms = (time.monotonic() - started_at) * 1000.0
+        logger.info(
+            "reconcile.outcome",
+            extra={
+                "operation": "reconcile_memories",
+                "user_id": user_id,
+                "candidates_considered": candidates,
+                "kept": result["kept"],
+                "merged": result["merged"],
+                "contradicted": result["contradicted"],
+                "duration_ms": duration_ms,
+                "prompt_id": "dedup.prompty",
+                "prompt_version": "v1",
+            },
+        )
 
     async def reconcile_memories(self, user_id: str, n: int = 50) -> dict[str, int]:
         """Reconcile a user's active facts in a single LLM pass.
@@ -1056,6 +1133,7 @@ class AsyncPipelineService:
         if n > 500:
             raise ValidationError(f"n must be <= 500 to bound prompt size and LLM cost, got {n}")
 
+        started_at = time.monotonic()
         logger.info("reconcile_memories started user_id=%s n=%d", user_id, n)
 
         # ---- 1. Load up to N most recent active facts ----
@@ -1084,7 +1162,14 @@ class AsyncPipelineService:
                 "reconcile_memories: %d facts, nothing to reconcile",
                 len(facts),
             )
-            return {"kept": len(facts), "merged": 0, "contradicted": 0}
+            early_result = {"kept": len(facts), "merged": 0, "contradicted": 0}
+            self._emit_reconcile_outcome(
+                started_at=started_at,
+                user_id=user_id,
+                candidates=len(facts),
+                result=early_result,
+            )
+            return early_result
 
         # ---- 2. Format the facts pool for the prompt ----
         # ``json.dumps`` escapes embedded quotes and pipes inside content so
@@ -1258,22 +1343,29 @@ class AsyncPipelineService:
             merged_id = "fact_" + hashlib.sha256(merged_id_seed.encode()).hexdigest()[:32]
 
             try:
-                merged_record = MemoryRecord(
-                    id=merged_id,
-                    user_id=user_id,
-                    role="system",
-                    memory_type=MemoryType.fact,
-                    content=merged_content,
-                    thread_id=recent_thread_id or f"__reconciled__:{user_id}",
-                    confidence=confidence_val,
-                    salience=salience_val,
-                    supersedes_ids=merged_supersedes,
-                    source_memory_ids=merged_source_memory_ids,
-                    tags=merged_tags,
-                    content_hash=merged_content_hash,
-                    metadata={
-                        "merged_via": "reconcile",
-                        "merged_from_count": len(valid_source_ids),
+                merged_record = construct_internal(
+                    FactRecord,
+                    {
+                        "id": merged_id,
+                        "user_id": user_id,
+                        "role": "system",
+                        "type": "fact",
+                        "content": merged_content,
+                        "thread_id": recent_thread_id or f"__reconciled__:{user_id}",
+                        "confidence": confidence_val if confidence_val is not None else 0.5,
+                        "salience": salience_val if salience_val is not None else 0.5,
+                        "supersedes_ids": merged_supersedes,
+                        "source_memory_ids": merged_source_memory_ids,
+                        "tags": merged_tags,
+                        "content_hash": merged_content_hash,
+                        "metadata": {
+                            "category": "preference",
+                            "merged_via": "reconcile",
+                            "merged_from_count": len(valid_source_ids),
+                        },
+                        **self._prompt_lineage("dedup.prompty"),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
             except Exception:
@@ -1290,7 +1382,7 @@ class AsyncPipelineService:
             # the sources would create a search-index hole until the next
             # reconcile retried. Better to leave the duplicates in place.
             try:
-                merged_record.embedding = await self._embeddings.generate(merged_content)
+                merged_record.embedding = await self._embed_one(merged_content)
             except Exception:
                 logger.exception(
                     "reconcile_memories: embedding failed for merged id=%s; "
@@ -1299,7 +1391,7 @@ class AsyncPipelineService:
                 )
                 continue
 
-            merged_doc = merged_record.to_cosmos_dict()
+            merged_doc = merged_record.to_doc()
             try:
                 merged_doc = await self._upsert_memory(merged_doc)
             except Exception:
@@ -1443,6 +1535,12 @@ class AsyncPipelineService:
             )
         result = {"kept": kept, "merged": merged, "contradicted": contradicted}
         logger.info("reconcile_memories completed: %s", result)
+        self._emit_reconcile_outcome(
+            started_at=started_at,
+            user_id=user_id,
+            candidates=len(facts),
+            result=result,
+        )
         return result
 
     async def build_procedural_context(self, user_id: str) -> str:

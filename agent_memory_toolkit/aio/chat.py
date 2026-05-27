@@ -9,7 +9,7 @@ rate-limit and transient errors.
 from __future__ import annotations
 
 import asyncio
-import logging
+from agent_memory_toolkit.logging import get_logger
 from typing import Any
 
 from agent_memory_toolkit.chat import (
@@ -20,7 +20,7 @@ from agent_memory_toolkit.chat import (
 )
 from agent_memory_toolkit.exceptions import ConfigurationError, LLMError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _is_async_credential(credential: Any) -> bool:
@@ -78,7 +78,7 @@ class AsyncChatClient:
         self._api_key = api_key
         self._model = model
         self._api_version = api_version
-        self._client: Any = None  # openai.AsyncAzureOpenAI (lazy)
+        self._client: Any = None
 
     async def __aenter__(self) -> AsyncChatClient:
         return self
@@ -175,7 +175,10 @@ class AsyncChatClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         LLMError
-            If the chat completion call fails after all retries.
+            If the response has no choices or no content (model-side issue
+            the SDK does not surface as an exception).
+            openai.RateLimitError, openai.APIError
+            Propagated from the SDK after retries are exhausted.
         """
         import openai
 
@@ -216,11 +219,9 @@ class AsyncChatClient:
                     await asyncio.sleep(delay)
                     attempt += 1
                     continue
-                raise LLMError(f"LLM rate-limited after {max_retries} attempts: {exc}") from exc
+                raise
             except openai.APIError as exc:
                 status = getattr(exc, "status_code", None)
-                # Strip-unsupported-param: request-shape repair, not a transient
-                # failure — does NOT consume a retry slot.
                 bad_param = unsupported_param(exc) if status == 400 else None
                 if bad_param and bad_param in kwargs and unsupported_strips < max_unsupported_strips:
                     logger.warning(
@@ -244,11 +245,7 @@ class AsyncChatClient:
                     await asyncio.sleep(delay)
                     attempt += 1
                     continue
-                raise LLMError(f"LLM chat completion failed (status={status}): {exc}") from exc
-            except Exception as exc:
-                raise LLMError(f"LLM chat completion failed: {exc}") from exc
-
-        raise LLMError("LLM chat completion failed after all retries")  # pragma: no cover
+                raise
 
     async def close(self) -> None:
         """Close the underlying async HTTP client, if one has been created."""

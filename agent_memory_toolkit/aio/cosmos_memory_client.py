@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING, Any, Optional
+
+from agent_memory_toolkit.logging import get_logger
 
 from agent_memory_toolkit._base import _BaseMemoryClient
 from agent_memory_toolkit._utils import (
@@ -29,7 +30,7 @@ from agent_memory_toolkit.exceptions import CosmosNotConnectedError, CosmosOpera
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from agent_memory_toolkit.processors.base import ProcessThreadResult, UserSummaryResult  # noqa: F401
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _log_auto_trigger_task_failure(task: "asyncio.Task[Any]") -> None:

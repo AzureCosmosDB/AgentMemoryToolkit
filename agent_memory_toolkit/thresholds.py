@@ -8,11 +8,11 @@ keys, so a single setting flips both.
 
 from __future__ import annotations
 
-import logging
+from agent_memory_toolkit.logging import get_logger
 import os
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DEFAULT_FACT_EXTRACTION_EVERY_N = 1
 DEFAULT_THREAD_SUMMARY_EVERY_N = 10

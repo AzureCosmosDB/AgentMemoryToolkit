@@ -475,7 +475,6 @@ class TestGetMemories:
         result = mem.get_memories()
 
         call_kwargs = container.query_items.call_args.kwargs
-        # Default behavior now includes superseded_by filter
         assert "WHERE" in call_kwargs["query"]
         assert "superseded_by" in call_kwargs["query"]
         assert result == [doc]

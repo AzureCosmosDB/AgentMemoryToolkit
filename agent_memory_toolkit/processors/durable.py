@@ -8,12 +8,12 @@ all ``process_*`` calls into debug-logged no-ops.
 
 from __future__ import annotations
 
-import logging
+from agent_memory_toolkit.logging import get_logger
 from typing import Any, Optional
 
 from .base import ProcessThreadResult, UserSummaryResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class DurableFunctionProcessor:

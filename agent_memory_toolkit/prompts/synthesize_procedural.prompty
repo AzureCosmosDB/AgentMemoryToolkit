@@ -1,10 +1,13 @@
 ---
 name: synthesize_procedural
+version: v1
 description: Synthesize a personalized system prompt for an agent serving this user, derived from the user's stated behavioral preferences and accumulated lessons from past interactions.
 model:
   apiType: chat
   options:
-    temperature: 0.2
+    temperature: 0.0
+    seed: 44
+    maxOutputTokens: 2000
     additionalProperties:
       response_format:
         type: json_object

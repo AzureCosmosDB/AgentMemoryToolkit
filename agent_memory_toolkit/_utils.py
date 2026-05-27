@@ -16,12 +16,46 @@ from typing import Any, Optional
 from ._query_builder import _QueryBuilder
 from .exceptions import ConfigurationError, ValidationError
 
-# ---------------------------------------------------------------------------
-# Validation constants
-# ---------------------------------------------------------------------------
-
 VALID_ROLES = {"agent", "user", "tool", "system"}
 VALID_TYPES = {"turn", "summary", "fact", "user_summary", "procedural", "episodic"}
+
+
+def new_id(memory_type: str) -> str:
+    """Return a fresh, type-prefixed UUID-backed memory id."""
+    prefix_map = {
+        "fact": "fact_",
+        "episodic": "ep_",
+        "procedural": "proc_",
+        "summary": "summary_",
+        "user_summary": "user_summary_",
+    }
+    prefix = prefix_map.get(memory_type, "")
+    return f"{prefix}{uuid.uuid4()}"
+
+
+def new_fact_id() -> str:
+    """Return a fresh ``fact_*`` id."""
+    return new_id("fact")
+
+
+def new_episodic_id() -> str:
+    """Return a fresh ``ep_*`` id."""
+    return new_id("episodic")
+
+
+def new_procedural_id() -> str:
+    """Return a fresh ``proc_*`` id."""
+    return new_id("procedural")
+
+
+def new_summary_id() -> str:
+    """Return a fresh ``summary_*`` id."""
+    return new_id("summary")
+
+
+def new_user_summary_id() -> str:
+    """Return a fresh ``user_summary_*`` id."""
+    return new_id("user_summary")
 
 DEFAULT_TTL_BY_TYPE: dict[str, int | None] = {
     "turn": 2_592_000,  # 30 days
@@ -31,11 +65,6 @@ DEFAULT_TTL_BY_TYPE: dict[str, int | None] = {
     "procedural": None,
     "episodic": 7_776_000,  # 90 days
 }
-
-
-# ---------------------------------------------------------------------------
-# Content hashing
-# ---------------------------------------------------------------------------
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -64,11 +93,6 @@ def compute_content_hash(content: str) -> str:
     return hashlib.sha256(_normalize_for_hash(content).encode("utf-8")).hexdigest()[:32]
 
 
-# ---------------------------------------------------------------------------
-# Memory factory
-# ---------------------------------------------------------------------------
-
-
 def _make_memory(
     user_id: str,
     role: str,
@@ -89,7 +113,6 @@ def _make_memory(
     if memory_type not in VALID_TYPES:
         raise ValidationError(f"type must be one of {VALID_TYPES}, got '{memory_type}'")
 
-    # Apply default TTL if caller didn't specify one
     if ttl is None:
         ttl = DEFAULT_TTL_BY_TYPE.get(memory_type)
 
@@ -282,11 +305,6 @@ def _build_container_kwargs(
     if offer_throughput is not None:
         kwargs["offer_throughput"] = offer_throughput
     return kwargs
-
-
-# ---------------------------------------------------------------------------
-# Connection / query helpers (shared by sync & async Cosmos clients)
-# ---------------------------------------------------------------------------
 
 
 def _validate_connection(

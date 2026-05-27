@@ -6,19 +6,16 @@ connection and generates embeddings via the OpenAI API.
 
 from __future__ import annotations
 
-import logging
+from agent_memory_toolkit.logging import get_logger
 from typing import Any
 
-from .exceptions import ConfigurationError, EmbeddingError
+from .exceptions import ConfigurationError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 
-
-# ---------------------------------------------------------------------------
-# Sync client
-# ---------------------------------------------------------------------------
+AOAI_EMBEDDING_BATCH_SIZE = 16
 
 
 class EmbeddingsClient:
@@ -56,9 +53,7 @@ class EmbeddingsClient:
         self._model = model
         self._dimensions = dimensions
         self._api_version = api_version
-        self._client: Any = None  # openai.AzureOpenAI (lazy)
-
-    # -- internal helpers ---------------------------------------------------
+        self._client: Any = None
 
     def _ensure_client(self) -> Any:
         """Lazily create the ``AzureOpenAI`` client on first use."""
@@ -106,8 +101,6 @@ class EmbeddingsClient:
             kwargs["dimensions"] = self._dimensions
         return kwargs
 
-    # -- public API ---------------------------------------------------------
-
     def generate(self, text: str) -> list[float]:
         """Generate an embedding vector for *text*.
 
@@ -115,44 +108,66 @@ class EmbeddingsClient:
         ------
         ConfigurationError
             If the endpoint or credentials are missing.
-        EmbeddingError
-            If the OpenAI API call fails.
+        openai.OpenAIError
+            Propagated from the SDK on API failure.
         """
         client = self._ensure_client()
         kwargs = self._build_kwargs(text)
-        try:
-            response = client.embeddings.create(**kwargs)
-        except Exception as exc:
-            raise EmbeddingError(f"Embedding generation failed: {exc}") from exc
+        response = client.embeddings.create(**kwargs)
         return response.data[0].embedding
 
-    def generate_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts in a single API call.
+    def generate_batch(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = AOAI_EMBEDDING_BATCH_SIZE,
+    ) -> list[list[float]]:
+        """Generate embeddings for multiple texts.
 
         Returns a list of embedding vectors **in the same order** as *texts*.
+
+        Parameters
+        ----------
+        texts:
+            Texts to embed. An empty list returns ``[]`` with no API call.
+        batch_size:
+            Maximum number of inputs per ``embeddings.create()`` call.
+            Defaults to :data:`AOAI_EMBEDDING_BATCH_SIZE` (16) to stay under
+            the observed AOAI per-request input cap.
 
         Raises
         ------
         ConfigurationError
             If the endpoint or credentials are missing.
-        EmbeddingError
-            If the OpenAI API call fails.
+        openai.OpenAIError
+            Propagated from the SDK on API failure (no retry — see module
+            docstring).
         """
         if not texts:
             return []
 
-        logger.info("Generating embeddings for batch of %d texts", len(texts))
-        client = self._ensure_client()
-        kwargs = self._build_kwargs(texts)
-        try:
-            response = client.embeddings.create(**kwargs)
-        except Exception as exc:
-            raise EmbeddingError(f"Batch embedding generation failed: {exc}") from exc
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
 
-        # The API returns results with an ``index`` field; sort to guarantee
-        # the caller receives embeddings in the same order as the input.
-        sorted_data = sorted(response.data, key=lambda d: d.index)
-        return [item.embedding for item in sorted_data]
+        logger.info(
+            "Generating embeddings for batch of %d texts (batch_size=%d)",
+            len(texts),
+            batch_size,
+        )
+        client = self._ensure_client()
+
+        results: list[list[float]] = []
+        for start in range(0, len(texts), batch_size):
+            chunk = texts[start : start + batch_size]
+            kwargs = self._build_kwargs(chunk)
+            response = client.embeddings.create(**kwargs)
+
+            # The API returns results with an ``index`` field; sort to guarantee
+            # the caller receives embeddings in the same order as the input.
+            sorted_data = sorted(response.data, key=lambda d: d.index)
+            results.extend(item.embedding for item in sorted_data)
+
+        return results
 
     def close(self) -> None:
         """Close the underlying sync HTTP client, if one has been created.

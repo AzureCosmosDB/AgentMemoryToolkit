@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any, Optional
+
+from agent_memory_toolkit.logging import get_logger
 
 from ._base import _BaseMemoryClient
 from ._utils import (
@@ -28,7 +29,7 @@ from .store import MemoryStore
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from .processors import ProcessThreadResult, UserSummaryResult  # noqa: F401
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class CosmosMemoryClient(_BaseMemoryClient):
@@ -448,7 +449,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Build formatted context of relevant past experiences."""
         return self._get_store().build_episodic_context(user_id, query, top_k)
 
-    def extract_memories(self, user_id: str, thread_id: str, recent_k: Optional[int] = None) -> dict[str, int]:
+    def extract_memories(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread."""
         return self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
 

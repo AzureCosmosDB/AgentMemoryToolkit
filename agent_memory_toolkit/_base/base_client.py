@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -16,8 +15,9 @@ from agent_memory_toolkit._utils import (
     _resolve_embedding_dimensions,
 )
 from agent_memory_toolkit.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
+from agent_memory_toolkit.logging import configure_logging, get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class _BaseMemoryClient:
@@ -45,6 +45,7 @@ class _BaseMemoryClient:
         default_credential_module: str = "azure.identity",
     ) -> None:
         """Initialize shared local state, config values, and default credentials."""
+        configure_logging()
         self.local_memory: list[dict[str, Any]] = []
         self._unflushed_turn_counts: dict[tuple[str, str], int] = {}
         self._warned_owner_skip: bool = False

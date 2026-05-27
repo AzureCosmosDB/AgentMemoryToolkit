@@ -183,7 +183,7 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
     assert result["episodic_count"] == 1
     assert result["updated_count"] == 0
     assert [doc["type"] for doc in store.upserts] == ["fact", "episodic"]
-    assert store.upserts[0]["tags"] == ["sys:fact", "sys:auto-extracted", "topic:ui"]
+    assert set(store.upserts[0]["tags"]) == {"sys:fact", "sys:auto-extracted", "topic:ui"}
     assert llm.chat_calls
     assert llm.embed_calls == [["The user prefers dark mode.", "CI retries resolved flaky tests."]]
 

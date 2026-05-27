@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -13,6 +12,7 @@ from agent_memory_toolkit.exceptions import (
     CosmosOperationError,
     MemoryNotFoundError,
 )
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import MemoryRecord
 from agent_memory_toolkit.store._search_helpers import (
     add_salience_filter,
@@ -25,7 +25,12 @@ from agent_memory_toolkit.store._search_helpers import (
     top_literal,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+
+def _wrap_cosmos_exception(exc: BaseException, *, message: str) -> CosmosOperationError:
+    """Wrap a Cosmos SDK exception with a contextual message."""
+    return CosmosOperationError(message)
 
 
 class MemoryStore:
@@ -91,7 +96,9 @@ class MemoryStore:
         try:
             response = self._container.upsert_item(body=record)
         except Exception as exc:
-            raise CosmosOperationError(f"add_cosmos upsert failed for record {record.get('id')}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"add_cosmos upsert failed for record {record.get('id')}: {exc}"
+            ) from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.get("id"), record.get("role"), record.get("type"))
         return response if isinstance(response, dict) else record
 
@@ -145,7 +152,9 @@ class MemoryStore:
         try:
             self._container.upsert_item(body=body)
         except Exception as exc:
-            raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"Upsert failed for record {record.id}: {exc}"
+            ) from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
         return record.id
 
@@ -158,10 +167,10 @@ class MemoryStore:
             len(local_memory),
             batch_size,
         )
-        records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in local_memory]
+        records = [dict(m) for m in local_memory]
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            bodies = [r.to_cosmos_dict() for r in batch]
+            bodies = [dict(r) for r in batch]
 
             to_embed_idx: list[int] = []
             to_embed_text: list[str] = []
@@ -187,7 +196,9 @@ class MemoryStore:
                 try:
                     self._container.upsert_item(body=body)
                 except Exception as exc:
-                    raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
+                    raise _wrap_cosmos_exception(
+                        exc, message=f"Upsert failed for record {record.id}: {exc}"
+                    ) from exc
         logger.info("Upserted batch of %d records", len(records))
 
     def get_memories(
@@ -293,7 +304,9 @@ class MemoryStore:
         try:
             self._container.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
-            raise CosmosOperationError(f"update replace failed for {memory_id}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"update replace failed for {memory_id}: {exc}"
+            ) from exc
 
         logger.info("Updated record %s", memory_id)
 
@@ -318,7 +331,9 @@ class MemoryStore:
         try:
             self._container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
-            raise CosmosOperationError(f"delete failed for {memory_id}: {exc}") from exc
+            raise _wrap_cosmos_exception(
+                exc, message=f"delete failed for {memory_id}: {exc}"
+            ) from exc
 
         logger.info("Deleted record %s", memory_id)
 
@@ -420,12 +435,14 @@ class MemoryStore:
             else:
                 self._container.upsert_item(body=new_doc)
             return True
-        except CosmosAccessConditionFailedError:
-            logger.info(
+        except CosmosAccessConditionFailedError as exc:
+            logger.warning(
                 "supersede skipped (concurrent writer won) id=%s superseder=%s",
                 old_doc.get("id"),
                 superseder_id,
+                extra={"operation": "mark_superseded"},
             )
+            del exc
             return False
         except Exception:
             logger.exception("supersede failed id=%s superseder=%s", old_doc.get("id"), superseder_id)
@@ -512,8 +529,6 @@ class MemoryStore:
         if category is not None:
             items = [i for i in items if i.get("metadata", {}).get("category") == category]
         return items
-
-    # -- retrieval ----------------------------------------------------------
 
     def search(
         self,

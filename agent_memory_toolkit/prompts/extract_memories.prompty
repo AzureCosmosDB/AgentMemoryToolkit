@@ -1,10 +1,13 @@
 ---
 name: extract_memories
+version: v1
 description: Extract facts and episodic memories from a conversation, reconciled against existing memories.
 model:
   apiType: chat
   options:
     temperature: 0.0
+    seed: 42
+    maxOutputTokens: 2500
     additionalProperties:
       response_format:
         type: json_object
@@ -67,8 +70,28 @@ Extract concrete, factual statements that fall into these categories:
 ### Fact Reconciliation
 Before adding a fact, check it against the existing memories provided below. Use the `action` field:
 - **ADD** — This is a genuinely new fact not present in existing memories
-- **UPDATE** — This fact contradicts or refines an existing memory. Set `supersedes_id` to the ID of the memory being replaced
+- **UPDATE** — This fact refines, narrows, or supplies more detail to an existing memory while remaining *compatible* with it (e.g. "user lives in Seattle" → "user lives in Seattle, WA"). Set `supersedes_id` to the ID of the memory being refined
+- **CONTRADICT** — This new fact is the opposite, a negation, or otherwise mutually exclusive with an existing memory (e.g. existing: "user is vegetarian"; new: "user now eats meat"). The old fact is no longer true — emit `CONTRADICT`, **not** UPDATE. Set `supersedes_id` to the ID of the memory being contradicted
 - **NONE** — This fact is already captured in existing memories with no meaningful change. Do not include NONE entries in your output — simply omit them
+
+**UPDATE vs CONTRADICT — the decisive test:** If the old fact and the new fact could both be true at the same moment about the same subject, use UPDATE. If they cannot both be true (one negates, reverses, or excludes the other), use CONTRADICT.
+
+#### Worked example — CONTRADICT
+
+- Existing memory: `[ID: fact_abc123] User is vegetarian.`
+- New turn: *"I started eating meat again last month."*
+- Correct output:
+  ```json
+  {
+    "text": "User eats meat.",
+    "category": "preference",
+    "action": "CONTRADICT",
+    "supersedes_id": "fact_abc123",
+    "confidence": 0.95,
+    "salience": 0.8
+  }
+  ```
+- **Wrong**: emitting `"action": "UPDATE"` here would be a silent bug — the pipeline treats UPDATE as a compatible refinement and CONTRADICT as an opposing claim, and downstream telemetry / belief-revision logic depends on the distinction.
 
 ---
 
@@ -118,7 +141,7 @@ When in doubt:
 ---
 
 ## Existing Memories
-The following facts already exist for this user. Use action=UPDATE with supersedes_id to update contradicted facts. Use action=NONE if a fact is already known.
+The following facts already exist for this user. Use action=UPDATE with supersedes_id to refine a compatible existing fact. Use action=CONTRADICT with supersedes_id when the new fact negates or is mutually exclusive with an existing fact. Use action=NONE if a fact is already known.
 {{existing_facts}}
 
 ---
@@ -370,7 +393,7 @@ You must output ONLY valid JSON matching the schema below. No preamble, no expla
       "salience": 0.8,
       "temporal_context": "optional time ref or null",
       "tags": ["topic:x"],
-      "action": "ADD|UPDATE",
+      "action": "ADD|UPDATE|CONTRADICT",
       "supersedes_id": "id or null"
     }
   ],

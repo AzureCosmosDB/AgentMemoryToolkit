@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.embeddings import EmbeddingsClient
-from agent_memory_toolkit.exceptions import ConfigurationError, EmbeddingError
+from agent_memory_toolkit.embeddings import AOAI_EMBEDDING_BATCH_SIZE, EmbeddingsClient
+from agent_memory_toolkit.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -129,7 +129,7 @@ class TestGenerate:
         mock_client.embeddings.create.side_effect = RuntimeError("API down")
 
         client = _make_client()
-        with pytest.raises(EmbeddingError) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             client.generate("text")
         assert "API down" in str(exc_info.value)
 
@@ -188,5 +188,93 @@ class TestGenerateBatch:
         mock_client.embeddings.create.side_effect = RuntimeError("batch fail")
 
         client = _make_client()
-        with pytest.raises(EmbeddingError):
+        with pytest.raises(RuntimeError):
             client.generate_batch(["a", "b"])
+
+
+# ---------------------------------------------------------------------------
+# generate_batch() — N=16 chunk guard
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateBatchChunking:
+    def test_default_batch_size_constant_is_16(self):
+        assert AOAI_EMBEDDING_BATCH_SIZE == 16
+
+    @patch("openai.AzureOpenAI")
+    def test_small_batch_calls_api_once(self, MockAOAI):
+        mock_client = MagicMock()
+        MockAOAI.return_value = mock_client
+        # 10 items, within default batch_size=16 → single API call.
+        mock_client.embeddings.create.return_value = _mock_batch_response(
+            [[float(i)] for i in range(10)]
+        )
+
+        client = _make_client()
+        result = client.generate_batch([f"t{i}" for i in range(10)])
+
+        assert len(result) == 10
+        assert result == [[float(i)] for i in range(10)]
+        assert mock_client.embeddings.create.call_count == 1
+
+    @patch("openai.AzureOpenAI")
+    def test_large_batch_chunked_into_16_16_8(self, MockAOAI):
+        mock_client = MagicMock()
+        MockAOAI.return_value = mock_client
+
+        # 40 items → ceil(40/16) = 3 calls with chunk sizes (16, 16, 8).
+        # Build response per chunk so each call sees indices 0..chunk_size-1.
+        def _create(*, input, model, **_):  # noqa: A002 - mirror OpenAI kwarg
+            return _mock_batch_response([[float(t)] for t in [int(x[1:]) for x in input]])
+
+        mock_client.embeddings.create.side_effect = _create
+
+        client = _make_client()
+        texts = [f"t{i}" for i in range(40)]
+        result = client.generate_batch(texts)
+
+        # Three calls with expected chunk sizes in order.
+        assert mock_client.embeddings.create.call_count == 3
+        chunk_sizes = [
+            len(call.kwargs["input"]) for call in mock_client.embeddings.create.call_args_list
+        ]
+        assert chunk_sizes == [16, 16, 8]
+
+        # Results preserved in input order across all chunks.
+        assert len(result) == 40
+        assert result == [[float(i)] for i in range(40)]
+
+    @patch("openai.AzureOpenAI")
+    def test_empty_list_no_api_call(self, MockAOAI):
+        mock_client = MagicMock()
+        MockAOAI.return_value = mock_client
+
+        client = _make_client()
+        result = client.generate_batch([])
+
+        assert result == []
+        assert mock_client.embeddings.create.call_count == 0
+        # Lazy-init must not even fire — empty short-circuit comes first.
+        MockAOAI.assert_not_called()
+
+    @patch("openai.AzureOpenAI")
+    def test_custom_batch_size_chunks_accordingly(self, MockAOAI):
+        mock_client = MagicMock()
+        MockAOAI.return_value = mock_client
+
+        def _create(*, input, model, **_):  # noqa: A002
+            return _mock_batch_response([[float(t)] for t in [int(x[1:]) for x in input]])
+
+        mock_client.embeddings.create.side_effect = _create
+
+        client = _make_client()
+        texts = [f"t{i}" for i in range(12)]
+        result = client.generate_batch(texts, batch_size=5)
+
+        # ceil(12/5) = 3 calls with chunk sizes (5, 5, 2).
+        assert mock_client.embeddings.create.call_count == 3
+        chunk_sizes = [
+            len(call.kwargs["input"]) for call in mock_client.embeddings.create.call_args_list
+        ]
+        assert chunk_sizes == [5, 5, 2]
+        assert result == [[float(i)] for i in range(12)]

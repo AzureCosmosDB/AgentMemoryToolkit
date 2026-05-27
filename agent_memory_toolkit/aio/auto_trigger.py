@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
+from agent_memory_toolkit.logging import get_logger
 from collections.abc import Callable
 from typing import Any
 
@@ -16,7 +16,7 @@ from agent_memory_toolkit import thresholds as default_thresholds
 from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor
 from agent_memory_toolkit.auto_trigger import _threshold_int, _threshold_value
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _WARNED_OWNER_SKIP: set[int] = set()
 

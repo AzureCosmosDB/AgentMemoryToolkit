@@ -28,14 +28,14 @@ detect double-write configurations after the fact. It is not a lock.
 
 from __future__ import annotations
 
-import logging
+from agent_memory_toolkit.logging import get_logger
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 USER_COUNTER_THREAD_ID = "__counters__"
 MAX_RETRIES = 3
@@ -97,11 +97,6 @@ def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], o
         existing_owner,
         observer_owner,
     )
-
-
-# ---------------------------------------------------------------------------
-# Sync increment
-# ---------------------------------------------------------------------------
 
 
 def increment_counter_sync(
@@ -183,11 +178,6 @@ def increment_counter_sync(
     return (0, 0)
 
 
-# ---------------------------------------------------------------------------
-# Async increment
-# ---------------------------------------------------------------------------
-
-
 async def increment_counter_async(
     container: Any,
     counter_id: str,
@@ -253,11 +243,6 @@ async def increment_counter_async(
     return (0, 0)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _build_counter_doc(
     *,
     counter_id: str,
@@ -308,9 +293,6 @@ def _build_counter_doc(
     return doc
 
 
-# Patch operations only touch the failure fields; concurrent counter
-# increments on the same doc are unaffected. This avoids the lost-update
-# race that a read → mutate → upsert sequence would have.
 def stamp_failure_sync(
     container: Any,
     counter_id: str,

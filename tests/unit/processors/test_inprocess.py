@@ -72,12 +72,12 @@ def test_close_is_noop():
 
 def test_constructor_builds_pipeline_from_components():
     container = MagicMock()
-    llm = MagicMock()
+    chat = MagicMock()
     embeddings = MagicMock()
 
-    proc = InProcessProcessor(cosmos_container=container, chat_client=llm, embeddings_client=embeddings)
-    # The pipeline should be a real ProcessingPipeline bound to those components
+    proc = InProcessProcessor(cosmos_container=container, chat_client=chat, embeddings_client=embeddings)
+    # The processor should build a PipelineService bound to those components.
     assert proc._pipeline is not None
-    assert proc._pipeline._container is container
-    assert proc._pipeline._llm is llm
+    assert proc._pipeline._store.container is container
+    assert proc._pipeline._chat_client is chat
     assert proc._pipeline._embeddings is embeddings

@@ -2,7 +2,7 @@
 
 Chain: ``SummarizeThread`` → ``PersistSummary``.
 
-``SummarizeThread`` calls ``ProcessingPipeline.generate_thread_summary`` which
+``SummarizeThread`` calls ``PipelineService.generate_thread_summary`` which
 loads turns, calls the LLM, and upserts the summary doc in a single
 self-contained transaction. ``PersistSummary`` is a thin observability shim
 that surfaces an explicit Persist event in App Insights / the Durable status

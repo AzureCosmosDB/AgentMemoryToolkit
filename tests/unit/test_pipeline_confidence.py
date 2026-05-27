@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.pipeline import ProcessingPipeline
+from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit.store import MemoryStore
 
 
 def _make_pipeline(llm_response: dict):
@@ -30,15 +31,12 @@ def _make_pipeline(llm_response: dict):
     upserted: list[dict] = []
     container.upsert_item.side_effect = lambda body: upserted.append(body) or body
 
-    llm = MagicMock()
+    chat = MagicMock()
     embeddings = MagicMock()
     embeddings.generate_batch.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
 
-    pipeline = ProcessingPipeline(
-        cosmos_container=container,
-        chat_client=llm,
-        embeddings_client=embeddings,
-    )
+    store = MemoryStore(container, embeddings_client=embeddings)
+    pipeline = PipelineService(store, chat, embeddings)
     # Avoid real LLM/prompty calls.
     pipeline._run_prompty = MagicMock(return_value=json.dumps(llm_response))
     pipeline._load_existing_memories = MagicMock(return_value=[])
@@ -157,9 +155,9 @@ class TestMarkSupersededDoesNotMutate:
     def test_input_dict_unchanged_on_success(self):
         from azure.core import MatchConditions
 
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
+        from agent_memory_toolkit.services.pipeline import PipelineService
 
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline = PipelineService.__new__(PipelineService)
         pipeline._container = MagicMock()
 
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
@@ -178,9 +176,9 @@ class TestMarkSupersededDoesNotMutate:
     def test_input_dict_unchanged_on_failure(self):
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
+        from agent_memory_toolkit.services.pipeline import PipelineService
 
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline = PipelineService.__new__(PipelineService)
         pipeline._container = MagicMock()
         pipeline._container.replace_item.side_effect = CosmosAccessConditionFailedError(message="412", response=None)
 
@@ -206,9 +204,9 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
     """
 
     def _build_pipeline(self):
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
+        from agent_memory_toolkit.services.pipeline import PipelineService
 
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline = PipelineService.__new__(PipelineService)
         pipeline._embeddings = MagicMock()
         pipeline._embeddings.generate.return_value = [0.1] * 8
         pipeline._upsert_memory = MagicMock()
@@ -260,42 +258,6 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
         upserted = pipeline._upsert_memory.call_args.args[0]
         # Both threads must contribute to the resulting summary metadata.
         assert sorted(upserted["metadata"]["thread_ids"]) == ["t1", "t3"]
-
-
-class TestDrainPipelineResources:
-    """``_init_pipeline`` must drain prior sync resources on re-entry.
-
-    Calling ``connect_cosmos()`` more than once on the same async client
-    (container switch, credential rotation, reconnect) must not leak the
-    predecessor sync EmbeddingsClient or sync CosmosClient.
-    """
-
-    def test_reentry_closes_prior_sync_embeddings_and_cosmos(self):
-        from agent_memory_toolkit.aio.cosmos_memory_client import (
-            AsyncCosmosMemoryClient,
-        )
-
-        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
-        prior_embed = MagicMock()
-        prior_cosmos = MagicMock()
-        client._sync_embeddings_client = prior_embed
-        client._sync_cosmos_client = prior_cosmos
-
-        client._drain_pipeline_resources()
-
-        prior_embed.close.assert_called_once()
-        prior_cosmos.close.assert_called_once()
-        assert client._sync_embeddings_client is None
-        assert client._sync_cosmos_client is None
-
-    def test_drain_is_safe_when_attributes_unset(self):
-        from agent_memory_toolkit.aio.cosmos_memory_client import (
-            AsyncCosmosMemoryClient,
-        )
-
-        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
-        # No attribute set yet — must not AttributeError.
-        client._drain_pipeline_resources()
 
 
 # ---------------------------------------------------------------------------

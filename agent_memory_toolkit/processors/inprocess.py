@@ -1,4 +1,4 @@
-"""In-process :class:`MemoryProcessor` backed by :class:`ProcessingPipeline`."""
+"""In-process :class:`MemoryProcessor` backed by :class:`PipelineService`."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ class InProcessProcessor:
     """Runs the summarize → extract → dedup pipeline inline.
 
     This is the default backend. Wraps an existing
-    :class:`agent_memory_toolkit.pipeline.ProcessingPipeline` instance, or
-    constructs one from the supplied container / LLM / embeddings clients.
+    :class:`agent_memory_toolkit.services.pipeline.PipelineService` instance,
+    or constructs one from the supplied container / LLM / embeddings clients.
     """
 
     def __init__(
@@ -33,13 +33,11 @@ class InProcessProcessor:
                     "InProcessProcessor requires either a `pipeline` instance or "
                     "`cosmos_container`, `chat_client`, and `embeddings_client`."
                 )
-            from ..pipeline import ProcessingPipeline
+            from ..services.pipeline import PipelineService
+            from ..store import MemoryStore
 
-            pipeline = ProcessingPipeline(
-                cosmos_container=cosmos_container,
-                chat_client=chat_client,
-                embeddings_client=embeddings_client,
-            )
+            store = MemoryStore(cosmos_container, embeddings_client=embeddings_client)
+            pipeline = PipelineService(store, chat_client, embeddings_client)
 
         self._pipeline = pipeline
 

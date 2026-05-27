@@ -1,86 +1,68 @@
-"""Synchronous LLM chat completion client for the Agent Memory Toolkit.
+"""Async LLM chat completion client for the Agent Memory Toolkit.
 
-Provides :class:`ChatClient` that lazily initialises an ``openai.AzureOpenAI``
-connection and generates chat completions via the OpenAI API.  Includes
-built-in retry logic with exponential backoff for rate-limit and transient
-errors.
-
-The async counterpart lives in :mod:`agent_memory_toolkit.aio.chat` as
-:class:`AsyncChatClient`.
+Provides :class:`AsyncChatClient` that lazily initialises an
+``openai.AsyncAzureOpenAI`` connection and generates chat completions via
+the OpenAI API.  Includes built-in retry logic with exponential backoff for
+rate-limit and transient errors.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import re
-import time
 from typing import Any
 
-from .exceptions import ConfigurationError, LLMError
+from agent_memory_toolkit.chat import (
+    RETRYABLE_STATUS_CODES,
+    TOKEN_SCOPE,
+    extract_content,
+    unsupported_param,
+)
+from agent_memory_toolkit.exceptions import ConfigurationError, LLMError
 
 logger = logging.getLogger(__name__)
 
-TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
-RETRYABLE_STATUS_CODES = (429, 500, 503)
-# Sampling parameters that some reasoning models (gpt-5, o-series) reject.
-# When the API returns 400 with one of these in the message, we strip it and retry once.
-SAMPLING_PARAMS = ("temperature", "top_p", "frequency_penalty", "presence_penalty")
 
+def _is_async_credential(credential: Any) -> bool:
+    """Return True if *credential* is an azure.identity *async* TokenCredential.
 
-def unsupported_param(exc: Exception) -> str | None:
-    """If *exc* is a 400 about an unsupported sampling param, return its name."""
-    msg = str(exc).lower()
-    if "400" not in msg:
-        return None
-    if not (
-        "does not support" in msg
-        or "is not supported" in msg
-        or "unsupported parameter" in msg
-        or "unsupported value" in msg
-    ):
-        return None
-    for p in SAMPLING_PARAMS:
-        pattern = rf"(?<![a-z_]){re.escape(p)}(?![a-z_])"
-        if re.search(pattern, msg):
-            return p
-    return None
-
-
-def extract_content(response: Any, model: str) -> str:
-    """Pull the assistant content out of a chat-completions response.
-
-    Raises ``LLMError`` when the model returned no content (content filter,
-    max-tokens-no-output, or certain reasoning-model paths). Without this
-    guard, downstream JSON parsing crashes with ``AttributeError: 'NoneType'
-    object has no attribute 'strip'`` and the actual root cause is invisible
-    in App Insights.
+    The async variants (e.g. ``azure.identity.aio.DefaultAzureCredential``)
+    expose ``get_token`` as a coroutine function. Sync variants expose it as
+    a regular method. We detect with :func:`inspect.iscoroutinefunction` so
+    we don't have to import the async identity package just to do an
+    isinstance check.
     """
-    if not response.choices:
-        raise LLMError(f"LLM returned no choices (model={model})")
-    choice = response.choices[0]
-    content = getattr(choice.message, "content", None)
-    if content is None:
-        finish_reason = getattr(choice, "finish_reason", "unknown")
-        raise LLMError(f"LLM returned no content (model={model}, finish_reason={finish_reason})")
-    return content
+    import inspect
+
+    get_token = getattr(credential, "get_token", None)
+    return get_token is not None and inspect.iscoroutinefunction(get_token)
 
 
-class ChatClient:
-    """Synchronous LLM chat completion client backed by Azure OpenAI.
+def _make_sync_token_provider_for_async(credential: Any, scope: str):
+    """Return an async token provider that wraps a *sync* TokenCredential.
 
-    Parameters
-    ----------
-    endpoint:
-        Azure OpenAI resource endpoint URL.
-    credential:
-        Optional Azure ``TokenCredential``.  Used when *api_key* is not set
-        to obtain bearer tokens for the OpenAI service.
-    api_key:
-        Optional API key for the Azure OpenAI resource.
-    model:
-        Deployment / model name.  Defaults to ``"gpt-4o-mini"``.
-    api_version:
-        Azure OpenAI API version.  Defaults to ``"2024-12-01-preview"``.
+    ``AsyncAzureOpenAI`` expects ``azure_ad_token_provider`` to return an
+    awaitable yielding the bearer token. When the caller supplied a sync
+    ``azure.identity.DefaultAzureCredential`` (the common case), we cannot
+    use ``azure.identity.aio.get_bearer_token_provider`` because it
+    ``await``s the credential's ``get_token`` — which is not a coroutine on
+    sync credentials and would raise at runtime.
+
+    Instead we wrap the sync ``get_token`` call in :func:`asyncio.to_thread`
+    so we don't block the event loop, and return the token string directly.
+    """
+
+    async def _provider() -> str:
+        return (await asyncio.to_thread(credential.get_token, scope)).token
+
+    return _provider
+
+
+class AsyncChatClient:
+    """Asynchronous LLM chat completion client backed by Azure OpenAI.
+
+    Mirrors :class:`agent_memory_toolkit.chat.ChatClient` but uses the
+    ``openai.AsyncAzureOpenAI`` client and ``asyncio``-aware retry sleeps.
     """
 
     def __init__(
@@ -96,20 +78,26 @@ class ChatClient:
         self._api_key = api_key
         self._model = model
         self._api_version = api_version
-        self._client: Any = None  # openai.AzureOpenAI (lazy)
+        self._client: Any = None  # openai.AsyncAzureOpenAI (lazy)
+
+    async def __aenter__(self) -> AsyncChatClient:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
 
     def _ensure_client(self) -> Any:
-        """Lazily create the ``AzureOpenAI`` client on first use."""
+        """Lazily create the ``AsyncAzureOpenAI`` client on first use."""
         if self._client is not None:
             return self._client
 
         if not self._endpoint:
             raise ConfigurationError("An LLM endpoint is required", parameter="endpoint")
 
-        from openai import AzureOpenAI
+        from openai import AsyncAzureOpenAI
 
         if self._api_key:
-            self._client = AzureOpenAI(
+            self._client = AsyncAzureOpenAI(
                 api_version=self._api_version,
                 azure_endpoint=self._endpoint,
                 api_key=self._api_key,
@@ -120,10 +108,22 @@ class ChatClient:
                     "Either api_key or a TokenCredential is required for LLM calls",
                     parameter="credential",
                 )
-            from azure.identity import get_bearer_token_provider
 
-            token_provider = get_bearer_token_provider(self._credential, TOKEN_SCOPE)
-            self._client = AzureOpenAI(
+            # Detect sync vs async credential. Callers commonly pass a sync
+            # ``DefaultAzureCredential`` (from ``azure.identity``) — its
+            # ``get_token`` method is *not* awaitable and will hang the async
+            # client if used with ``azure.identity.aio.get_bearer_token_provider``.
+            # When the credential exposes an ``async def get_token`` we use the
+            # async helper directly; otherwise we adapt the sync credential by
+            # offloading token acquisition to a worker thread.
+            if _is_async_credential(self._credential):
+                from azure.identity.aio import get_bearer_token_provider
+
+                token_provider = get_bearer_token_provider(self._credential, TOKEN_SCOPE)
+            else:
+                token_provider = _make_sync_token_provider_for_async(self._credential, TOKEN_SCOPE)
+
+            self._client = AsyncAzureOpenAI(
                 api_version=self._api_version,
                 azure_endpoint=self._endpoint,
                 azure_ad_token_provider=token_provider,
@@ -149,13 +149,10 @@ class ChatClient:
             kwargs["temperature"] = temperature
         if response_format is not None:
             kwargs["response_format"] = response_format
-        # Pass through any additional model parameters (e.g. top_p, seed)
-        # supplied by callers — typically sourced from a prompty file's
-        # ``model.parameters`` block.
         kwargs.update(extra)
         return kwargs
 
-    def generate(
+    async def generate(
         self,
         messages: list[dict[str, str]],
         *,
@@ -168,12 +165,10 @@ class ChatClient:
         """Call chat completions and return the response content string.
 
         Retries on rate limit (429) and transient errors (500, 503) with
-        exponential backoff.
+        exponential backoff using ``asyncio.sleep``.
 
-        Any additional keyword arguments (e.g. ``top_p``, ``seed``) are
-        forwarded directly to ``client.chat.completions.create`` — this lets
-        callers pass through ``model.parameters`` from a prompty file without
-        modification.
+        Any additional keyword arguments are forwarded directly to the OpenAI
+        client — typically sourced from a prompty file's ``model.parameters``.
 
         Raises
         ------
@@ -197,7 +192,7 @@ class ChatClient:
         max_unsupported_strips = 5
         while True:
             try:
-                response = client.chat.completions.create(**kwargs)
+                response = await client.chat.completions.create(**kwargs)
                 usage = response.usage
                 if usage:
                     logger.info(
@@ -218,16 +213,14 @@ class ChatClient:
                         delay,
                         exc,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     attempt += 1
                     continue
                 raise LLMError(f"LLM rate-limited after {max_retries} attempts: {exc}") from exc
             except openai.APIError as exc:
                 status = getattr(exc, "status_code", None)
-                # Reasoning models (gpt-5, o-series) reject custom sampling
-                # parameters with 400. Strip the offending param and retry —
-                # this does NOT consume a retry slot since it's a request-shape
-                # repair, not a transient failure.
+                # Strip-unsupported-param: request-shape repair, not a transient
+                # failure — does NOT consume a retry slot.
                 bad_param = unsupported_param(exc) if status == 400 else None
                 if bad_param and bad_param in kwargs and unsupported_strips < max_unsupported_strips:
                     logger.warning(
@@ -248,7 +241,7 @@ class ChatClient:
                         delay,
                         exc,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     attempt += 1
                     continue
                 raise LLMError(f"LLM chat completion failed (status={status}): {exc}") from exc
@@ -257,18 +250,8 @@ class ChatClient:
 
         raise LLMError("LLM chat completion failed after all retries")  # pragma: no cover
 
-    def close(self) -> None:
-        """Close the underlying sync HTTP client, if one has been created.
-
-        ``openai.AzureOpenAI`` owns an httpx connection pool that leaks
-        across ``with`` blocks unless closed explicitly. Sync callers should
-        invoke this from their own ``close()`` to drain the pool.
-        """
+    async def close(self) -> None:
+        """Close the underlying async HTTP client, if one has been created."""
         if self._client is not None:
-            close = getattr(self._client, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+            await self._client.close()
             self._client = None

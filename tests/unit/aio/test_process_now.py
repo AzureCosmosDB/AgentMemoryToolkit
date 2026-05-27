@@ -28,7 +28,7 @@ def _patch_get_thread(client, turns):
 @pytest.mark.asyncio
 async def test_process_now_with_inprocess_invokes_pipeline():
     client = _connected()
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
@@ -39,15 +39,15 @@ async def test_process_now_with_inprocess_invokes_pipeline():
 
     assert isinstance(result, ProcessThreadResult)
     assert isinstance(client._processor, AsyncInProcessProcessor)
-    pipeline.generate_thread_summary.assert_called_once_with("u", "t")
-    pipeline.extract_memories.assert_called_once_with("u", "t")
-    pipeline.reconcile_memories.assert_called_once_with("u", 50)
+    pipeline.generate_thread_summary.assert_awaited_once_with("u", "t")
+    pipeline.extract_memories.assert_awaited_once_with("u", "t")
+    pipeline.reconcile_memories.assert_awaited_once_with("u", 50)
 
 
 @pytest.mark.asyncio
 async def test_process_now_with_durable_is_noop():
     client = _connected(processor=AsyncDurableFunctionProcessor())
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 
@@ -68,7 +68,7 @@ async def test_process_now_requires_cosmos():
 @pytest.mark.asyncio
 async def test_process_now_and_wait_inprocess_returns_true():
     client = _connected()
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {}
     pipeline.reconcile_memories.return_value = {}

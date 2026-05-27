@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,7 +11,7 @@ from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor, Process
 
 @pytest.mark.asyncio
 async def test_process_thread_calls_summarize_extract_reconcile_in_order():
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 0, "kept": 3}
@@ -32,7 +32,7 @@ async def test_process_thread_calls_summarize_extract_reconcile_in_order():
 
 @pytest.mark.asyncio
 async def test_generate_user_summary_passes_thread_ids():
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.generate_user_summary.return_value = {"id": "us"}
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     res = await proc.generate_user_summary(
@@ -45,7 +45,7 @@ async def test_generate_user_summary_passes_thread_ids():
 
 @pytest.mark.asyncio
 async def test_close_is_noop():
-    proc = AsyncInProcessProcessor(pipeline=MagicMock())
+    proc = AsyncInProcessProcessor(pipeline=AsyncMock())
     assert await proc.close() is None
 
 
@@ -56,7 +56,7 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
     async deployments. Verify the call now succeeds and forwards the
     env-tunable pool size from ``get_dedup_pool_size``."""
     monkeypatch.setenv("DEDUP_POOL_SIZE", "37")
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.reconcile_memories.return_value = {"merged": 4, "contradicted": 1, "kept": 9}
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
@@ -68,7 +68,7 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
 
 @pytest.mark.asyncio
 async def test_process_extract_memories_invokes_pipeline_and_filters_to_ints():
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.extract_memories.return_value = {
         "fact_count": 3,
         "non_int_field": "skip me",
@@ -83,7 +83,7 @@ async def test_process_extract_memories_invokes_pipeline_and_filters_to_ints():
 
 @pytest.mark.asyncio
 async def test_process_thread_summary_invokes_pipeline_and_returns_dict():
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary-1", "content": "..."}
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
@@ -95,9 +95,10 @@ async def test_process_thread_summary_invokes_pipeline_and_returns_dict():
 
 @pytest.mark.asyncio
 async def test_process_thread_summary_returns_none_for_non_dict():
-    pipeline = MagicMock()
+    pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = "not a dict"
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     result = await proc.process_thread_summary(user_id="u", thread_id="t")
     assert result is None
+

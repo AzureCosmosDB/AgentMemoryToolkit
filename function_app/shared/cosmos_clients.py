@@ -3,7 +3,7 @@
 Both sync and async clients are exposed:
 
 * ``get_memories_container()`` returns a *sync* ContainerProxy used by the
-  ``ProcessingPipeline`` activities (the pipeline is sync today).
+  ``PipelineService`` activities (the pipeline is sync today).
 * ``get_counter_container_async()`` returns an *async* AsyncContainerProxy
   used by the change-feed trigger to update counters.
 
@@ -18,7 +18,7 @@ from typing import Any
 
 from . import config
 
-# Sync clients (for activities that call the sync ProcessingPipeline)
+# Sync clients (for activities that call the sync PipelineService)
 _sync_cosmos_client: Any | None = None
 _sync_memories_container: Any | None = None
 

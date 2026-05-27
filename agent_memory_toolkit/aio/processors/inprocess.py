@@ -1,15 +1,12 @@
-"""Async in-process :class:`AsyncMemoryProcessor` backed by :class:`ProcessingPipeline`.
+"""Async in-process :class:`AsyncMemoryProcessor` backed by :class:`AsyncPipelineService`.
 
-The underlying :class:`agent_memory_toolkit.pipeline.ProcessingPipeline` is
-synchronous; this wrapper exposes ``async def`` methods that simply call
-into the sync pipeline. This mirrors the existing pattern in
-:class:`agent_memory_toolkit.aio.cosmos_memory_client.AsyncCosmosMemoryClient`,
-which already runs the pipeline synchronously inside its async API surface.
+The underlying :class:`agent_memory_toolkit.aio.services.pipeline.AsyncPipelineService`
+exposes native ``async def`` methods, so every call here is a direct
+``await`` — no ``asyncio.to_thread`` adapter, no sync sub-clients.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any, Optional
@@ -23,12 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncInProcessProcessor:
-    """Async wrapper around the in-process :class:`ProcessingPipeline`.
-
-    The underlying pipeline is synchronous (multiple LLM + embedding + Cosmos
-    calls). To avoid blocking the event loop, all calls are dispatched to the
-    default thread pool via :func:`asyncio.to_thread`.
-    """
+    """Async in-process orchestrator over :class:`AsyncPipelineService`."""
 
     def __init__(
         self,
@@ -44,13 +36,11 @@ class AsyncInProcessProcessor:
                     "AsyncInProcessProcessor requires either a `pipeline` instance "
                     "or `cosmos_container`, `chat_client`, and `embeddings_client`."
                 )
-            from agent_memory_toolkit.pipeline import ProcessingPipeline
+            from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
+            from agent_memory_toolkit.aio.store import AsyncMemoryStore
 
-            pipeline = ProcessingPipeline(
-                cosmos_container=cosmos_container,
-                chat_client=chat_client,
-                embeddings_client=embeddings_client,
-            )
+            store = AsyncMemoryStore(cosmos_container, embeddings_client=embeddings_client)
+            pipeline = AsyncPipelineService(store, chat_client, embeddings_client)
 
         self._pipeline = pipeline
 
@@ -66,9 +56,9 @@ class AsyncInProcessProcessor:
 
         from ...thresholds import get_dedup_pool_size
 
-        thread_summary = await asyncio.to_thread(self._pipeline.generate_thread_summary, user_id, thread_id)
-        extracted = await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id)
-        reconciled = await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, get_dedup_pool_size())
+        thread_summary = await self._pipeline.generate_thread_summary(user_id, thread_id)
+        extracted = await self._pipeline.extract_memories(user_id, thread_id)
+        reconciled = await self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
 
         deduped_count = self._extract_reconcile_count(reconciled)
 
@@ -90,7 +80,7 @@ class AsyncInProcessProcessor:
         user_id: str,
         thread_id: str,
     ) -> dict[str, int]:
-        extracted = await asyncio.to_thread(self._pipeline.extract_memories, user_id, thread_id)
+        extracted = await self._pipeline.extract_memories(user_id, thread_id)
         return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
 
     async def process_thread_summary(
@@ -99,7 +89,7 @@ class AsyncInProcessProcessor:
         user_id: str,
         thread_id: str,
     ) -> Optional[dict[str, Any]]:
-        summary = await asyncio.to_thread(self._pipeline.generate_thread_summary, user_id, thread_id)
+        summary = await self._pipeline.generate_thread_summary(user_id, thread_id)
         return summary if isinstance(summary, dict) else None
 
     async def process_user_summary(
@@ -108,13 +98,13 @@ class AsyncInProcessProcessor:
         user_id: str,
         thread_ids: Optional[list[str]] = None,
     ) -> UserSummaryResult:
-        summary = await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids)
+        summary = await self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
     async def process_reconcile(self, *, user_id: str) -> int:
         from ...thresholds import get_dedup_pool_size
 
-        reconciled = await asyncio.to_thread(self._pipeline.reconcile_memories, user_id, get_dedup_pool_size())
+        reconciled = await self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
         return self._extract_reconcile_count(reconciled)
 
     @staticmethod
@@ -143,7 +133,7 @@ class AsyncInProcessProcessor:
             ids = [s.get("thread_id") for s in thread_summaries if s.get("thread_id")]
             thread_ids = ids or None
 
-        summary = await asyncio.to_thread(self._pipeline.generate_user_summary, user_id, thread_ids)
+        summary = await self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
     async def synthesize_procedural(
@@ -153,10 +143,11 @@ class AsyncInProcessProcessor:
         force: bool = False,
     ) -> dict[str, Any]:
         """Run procedural prompt synthesis through the in-process pipeline."""
-        return await asyncio.to_thread(self._pipeline.synthesize_procedural, user_id, force=force)
+        return await self._pipeline.synthesize_procedural(user_id, force=force)
 
     async def close(self) -> None:
         return None
 
 
 __all__ = ["AsyncInProcessProcessor"]
+

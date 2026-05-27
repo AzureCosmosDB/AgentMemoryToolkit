@@ -607,13 +607,13 @@ class TestSearchCosmos:
 class TestGenerateThreadSummary:
     async def test_generate_thread_summary(self):
         mem, container = _connected_client()
-        mock_pipeline = MagicMock()
-        mock_pipeline.generate_thread_summary = MagicMock(return_value={"status": "ok"})
+        mock_pipeline = AsyncMock()
+        mock_pipeline.generate_thread_summary.return_value = {"status": "ok"}
         mem._pipeline = mock_pipeline
 
         result = await mem.generate_thread_summary(user_id="u1", thread_id="t1")
 
-        mock_pipeline.generate_thread_summary.assert_called_once_with(
+        mock_pipeline.generate_thread_summary.assert_awaited_once_with(
             "u1",
             "t1",
             None,

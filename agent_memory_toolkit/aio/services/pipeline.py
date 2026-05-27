@@ -1,7 +1,11 @@
-"""Processing pipeline for memory extraction, summarization, and dedup.
+"""Async pipeline service for LLM-driven memory extraction, summaries, and reconciliation.
 
-Shared by both the SDK (in-process calls) and Azure Functions (change feed trigger).
-Uses ChatClient for chat completions and EmbeddingsClient for embeddings.
+This module is the asynchronous sibling of
+:class:`agent_memory_toolkit.services.pipeline.PipelineService`. The two
+share all pure helpers via
+:mod:`agent_memory_toolkit.services._pipeline_helpers`; only the IO call
+sites differ — every Cosmos query, chat completion, and embedding call is
+``await``-ed against the async clients/store.
 """
 
 from __future__ import annotations
@@ -9,195 +13,86 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from ._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
-from .exceptions import LLMError, ValidationError
+from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
+from agent_memory_toolkit.aio.store import AsyncMemoryStore
+from agent_memory_toolkit.exceptions import LLMError, ValidationError
+from agent_memory_toolkit.models import MemoryRecord, MemoryType
+from agent_memory_toolkit.services._pipeline_helpers import (
+    ID_SEED_SEP as _ID_SEED_SEP,
+    PromptyLoader,
+    build_transcript,
+    chat_text,
+    is_real_number as _is_real_number,
+    max_or_none as _max_or_none,
+    parse_llm_json,
+)
 
-logger = logging.getLogger(__name__)
-
-# Separator for deterministic id seeds. Using NUL ensures user_id /
-# thread_id values can never collide with literal section markers
-# (e.g. a thread literally named ``"merged"`` cannot collide with the
-# reconcile-merge id namespace). Defined as a module constant because
-# escape sequences are not permitted inside f-strings on Python 3.11.
-_ID_SEED_SEP = "\x00"
-
-
-def _is_real_number(v: Any) -> bool:
-    """True for ``int``/``float`` excluding ``bool`` (``isinstance(True, int)`` is True)."""
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
-def _max_or_none(values: Any) -> Optional[float]:
-    """Return max of numeric values, ignoring None / non-numeric / bool. None if empty."""
-    nums = [float(v) for v in values if _is_real_number(v)]
-    return max(nums) if nums else None
+logger = logging.getLogger("agent_memory_toolkit.pipeline.aio")
 
 
-class ProcessingPipeline:
-    """Memory processing engine.
+class _AsyncStoreContainerAdapter:
+    """Async equivalent of ``services.pipeline._StoreContainerAdapter``.
 
-    Parameters
-    ----------
-    cosmos_container : ContainerProxy or AsyncContainerProxy
-        The Cosmos DB container client for reading/writing memories.
-    chat_client : ChatClient
-        Client for LLM chat completions.
-    embeddings_client : EmbeddingsClient
-        Client for embedding generation.
-    prompts_dir : str, optional
-        Directory containing ``.prompty`` prompt templates.  Defaults to
-        ``agent_memory_toolkit/prompts/`` bundled with the package.
+    Lets the lifted orchestration body use the same ``query_items``/
+    ``read_item``/``upsert_item`` shape as the sync path while delegating
+    to the underlying :class:`AsyncMemoryStore` primitives.
     """
+
+    def __init__(self, store: AsyncMemoryStore) -> None:
+        self._store = store
+
+    async def query_items(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return await self._store.query(
+            kwargs["query"],
+            parameters=kwargs.get("parameters"),
+            partition_key=kwargs.get("partition_key"),
+            cross_partition=bool(kwargs.get("enable_cross_partition_query")),
+        )
+
+    async def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
+        return await self._store.read_item(item, partition_key)
+
+    async def upsert_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._store.add_cosmos(body)
+
+
+class AsyncPipelineService:
+    """Async LLM orchestration service backed by an async typed memory store."""
 
     def __init__(
         self,
-        cosmos_container: Any,
+        store: AsyncMemoryStore,
         chat_client: Any,
         embeddings_client: Any,
         prompts_dir: str | None = None,
     ) -> None:
-        self._container = cosmos_container
-        self._llm = chat_client
+        self._store = store
+        self._container = _AsyncStoreContainerAdapter(store)
+        self._chat_client = chat_client
         self._embeddings = embeddings_client
-
-        if prompts_dir is not None:
-            self._prompts_dir = prompts_dir
-        else:
-            # Default: prompts/ directory bundled inside the package
-            pkg_dir = os.path.dirname(os.path.abspath(__file__))
-            self._prompts_dir = os.path.join(pkg_dir, "prompts")
-
-        # Cache of loaded prompty.Prompty objects keyed by filename
-        self._prompty_cache: dict[str, Any] = {}
+        self._prompty = PromptyLoader(prompts_dir)
 
     # -----------------------------------------------------------------------
     # Private helpers
     # -----------------------------------------------------------------------
 
-    def _load_prompty(self, filename: str) -> Any:
-        """Load and cache a ``.prompty`` template.
-
-        The returned object exposes ``model.parameters`` (temperature,
-        ``response_format``, etc.) and is consumed by ``prompty.prepare``
-        to render the final ``messages`` list.
-        """
-        cached = self._prompty_cache.get(filename)
-        if cached is not None:
-            return cached
-
-        import prompty  # local import to avoid a hard dependency at import time
-
-        path = os.path.join(self._prompts_dir, filename)
-        loaded = prompty.load(path)
-        self._prompty_cache[filename] = loaded
-        return loaded
-
-    def _run_prompty(
+    async def _run_prompty(
         self,
         filename: str,
         inputs: dict[str, Any],
     ) -> str:
-        """Render a prompty template, run the LLM, and return the response text.
-
-        Model options from the prompty file (``temperature``,
-        ``response_format``, etc.) are passed straight through to the
-        underlying ``ChatClient.generate`` call — no per-call hardcoding.
-        """
-        import prompty
-
-        p = self._load_prompty(filename)
-        messages = self._messages_to_dicts(prompty.prepare(p, inputs=inputs))
-        params = self._extract_prompty_params(p)
-        return self._llm.generate(messages, **params)
+        """Render a prompty template, run the LLM async, and return the response text."""
+        messages, params = self._prompty.prepare(filename, inputs)
+        response = await self._chat_client.generate(messages, **params)
+        return chat_text(response)
 
     @staticmethod
-    def _messages_to_dicts(messages: Any) -> list[dict[str, str]]:
-        """Normalize prompty's prepared output to OpenAI-style message dicts.
-
-        Prompty 2.x returns ``list[Message]`` dataclasses with ``role`` and
-        ``parts`` (rich content parts). Older releases returned plain dicts.
-        We collapse text parts into a single ``content`` string so the result
-        is always the ``[{"role": ..., "content": ...}]`` shape OpenAI's
-        chat completions API expects.
-        """
-        normalized: list[dict[str, str]] = []
-        for msg in messages or []:
-            if isinstance(msg, dict):
-                normalized.append(msg)
-                continue
-            role = getattr(msg, "role", None)
-            content = getattr(msg, "text", None)
-            if content is None:
-                parts = getattr(msg, "parts", None) or []
-                content = "".join(getattr(part, "value", "") for part in parts)
-            if role is None:
-                continue
-            normalized.append({"role": role, "content": content or ""})
-        return normalized
-
-    # Mapping from prompty 2.x ModelOptions field names (camelCase) to the
-    # snake_case kwargs accepted by OpenAI's chat completions API.
-    _PROMPTY_OPTION_ALIASES = {
-        "topP": "top_p",
-        "topK": "top_k",
-        "frequencyPenalty": "frequency_penalty",
-        "presencePenalty": "presence_penalty",
-        "maxOutputTokens": "max_tokens",
-        "stopSequences": "stop",
-        "allowMultipleToolCalls": "parallel_tool_calls",
-    }
-
-    @classmethod
-    def _extract_prompty_params(cls, p: Any) -> dict[str, Any]:
-        """Pull model parameters from a Prompty object across library versions.
-
-        - Prompty 2.x exposes ``model.options`` as a ``ModelOptions``
-          dataclass with camelCase fields plus an ``additionalProperties``
-          dict for things like ``response_format``.
-        - Older 0.1.x releases expose ``model.parameters`` as a plain dict.
-
-        We probe both, normalize camelCase → snake_case for known aliases,
-        flatten ``additionalProperties``, and drop ``None`` values so the
-        underlying ChatClient defaults still apply when a field is unset.
-        """
-        model = getattr(p, "model", None)
-        if model is None:
-            return {}
-
-        # Prompty 0.1.x: parameters is already a dict.
-        legacy = getattr(model, "parameters", None)
-        if legacy:
-            return {k: v for k, v in dict(legacy).items() if v is not None}
-
-        options = getattr(model, "options", None)
-        if options is None:
-            return {}
-
-        # Prompty 2.x: ModelOptions dataclass.
-        try:
-            import dataclasses
-
-            raw = dataclasses.asdict(options) if dataclasses.is_dataclass(options) else dict(options)
-        except Exception:
-            raw = {}
-
-        params: dict[str, Any] = {}
-        for key, value in raw.items():
-            if value is None:
-                continue
-            if key in ("additionalProperties", "additional_properties"):
-                if isinstance(value, dict):
-                    params.update(value)
-                continue
-            if isinstance(value, list) and not value:
-                continue
-            params[cls._PROMPTY_OPTION_ALIASES.get(key, key)] = value
-        return params
+    def _chat_text(response: Any) -> str:
+        return chat_text(response)
 
     @staticmethod
     def _build_transcript(
@@ -205,42 +100,9 @@ class ProcessingPipeline:
         *,
         group_by_thread: bool = False,
     ) -> str:
-        """Build a formatted transcript from memory documents.
+        return build_transcript(items, group_by_thread=group_by_thread)
 
-        Parameters
-        ----------
-        items:
-            Memory dicts with ``role``, ``content``, and optional ``metadata``.
-        group_by_thread:
-            If *True*, group messages under ``=== Thread <id> ===`` headers.
-        """
-        if not group_by_thread:
-            lines: list[str] = []
-            for m in items:
-                role = m.get("role", "unknown")
-                content = m.get("content", "")
-                metadata = m.get("metadata", {})
-                meta_str = f" [metadata: {json.dumps(metadata)}]" if metadata else ""
-                lines.append(f"[{role}]: {content}{meta_str}")
-            return "\n".join(lines)
-
-        threads: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for m in items:
-            threads[m.get("thread_id", "")].append(m)
-
-        parts: list[str] = []
-        for tid, thread_items in threads.items():
-            parts.append(f"=== Thread {tid} ===")
-            for m in thread_items:
-                role = m.get("role", "unknown")
-                content = m.get("content", "")
-                metadata = m.get("metadata", {})
-                meta_str = f" [metadata: {json.dumps(metadata)}]" if metadata else ""
-                parts.append(f"[{role}]: {content}{meta_str}")
-            parts.append("")
-        return "\n".join(parts)
-
-    def _load_existing_memories(
+    async def _load_existing_memories(
         self,
         user_id: str,
         memory_types: list[str],
@@ -267,72 +129,29 @@ class ProcessingPipeline:
         for i, mt in enumerate(memory_types):
             parameters.append({"name": f"@mtype{i}", "value": mt})
 
-        items = list(
-            self._container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
+        return await self._container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
         )
-        return items
 
-    def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Upsert a single memory document to Cosmos DB."""
-        response = self._container.upsert_item(body=doc)
+    async def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Upsert a single memory document via the async memory store."""
+        response = await self._store.add_cosmos(doc)
         if isinstance(response, dict):
             return response
         return doc
 
-    def _mark_superseded(
+    async def _mark_superseded(
         self,
         old_doc: dict[str, Any],
         superseder_id: str,
         *,
         reason: Literal["duplicate", "contradict", "update"],
     ) -> bool:
-        """Atomically set ``superseded_by`` on ``old_doc`` using ETag protection.
-
-        Also stamps ``supersede_reason`` and ``superseded_at`` so apps can
-        distinguish a duplicate-collapse from a contradiction-resolution
-        from an extract-time refinement (``update``) at audit time.
-
-        Supersession is advisory — losing a race here just means another writer
-        already marked the same memory, so we log and return False instead of
-        raising. Returns True on success.
-
-        Using ``replace_item`` with ``MatchConditions.IfNotModified`` prevents
-        the read-modify-write hazard where two concurrent extractions both
-        load an old fact, both compute their own ``det_id``, and the
-        slower writer overwrites the faster writer's ``superseded_by`` link.
-        """
-        from azure.core import MatchConditions
-        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
-
-        etag = old_doc.get("_etag")
-        new_doc = {
-            **old_doc,
-            "superseded_by": superseder_id,
-            "supersede_reason": reason,
-            "superseded_at": datetime.now(timezone.utc).isoformat(),
-        }
+        """Atomically set ``superseded_by`` on ``old_doc`` via the async memory store."""
         try:
-            if etag:
-                self._container.replace_item(
-                    item=new_doc["id"],
-                    body=new_doc,
-                    match_condition=MatchConditions.IfNotModified,
-                    etag=etag,
-                )
-            else:
-                self._container.upsert_item(body=new_doc)
-            return True
-        except CosmosAccessConditionFailedError:
-            logger.info(
-                "supersede skipped (concurrent writer won) id=%s superseder=%s",
-                old_doc.get("id"),
-                superseder_id,
-            )
-            return False
+            return await self._store.mark_superseded(old_doc, superseder_id, reason=reason)
         except Exception:
             logger.exception(
                 "supersede failed id=%s superseder=%s",
@@ -343,33 +162,19 @@ class ProcessingPipeline:
 
     @staticmethod
     def _parse_llm_json(text: str | None) -> dict[str, Any]:
-        """Parse JSON from an LLM response, stripping markdown fences."""
-        if text is None:
-            raise LLMError("LLM returned no content (None response body)")
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            first_newline = cleaned.find("\n")
-            if first_newline >= 0:
-                cleaned = cleaned[first_newline + 1 :]
-            else:
-                cleaned = cleaned.lstrip("`").lstrip()
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        try:
-            return json.loads(cleaned.strip())
-        except json.JSONDecodeError as exc:
-            preview = (text or "")[:200].replace("\n", " ")
-            raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
+        return parse_llm_json(text)
 
     # -----------------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------------
 
-    def extract_memories(
+    async def extract_memories(
         self,
         user_id: str,
         thread_id: str,
         recent_k: int | None = None,
+        *,
+        turns: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread.
 
@@ -387,18 +192,19 @@ class ProcessingPipeline:
         )
 
         # ---- 1. Query thread memories ----
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id"
-        parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
-            {"name": "@thread_id", "value": thread_id},
-        ]
-        items = list(
-            self._container.query_items(
+        if turns is None:
+            query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id"
+            parameters: list[dict[str, Any]] = [
+                {"name": "@user_id", "value": user_id},
+                {"name": "@thread_id", "value": thread_id},
+            ]
+            items = await self._container.query_items(
                 query=query,
                 parameters=parameters,
                 partition_key=[user_id, thread_id],
             )
-        )
+        else:
+            items = list(turns)
 
         # Sort and trim
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
@@ -417,11 +223,12 @@ class ProcessingPipeline:
                 "episodic_count": 0,
                 "unclassified_count": 0,
                 "updated_count": 0,
+                "contradicted_count": 0,
                 "exact_dedup_skipped": 0,
             }
 
         # ---- 2. Load existing memories for reconciliation ----
-        existing = self._load_existing_memories(user_id, ["fact"])
+        existing = await self._load_existing_memories(user_id, ["fact"])
         # Pre-compute exact-content hashes from existing memories for the
         # write-time short-circuit. Saves the embedding call and the upsert
         # RU on identical re-extractions across runs. Unclassified items are
@@ -444,7 +251,7 @@ class ProcessingPipeline:
         # ---- 3. Build transcript and call LLM ----
         transcript = self._build_transcript(items)
 
-        response_text = self._run_prompty(
+        response_text = await self._run_prompty(
             "extract_memories.prompty",
             inputs={"existing_facts": existing_text, "transcript": transcript},
         )
@@ -459,6 +266,7 @@ class ProcessingPipeline:
         docs_to_embed: list[dict[str, Any]] = []
         embed_texts: list[str] = []
         updated_count = 0
+        contradicted_count = 0
         exact_dedup_skipped = 0
 
         # ---- 5. Process facts ----
@@ -519,7 +327,8 @@ class ProcessingPipeline:
                 "created_at": now,
             }
 
-            if action == "UPDATE" and fact.get("supersedes_id"):
+            if action in {"UPDATE", "CONTRADICT"} and fact.get("supersedes_id"):
+                supersede_reason: Literal["update", "contradict"] = "contradict" if action == "CONTRADICT" else "update"
                 # If the new content hashes to the same deterministic id
                 # as the target (UPDATE refines metadata but text is
                 # unchanged), the upsert below would overwrite the
@@ -537,7 +346,7 @@ class ProcessingPipeline:
                 doc["supersedes_ids"] = [fact["supersedes_id"]]
                 # Mark old memory as superseded
                 try:
-                    old_mem = self._container.read_item(
+                    old_mem = await self._container.read_item(
                         item=fact["supersedes_id"],
                         partition_key=[user_id, thread_id],
                     )
@@ -551,8 +360,11 @@ class ProcessingPipeline:
                             fact["supersedes_id"],
                             old_mem.get("superseded_by"),
                         )
-                    elif self._mark_superseded(old_mem, det_id, reason="update"):
-                        updated_count += 1
+                    elif await self._mark_superseded(old_mem, det_id, reason=supersede_reason):
+                        if supersede_reason == "contradict":
+                            contradicted_count += 1
+                        else:
+                            updated_count += 1
                 except Exception:
                     # Try cross-partition query if direct read fails
                     logger.debug(
@@ -564,18 +376,19 @@ class ProcessingPipeline:
                             "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
                             "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
                         )
-                        results = list(
-                            self._container.query_items(
-                                query=q,
-                                parameters=[
-                                    {"name": "@id", "value": fact["supersedes_id"]},
-                                    {"name": "@uid", "value": user_id},
-                                ],
-                                enable_cross_partition_query=True,
-                            )
+                        results = await self._container.query_items(
+                            query=q,
+                            parameters=[
+                                {"name": "@id", "value": fact["supersedes_id"]},
+                                {"name": "@uid", "value": user_id},
+                            ],
+                            enable_cross_partition_query=True,
                         )
-                        if results and self._mark_superseded(results[0], det_id, reason="update"):
-                            updated_count += 1
+                        if results and await self._mark_superseded(results[0], det_id, reason=supersede_reason):
+                            if supersede_reason == "contradict":
+                                contradicted_count += 1
+                            else:
+                                updated_count += 1
                     except Exception as exc:
                         logger.warning(
                             "Failed to mark superseded memory %s: %s",
@@ -722,13 +535,13 @@ class ProcessingPipeline:
         # ---- 8. Generate embeddings in batch ----
         if embed_texts:
             logger.info("extract_memories generating embeddings for %d items", len(embed_texts))
-            embeddings = self._embeddings.generate_batch(embed_texts)
+            embeddings = await self._embeddings.generate_batch(embed_texts)
             for doc, emb in zip(docs_to_embed, embeddings):
                 doc["embedding"] = emb
 
         # ---- 9. Upsert all documents ----
         for doc in docs_to_embed:
-            self._upsert_memory(doc)
+            await self._upsert_memory(doc)
 
         result = {
             "fact_count": sum(
@@ -737,12 +550,13 @@ class ProcessingPipeline:
             "episodic_count": sum(1 for d in docs_to_embed if d["type"] == "episodic"),
             "unclassified_count": sum(1 for d in docs_to_embed if "sys:unclassified" in d.get("tags", [])),
             "updated_count": updated_count,
+            "contradicted_count": contradicted_count,
             "exact_dedup_skipped": exact_dedup_skipped,
         }
         logger.info("extract_memories completed: %s", result)
         return result
 
-    def synthesize_procedural(
+    async def synthesize_procedural(
         self,
         user_id: str,
         *,
@@ -756,44 +570,40 @@ class ProcessingPipeline:
 
         active_filter = "(NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null)"
 
-        prior_docs = list(
-            self._container.query_items(
-                query=(
-                    "SELECT * FROM c WHERE c.user_id = @uid "
-                    "AND c.thread_id = @thread_id "
-                    "AND c.type = @type "
-                    f"AND {active_filter}"
-                ),
-                parameters=[
-                    {"name": "@uid", "value": user_id},
-                    {"name": "@thread_id", "value": "__procedural__"},
-                    {"name": "@type", "value": "procedural"},
-                ],
-                enable_cross_partition_query=True,
-            )
+        prior_docs = await self._container.query_items(
+            query=(
+                "SELECT * FROM c WHERE c.user_id = @uid "
+                "AND c.thread_id = @thread_id "
+                "AND c.type = @type "
+                f"AND {active_filter}"
+            ),
+            parameters=[
+                {"name": "@uid", "value": user_id},
+                {"name": "@thread_id", "value": "__procedural__"},
+                {"name": "@type", "value": "procedural"},
+            ],
+            enable_cross_partition_query=True,
         )
         prior_docs.sort(key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)), reverse=True)
         if len(prior_docs) > 1:
             logger.warning("synthesize_procedural found multiple active docs user_id=%s count=%d", user_id, len(prior_docs))
         prior_doc = prior_docs[0] if prior_docs else None
 
-        behavioral_fact_docs = list(
-            self._container.query_items(
-                query=(
-                    "SELECT * FROM c WHERE c.user_id = @uid "
-                    "AND c.type = @type "
-                    f"AND {active_filter} "
-                    "AND ((IS_DEFINED(c.metadata.category) "
-                    "AND c.metadata.category IN ('preference', 'requirement')) "
-                    "OR (IS_DEFINED(c.salience) AND c.salience >= @min_salience))"
-                ),
-                parameters=[
-                    {"name": "@uid", "value": user_id},
-                    {"name": "@type", "value": "fact"},
-                    {"name": "@min_salience", "value": 0.8},
-                ],
-                enable_cross_partition_query=True,
-            )
+        behavioral_fact_docs = await self._container.query_items(
+            query=(
+                "SELECT * FROM c WHERE c.user_id = @uid "
+                "AND c.type = @type "
+                f"AND {active_filter} "
+                "AND ((IS_DEFINED(c.metadata.category) "
+                "AND c.metadata.category IN ('preference', 'requirement')) "
+                "OR (IS_DEFINED(c.salience) AND c.salience >= @min_salience))"
+            ),
+            parameters=[
+                {"name": "@uid", "value": user_id},
+                {"name": "@type", "value": "fact"},
+                {"name": "@min_salience", "value": 0.8},
+            ],
+            enable_cross_partition_query=True,
         )
         behavioral_fact_docs.sort(
             key=lambda doc: (
@@ -810,21 +620,19 @@ class ProcessingPipeline:
         ]
         behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
 
-        episodic_docs = list(
-            self._container.query_items(
-                query=(
-                    "SELECT * FROM c WHERE c.user_id = @uid "
-                    "AND c.type = @type "
-                    f"AND {active_filter} "
-                    "AND IS_DEFINED(c.metadata.lesson) "
-                    "AND c.metadata.lesson != null"
-                ),
-                parameters=[
-                    {"name": "@uid", "value": user_id},
-                    {"name": "@type", "value": "episodic"},
-                ],
-                enable_cross_partition_query=True,
-            )
+        episodic_docs = await self._container.query_items(
+            query=(
+                "SELECT * FROM c WHERE c.user_id = @uid "
+                "AND c.type = @type "
+                f"AND {active_filter} "
+                "AND IS_DEFINED(c.metadata.lesson) "
+                "AND c.metadata.lesson != null"
+            ),
+            parameters=[
+                {"name": "@uid", "value": user_id},
+                {"name": "@type", "value": "episodic"},
+            ],
+            enable_cross_partition_query=True,
         )
         episodic_docs.sort(
             key=lambda doc: (
@@ -857,26 +665,24 @@ class ProcessingPipeline:
             )
             return {"status": "unchanged", "procedural": prior_doc}
 
-        name_docs = list(
-            self._container.query_items(
-                query=(
-                    "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
-                    "AND c.type = @type "
-                    f"AND {active_filter} "
-                    "AND IS_DEFINED(c.metadata.category) "
-                    "AND c.metadata.category = @category "
-                    "AND IS_DEFINED(c.metadata.predicate) "
-                    "AND c.metadata.predicate = @predicate "
-                    "ORDER BY c._ts DESC"
-                ),
-                parameters=[
-                    {"name": "@uid", "value": user_id},
-                    {"name": "@type", "value": "fact"},
-                    {"name": "@category", "value": "biographical"},
-                    {"name": "@predicate", "value": "name"},
-                ],
-                enable_cross_partition_query=True,
-            )
+        name_docs = await self._container.query_items(
+            query=(
+                "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
+                "AND c.type = @type "
+                f"AND {active_filter} "
+                "AND IS_DEFINED(c.metadata.category) "
+                "AND c.metadata.category = @category "
+                "AND IS_DEFINED(c.metadata.predicate) "
+                "AND c.metadata.predicate = @predicate "
+                "ORDER BY c._ts DESC"
+            ),
+            parameters=[
+                {"name": "@uid", "value": user_id},
+                {"name": "@type", "value": "fact"},
+                {"name": "@category", "value": "biographical"},
+                {"name": "@predicate", "value": "name"},
+            ],
+            enable_cross_partition_query=True,
         )
         user_name = "the user"
         if name_docs:
@@ -893,7 +699,7 @@ class ProcessingPipeline:
                 return "(none)"
             return "\n".join(f"- {value}" for value in cleaned)
 
-        response_text = self._run_prompty(
+        response_text = await self._run_prompty(
             "synthesize_procedural.prompty",
             inputs={
                 "prior_prompt": (prior_doc.get("content") or "") if prior_doc else "",
@@ -927,10 +733,10 @@ class ProcessingPipeline:
             "role": "system",
             "tags": ["sys:procedural", "sys:synthesized"],
         }
-        self._container.upsert_item(body=new_doc)
+        await self._container.upsert_item(body=new_doc)
 
         if prior_doc:
-            self._mark_superseded(prior_doc, new_id, reason="update")
+            await self._mark_superseded(prior_doc, new_id, reason="update")
 
         logger.info(
             "synthesize_procedural synthesized user_id=%s version=%d fact_count=%d episodic_count=%d",
@@ -941,7 +747,7 @@ class ProcessingPipeline:
         )
         return {"status": "synthesized", "procedural": new_doc}
 
-    def generate_thread_summary(
+    async def generate_thread_summary(
         self,
         user_id: str,
         thread_id: str,
@@ -966,7 +772,7 @@ class ProcessingPipeline:
         summary_id = f"summary_{user_id}_{thread_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._container.read_item(
+            existing_summary = await self._container.read_item(
                 item=summary_id,
                 partition_key=[user_id, thread_id],
             )
@@ -987,12 +793,10 @@ class ProcessingPipeline:
 
         query_started_at = datetime.now(timezone.utc).isoformat()
 
-        items = list(
-            self._container.query_items(
-                query=query,
-                parameters=parameters,
-                partition_key=[user_id, thread_id],
-            )
+        items = await self._container.query_items(
+            query=query,
+            parameters=parameters,
+            partition_key=[user_id, thread_id],
         )
 
         if existing_summary and not items:
@@ -1018,12 +822,12 @@ class ProcessingPipeline:
                 prior_text = json.dumps(prior_json, indent=2)
             else:
                 prior_text = existing_summary.get("content", "")
-            response_text = self._run_prompty(
+            response_text = await self._run_prompty(
                 "summarize_update.prompty",
                 inputs={"prior_summary": prior_text, "transcript": transcript},
             )
         else:
-            response_text = self._run_prompty(
+            response_text = await self._run_prompty(
                 "summarize.prompty",
                 inputs={"transcript": transcript},
             )
@@ -1034,7 +838,7 @@ class ProcessingPipeline:
         topics = parsed.get("topics", [])
 
         # ---- 7. Generate embedding from overview ----
-        summary_embedding = self._embeddings.generate(overview)
+        summary_embedding = await self._embeddings.generate(overview)
 
         # ---- 8. Build and upsert summary doc ----
         if existing_summary:
@@ -1066,7 +870,7 @@ class ProcessingPipeline:
             "updated_at": query_started_at,
         }
 
-        self._upsert_memory(summary_doc)
+        await self._upsert_memory(summary_doc)
         logger.info(
             "generate_thread_summary completed id=%s source_count=%d",
             summary_id,
@@ -1074,7 +878,7 @@ class ProcessingPipeline:
         )
         return summary_doc
 
-    def generate_user_summary(
+    async def generate_user_summary(
         self,
         user_id: str,
         thread_ids: list[str] | None = None,
@@ -1108,7 +912,7 @@ class ProcessingPipeline:
         user_summary_id = f"user_summary_{user_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._container.read_item(
+            existing_summary = await self._container.read_item(
                 item=user_summary_id,
                 partition_key=[user_id, "__user_summary__"],
             )
@@ -1128,12 +932,10 @@ class ProcessingPipeline:
 
         query_started_at = datetime.now(timezone.utc).isoformat()
 
-        items = list(
-            self._container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
+        items = await self._container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
         )
 
         if existing_summary and not items:
@@ -1169,12 +971,12 @@ class ProcessingPipeline:
                 prior_text = json.dumps(prior_json, indent=2)
             else:
                 prior_text = existing_summary.get("content", "")
-            response_text = self._run_prompty(
+            response_text = await self._run_prompty(
                 "user_summary_update.prompty",
                 inputs={"prior_summary": prior_text, "transcript": transcript},
             )
         else:
-            response_text = self._run_prompty(
+            response_text = await self._run_prompty(
                 "user_summary.prompty",
                 inputs={"transcript": transcript},
             )
@@ -1186,7 +988,7 @@ class ProcessingPipeline:
         overview = "; ".join(key_facts) if key_facts else response_text
 
         # ---- 7. Generate embedding ----
-        summary_embedding = self._embeddings.generate(overview)
+        summary_embedding = await self._embeddings.generate(overview)
 
         # ---- 8. Accumulate metadata and upsert ----
         if existing_summary:
@@ -1220,7 +1022,7 @@ class ProcessingPipeline:
             "updated_at": query_started_at,
         }
 
-        self._upsert_memory(summary_doc)
+        await self._upsert_memory(summary_doc)
         logger.info(
             "generate_user_summary completed thread_count=%d memory_count=%d",
             len(all_thread_ids),
@@ -1228,7 +1030,7 @@ class ProcessingPipeline:
         )
         return summary_doc
 
-    def reconcile_memories(self, user_id: str, n: int = 50) -> dict[str, int]:
+    async def reconcile_memories(self, user_id: str, n: int = 50) -> dict[str, int]:
         """Reconcile a user's active facts in a single LLM pass.
 
         Loads the most recent ``n`` active (non-superseded) facts for
@@ -1247,8 +1049,6 @@ class ProcessingPipeline:
         ``merged`` and ``contradicted`` count the *losers* that were
         soft-deleted (duplicates and contradictions respectively).
         """
-        from .models import MemoryRecord, MemoryType
-
         if not user_id:
             raise ValidationError("user_id is required")
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:
@@ -1273,12 +1073,10 @@ class ProcessingPipeline:
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
         ]
-        facts = list(
-            self._container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
+        facts = await self._container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
         )
 
         if len(facts) <= 1:
@@ -1313,7 +1111,7 @@ class ProcessingPipeline:
         facts_text = "\n".join(lines)
 
         # ---- 3. Single LLM call over the entire pool ----
-        response_text = self._run_prompty(
+        response_text = await self._run_prompty(
             "dedup.prompty",
             inputs={"facts_text": facts_text},
         )
@@ -1492,7 +1290,7 @@ class ProcessingPipeline:
             # the sources would create a search-index hole until the next
             # reconcile retried. Better to leave the duplicates in place.
             try:
-                merged_record.embedding = self._embeddings.generate(merged_content)
+                merged_record.embedding = await self._embeddings.generate(merged_content)
             except Exception:
                 logger.exception(
                     "reconcile_memories: embedding failed for merged id=%s; "
@@ -1503,7 +1301,7 @@ class ProcessingPipeline:
 
             merged_doc = merged_record.to_cosmos_dict()
             try:
-                merged_doc = self._upsert_memory(merged_doc)
+                merged_doc = await self._upsert_memory(merged_doc)
             except Exception:
                 logger.exception(
                     "reconcile_memories: upsert failed for merged id=%s; aborting duplicate group",
@@ -1522,7 +1320,7 @@ class ProcessingPipeline:
                 # Losing the ETag race means another writer beat us; the
                 # source doc is still active from our perspective and should
                 # not be treated as consumed.
-                if self._mark_superseded(src_doc, merged_record.id, reason="duplicate"):
+                if await self._mark_superseded(src_doc, merged_record.id, reason="duplicate"):
                     merged += 1
                     group_supersede_count += 1
                     source_to_merged_id[sid] = merged_record.id
@@ -1608,7 +1406,7 @@ class ProcessingPipeline:
                 )
                 continue
 
-            if self._mark_superseded(loser_doc, resolved_winner, reason="contradict"):
+            if await self._mark_superseded(loser_doc, resolved_winner, reason="contradict"):
                 contradicted += 1
                 # Track the *original* loser_id from the LLM so the kept
                 # cross-check below can reconcile against the input pool.
@@ -1646,3 +1444,30 @@ class ProcessingPipeline:
         result = {"kept": kept, "merged": merged, "contradicted": contradicted}
         logger.info("reconcile_memories completed: %s", result)
         return result
+
+    async def build_procedural_context(self, user_id: str) -> str:
+        """Return the active synthesized procedural prompt for system injection."""
+        if not user_id:
+            raise ValidationError("user_id is required")
+        query = (
+            "SELECT TOP 1 c.content, c.version FROM c WHERE c.user_id = @user_id "
+            "AND c.thread_id = @thread_id AND c.type = @type "
+            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
+            "ORDER BY c.version DESC"
+        )
+        items = await self._store.query(
+            query,
+            parameters=[
+                {"name": "@user_id", "value": user_id},
+                {"name": "@thread_id", "value": "__procedural__"},
+                {"name": "@type", "value": "procedural"},
+            ],
+            cross_partition=True,
+        )
+        if not items:
+            return ""
+        content = items[0].get("content")
+        return content if isinstance(content, str) else ""
+
+
+__all__ = ["AsyncPipelineService"]

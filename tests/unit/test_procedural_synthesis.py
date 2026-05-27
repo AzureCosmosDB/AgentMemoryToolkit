@@ -7,8 +7,9 @@ from datetime import datetime
 from unittest.mock import MagicMock
 
 from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
-from agent_memory_toolkit.pipeline import ProcessingPipeline
 from agent_memory_toolkit.processors import DurableFunctionProcessor
+from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit.store import MemoryStore
 
 
 def _assert_iso8601(text: str) -> None:
@@ -45,11 +46,8 @@ def _make_extract_pipeline(llm_response: dict):
     embeddings = MagicMock()
     embeddings.generate_batch.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
 
-    pipeline = ProcessingPipeline(
-        cosmos_container=container,
-        chat_client=MagicMock(),
-        embeddings_client=embeddings,
-    )
+    store = MemoryStore(container, embeddings_client=embeddings)
+    pipeline = PipelineService(store, MagicMock(), embeddings)
     pipeline._run_prompty = MagicMock(return_value=json.dumps(llm_response))
     pipeline._load_existing_memories = MagicMock(return_value=[])
     return pipeline, container, upserted
@@ -153,11 +151,9 @@ def _make_synthesis_pipeline(
     upserted, capture = _capture_upserts()
     container.upsert_item.side_effect = capture
 
-    pipeline = ProcessingPipeline(
-        cosmos_container=container,
-        chat_client=MagicMock(),
-        embeddings_client=MagicMock(),
-    )
+    mock_embeddings = MagicMock()
+    store = MemoryStore(container, embeddings_client=mock_embeddings)
+    pipeline = PipelineService(store, MagicMock(), mock_embeddings)
     pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": llm_output}))
     return pipeline, container, upserted
 

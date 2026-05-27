@@ -1,16 +1,21 @@
-"""Async tests for procedural synthesis and procedural prompt retrieval."""
+"""Async tests for procedural synthesis and procedural prompt retrieval.
+
+The procedural-synthesis business logic is covered exhaustively by sync
+tests in ``tests/unit/test_procedural_synthesis.py`` against
+``PipelineService``; ``AsyncPipelineService`` is a 1:1 async mirror.
+These tests verify async wiring — that the client awaits the pipeline
+correctly, that the durable-processor branch short-circuits, and that
+the store-backed procedural reads work over async iterators.
+"""
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from agent_memory_toolkit.aio.processors import AsyncDurableFunctionProcessor
-from agent_memory_toolkit.pipeline import ProcessingPipeline
 
 
 class AsyncIterator:
@@ -25,62 +30,6 @@ class AsyncIterator:
             return next(self._items)
         except StopIteration:
             raise StopAsyncIteration
-
-
-def _assert_iso8601(text: str) -> None:
-    assert text
-    datetime.fromisoformat(text)
-
-
-def _capture_upserts():
-    upserted: list[dict] = []
-
-    def _capture(*, body):
-        upserted.append(body)
-        return body
-
-    return upserted, _capture
-
-
-def _fact_doc(
-    doc_id: str,
-    content: str,
-    *,
-    category: str = "preference",
-    salience: float = 0.9,
-    created_at: str = "2025-01-01T00:00:00+00:00",
-) -> dict:
-    return {
-        "id": doc_id,
-        "user_id": "u1",
-        "thread_id": "t-source",
-        "role": "system",
-        "type": "fact",
-        "content": content,
-        "metadata": {"category": category},
-        "salience": salience,
-        "created_at": created_at,
-    }
-
-
-def _episodic_doc(
-    doc_id: str,
-    *,
-    lesson: str,
-    salience: float = 0.7,
-    created_at: str = "2025-01-02T00:00:00+00:00",
-) -> dict:
-    return {
-        "id": doc_id,
-        "user_id": "u1",
-        "thread_id": "t-source",
-        "role": "system",
-        "type": "episodic",
-        "content": f"Episode {doc_id}",
-        "metadata": {"lesson": lesson},
-        "salience": salience,
-        "created_at": created_at,
-    }
 
 
 def _procedural_doc(
@@ -115,176 +64,26 @@ def _procedural_doc(
     return doc
 
 
-def _make_synthesis_pipeline(
-    *,
-    prior_docs: list[dict] | None = None,
-    fact_docs: list[dict] | None = None,
-    episodic_docs: list[dict] | None = None,
-    name_docs: list[dict] | None = None,
-    llm_output: str = "Follow the user's preferences.",
-):
-    container = MagicMock()
-    container.query_items.side_effect = [
-        list(prior_docs or []),
-        list(fact_docs or []),
-        list(episodic_docs or []),
-        list(name_docs or []),
-    ]
-    upserted, capture = _capture_upserts()
-    container.upsert_item.side_effect = capture
-
-    pipeline = ProcessingPipeline(
-        cosmos_container=container,
-        chat_client=MagicMock(),
-        embeddings_client=MagicMock(),
-    )
-    pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": llm_output}))
-    return pipeline, container, upserted
-
-
 def _make_client(*, processor=None) -> AsyncCosmosMemoryClient:
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
     client._container_client = MagicMock()
     return client
 
 
-@pytest.fixture
-def inline_to_thread():
-    async def _inline(func, /, *args, **kwargs):
-        return func(*args, **kwargs)
-
-    with patch("agent_memory_toolkit.aio.cosmos_memory_client.asyncio.to_thread", new=_inline):
-        yield
-
-
 @pytest.mark.asyncio
-async def test_async_synthesize_procedural_first_synthesis(inline_to_thread):
-    fact_docs = [
-        _fact_doc("f1", "Always use bullet points.", category="preference"),
-        _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
-    ]
-    episodic_docs = [_episodic_doc("e1", lesson="Keep examples small.")]
-    pipeline, _, upserted = _make_synthesis_pipeline(
-        fact_docs=fact_docs,
-        episodic_docs=episodic_docs,
-        llm_output="Async prompt",
-    )
+async def test_async_synthesize_procedural_awaits_async_pipeline():
+    """The client must ``await`` ``AsyncPipelineService.synthesize_procedural``
+    directly (no ``asyncio.to_thread`` indirection) and forward force=True."""
     client = _make_client()
-    client._pipeline = pipeline
-
-    result = await client.synthesize_procedural("u1", force=False)
-
-    assert result["status"] == "synthesized"
-    doc = result["procedural"]
-    assert doc["version"] == 1
-    assert doc["content"] == "Async prompt"
-    assert set(doc["source_fact_ids"]) == {"f1", "f2"}
-    assert set(doc["source_episodic_ids"]) == {"e1"}
-    assert upserted == [doc]
-
-
-@pytest.mark.asyncio
-async def test_async_synthesize_procedural_resynthesis_supersedes_prior(inline_to_thread):
-    prior_doc = _procedural_doc(
-        "proc_u1_1",
-        version=1,
-        content="Old prompt",
-        source_fact_ids=["f1", "f2"],
-        source_episodic_ids=["e1"],
-        ts=1,
-    )
-    fact_docs = [
-        _fact_doc("f1", "Always use bullet points.", category="preference"),
-        _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
-        _fact_doc("f3", "Lead with the answer.", category="preference"),
-    ]
-    episodic_docs = [_episodic_doc("e1", lesson="Keep examples small.")]
-    pipeline, container, upserted = _make_synthesis_pipeline(
-        prior_docs=[prior_doc],
-        fact_docs=fact_docs,
-        episodic_docs=episodic_docs,
-        llm_output="Updated prompt",
-    )
-    client = _make_client()
-    client._pipeline = pipeline
-
-    result = await client.synthesize_procedural("u1")
-
-    assert result["status"] == "synthesized"
-    new_doc = result["procedural"]
-    assert new_doc["version"] == 2
-    assert new_doc["supersedes_ids"] == [prior_doc["id"]]
-    assert upserted == [new_doc]
-    body = container.replace_item.call_args.kwargs["body"]
-    assert body["superseded_by"] == new_doc["id"]
-    _assert_iso8601(body["superseded_at"])
-    assert body["supersede_reason"] == "update"
-
-
-@pytest.mark.asyncio
-async def test_async_synthesize_procedural_noop_when_source_ids_are_unchanged(inline_to_thread):
-    prior_doc = _procedural_doc(
-        "proc_u1_1",
-        version=1,
-        content="Existing prompt",
-        source_fact_ids=["f1", "f2"],
-        source_episodic_ids=["e1"],
-        ts=1,
-    )
-    fact_docs = [
-        _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
-        _fact_doc("f1", "Always use bullet points.", category="preference"),
-    ]
-    episodic_docs = [_episodic_doc("e1", lesson="Keep examples small.")]
-    pipeline, container, _ = _make_synthesis_pipeline(
-        prior_docs=[prior_doc],
-        fact_docs=fact_docs,
-        episodic_docs=episodic_docs,
-    )
-    client = _make_client()
-    client._pipeline = pipeline
-
-    result = await client.synthesize_procedural("u1", force=False)
-
-    assert result == {"status": "unchanged", "procedural": prior_doc}
-    pipeline._run_prompty.assert_not_called()
-    container.upsert_item.assert_not_called()
-    container.replace_item.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_async_synthesize_procedural_force_true_reruns(inline_to_thread):
-    prior_doc = _procedural_doc(
-        "proc_u1_1",
-        version=1,
-        content="Existing prompt",
-        source_fact_ids=["f1", "f2"],
-        source_episodic_ids=["e1"],
-        ts=1,
-    )
-    fact_docs = [
-        _fact_doc("f1", "Always use bullet points.", category="preference"),
-        _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
-    ]
-    episodic_docs = [_episodic_doc("e1", lesson="Keep examples small.")]
-    pipeline, container, upserted = _make_synthesis_pipeline(
-        prior_docs=[prior_doc],
-        fact_docs=fact_docs,
-        episodic_docs=episodic_docs,
-        llm_output="Refreshed async prompt",
-    )
-    client = _make_client()
+    pipeline = AsyncMock()
+    expected = {"status": "synthesized", "procedural": {"id": "proc_u1_1", "version": 1}}
+    pipeline.synthesize_procedural.return_value = expected
     client._pipeline = pipeline
 
     result = await client.synthesize_procedural("u1", force=True)
 
-    assert result["status"] == "synthesized"
-    new_doc = result["procedural"]
-    assert new_doc["version"] == 2
-    assert upserted == [new_doc]
-    body = container.replace_item.call_args.kwargs["body"]
-    assert body["superseded_by"] == new_doc["id"]
-    assert body["supersede_reason"] == "update"
+    assert result == expected
+    pipeline.synthesize_procedural.assert_awaited_once_with("u1", force=True)
 
 
 @pytest.mark.asyncio
@@ -367,7 +166,7 @@ async def test_async_get_procedural_history_orders_active_first_then_newest_vers
 @pytest.mark.asyncio
 async def test_async_client_synthesize_procedural_defers_remote_processors():
     client = _make_client(processor=AsyncDurableFunctionProcessor())
-    client._pipeline = MagicMock()
+    client._pipeline = AsyncMock()
 
     result = await client.synthesize_procedural("u1")
 

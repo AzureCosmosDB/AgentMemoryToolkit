@@ -60,8 +60,10 @@ class ProcessingPipeline:
         chat_client: Any,
         embeddings_client: Any,
         prompts_dir: str | None = None,
+        cosmos_turns_container: Any | None = None,
     ) -> None:
         self._container = cosmos_container
+        self._turns_container = cosmos_turns_container or cosmos_container
         self._llm = chat_client
         self._embeddings = embeddings_client
 
@@ -399,6 +401,17 @@ class ProcessingPipeline:
                 partition_key=[user_id, thread_id],
             )
         )
+        # Also fetch from the turns container if it differs from the main one
+        if getattr(self, "_turns_container", self._container) is not self._container:
+            items.extend(
+                list(
+                    self._turns_container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        partition_key=[user_id, thread_id],
+                    )
+                )
+            )
 
         # Sort and trim
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
@@ -902,6 +915,17 @@ class ProcessingPipeline:
                 partition_key=[user_id, thread_id],
             )
         )
+        # Also fetch from the turns container if it differs from the main one
+        if getattr(self, "_turns_container", self._container) is not self._container:
+            items.extend(
+                list(
+                    self._turns_container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        partition_key=[user_id, thread_id],
+                    )
+                )
+            )
 
         if existing_summary and not items:
             logger.info("generate_thread_summary no new memories, returning existing")
@@ -1043,6 +1067,17 @@ class ProcessingPipeline:
                 enable_cross_partition_query=True,
             )
         )
+        # Also fetch from the turns container if it differs from the main one
+        if getattr(self, "_turns_container", self._container) is not self._container:
+            items.extend(
+                list(
+                    self._turns_container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        enable_cross_partition_query=True,
+                    )
+                )
+            )
 
         if existing_summary and not items:
             logger.info("generate_user_summary no new memories, returning existing")

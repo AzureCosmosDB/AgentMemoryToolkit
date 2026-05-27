@@ -97,6 +97,7 @@ class CosmosMemoryClient:
         cosmos_key: Optional[str] = None,
         cosmos_database: Optional[str] = None,
         cosmos_container: Optional[str] = None,
+        cosmos_turns_container: Optional[str] = None,
         cosmos_counter_container: Optional[str] = None,
         cosmos_lease_container: Optional[str] = None,
         cosmos_throughput_mode: Optional[str] = None,
@@ -122,6 +123,10 @@ class CosmosMemoryClient:
         self._cosmos_key = cosmos_key
         self._cosmos_database = cosmos_database or "ai_memory"
         self._cosmos_container = cosmos_container or "memories"
+        # None means use main container. Note: change-feed-based triggers
+        # (e.g., Azure Functions) bound to the main container will NOT fire
+        # for turns written to a dedicated turns container.
+        self._cosmos_turns_container = cosmos_turns_container
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
@@ -169,6 +174,7 @@ class CosmosMemoryClient:
         # Internal Cosmos SDK handles
         self._cosmos_client: Any = None
         self._container_client: Any = None
+        self._turns_container_client: Any = None  # Separate container for turns (optional)
         self._counter_container_client: Any = None
 
         # Composed sub-clients
@@ -217,6 +223,7 @@ class CosmosMemoryClient:
             self._cosmos_client.close()
             self._cosmos_client = None
             self._container_client = None
+            self._turns_container_client = None
             self._counter_container_client = None
             logger.info("Cosmos client closed")
         # Drain LLM/embeddings httpx pools — openai.AzureOpenAI keeps them
@@ -386,6 +393,7 @@ class CosmosMemoryClient:
         key: Optional[str] = None,
         database: Optional[str] = None,
         container: Optional[str] = None,
+        turns_container: Optional[str] = None,
     ) -> None:
         """Establish a connection to a Cosmos DB container.
 
@@ -394,6 +402,9 @@ class CosmosMemoryClient:
 
         Either *credential* (Entra ID) or *key* (account key) may be
         provided.  *credential* takes precedence.
+
+        If *turns_container* is provided, it overrides the constructor's
+        ``cosmos_turns_container`` setting for this connection.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
         if credential is not None:
@@ -403,6 +414,8 @@ class CosmosMemoryClient:
             self._cosmos_key = key
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
+        if turns_container is not None:
+            self._cosmos_turns_container = turns_container
 
         _validate_connection(
             self._cosmos_endpoint,
@@ -422,6 +435,19 @@ class CosmosMemoryClient:
 
             self._cosmos_client = client
             self._container_client = container_handle
+
+            # Connect turns container if configured separately
+            if self._cosmos_turns_container:
+                turns_handle = db.get_container_client(self._cosmos_turns_container)
+                self._turns_container_client = turns_handle
+                logger.info(
+                    "Connected turns container: %s/%s",
+                    self._cosmos_database,
+                    self._cosmos_turns_container,
+                )
+            else:
+                self._turns_container_client = None
+
             self._init_pipeline()
         except Exception as exc:
             raise CosmosOperationError(f"Failed to connect to Cosmos DB: {exc}") from exc
@@ -436,6 +462,7 @@ class CosmosMemoryClient:
         self,
         database: Optional[str] = None,
         container: Optional[str] = None,
+        turns_container: Optional[str] = None,
         counter_container: Optional[str] = None,
         lease_container: Optional[str] = None,
         endpoint: Optional[str] = None,
@@ -477,6 +504,8 @@ class CosmosMemoryClient:
             self._cosmos_key = key
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
+        if turns_container is not None:
+            self._cosmos_turns_container = turns_container
         self._cosmos_counter_container = counter_container or self._cosmos_counter_container
         self._cosmos_lease_container = lease_container or self._cosmos_lease_container
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(
@@ -546,6 +575,29 @@ class CosmosMemoryClient:
             )
             self._cosmos_client = client
             self._container_client = container_handle
+
+            # Create and connect separate turns container if configured
+            if self._cosmos_turns_container:
+                turns_handle = db.create_container_if_not_exists(
+                    **_build_container_kwargs(
+                        container_id=self._cosmos_turns_container,
+                        partition_key=partition_key,
+                        offer_throughput=offer_throughput,
+                        default_ttl=-1,
+                        indexing_policy=idx_policy,
+                        vector_embedding_policy=vec_policy,
+                        full_text_policy=ft_policy,
+                    )
+                )
+                self._turns_container_client = turns_handle
+                logger.info(
+                    "Created turns container: %s/%s",
+                    self._cosmos_database,
+                    self._cosmos_turns_container,
+                )
+            else:
+                self._turns_container_client = None
+
             self._init_pipeline()
         except Exception as exc:
             raise CosmosOperationError(f"Failed to create memory store: {exc}") from exc
@@ -566,6 +618,7 @@ class CosmosMemoryClient:
             cosmos_container=self._container_client,
             chat_client=self._chat_client,
             embeddings_client=self._embeddings_client,
+            cosmos_turns_container=self._turns_container_client,
         )
         self._warn_on_embedding_dim_mismatch()
 
@@ -586,6 +639,7 @@ class CosmosMemoryClient:
                 logger.warning("Failed to close prior Cosmos client during reconnect", exc_info=True)
         self._cosmos_client = None
         self._container_client = None
+        self._turns_container_client = None
         self._counter_container_client = None
         self._pipeline = None
         if not self._processor_explicit:
@@ -874,6 +928,80 @@ class CosmosMemoryClient:
         if self._container_client is None:
             raise CosmosNotConnectedError()
 
+    def _container_for_type(self, memory_type: str) -> Any:
+        """Return the appropriate container client based on memory type.
+
+        When ``cosmos_turns_container`` is configured, turn-type documents
+        are routed to the dedicated turns container. All other memory types
+        (fact, summary, episodic, procedural, user_summary) use the main
+        memories container.
+        """
+        if memory_type == "turn" and self._turns_container_client is not None:
+            return self._turns_container_client
+        return self._container_client
+
+    def _container_for_query(self, memory_types: Optional[list[str]] = None) -> Any:
+        """Return a single container for a read query.
+
+        This helper is intended for callers that target a known single
+        container (e.g., ``get_memories`` for derived memories, ``search_cosmos``
+        for vector search). It does NOT merge across containers.
+
+        When a dedicated turns container is configured:
+
+        * turn-only queries → turns container
+        * non-turn / unspecified / mixed queries → main memories container
+
+        Callers that need complete results across both containers (e.g.,
+        ``get_thread``) should use ``_containers_for_query()`` instead.
+
+        Note: ``get_memories(memory_types=None)`` returns derived memories
+        only (facts, episodic, procedural, summaries). Raw turns are
+        retrieved via ``get_thread()``.
+        """
+        if not memory_types:
+            return self._container_client
+
+        has_turn = any(t == "turn" for t in memory_types)
+        has_not_turn = any(t != "turn" for t in memory_types)
+
+        if self._turns_container_client is not None:
+            if has_turn and not has_not_turn:
+                return self._turns_container_client
+            if not has_turn:
+                return self._container_client
+            # Mixed: fall back to main (turns in separate container won't
+            # appear but this preserves backward-compat for callers that
+            # don't handle multi-container merging)
+            return self._container_client
+        return self._container_client
+
+    def _containers_for_query(self, memory_types: Optional[list[str]] = None) -> list[Any]:
+        """Return candidate containers for a read query.
+
+        Unlike :meth:`_container_for_query` which returns a single container,
+        this returns all containers that should be queried to get complete
+        results, enabling callers to merge across containers.
+        """
+        if self._turns_container_client is None:
+            return [self._container_client]
+
+        if not memory_types:
+            # Query spans both the main memories container and the
+            # turns container when memory_types is None. Query both
+            # containers explicitly or provide a single-container filter.
+            return [self._container_client, self._turns_container_client]
+
+        has_turn = any(t == "turn" for t in memory_types)
+        has_not_turn = any(t != "turn" for t in memory_types)
+
+        if has_turn and has_not_turn:
+            return [self._container_client, self._turns_container_client]
+
+        if has_turn:
+            return [self._turns_container_client]
+        return [self._container_client]
+
     # ------------------------------------------------------------------
     # Cosmos DB CRUD operations
     # ------------------------------------------------------------------
@@ -937,7 +1065,8 @@ class CosmosMemoryClient:
                 )
 
         try:
-            self._container_client.upsert_item(body=body)
+            container = self._container_for_type(memory_type)
+            container.upsert_item(body=body)
         except Exception as exc:
             raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
@@ -1009,7 +1138,8 @@ class CosmosMemoryClient:
 
             for record, body in zip(batch, bodies):
                 try:
-                    self._container_client.upsert_item(body=body)
+                    container = self._container_for_type(body.get("type", "turn"))
+                    container.upsert_item(body=body)
                 except Exception as exc:
                     raise CosmosOperationError(f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("Upserted batch of %d records", len(records))
@@ -1102,8 +1232,9 @@ class CosmosMemoryClient:
         logger.debug("get_memories query: %s", query)
 
         try:
+            container = self._container_for_query(memory_types)
             items = list(
-                self._container_client.query_items(
+                container.query_items(
                     query=query,
                     parameters=parameters or None,
                     enable_cross_partition_query=True,
@@ -1143,6 +1274,7 @@ class CosmosMemoryClient:
         self._require_cosmos()
 
         try:
+            # Try main container first, then turns container
             results = list(
                 self._container_client.query_items(
                     query="SELECT * FROM c WHERE c.id = @id",
@@ -1150,6 +1282,16 @@ class CosmosMemoryClient:
                     enable_cross_partition_query=True,
                 )
             )
+            target_container = self._container_client
+            if not results and self._turns_container_client is not None:
+                results = list(
+                    self._turns_container_client.query_items(
+                        query="SELECT * FROM c WHERE c.id = @id",
+                        parameters=[{"name": "@id", "value": memory_id}],
+                        enable_cross_partition_query=True,
+                    )
+                )
+                target_container = self._turns_container_client
         except Exception as exc:
             raise CosmosOperationError(f"update query failed: {exc}") from exc
 
@@ -1168,7 +1310,7 @@ class CosmosMemoryClient:
         doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         try:
-            self._container_client.replace_item(item=doc["id"], body=doc)
+            target_container.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
             raise CosmosOperationError(f"update replace failed for {memory_id}: {exc}") from exc
 
@@ -1201,6 +1343,23 @@ class CosmosMemoryClient:
                     enable_cross_partition_query=True,
                 )
             )
+            target_container = self._container_client
+            if not results and self._turns_container_client is not None:
+                results = list(
+                    self._turns_container_client.query_items(
+                        query=(
+                            "SELECT TOP 1 c.id FROM c WHERE c.id = @id "
+                            "AND c.thread_id = @thread_id AND c.user_id = @user_id"
+                        ),
+                        parameters=[
+                            {"name": "@id", "value": memory_id},
+                            {"name": "@thread_id", "value": thread_id},
+                            {"name": "@user_id", "value": user_id},
+                        ],
+                        enable_cross_partition_query=True,
+                    )
+                )
+                target_container = self._turns_container_client
         except Exception as exc:
             raise CosmosOperationError(f"delete lookup failed: {exc}") from exc
 
@@ -1208,7 +1367,7 @@ class CosmosMemoryClient:
             raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
 
         try:
-            self._container_client.delete_item(item=memory_id, partition_key=[user_id, thread_id])
+            target_container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
             raise CosmosOperationError(f"delete failed for {memory_id}: {exc}") from exc
 
@@ -1371,13 +1530,21 @@ class CosmosMemoryClient:
         logger.debug("get_thread query: %s", query)
 
         try:
-            items = list(
-                self._container_client.query_items(
-                    query=query,
-                    parameters=parameters,
-                    enable_cross_partition_query=True,
+            containers = self._containers_for_query(memory_types)
+            items = []
+            for container in containers:
+                items.extend(
+                    list(
+                        container.query_items(
+                            query=query,
+                            parameters=parameters,
+                            enable_cross_partition_query=True,
+                        )
+                    )
                 )
-            )
+            # Re-sort merged results to preserve chronological ordering
+            if len(containers) > 1:
+                items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         except Exception as exc:
             raise CosmosOperationError(f"get_thread query failed: {exc}") from exc
 

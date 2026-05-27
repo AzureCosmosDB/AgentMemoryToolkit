@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -48,6 +49,40 @@ async def test_add_upserts_memory_document():
     body = container.upsert_item.call_args.kwargs["body"]
     assert memory_id == body["id"]
     assert body["content"] == "hello"
+    assert body["ttl"] == 2_592_000
+
+
+@pytest.mark.parametrize(
+    ("memory_type", "expected_ttl"),
+    [
+        ("turn", 2_592_000),
+        ("episodic", 7_776_000),
+    ],
+)
+def test_prepare_doc_applies_default_ttl(memory_type, expected_ttl):
+    store = AsyncMemoryStore(MagicMock())
+
+    body = store._prepare_doc(_doc(type=memory_type))
+
+    assert body["ttl"] == expected_ttl
+
+
+@pytest.mark.parametrize("ttl", [0, 60, -1])
+def test_prepare_doc_preserves_caller_ttl(ttl):
+    store = AsyncMemoryStore(MagicMock())
+
+    body = store._prepare_doc(_doc(type="episodic", ttl=ttl))
+
+    assert body["ttl"] == ttl
+
+
+@pytest.mark.parametrize("memory_type", ["fact", "summary", "user_summary", "procedural", "unknown"])
+def test_prepare_doc_omits_ttl_for_never_types(memory_type):
+    store = AsyncMemoryStore(MagicMock())
+
+    body = store._prepare_doc(_doc(type=memory_type))
+
+    assert "ttl" not in body
 
 
 async def test_push_batches_and_embeds_non_turn_records():
@@ -139,3 +174,52 @@ async def test_single_doc_and_simple_query_helpers():
     assert await store.get_procedural_prompt("u1") == "prompt"
     assert await store.get_procedural_history("u1", limit=1)
     assert await store.get_procedural_memories("u1")
+
+
+
+def _params_by_name(call_kwargs):
+    return {p["name"]: p["value"] for p in call_kwargs["parameters"]}
+
+
+async def test_get_memories_adds_created_time_range_filters():
+    container = MagicMock()
+    container.query_items.return_value = AsyncIterator([])
+    store = AsyncMemoryStore(container)
+    after = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    await store.get_memories(user_id="u1", created_after=after, created_before="2026-02-01T00:00:00+00:00")
+
+    call_kwargs = container.query_items.call_args.kwargs
+    assert "c.created_at >= @created_after" in call_kwargs["query"]
+    assert "c.created_at <= @created_before" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@created_after"] == after.isoformat()
+    assert params["@created_before"] == "2026-02-01T00:00:00+00:00"
+
+
+async def test_get_thread_adds_created_time_range_filters():
+    container = MagicMock()
+    container.query_items.return_value = AsyncIterator([])
+    store = AsyncMemoryStore(container)
+
+    await store.get_thread("t1", user_id="u1", created_after="2026-01-01T00:00:00+00:00")
+
+    call_kwargs = container.query_items.call_args.kwargs
+    assert "c.created_at >= @created_after" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@created_after"] == "2026-01-01T00:00:00+00:00"
+
+
+async def test_search_adds_created_time_range_filters():
+    container = MagicMock()
+    container.query_items.return_value = AsyncIterator([])
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(container, embeddings_client=embeddings)
+
+    await store.search("weather", user_id="u1", created_before="2026-03-01T00:00:00+00:00")
+
+    call_kwargs = container.query_items.call_args.kwargs
+    assert "c.created_at <= @created_before" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@created_before"] == "2026-03-01T00:00:00+00:00"

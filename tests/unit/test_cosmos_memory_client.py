@@ -323,6 +323,47 @@ class TestCreateMemoryStore:
         assert "vector_embedding_policy" not in counter_call.kwargs
         assert mem._container_client is mock_memories_container
 
+    def test_create_memory_store_turns_container_uses_30_day_ttl(self):
+        mock_cosmos_cls = MagicMock()
+        mock_client = MagicMock()
+        mock_db = MagicMock()
+        mock_memories_container = MagicMock()
+        mock_counter_container = MagicMock()
+        mock_lease_container = MagicMock()
+        mock_turns_container = MagicMock()
+        mock_cosmos_cls.return_value = mock_client
+        mock_client.create_database_if_not_exists.return_value = mock_db
+        mock_db.create_container_if_not_exists.side_effect = [
+            mock_memories_container,
+            mock_counter_container,
+            mock_lease_container,
+            mock_turns_container,
+        ]
+
+        mem = _make_client()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls,
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            mem.create_memory_store(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+                turns_container="memories_turns",
+            )
+
+        turns_call = mock_db.create_container_if_not_exists.call_args_list[3]
+        assert turns_call.kwargs["id"] == "memories_turns"
+        assert turns_call.kwargs["default_ttl"] == 2_592_000
+        assert "vector_embedding_policy" in turns_call.kwargs
+        assert mem._turns_container_client is mock_turns_container
+
     def test_create_memory_store_defaults_to_serverless(self):
         mock_cosmos_cls = MagicMock()
         mock_client = MagicMock()
@@ -730,3 +771,14 @@ class TestClose:
             assert m is mem
 
         mock_cosmos.close.assert_called_once()
+
+
+def test_list_tags_delegates_to_store():
+    mem, container = _connected_client()
+    container.query_items.return_value = [["topic:python", "sys:fact"]]
+
+    assert mem.list_tags("u1") == ["topic:python"]
+
+    kwargs = container.query_items.call_args.kwargs
+    assert "SELECT VALUE c.tags" in kwargs["query"]
+    assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]

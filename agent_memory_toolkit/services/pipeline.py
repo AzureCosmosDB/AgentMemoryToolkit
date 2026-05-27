@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
+from azure.cosmos.exceptions import CosmosResourceExistsError
+
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.exceptions import (
     LLMError,
@@ -33,6 +35,7 @@ from agent_memory_toolkit.services import MemoryStoreProtocol
 from agent_memory_toolkit.services._pipeline_helpers import (
     ID_SEED_SEP as _ID_SEED_SEP,
     PromptyLoader,
+    build_topic_tags,
     build_transcript,
     chat_text,
     is_real_number as _is_real_number,
@@ -62,6 +65,19 @@ class _StoreContainerAdapter:
         return self._store.read_item(item, partition_key)
 
     def upsert_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        return self._store.add_cosmos(body)
+
+    def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        container = getattr(self._store, "container", None)
+        if container is not None and hasattr(container, "create_item"):
+            response = container.create_item(body=body)
+            if isinstance(response, dict):
+                return response
+            return self._store.add_cosmos(body)
+        create = getattr(self._store, "create_item", None)
+        if create is not None:
+            response = create(body=body)
+            return response if isinstance(response, dict) else body
         return self._store.add_cosmos(body)
 
 
@@ -120,6 +136,7 @@ class PipelineService:
             return construct_internal(EpisodicRecord, doc).to_doc()
         return doc
 
+
     @staticmethod
     def _chat_text(response: Any) -> str:
         return chat_text(response)
@@ -174,6 +191,73 @@ class PipelineService:
         if isinstance(response, dict):
             return response
         return doc
+
+    def _create_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Create a memory document and let Cosmos raise 409 for duplicates."""
+        if getattr(self, "_store", None) is None:
+            return self._upsert_memory(doc)
+        response = self._container.create_item(body=doc)
+        return response if isinstance(response, dict) else doc
+
+    @staticmethod
+    def _empty_extract_counts() -> dict[str, int]:
+        return {
+            "fact_count": 0,
+            "episodic_count": 0,
+            "unclassified_count": 0,
+            "updated_count": 0,
+            "contradicted_count": 0,
+            "exact_dedup_skipped": 0,
+        }
+
+    @staticmethod
+    def _stable_source_timestamp(items: list[dict[str, Any]]) -> str:
+        timestamps = [str(item.get("created_at")) for item in items if item.get("created_at")]
+        if timestamps:
+            return max(timestamps)
+        return datetime.now(timezone.utc).isoformat()
+
+    def _mark_extracted_superseded(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        supersedes_id: str,
+        superseder_id: str,
+        reason: Literal["update", "contradict"],
+    ) -> bool:
+        try:
+            old_mem = self._container.read_item(item=supersedes_id, partition_key=[user_id, thread_id])
+            if old_mem.get("superseded_by"):
+                logger.debug(
+                    "extract_memories: skipping UPDATE — target %s already superseded by %s",
+                    supersedes_id,
+                    old_mem.get("superseded_by"),
+                )
+                return False
+            return self._mark_superseded(old_mem, superseder_id, reason=reason)
+        except Exception:
+            logger.debug("Could not read superseded item %s directly, trying cross-partition", supersedes_id)
+            try:
+                q = (
+                    "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
+                    "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+                )
+                results = list(
+                    self._container.query_items(
+                        query=q,
+                        parameters=[
+                            {"name": "@id", "value": supersedes_id},
+                            {"name": "@uid", "value": user_id},
+                        ],
+                        enable_cross_partition_query=True,
+                    )
+                )
+                if results and not results[0].get("superseded_by"):
+                    return self._mark_superseded(results[0], superseder_id, reason=reason)
+            except Exception as exc:
+                logger.warning("Failed to mark superseded memory %s: %s", supersedes_id, exc)
+        return False
 
     def _mark_superseded(
         self,
@@ -232,30 +316,22 @@ class PipelineService:
     def _parse_llm_json(text: str | None) -> dict[str, Any]:
         return parse_llm_json(text)
 
-    def extract_memories(
+    def extract_memories_dry(
         self,
         user_id: str,
         thread_id: str,
         recent_k: int | None = None,
         *,
         turns: Optional[list[dict[str, Any]]] = None,
-    ) -> dict[str, int]:
-        """Extract facts and episodic memories from a thread.
-
-        Returns a summary dict with counts of extracted items.
-        """
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Load turns, call the LLM, and return memory docs without embeddings or writes."""
         if not user_id:
             raise ValidationError("user_id is required")
         if not thread_id:
             raise ValidationError("thread_id is required")
 
-        logger.info(
-            "extract_memories started user_id=%s thread_id=%s",
-            user_id,
-            thread_id,
-        )
+        logger.info("extract_memories_dry started user_id=%s thread_id=%s", user_id, thread_id)
 
-        # ---- 1. Query thread memories ----
         if turns is None:
             query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id"
             parameters: list[dict[str, Any]] = [
@@ -285,82 +361,50 @@ class PipelineService:
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:
             items = items[:recent_k]
-        items.reverse()  # chronological order
+        items.reverse()
 
         if not items:
-            logger.warning(
-                "extract_memories no memories found user_id=%s thread_id=%s",
-                user_id,
-                thread_id,
-            )
-            return {
-                "fact_count": 0,
-                "episodic_count": 0,
-                "unclassified_count": 0,
-                "updated_count": 0,
-                "contradicted_count": 0,
-                "exact_dedup_skipped": 0,
-            }
+            logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
+            return {"facts": [], "episodic": [], "updates": []}
 
-        # ---- 2. Load existing memories for reconciliation ----
         existing = self._load_existing_memories(user_id, ["fact"])
-        # Pre-compute exact-content hashes from existing memories for the
-        # write-time short-circuit. Saves the embedding call and the upsert
-        # RU on identical re-extractions across runs. Unclassified items are
-        # persisted as facts so they share the fact bucket.
         existing_fact_hashes: set[str] = {
             m["content_hash"] for m in existing if m.get("type") == "fact" and m.get("content_hash")
         }
-        existing_text = ""
         if existing:
-            lines = []
-            for mem in existing:
-                lines.append(
-                    f"- [ID: {mem['id']}] {mem.get('content', '')} "
-                    f"(type={mem.get('type', 'fact')}, salience={mem.get('salience', 'N/A')})"
-                )
-            existing_text = "\n".join(lines)
+            existing_text = "\n".join(
+                f"- [ID: {mem['id']}] {mem.get('content', '')} "
+                f"(type={mem.get('type', 'fact')}, salience={mem.get('salience', 'N/A')})"
+                for mem in existing
+            )
         else:
             existing_text = "(none)"
 
-        # ---- 3. Build transcript and call LLM ----
         transcript = self._build_transcript(items)
-
         response_text = self._run_prompty(
             "extract_memories.prompty",
             inputs={"existing_facts": existing_text, "transcript": transcript},
         )
-
-        # ---- 4. Parse LLM response ----
         parsed = self._parse_llm_json(response_text)
         facts = parsed.get("facts", [])
         episodic = parsed.get("episodic", [])
         unclassified = parsed.get("unclassified", [])
 
-        now = datetime.now(timezone.utc).isoformat()
-        docs_to_embed: list[dict[str, Any]] = []
-        embed_texts: list[str] = []
-        updated_count = 0
-        contradicted_count = 0
+        doc_timestamp = self._stable_source_timestamp(items)
+        fact_docs: list[dict[str, Any]] = []
+        episodic_docs: list[dict[str, Any]] = []
+        updates: list[dict[str, Any]] = []
         exact_dedup_skipped = 0
 
-        # ---- 5. Process facts ----
         for fact in facts:
             action = fact.get("action", "ADD").upper()
             if action == "NONE":
                 continue
-
             text = fact.get("text")
             if not text:
-                logger.warning(
-                    "extract_memories: dropping malformed fact (missing 'text'): %r",
-                    fact,
-                )
+                logger.warning("extract_memories: dropping malformed fact (missing 'text'): %r", fact)
                 continue
-            # Write-time exact-dedup short-circuit. ADDs whose normalized
-            # content already exists are skipped before embedding/upsert.
-            # UPDATEs go through unchanged - they explicitly target an old
-            # record by id and need to write the supersession link.
+
             new_content_hash = compute_content_hash(text)
             if action == "ADD" and new_content_hash in existing_fact_hashes:
                 logger.debug(
@@ -371,16 +415,11 @@ class PipelineService:
                 )
                 exact_dedup_skipped += 1
                 continue
+
             seed = _ID_SEED_SEP.join((user_id, thread_id, new_content_hash))
             det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
-
-            topic_tags = [f"topic:{t}" for t in fact.get("tags", [])]
-            tags = ["sys:fact", "sys:auto-extracted"] + topic_tags
-
+            topic_tags = build_topic_tags(fact.get("tags", []))
             confidence = fact.get("confidence")
-            if confidence is None:
-                confidence = 0.5
-
             doc: dict[str, Any] = {
                 "id": det_id,
                 "user_id": user_id,
@@ -389,7 +428,7 @@ class PipelineService:
                 "type": "fact",
                 "content": text,
                 "content_hash": new_content_hash,
-                "confidence": confidence,
+                "confidence": 0.5 if confidence is None else confidence,
                 **self._prompt_lineage("extract_memories.prompty"),
                 "metadata": {
                     "category": fact.get("category") or "general",
@@ -399,94 +438,30 @@ class PipelineService:
                     "temporal_context": fact.get("temporal_context"),
                 },
                 "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
-                "tags": tags,
-                "created_at": now,
-                "updated_at": now,
+                "tags": ["sys:fact", "sys:auto-extracted"] + topic_tags,
+                "created_at": doc_timestamp,
+                "updated_at": doc_timestamp,
             }
 
             if action in {"UPDATE", "CONTRADICT"} and fact.get("supersedes_id"):
-                supersede_reason: Literal["update", "contradict"] = "contradict" if action == "CONTRADICT" else "update"
-                # If the new content hashes to the same deterministic id
-                # as the target (UPDATE refines metadata but text is
-                # unchanged), the upsert below would overwrite the
-                # ``superseded_by``/``supersede_reason`` audit metadata
-                # we are about to stamp on the target — and the new doc
-                # would carry a self-referential ``supersedes_ids``
-                # entry. Treat as a no-op and let the existing record
-                # stand.
+                reason: Literal["update", "contradict"] = "contradict" if action == "CONTRADICT" else "update"
                 if det_id == fact["supersedes_id"]:
-                    logger.debug(
-                        "extract_memories: skipping UPDATE — det_id == supersedes_id (%s)",
-                        det_id,
-                    )
+                    logger.debug("extract_memories: skipping UPDATE — det_id == supersedes_id (%s)", det_id)
                     continue
                 doc["supersedes_ids"] = [fact["supersedes_id"]]
-                # Mark old memory as superseded
-                try:
-                    old_mem = self._container.read_item(
-                        item=fact["supersedes_id"],
-                        partition_key=[user_id, thread_id],
-                    )
-                    # Skip if the target was already retired by an earlier
-                    # extract or a reconcile cycle - re-superseding it
-                    # would clobber the prior ``superseded_by`` link and
-                    # narrow the audit chain.
-                    if old_mem.get("superseded_by"):
-                        logger.debug(
-                            "extract_memories: skipping UPDATE — target %s already superseded by %s",
-                            fact["supersedes_id"],
-                            old_mem.get("superseded_by"),
-                        )
-                    elif self._mark_superseded(old_mem, det_id, reason=supersede_reason):
-                        if supersede_reason == "contradict":
-                            contradicted_count += 1
-                        else:
-                            updated_count += 1
-                except Exception:
-                    # Try cross-partition query if direct read fails
-                    logger.debug(
-                        "Could not read superseded item %s directly, trying cross-partition",
-                        fact["supersedes_id"],
-                    )
-                    try:
-                        q = (
-                            "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
-                            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
-                        )
-                        results = list(
-                            self._container.query_items(
-                                query=q,
-                                parameters=[
-                                    {"name": "@id", "value": fact["supersedes_id"]},
-                                    {"name": "@uid", "value": user_id},
-                                ],
-                                enable_cross_partition_query=True,
-                            )
-                        )
-                        if results and self._mark_superseded(results[0], det_id, reason=supersede_reason):
-                            if supersede_reason == "contradict":
-                                contradicted_count += 1
-                            else:
-                                updated_count += 1
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to mark superseded memory %s: %s",
-                            fact["supersedes_id"],
-                            exc,
-                        )
+                updates.append(
+                    {
+                        "op": "supersede",
+                        "supersedes_id": fact["supersedes_id"],
+                        "superseder_id": det_id,
+                        "thread_id": thread_id,
+                        "reason": reason,
+                    }
+                )
 
-            docs_to_embed.append(doc)
-            embed_texts.append(text)
-            # Record this fact's hash so a later candidate in the same batch
-            # with identical content also short-circuits.
+            fact_docs.append(self._validate_extracted_doc(doc))
             existing_fact_hashes.add(new_content_hash)
 
-        # ---- 6. Process episodic ----
-        # Episodic memories are tied to a specific situation, scope, or context
-        # (past, present, or planned). The only required fields are
-        # ``scope_type`` and ``scope_value``. The ``situation``/``action_taken``/
-        # ``outcome`` triple is now optional and is only present for past events
-        # with a clear outcome.
         for ep in episodic:
             scope_type_raw = ep.get("scope_type")
             scope_value_raw = ep.get("scope_value")
@@ -502,11 +477,6 @@ class PipelineService:
             situation = ep.get("situation")
             action_taken = ep.get("action_taken")
             outcome = ep.get("outcome")
-
-            # Deterministic content fallback chain:
-            #   1. LLM-provided ``summary`` (most meaningful when supplied),
-            #   2. ``situation → action_taken → outcome`` arrow form when all three are present,
-            #   3. a minimal scope-derived fallback so the doc still has embeddable content.
             summary = ep.get("summary")
             if isinstance(summary, str) and summary.strip():
                 text = summary.strip()
@@ -518,14 +488,8 @@ class PipelineService:
             content_hash = compute_content_hash(text)
             seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
             det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
-
-            topic_tags = [f"topic:{t}" for t in ep.get("tags", [])]
-            tags = ["sys:episodic", "sys:auto-extracted"] + topic_tags
-
+            topic_tags = build_topic_tags(ep.get("tags", []))
             confidence = ep.get("confidence")
-            if confidence is None:
-                confidence = 0.5
-
             doc = {
                 "id": det_id,
                 "user_id": user_id,
@@ -534,7 +498,7 @@ class PipelineService:
                 "type": "episodic",
                 "content": text,
                 "content_hash": content_hash,
-                "confidence": confidence,
+                "confidence": 0.5 if confidence is None else confidence,
                 "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
                 **self._prompt_lineage("extract_memories.prompty"),
                 "metadata": {
@@ -545,34 +509,22 @@ class PipelineService:
                     "outcome": outcome,
                     "reasoning": ep.get("reasoning"),
                     "outcome_valence": ep.get("outcome_valence") or "neutral",
-                    "lesson": ep.get("lesson") or (
-                        f"{situation} → {action_taken} → {outcome}"
-                        if situation and action_taken and outcome
-                        else text
-                    ),
+                    "lesson": ep.get("lesson")
+                    or (f"{situation} → {action_taken} → {outcome}" if situation and action_taken and outcome else text),
                     "domain": ep.get("domain"),
                 },
                 "salience": ep.get("salience"),
-                "tags": tags,
-                "created_at": now,
-                "updated_at": now,
+                "tags": ["sys:episodic", "sys:auto-extracted"] + topic_tags,
+                "created_at": doc_timestamp,
+                "updated_at": doc_timestamp,
             }
+            episodic_docs.append(self._validate_extracted_doc(doc))
 
-            docs_to_embed.append(doc)
-            embed_texts.append(text)
-
-        # ---- 7. Process unclassified ----
-        # The LLM uses the `unclassified` bucket when it cannot confidently
-        # decide between fact / episodic. We persist these as facts (the most
-        # common type, retrieval already handles them well) tagged
-        # `sys:unclassified` so they're easy to audit and reclassify.
         for item in unclassified:
             text = item.get("text")
             if not text:
                 continue
             content_hash = compute_content_hash(text)
-            # Unclassified items are persisted as facts → share the fact
-            # bucket for the write-time exact-dedup short-circuit.
             if content_hash in existing_fact_hashes:
                 logger.debug(
                     "extract_memories: skipping exact-dup unclassified hash=%s user_id=%s thread_id=%s",
@@ -584,14 +536,8 @@ class PipelineService:
                 continue
             seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
             det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
-
-            topic_tags = [f"topic:{t}" for t in item.get("tags", [])]
-            tags = ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags
-
+            topic_tags = build_topic_tags(item.get("tags", []))
             confidence = item.get("confidence")
-            if confidence is None:
-                confidence = 0.5
-
             doc = {
                 "id": det_id,
                 "user_id": user_id,
@@ -600,47 +546,109 @@ class PipelineService:
                 "type": "fact",
                 "content": text,
                 "content_hash": content_hash,
-                "confidence": confidence,
+                "confidence": 0.5 if confidence is None else confidence,
                 **self._prompt_lineage("extract_memories.prompty"),
-                "metadata": {
-                    "category": "unclassified",
-                    "unclassified_reason": item.get("reason"),
-                },
+                "metadata": {"category": "unclassified", "unclassified_reason": item.get("reason")},
                 "salience": item.get("salience") if item.get("salience") is not None else 0.5,
-                "tags": tags,
-                "created_at": now,
-                "updated_at": now,
+                "tags": ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags,
+                "created_at": doc_timestamp,
+                "updated_at": doc_timestamp,
             }
-
-            docs_to_embed.append(doc)
-            embed_texts.append(text)
-            # Unclassified items are persisted as facts → record in the
-            # fact bucket so later batch candidates short-circuit.
+            fact_docs.append(self._validate_extracted_doc(doc))
             existing_fact_hashes.add(content_hash)
 
-        # ---- 8. Generate embeddings in batch ----
-        if embed_texts:
-            logger.info("extract_memories generating embeddings for %d items", len(embed_texts))
-            embeddings = self._embed_batch(embed_texts)
-            for doc, emb in zip(docs_to_embed, embeddings):
-                doc["embedding"] = emb
+        if exact_dedup_skipped:
+            updates.append({"op": "stats", "exact_dedup_skipped": exact_dedup_skipped})
 
-        # ---- 9. Upsert all documents ----
-        for doc in docs_to_embed:
-            self._upsert_memory(self._validate_extracted_doc(doc))
-
-        result = {
-            "fact_count": sum(
-                1 for d in docs_to_embed if d["type"] == "fact" and "sys:unclassified" not in d.get("tags", [])
-            ),
-            "episodic_count": sum(1 for d in docs_to_embed if d["type"] == "episodic"),
-            "unclassified_count": sum(1 for d in docs_to_embed if "sys:unclassified" in d.get("tags", [])),
-            "updated_count": updated_count,
-            "contradicted_count": contradicted_count,
-            "exact_dedup_skipped": exact_dedup_skipped,
-        }
-        logger.info("extract_memories completed: %s", result)
+        result = {"facts": fact_docs, "episodic": episodic_docs, "updates": updates}
+        logger.info(
+            "extract_memories_dry completed user_id=%s thread_id=%s fact_docs=%d episodic_docs=%d updates=%d",
+            user_id,
+            thread_id,
+            len(fact_docs),
+            len(episodic_docs),
+            len(updates),
+        )
         return result
+
+    def persist_extracted_memories(
+        self,
+        user_id: str,
+        extracted: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, int]:
+        """Embed and create extracted memories, skipping deterministic-ID conflicts."""
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not isinstance(extracted, dict):
+            raise ValidationError("extracted must be a dict")
+
+        result = self._empty_extract_counts()
+        fact_docs = [dict(doc) for doc in extracted.get("facts", [])]
+        episodic_docs = [dict(doc) for doc in extracted.get("episodic", [])]
+        update_ops = [dict(op) for op in extracted.get("updates", [])]
+        docs_to_create = fact_docs + episodic_docs
+
+        docs_needing_embeddings = [doc for doc in docs_to_create if doc.get("content") and not doc.get("embedding")]
+        if docs_needing_embeddings:
+            embeddings = self._embed_batch([str(doc["content"]) for doc in docs_needing_embeddings])
+            for doc, embedding in zip(docs_needing_embeddings, embeddings):
+                doc["embedding"] = embedding
+
+        for doc in docs_to_create:
+            validated = self._validate_extracted_doc(doc)
+            try:
+                self._create_memory(validated)
+            except CosmosResourceExistsError:
+                logger.info("persist_extracted_memories skipped existing id=%s", validated.get("id"))
+                continue
+
+            tags = validated.get("tags", [])
+            if validated.get("type") == "episodic":
+                result["episodic_count"] += 1
+            elif "sys:unclassified" in tags:
+                result["unclassified_count"] += 1
+            elif validated.get("type") == "fact":
+                result["fact_count"] += 1
+
+        for op in update_ops:
+            if op.get("op") == "stats":
+                result["exact_dedup_skipped"] += int(op.get("exact_dedup_skipped") or 0)
+                continue
+            if op.get("op") != "supersede":
+                continue
+            reason = op.get("reason")
+            op_thread_id = op.get("thread_id")
+            supersedes_id = op.get("supersedes_id")
+            superseder_id = op.get("superseder_id")
+            if reason not in {"update", "contradict"} or not op_thread_id or not supersedes_id or not superseder_id:
+                continue
+            marked = self._mark_extracted_superseded(
+                user_id=user_id,
+                thread_id=op_thread_id,
+                supersedes_id=supersedes_id,
+                superseder_id=superseder_id,
+                reason=reason,
+            )
+            if marked:
+                if reason == "contradict":
+                    result["contradicted_count"] += 1
+                else:
+                    result["updated_count"] += 1
+
+        logger.info("persist_extracted_memories completed user_id=%s counts=%s", user_id, result)
+        return result
+
+    def extract_memories(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: int | None = None,
+        *,
+        turns: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, int]:
+        """Extract facts and episodic memories from a thread and persist them."""
+        extracted = self.extract_memories_dry(user_id, thread_id, recent_k, turns=turns)
+        return self.persist_extracted_memories(user_id, extracted)
 
     def synthesize_procedural(
         self,
@@ -856,60 +864,38 @@ class PipelineService:
         )
         return {"status": "synthesized", "procedural": new_doc}
 
-    def generate_thread_summary(
+    def generate_thread_summary_dry(
         self,
         user_id: str,
         thread_id: str,
         recent_k: int | None = None,
     ) -> dict[str, Any]:
-        """Generate or incrementally update a thread summary.
-
-        Returns the summary document dict.
-        """
+        """Generate or update a thread summary document without embedding or writing it."""
         if not user_id:
             raise ValidationError("user_id is required")
         if not thread_id:
             raise ValidationError("thread_id is required")
 
-        logger.info(
-            "generate_thread_summary started user_id=%s thread_id=%s",
-            user_id,
-            thread_id,
-        )
+        logger.info("generate_thread_summary_dry started user_id=%s thread_id=%s", user_id, thread_id)
 
-        # ---- 1. Check for existing summary ----
         summary_id = f"summary_{user_id}_{thread_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._container.read_item(
-                item=summary_id,
-                partition_key=[user_id, thread_id],
-            )
+            existing_summary = self._container.read_item(item=summary_id, partition_key=[user_id, thread_id])
         except Exception:
-            pass  # first time — full generation
+            pass
 
-        # ---- 2. Query memories (time-filtered if updating) ----
         query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type != 'summary'"
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
             {"name": "@thread_id", "value": thread_id},
         ]
-
         if existing_summary:
             since = existing_summary["updated_at"]
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        query_started_at = datetime.now(timezone.utc).isoformat()
-
-        items = list(
-            self._container.query_items(
-                query=query,
-                parameters=parameters,
-                partition_key=[user_id, thread_id],
-            )
-        )
-        # Also fetch from the turns container if it differs from the main one
+        items = list(self._container.query_items(query=query, parameters=parameters, partition_key=[user_id, thread_id]))
         if self._turns_container is not None:
             items.extend(
                 list(
@@ -922,58 +908,37 @@ class PipelineService:
             )
 
         if existing_summary and not items:
-            logger.info("generate_thread_summary no new memories, returning existing")
-            return existing_summary
-
+            logger.info("generate_thread_summary_dry no new memories, returning existing")
+            summary_doc = dict(existing_summary)
+            summary_doc.pop("embedding", None)
+            return summary_doc
         if not existing_summary and not items:
             raise ValidationError(f"No memories found for user_id={user_id!r}, thread_id={thread_id!r}")
 
-        # ---- 3. Sort and trim ----
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:
             items = items[:recent_k]
-        items.reverse()  # chronological order
+        items.reverse()
 
-        # ---- 4. Build transcript ----
         transcript = self._build_transcript(items)
-
-        # ---- 5. Call LLM ----
         if existing_summary:
             prior_json = existing_summary.get("metadata", {}).get("structured_summary")
-            if prior_json:
-                prior_text = json.dumps(prior_json, indent=2)
-            else:
-                prior_text = existing_summary.get("content", "")
+            prior_text = json.dumps(prior_json, indent=2) if prior_json else existing_summary.get("content", "")
             response_text = self._run_prompty(
                 "summarize_update.prompty",
                 inputs={"prior_summary": prior_text, "transcript": transcript},
             )
             summary_prompt_filename = "summarize_update.prompty"
         else:
-            response_text = self._run_prompty(
-                "summarize.prompty",
-                inputs={"transcript": transcript},
-            )
+            response_text = self._run_prompty("summarize.prompty", inputs={"transcript": transcript})
             summary_prompt_filename = "summarize.prompty"
 
-        # ---- 6. Parse response ----
         parsed = self._parse_llm_json(response_text)
         overview = parsed.get("overview", response_text)
         topics = parsed.get("topics", [])
-
-        # ---- 7. Generate embedding from overview ----
-        summary_embedding = self._embed_one(overview)
-
-        # ---- 8. Build and upsert summary doc ----
-        if existing_summary:
-            old_source_count = existing_summary.get("metadata", {}).get("source_count", 0)
-            total_source_count = old_source_count + len(items)
-        else:
-            total_source_count = len(items)
-
-        topic_tags = [f"topic:{t}" for t in topics]
-        tags = ["sys:summary"] + topic_tags
-
+        total_source_count = (existing_summary.get("metadata", {}).get("source_count", 0) if existing_summary else 0) + len(items)
+        topic_tags = build_topic_tags(topics)
+        doc_timestamp = self._stable_source_timestamp(items)
         summary_doc: dict[str, Any] = {
             "id": summary_id,
             "user_id": user_id,
@@ -981,9 +946,8 @@ class PipelineService:
             "role": "system",
             "type": "summary",
             "content": overview,
-            "embedding": summary_embedding,
             "salience": 1.0,
-            "tags": tags,
+            "tags": ["sys:summary"] + topic_tags,
             **self._prompt_lineage(summary_prompt_filename),
             "metadata": {
                 "structured_summary": parsed,
@@ -991,50 +955,64 @@ class PipelineService:
                 "recent_k": recent_k,
                 "incremental_update": existing_summary is not None,
             },
-            "created_at": existing_summary["created_at"] if existing_summary else query_started_at,
-            "updated_at": query_started_at,
+            "created_at": existing_summary["created_at"] if existing_summary else doc_timestamp,
+            "updated_at": doc_timestamp,
         }
-        summary_doc = construct_internal(ThreadSummaryRecord, summary_doc).to_doc()
+        return construct_internal(ThreadSummaryRecord, summary_doc).to_doc()
 
-        self._upsert_memory(summary_doc)
-        logger.info(
-            "generate_thread_summary completed id=%s source_count=%d",
-            summary_id,
-            total_source_count,
-        )
-        return summary_doc
+    def persist_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        summary_doc: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compute the summary embedding and upsert the deterministic summary doc."""
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not thread_id:
+            raise ValidationError("thread_id is required")
+        if not isinstance(summary_doc, dict):
+            raise ValidationError("summary_doc must be a dict")
 
-    def generate_user_summary(
+        doc = dict(summary_doc)
+        doc["id"] = doc.get("id") or f"summary_{user_id}_{thread_id}"
+        doc["user_id"] = user_id
+        doc["thread_id"] = thread_id
+        doc.setdefault("prompt_id", "summarize.prompty")
+        doc.setdefault("prompt_version", "v1")
+        if doc.get("content") and not doc.get("embedding"):
+            doc["embedding"] = self._embed_one(doc["content"])
+        validated = construct_internal(ThreadSummaryRecord, doc).to_doc()
+        stored = self._upsert_memory(validated)
+        logger.info("persist_thread_summary completed id=%s", validated.get("id"))
+        return stored
+
+    def generate_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: int | None = None,
+    ) -> dict[str, Any]:
+        """Generate or incrementally update a thread summary and persist it."""
+        summary_doc = self.generate_thread_summary_dry(user_id, thread_id, recent_k=recent_k)
+        return self.persist_thread_summary(user_id, thread_id, summary_doc)
+
+    def generate_user_summary_dry(
         self,
         user_id: str,
         thread_ids: list[str] | None = None,
         recent_k: int | None = None,
     ) -> dict[str, Any]:
-        """Generate or incrementally update a cross-thread user summary.
-
-        ``thread_ids`` is observability metadata — recorded on the resulting
-        document for debugging/auditing — but **not** used to filter the
-        query. Filtering by ``thread_ids`` would silently drop memories from
-        threads contributing earlier in the cross-counter window: if N
-        change-feed batches accumulate before USER_SUMMARY_EVERY_N is
-        crossed, only the threads in the *last* batch would be visible to
-        the query, and pre-existing facts on other contributing threads
-        would be permanently excluded from every subsequent incremental
-        summary (the ``c.created_at > @since`` watermark moves past them).
-        Cross-partition is unavoidable for a per-user roll-up.
-
-        Returns the user summary document dict.
-        """
+        """Generate a user summary document without embedding or writing it."""
         if not user_id:
             raise ValidationError("user_id is required")
 
         logger.info(
-            "generate_user_summary started user_id=%s observed_thread_ids=%s",
+            "generate_user_summary_dry started user_id=%s observed_thread_ids=%s",
             user_id,
             len(thread_ids) if thread_ids else 0,
         )
 
-        # ---- 1. Check for existing user summary ----
         user_summary_id = f"user_summary_{user_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
@@ -1043,29 +1021,16 @@ class PipelineService:
                 partition_key=[user_id, "__user_summary__"],
             )
         except Exception:
-            pass  # first time — full generation
+            pass
 
-        # ---- 2. Query memories (time-filtered if updating) ----
         query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.type != 'user_summary'"
-        parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
-        ]
-
+        parameters: list[dict[str, Any]] = [{"name": "@user_id", "value": user_id}]
         if existing_summary:
             since = existing_summary["updated_at"]
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        query_started_at = datetime.now(timezone.utc).isoformat()
-
-        items = list(
-            self._container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
-        )
-        # Also fetch from the turns container if it differs from the main one
+        items = list(self._container.query_items(query=query, parameters=parameters, enable_cross_partition_query=True))
         if self._turns_container is not None:
             items.extend(
                 list(
@@ -1078,15 +1043,14 @@ class PipelineService:
             )
 
         if existing_summary and not items:
-            logger.info("generate_user_summary no new memories, returning existing")
-            return existing_summary
-
+            logger.info("generate_user_summary_dry no new memories, returning existing")
+            user_doc = dict(existing_summary)
+            user_doc.pop("embedding", None)
+            return user_doc
         if not existing_summary and not items:
             raise ValidationError(f"No memories found for user_id={user_id!r}")
 
-        # ---- 3. Sort and apply per-thread recent_k trimming ----
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
-
         if recent_k is not None:
             by_thread: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for m in items:
@@ -1097,41 +1061,25 @@ class PipelineService:
             trimmed.sort(key=lambda m: m.get("created_at", ""))
             items = trimmed
         else:
-            items.reverse()  # chronological order
+            items.reverse()
 
-        # ---- 4. Build transcript grouped by thread ----
         transcript = self._build_transcript(items, group_by_thread=True)
         new_thread_ids = {m.get("thread_id", "") for m in items}
-
-        # ---- 5. Call LLM ----
         if existing_summary:
             prior_json = existing_summary.get("metadata", {}).get("structured_summary")
-            if prior_json:
-                prior_text = json.dumps(prior_json, indent=2)
-            else:
-                prior_text = existing_summary.get("content", "")
+            prior_text = json.dumps(prior_json, indent=2) if prior_json else existing_summary.get("content", "")
             response_text = self._run_prompty(
                 "user_summary_update.prompty",
                 inputs={"prior_summary": prior_text, "transcript": transcript},
             )
-            user_summary_prompt_filename = "user_summary_update.prompty"
+            prompt_filename = "user_summary_update.prompty"
         else:
-            response_text = self._run_prompty(
-                "user_summary.prompty",
-                inputs={"transcript": transcript},
-            )
-            user_summary_prompt_filename = "user_summary.prompty"
+            response_text = self._run_prompty("user_summary.prompty", inputs={"transcript": transcript})
+            prompt_filename = "user_summary.prompty"
 
-        # ---- 6. Parse response ----
         parsed = self._parse_llm_json(response_text)
-        # For user summaries, build a narrative overview from key_facts
         key_facts = parsed.get("key_facts", [])
         overview = "; ".join(key_facts) if key_facts else response_text
-
-        # ---- 7. Generate embedding ----
-        summary_embedding = self._embed_one(overview)
-
-        # ---- 8. Accumulate metadata and upsert ----
         if existing_summary:
             old_thread_ids = set(existing_summary.get("metadata", {}).get("thread_ids", []))
             all_thread_ids = sorted(old_thread_ids | new_thread_ids)
@@ -1141,6 +1089,8 @@ class PipelineService:
             all_thread_ids = sorted(new_thread_ids)
             total_memory_count = len(items)
 
+        topic_tags = build_topic_tags(parsed.get("topics", []))
+        doc_timestamp = self._stable_source_timestamp(items)
         summary_doc: dict[str, Any] = {
             "id": user_summary_id,
             "user_id": user_id,
@@ -1148,10 +1098,9 @@ class PipelineService:
             "role": "system",
             "type": "user_summary",
             "content": overview,
-            "embedding": summary_embedding,
             "salience": 1.0,
-            "tags": ["sys:user-summary"],
-            **self._prompt_lineage(user_summary_prompt_filename),
+            "tags": ["sys:user-summary"] + topic_tags,
+            **self._prompt_lineage(prompt_filename),
             "metadata": {
                 "structured_summary": parsed,
                 "source_thread_count": len(all_thread_ids),
@@ -1160,18 +1109,47 @@ class PipelineService:
                 "recent_k": recent_k,
                 "incremental_update": existing_summary is not None,
             },
-            "created_at": existing_summary["created_at"] if existing_summary else query_started_at,
-            "updated_at": query_started_at,
+            "created_at": existing_summary["created_at"] if existing_summary else doc_timestamp,
+            "updated_at": doc_timestamp,
         }
-        summary_doc = construct_internal(UserSummaryRecord, summary_doc).to_doc()
+        return construct_internal(UserSummaryRecord, summary_doc).to_doc()
 
-        self._upsert_memory(summary_doc)
-        logger.info(
-            "generate_user_summary completed thread_count=%d memory_count=%d",
-            len(all_thread_ids),
-            total_memory_count,
-        )
-        return summary_doc
+    def persist_user_summary(
+        self,
+        user_id: str,
+        user_summary_doc: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compute the user-summary embedding and upsert the deterministic doc."""
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not isinstance(user_summary_doc, dict):
+            raise ValidationError("user_summary_doc must be a dict")
+
+        doc = dict(user_summary_doc)
+        doc["id"] = doc.get("id") or f"user_summary_{user_id}"
+        doc["user_id"] = user_id
+        doc["thread_id"] = "__user_summary__"
+        doc.setdefault("prompt_id", "user_summary.prompty")
+        doc.setdefault("prompt_version", "v1")
+        structured_summary = doc.get("metadata", {}).get("structured_summary")
+        topics = structured_summary.get("topics", []) if isinstance(structured_summary, dict) else []
+        doc["tags"] = sorted({*(doc.get("tags") or []), "sys:user-summary", *build_topic_tags(topics)})
+        if doc.get("content") and not doc.get("embedding"):
+            doc["embedding"] = self._embed_one(doc["content"])
+        validated = construct_internal(UserSummaryRecord, doc).to_doc()
+        stored = self._upsert_memory(validated)
+        logger.info("persist_user_summary completed id=%s", validated.get("id"))
+        return stored
+
+    def generate_user_summary(
+        self,
+        user_id: str,
+        thread_ids: list[str] | None = None,
+        recent_k: int | None = None,
+    ) -> dict[str, Any]:
+        """Generate or incrementally update a user summary and persist it."""
+        summary_doc = self.generate_user_summary_dry(user_id, thread_ids=thread_ids, recent_k=recent_k)
+        return self.persist_user_summary(user_id, summary_doc)
 
     def _emit_reconcile_outcome(
         self,

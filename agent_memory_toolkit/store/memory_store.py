@@ -6,14 +6,16 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
-from agent_memory_toolkit._utils import _build_memory_query_builder, _validate_hybrid_search
+from agent_memory_toolkit._utils import _build_memory_query_builder, _coerce_datetime_iso, _validate_hybrid_search
 from agent_memory_toolkit.exceptions import (
     ConfigurationError,
     CosmosOperationError,
+    MemoryConflictError,
     MemoryNotFoundError,
 )
 from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import MemoryRecord
+from agent_memory_toolkit.thresholds import default_ttl_for
 from agent_memory_toolkit.store._search_helpers import (
     add_salience_filter,
     add_tag_filters,
@@ -51,6 +53,16 @@ class MemoryStore:
     def container(self) -> Any:
         """Return the underlying Cosmos container client."""
         return self._container
+
+    def _prepare_doc(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Return a write-ready document with type defaults applied."""
+        body = dict(doc)
+        if body.get("ttl") is None:
+            body.pop("ttl", None)
+            ttl = default_ttl_for(body.get("type"))
+            if ttl is not None:
+                body["ttl"] = ttl
+        return body
 
     def _container_for_type(self, memory_type: str) -> Any:
         """Route writes by memory type: turns → turns container if configured."""
@@ -135,15 +147,16 @@ class MemoryStore:
 
     def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
         """Upsert a pre-built Cosmos memory document and return the stored body."""
-        container = self._container_for_type(record.get("type", "turn"))
+        body = self._prepare_doc(record)
+        container = self._container_for_type(body.get("type", "turn"))
         try:
-            response = container.upsert_item(body=record)
+            response = container.upsert_item(body=body)
         except Exception as exc:
             raise _wrap_cosmos_exception(
-                exc, message=f"add_cosmos upsert failed for record {record.get('id')}: {exc}"
+                exc, message=f"add_cosmos upsert failed for record {body.get('id')}: {exc}"
             ) from exc
-        logger.info("add_cosmos id=%s role=%s type=%s", record.get("id"), record.get("role"), record.get("type"))
-        return response if isinstance(response, dict) else record
+        logger.info("add_cosmos id=%s role=%s type=%s", body.get("id"), body.get("role"), body.get("type"))
+        return response if isinstance(response, dict) else body
 
     def add(
         self,
@@ -192,6 +205,7 @@ class MemoryStore:
                     exc,
                 )
 
+        body = self._prepare_doc(body)
         try:
             container = self._container_for_type(memory_type)
             container.upsert_item(body=body)
@@ -236,6 +250,7 @@ class MemoryStore:
                         len(to_embed_text),
                     )
 
+            bodies = [self._prepare_doc(body) for body in bodies]
             for record, body in zip(batch, bodies):
                 try:
                     container = self._container_for_type(body.get("type", "turn"))
@@ -254,12 +269,14 @@ class MemoryStore:
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
-        tags: Optional[list[str]] = None,
-        any_tags: Optional[list[str]] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
         min_confidence: Optional[float] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve memories from Cosmos DB with optional filters."""
         logger.debug(
@@ -281,14 +298,14 @@ class MemoryStore:
             min_confidence=min_confidence,
         )
 
-        if tags:
-            for i, tag in enumerate(tags):
-                qb.add_array_contains("c.tags", f"@tag_{i}", tag)
-        if any_tags:
-            qb.add_array_contains_any("c.tags", "@any_tag_", any_tags)
-        if exclude_tags:
-            for i, tag in enumerate(exclude_tags):
-                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -411,9 +428,12 @@ class MemoryStore:
         user_id: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
-        tags: Optional[list[str]] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve an entire thread sorted oldest first."""
         qb = _QueryBuilder()
@@ -421,12 +441,14 @@ class MemoryStore:
         qb.add_filter("c.user_id", "@user_id", user_id)
         if memory_types:
             qb.add_in_filter("c.type", "@memory_type_", list(memory_types))
-        if tags:
-            for i, tag in enumerate(tags):
-                qb.add_array_contains("c.tags", f"@tag_{i}", tag)
-        if exclude_tags:
-            for i, tag in enumerate(exclude_tags):
-                qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
@@ -465,22 +487,80 @@ class MemoryStore:
         except Exception as exc:
             raise CosmosOperationError(f"get_user_summary read failed: {exc}") from exc
 
+    def list_tags(
+        self,
+        user_id: str,
+        *,
+        thread_id: Optional[str] = None,
+        prefix: Optional[str] = None,
+        include_sys: bool = False,
+    ) -> list[str]:
+        """Return sorted distinct tags for a user, optionally scoped to one thread."""
+        query = "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+        parameters = [{"name": "@user_id", "value": user_id}]
+        if thread_id is not None:
+            query += " AND c.thread_id = @thread_id"
+            parameters.append({"name": "@thread_id", "value": thread_id})
+
+        prefix_norm = prefix.strip().lower() if prefix else None
+        partition_key, cross_partition = query_scope(user_id, thread_id)
+        tags: set[str] = set()
+        for container in self._containers_for_query(None):
+            rows = self._query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=partition_key,
+                cross_partition=cross_partition,
+                operation="list_tags query",
+                container=container,
+            )
+            for row in rows:
+                values = row.get("tags", []) if isinstance(row, dict) else row
+                for tag in values or []:
+                    tag_value = str(tag).strip().lower()
+                    if not tag_value:
+                        continue
+                    if not include_sys and tag_value.startswith("sys:"):
+                        continue
+                    if prefix_norm is not None and not tag_value.startswith(prefix_norm):
+                        continue
+                    tags.add(tag_value)
+        return sorted(tags)
+
+    def _mutate_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str], *, add: bool) -> None:
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        normalized = {t.strip().lower() for t in tags if t and t.strip()}
+        attempts = 0
+        while True:
+            doc = self._container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+            existing_tags = set(doc.get("tags", []))
+            if add:
+                existing_tags.update(normalized)
+            else:
+                existing_tags.difference_update(normalized)
+            doc["tags"] = sorted(existing_tags)
+            doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            kwargs: dict[str, Any] = {"item": memory_id, "body": doc}
+            if etag := doc.get("_etag"):
+                kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
+            try:
+                self._container.replace_item(**kwargs)
+                return
+            except CosmosAccessConditionFailedError as exc:
+                attempts += 1
+                if attempts > 1:
+                    raise MemoryConflictError(f"Tag update conflicted for memory_id={memory_id!r}") from exc
+
     def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
         """Add tags to an existing memory document."""
-        doc = self._container.read_item(item=memory_id, partition_key=[user_id, thread_id])
-        existing_tags = set(doc.get("tags", []))
-        existing_tags.update(t.strip().lower() for t in tags)
-        doc["tags"] = sorted(existing_tags)
-        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self._container.replace_item(item=memory_id, body=doc)
+        self._mutate_tags(memory_id, user_id, thread_id, tags, add=True)
 
     def remove_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
         """Remove tags from an existing memory document."""
-        doc = self._container.read_item(item=memory_id, partition_key=[user_id, thread_id])
-        tags_to_remove = {t.strip().lower() for t in tags}
-        doc["tags"] = sorted(set(doc.get("tags", [])) - tags_to_remove)
-        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self._container.replace_item(item=memory_id, body=doc)
+        self._mutate_tags(memory_id, user_id, thread_id, tags, add=False)
 
     def mark_superseded(
         self,
@@ -616,16 +696,16 @@ class MemoryStore:
         thread_id: Optional[str] = None,
         hybrid_search: bool = False,
         top_k: int = 5,
-        tags: Optional[list[str]] = None,
-        any_tags: Optional[list[str]] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
         min_confidence: Optional[float] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
         *,
         query: Optional[str] = None,
-        tags_any: Optional[list[str]] = None,
-        tags_all: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity with optional full-text hybrid ranking."""
         terms = require_search_terms(search_terms, query)
@@ -641,13 +721,13 @@ class MemoryStore:
             thread_id=thread_id,
             min_confidence=min_confidence,
         )
-        add_tag_filters(
-            qb,
-            tags=tags,
-            tags_all=tags_all,
-            any_tags=any_tags,
-            tags_any=tags_any,
-            exclude_tags=exclude_tags,
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
         )
         add_salience_filter(qb, min_salience)
 

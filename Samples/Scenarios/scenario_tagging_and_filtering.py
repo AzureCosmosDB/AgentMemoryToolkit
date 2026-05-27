@@ -4,8 +4,8 @@ This sample showcases the tagging + filtering surface as a first-class
 feature. Tags are arbitrary string labels attached to a memory at write
 time; at read time you can filter retrieval with three composable predicates:
 
-* ``tags=[...]``        — AND filter: every listed tag must be present
-* ``any_tags=[...]``    — OR filter: at least one listed tag must be present
+* ``tags_all=[...]``    — AND filter: every listed tag must be present
+* ``tags_any=[...]``    — OR filter: at least one listed tag must be present
 * ``exclude_tags=[...]`` — NOT filter: none of these tags may be present
 
 Tags are stored in Cosmos as a JSON array on the memory document. They work
@@ -90,24 +90,24 @@ def main() -> None:
         print(f"  + {mem_type:>10}  tags={tags}")
 
     # ------------------------------------------------------------------
-    # 2. AND filter: tags=[...] — every listed tag must be present
+    # 2. AND filter: tags_all=[...] — every listed tag must be present
     #    Use get_memories() for filter-only retrieval (no vector search).
     # ------------------------------------------------------------------
-    print_section("AND filter — tags=['workflow', 'important']")
+    print_section("AND filter — tags_all=['workflow', 'important']")
     results = client.get_memories(
         user_id=user_id,
-        tags=["workflow", "important"],
+        tags_all=["workflow", "important"],
     )
     print_results(results)
     # Expected: only the "Always confirm before purging" procedural memory.
 
     # ------------------------------------------------------------------
-    # 3. OR filter: any_tags=[...] — any listed tag may match
+    # 3. OR filter: tags_any=[...] — any listed tag may match
     # ------------------------------------------------------------------
-    print_section("OR filter — any_tags=['diet', 'travel']")
+    print_section("OR filter — tags_any=['diet', 'travel']")
     results = client.get_memories(
         user_id=user_id,
-        any_tags=["diet", "travel"],
+        tags_any=["diet", "travel"],
     )
     print_results(results)
     # Expected: the peanut allergy fact and the PyCon episodic memory.
@@ -129,11 +129,11 @@ def main() -> None:
     #    search_cosmos() runs vector similarity against search_terms and
     #    composes naturally with structural / tag filters.
     # ------------------------------------------------------------------
-    print_section("Semantic + tag filter — search_terms='shipping a service' tags=['work']")
+    print_section("Semantic + tag filter — search_terms='shipping a service' tags_all=['work']")
     results = client.search_cosmos(
         search_terms="shipping a service",
         user_id=user_id,
-        tags=["work"],
+        tags_all=["work"],
         top_k=5,
     )
     print_results(results)
@@ -143,10 +143,10 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 6. Compose AND + NOT filters across types
     # ------------------------------------------------------------------
-    print_section("AND + NOT — tags=['preference']  exclude_tags=['health']")
+    print_section("AND + NOT — tags_all=['preference']  exclude_tags=['health']")
     results = client.get_memories(
         user_id=user_id,
-        tags=["preference"],
+        tags_all=["preference"],
         exclude_tags=["health"],
     )
     print_results(results)

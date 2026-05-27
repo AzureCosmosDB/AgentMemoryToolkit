@@ -39,6 +39,16 @@ PROMPTY_OPTION_ALIASES = {
 
 _FRONT_MATTER_VERSION = re.compile(r"^version:\s*(\S+)\s*$", re.MULTILINE)
 DEFAULT_PROMPT_VERSION = "v1"
+_TOPIC_TAG_UNSAFE = re.compile(r"[^a-z0-9_:./-]+")
+
+
+def build_topic_tags(values: Any) -> list[str]:
+    tags: set[str] = set()
+    for value in values or []:
+        topic = _TOPIC_TAG_UNSAFE.sub("-", str(value).strip().lower()).strip("-")
+        if topic:
+            tags.add(f"topic:{topic}")
+    return sorted(tags)
 
 
 def is_real_number(v: Any) -> bool:

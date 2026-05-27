@@ -54,6 +54,12 @@ param existingAiFoundryResourceGroup string = ''
 @description('Cosmos database name.')
 param cosmosDatabaseName string = 'ai_memory'
 
+@description('Turns container name.')
+param turnsContainerName string = 'memories_turns'
+
+@description('Default TTL for turn documents, in seconds. Use -1 to disable expiry.')
+param memoriesTurnsDefaultTtl int = 2592000
+
 @description('Catalog name of the embedding model (e.g. text-embedding-3-large).')
 param embeddingModelName string = 'text-embedding-3-large'
 
@@ -118,6 +124,8 @@ module cosmos 'modules/cosmos.bicep' = {
     existingResourceGroup: existingCosmosResourceGroup
     location: location
     databaseName: cosmosDatabaseName
+    turnsContainerName: turnsContainerName
+    memoriesTurnsDefaultTtl: memoriesTurnsDefaultTtl
     deployFunctionContainers: deployFunctionApp
     tags: commonTags
   }
@@ -159,6 +167,7 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
     cosmosEndpoint: cosmos.outputs.endpoint
     cosmosDatabase: cosmos.outputs.databaseName
     cosmosContainer: cosmos.outputs.memoriesContainerName
+    cosmosTurnsContainer: cosmos.outputs.turnsContainerName
     cosmosLeaseContainer: cosmos.outputs.leasesContainerName
     cosmosCountersContainer: cosmos.outputs.counterContainerName
     aiFoundryEndpoint: aiFoundry.outputs.endpoint
@@ -196,6 +205,7 @@ output RESOURCE_GROUP_NAME string = rg.name
 output COSMOS_DB_ENDPOINT string = cosmos.outputs.endpoint
 output COSMOS_DB_DATABASE string = cosmos.outputs.databaseName
 output COSMOS_DB_CONTAINER string = cosmos.outputs.memoriesContainerName
+output COSMOS_TURNS_CONTAINER string = cosmos.outputs.turnsContainerName
 output COSMOS_DB_ACCOUNT_NAME string = cosmos.outputs.accountName
 
 output AI_FOUNDRY_ENDPOINT string = aiFoundry.outputs.endpoint

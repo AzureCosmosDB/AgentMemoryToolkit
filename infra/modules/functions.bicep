@@ -35,6 +35,9 @@ param cosmosDatabase string = 'ai_memory'
 @description('Memories container name.')
 param cosmosContainer string = 'memories'
 
+@description('Turns container name.')
+param cosmosTurnsContainer string = 'memories_turns'
+
 @description('Lease container name.')
 param cosmosLeaseContainer string = 'leases'
 
@@ -237,6 +240,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'COSMOS_DB_CONTAINER'
           value: cosmosContainer
+        }
+        {
+          name: 'COSMOS_TURNS_CONTAINER'
+          value: cosmosTurnsContainer
         }
         {
           name: 'COSMOS_DB_LEASE_CONTAINER'

@@ -41,6 +41,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: requires live Azure services",
+    "slow: long-running tests that must be selected explicitly",
     "e2e: requires full pipeline (Cosmos + ADF + AI)",
 ]
 

@@ -292,6 +292,44 @@ class TestCreateMemoryStore:
         assert "vector_embedding_policy" not in counter_call.kwargs
         assert mem._container_client is mock_memories_container
 
+    async def test_create_memory_store_turns_container_uses_30_day_ttl(self):
+        mem = _make_client()
+        mock_cosmos_cls = MagicMock()
+        mock_client = MagicMock()
+        mock_db = AsyncMock()
+        mock_memories_container = MagicMock()
+        mock_counter_container = MagicMock()
+        mock_lease_container = MagicMock()
+        mock_turns_container = MagicMock()
+
+        mock_cosmos_cls.return_value = mock_client
+        mock_client.create_database_if_not_exists = AsyncMock(return_value=mock_db)
+        mock_db.create_container_if_not_exists = AsyncMock(
+            side_effect=[mock_memories_container, mock_counter_container, mock_lease_container, mock_turns_container]
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos.aio": MagicMock(CosmosClient=mock_cosmos_cls),
+                "azure.cosmos": MagicMock(
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            await mem.create_memory_store(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+                turns_container="memories_turns",
+            )
+
+        turns_call = mock_db.create_container_if_not_exists.await_args_list[3]
+        assert turns_call.kwargs["id"] == "memories_turns"
+        assert turns_call.kwargs["default_ttl"] == 2_592_000
+        assert "vector_embedding_policy" in turns_call.kwargs
+        assert mem._turns_container_client is mock_turns_container
+
     async def test_create_memory_store_defaults_to_serverless(self):
         mem = _make_client(cosmos_throughput_mode="serverless")
         mock_cosmos_cls = MagicMock()
@@ -654,3 +692,14 @@ class TestClose:
             assert m is mem
 
         mock_cosmos.close.assert_awaited_once()
+
+
+async def test_list_tags_delegates_to_store():
+    mem, container = _connected_client()
+    container.query_items = MagicMock(return_value=AsyncIterator([["topic:python", "sys:fact"]]))
+
+    assert await mem.list_tags("u1") == ["topic:python"]
+
+    kwargs = container.query_items.call_args.kwargs
+    assert "SELECT VALUE c.tags" in kwargs["query"]
+    assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]

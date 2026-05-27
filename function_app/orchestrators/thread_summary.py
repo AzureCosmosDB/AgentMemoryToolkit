@@ -1,12 +1,7 @@
 """Thread-summary orchestrator + activities.
 
-Chain: ``SummarizeThread`` → ``PersistSummary``.
-
-``SummarizeThread`` calls ``PipelineService.generate_thread_summary`` which
-loads turns, calls the LLM, and upserts the summary doc in a single
-self-contained transaction. ``PersistSummary`` is a thin observability shim
-that surfaces an explicit Persist event in App Insights / the Durable status
-API.
+Chain: ``Extract`` → ``PersistSummary``. Extract loads turns and calls the LLM;
+PersistSummary computes the embedding and writes the deterministic summary doc.
 """
 
 from __future__ import annotations
@@ -24,27 +19,20 @@ logger = logging.getLogger(__name__)
 bp = df.Blueprint()
 
 
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
-
-
 @bp.orchestration_trigger(context_name="context")
 def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
-    max_batch = config.get_max_batch_size()
-
     retry = default_retry_options()
 
     summary = yield context.call_activity_with_retry(
-        "ts_SummarizeThread",
+        "ts_Extract",
         retry,
-        {"user_id": user_id, "thread_id": thread_id, "limit": max_batch},
+        {"user_id": user_id, "thread_id": thread_id, "limit": config.get_max_batch_size()},
     )
 
-    yield context.call_activity_with_retry(
+    persisted = yield context.call_activity_with_retry(
         "ts_PersistSummary",
         retry,
         {"user_id": user_id, "thread_id": thread_id, "summary": summary},
@@ -52,42 +40,33 @@ def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
 
     return {
         "persisted": True,
-        "summary_id": summary.get("id") if isinstance(summary, dict) else None,
+        "summary_id": persisted.get("id") if isinstance(persisted, dict) else None,
     }
 
 
-# ---------------------------------------------------------------------------
-# Activities
-# ---------------------------------------------------------------------------
-
-
 @bp.activity_trigger(input_name="payload")
-def ts_SummarizeThread(payload: dict) -> dict:
-    """Generate (or incrementally update) the thread summary.
-
-    The pipeline loads recent turns internally; we do NOT pre-load them in a
-    separate activity (which would duplicate the query, waste RUs, and open a
-    TOCTOU window between the load and the LLM call).
-    """
+def ts_Extract(payload: dict) -> dict:
+    """Generate (or incrementally update) the thread summary body only."""
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
-    limit = payload.get("limit")
-    pipeline = get_pipeline()
-    summary = pipeline.generate_thread_summary(
+    summary = get_pipeline().generate_thread_summary_dry(
         user_id=user_id,
         thread_id=thread_id,
-        recent_k=limit,
+        recent_k=payload.get("limit"),
     )
-    logger.info("ThreadSummary generated user=%s thread=%s", user_id, thread_id)
+    logger.info("ThreadSummary extracted user=%s thread=%s", user_id, thread_id)
     return summary
 
 
 @bp.activity_trigger(input_name="payload")
 def ts_PersistSummary(payload: dict) -> dict:
-    """Observability shim — the pipeline has already upserted the summary doc.
-
-    Kept as a separate activity so operators see explicit Persist events in
-    App Insights / the Durable status API.
-    """
-    summary = payload.get("summary") or {}
-    return {"id": summary.get("id"), "persisted": True}
+    """Compute the embedding and persist the thread summary."""
+    user_id = payload["user_id"]
+    thread_id = payload["thread_id"]
+    summary = get_pipeline().persist_thread_summary(
+        user_id=user_id,
+        thread_id=thread_id,
+        summary_doc=payload["summary"],
+    )
+    logger.info("ThreadSummary persisted user=%s thread=%s id=%s", user_id, thread_id, summary.get("id"))
+    return summary

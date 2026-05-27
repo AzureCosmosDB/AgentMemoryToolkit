@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
 from .exceptions import ConfigurationError, ValidationError
+from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE, default_ttl_for
 
 VALID_ROLES = {"agent", "user", "tool", "system"}
 VALID_TYPES = {"turn", "summary", "fact", "user_summary", "procedural", "episodic"}
@@ -57,17 +58,14 @@ def new_user_summary_id() -> str:
     """Return a fresh ``user_summary_*`` id."""
     return new_id("user_summary")
 
-DEFAULT_TTL_BY_TYPE: dict[str, int | None] = {
-    "turn": 2_592_000,  # 30 days
-    "summary": None,
-    "fact": None,
-    "user_summary": None,
-    "procedural": None,
-    "episodic": 7_776_000,  # 90 days
-}
-
-
 _WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _coerce_datetime_iso(value: Optional[str | datetime]) -> Optional[str]:
+    """Return ISO text for datetime values while leaving strings unchanged."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
 
 
 def _normalize_for_hash(text: str) -> str:
@@ -114,7 +112,7 @@ def _make_memory(
         raise ValidationError(f"type must be one of {VALID_TYPES}, got '{memory_type}'")
 
     if ttl is None:
-        ttl = DEFAULT_TTL_BY_TYPE.get(memory_type)
+        ttl = default_ttl_for(memory_type)
 
     memory: dict[str, Any] = {
         "id": memory_id or str(uuid.uuid4()),

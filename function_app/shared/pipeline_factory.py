@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import config
-from .cosmos_clients import get_memories_container
+from .cosmos_clients import get_memories_container, get_turns_container
 
 _pipeline: Any | None = None
 
@@ -30,6 +30,7 @@ def get_pipeline():
 
     credential = DefaultAzureCredential()
     container = get_memories_container()
+    turns_container = get_turns_container()
     ai_endpoint = config.get_ai_foundry_endpoint()
 
     embedding_dimensions = _resolve_embedding_dimensions(None)
@@ -46,6 +47,6 @@ def get_pipeline():
         dimensions=embedding_dimensions,
     )
 
-    store = MemoryStore(container, embeddings_client=embeddings)
-    _pipeline = PipelineService(store, chat, embeddings)
+    store = MemoryStore(container, embeddings_client=embeddings, turns_container=turns_container)
+    _pipeline = PipelineService(store, chat, embeddings, cosmos_turns_container=turns_container)
     return _pipeline

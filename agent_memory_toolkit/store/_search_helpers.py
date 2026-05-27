@@ -36,29 +36,18 @@ def top_literal(value: int, *, name: str) -> int:
     return top
 
 
-def _merge_tags(primary: Optional[list[str]], alias: Optional[list[str]]) -> list[str]:
-    merged: list[str] = []
-    if primary:
-        merged.extend(primary)
-    if alias:
-        merged.extend(alias)
-    return merged
-
-
 def add_tag_filters(
     qb: _QueryBuilder,
     *,
-    tags: Optional[list[str]],
     tags_all: Optional[list[str]],
-    any_tags: Optional[list[str]],
     tags_any: Optional[list[str]],
     exclude_tags: Optional[list[str]],
 ) -> None:
-    for i, tag in enumerate(_merge_tags(tags, tags_all)):
-        qb.add_array_contains("c.tags", f"@tag_{i}", tag)
-    any_tag_values = _merge_tags(any_tags, tags_any)
-    if any_tag_values:
-        qb.add_array_contains_any("c.tags", "@any_tag_", any_tag_values)
+    if tags_all:
+        for i, tag in enumerate(tags_all):
+            qb.add_array_contains("c.tags", f"@tag_{i}", tag)
+    if tags_any:
+        qb.add_array_contains_any("c.tags", "@any_tag_", tags_any)
     if exclude_tags:
         for i, tag in enumerate(exclude_tags):
             qb.add_not_array_contains("c.tags", f"@exc_tag_{i}", tag)

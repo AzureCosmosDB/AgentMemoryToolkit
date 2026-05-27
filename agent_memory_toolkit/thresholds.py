@@ -27,6 +27,15 @@ DEFAULT_DEDUP_EVERY_N = 5
 # of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
 
+DEFAULT_TTL_BY_TYPE: dict[str, int] = {
+    "turn": 2_592_000,
+    "episodic": 7_776_000,
+    "thread_summary": -1,
+    "user_summary": -1,
+    "fact": -1,
+    "procedural": -1,
+}
+
 _TRUTHY = {"true", "1", "yes", "on", "t", "y"}
 _FALSY = {"false", "0", "no", "off", "f", "n"}
 
@@ -72,6 +81,19 @@ def _parse_bool(name: str, default: bool) -> bool:
         return False
     logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
     return default
+
+
+def default_ttl_for(memory_type: str) -> Optional[int]:
+    """Return the per-type default TTL, or None for 'use container default'.
+
+    Per-doc ttl=-1 also means 'never'; never-expiring types return None so
+    the container default applies and documents stay small. Unknown types do
+    not expire by default.
+    """
+    ttl = DEFAULT_TTL_BY_TYPE.get(memory_type)
+    if ttl is None or ttl == -1:
+        return None
+    return ttl
 
 
 def get_fact_extraction_every_n() -> int:
@@ -156,9 +178,11 @@ __all__ = [
     "DEFAULT_USER_SUMMARY_EVERY_N",
     "DEFAULT_DEDUP_EVERY_N",
     "DEFAULT_DEDUP_POOL_SIZE",
+    "DEFAULT_TTL_BY_TYPE",
     "DEFAULT_PROCEDURAL_SYNTHESIS_AUTO",
     "PROCESSOR_OWNER_INPROCESS",
     "PROCESSOR_OWNER_DURABLE",
+    "default_ttl_for",
     "get_fact_extraction_every_n",
     "get_thread_summary_every_n",
     "get_user_summary_every_n",

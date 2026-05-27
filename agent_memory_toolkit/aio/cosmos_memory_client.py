@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from agent_memory_toolkit.logging import get_logger
@@ -26,6 +27,7 @@ from agent_memory_toolkit.aio.auto_trigger import maybe_trigger_steps
 from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
 from agent_memory_toolkit.exceptions import CosmosNotConnectedError, CosmosOperationError
+from agent_memory_toolkit.thresholds import DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from agent_memory_toolkit.processors.base import ProcessThreadResult, UserSummaryResult  # noqa: F401
@@ -272,7 +274,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                         container_id=self._cosmos_turns_container,
                         partition_key=partition_key,
                         offer_throughput=offer,
-                        default_ttl=-1,
+                        default_ttl=DEFAULT_TTL_BY_TYPE["turn"],
                         indexing_policy=idx_policy,
                         vector_embedding_policy=vec_policy,
                         full_text_policy=ft_policy,
@@ -492,16 +494,30 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
-        tags: Optional[list[str]] = None,
-        any_tags: Optional[list[str]] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
         min_confidence: Optional[float] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
         return await self._get_store().get_memories(
-            memory_id, user_id, thread_id, role, memory_types, recent_k, tags, any_tags, exclude_tags,
-            include_superseded, min_salience, min_confidence
+            memory_id=memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            role=role,
+            memory_types=memory_types,
+            recent_k=recent_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            include_superseded=include_superseded,
+            min_salience=min_salience,
+            min_confidence=min_confidence,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     async def update_cosmos(
@@ -527,16 +543,32 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         thread_id: Optional[str] = None,
         hybrid_search: bool = False,
         top_k: int = 5,
-        tags: Optional[list[str]] = None,
-        any_tags: Optional[list[str]] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
         min_salience: Optional[float] = None,
         min_confidence: Optional[float] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
         return await self._get_store().search(
-            search_terms, memory_id, user_id, role, memory_types, thread_id, hybrid_search, top_k, tags,
-            any_tags, exclude_tags, include_superseded, min_salience, min_confidence
+            search_terms=search_terms,
+            memory_id=memory_id,
+            user_id=user_id,
+            role=role,
+            memory_types=memory_types,
+            thread_id=thread_id,
+            hybrid_search=hybrid_search,
+            top_k=top_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            include_superseded=include_superseded,
+            min_salience=min_salience,
+            min_confidence=min_confidence,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     async def get_thread(
@@ -545,14 +577,44 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         user_id: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
-        tags: Optional[list[str]] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
         exclude_tags: Optional[list[str]] = None,
         include_superseded: bool = False,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        return await self._get_store().get_thread(thread_id, user_id, memory_types, recent_k, tags, exclude_tags, include_superseded)
+        return await self._get_store().get_thread(
+            thread_id=thread_id,
+            user_id=user_id,
+            memory_types=memory_types,
+            recent_k=recent_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            include_superseded=include_superseded,
+            created_after=created_after,
+            created_before=created_before,
+        )
 
     async def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
         return await self._get_store().get_user_summary(user_id=user_id)
+
+    async def list_tags(
+        self,
+        user_id: str,
+        *,
+        thread_id: Optional[str] = None,
+        prefix: Optional[str] = None,
+        include_sys: bool = False,
+    ) -> list[str]:
+        """Return sorted distinct tags for a user."""
+        return await self._get_store().list_tags(
+            user_id,
+            thread_id=thread_id,
+            prefix=prefix,
+            include_sys=include_sys,
+        )
 
     async def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
         return await self._get_store().add_tags(memory_id, user_id, thread_id, tags)

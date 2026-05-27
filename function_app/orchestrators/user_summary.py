@@ -1,6 +1,7 @@
 """User-summary orchestrator + activities.
 
-Chain: ``GenerateUserSummary`` → ``PersistUserSummary``.
+Chain: ``Extract`` → ``PersistUserSummary``. Extract loads memories and calls the
+LLM; PersistUserSummary computes the embedding and writes the deterministic doc.
 """
 
 from __future__ import annotations
@@ -23,17 +24,15 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
     user_id = payload["user_id"]
     thread_ids = payload.get("thread_ids") or None
-    max_batch = config.get_max_batch_size()
-
     retry = default_retry_options()
 
     user_summary = yield context.call_activity_with_retry(
-        "us_GenerateUserSummary",
+        "us_Extract",
         retry,
-        {"user_id": user_id, "limit": max_batch, "thread_ids": thread_ids},
+        {"user_id": user_id, "limit": config.get_max_batch_size(), "thread_ids": thread_ids},
     )
 
-    yield context.call_activity_with_retry(
+    persisted = yield context.call_activity_with_retry(
         "us_PersistUserSummary",
         retry,
         {"user_id": user_id, "user_summary": user_summary},
@@ -41,29 +40,30 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
 
     return {
         "persisted": True,
-        "user_summary_id": (user_summary.get("id") if isinstance(user_summary, dict) else None),
+        "user_summary_id": (persisted.get("id") if isinstance(persisted, dict) else None),
     }
 
 
 @bp.activity_trigger(input_name="payload")
-def us_GenerateUserSummary(payload: dict) -> dict:
-    """Generate a cross-thread user summary.
-
-    The pipeline loads recent thread summaries internally; we do NOT pre-load
-    them in a separate activity (which would duplicate the query and open a
-    TOCTOU window between the load and the LLM call).
-    """
+def us_Extract(payload: dict) -> dict:
+    """Generate a cross-thread user summary body only."""
     user_id = payload["user_id"]
-    limit = payload.get("limit")
-    thread_ids = payload.get("thread_ids") or None
-    pipeline = get_pipeline()
-    summary = pipeline.generate_user_summary(user_id=user_id, recent_k=limit, thread_ids=thread_ids)
-    logger.info("UserSummary generated user=%s", user_id)
+    summary = get_pipeline().generate_user_summary_dry(
+        user_id=user_id,
+        recent_k=payload.get("limit"),
+        thread_ids=payload.get("thread_ids") or None,
+    )
+    logger.info("UserSummary extracted user=%s", user_id)
     return summary
 
 
 @bp.activity_trigger(input_name="payload")
 def us_PersistUserSummary(payload: dict) -> dict:
-    """Observability shim — the pipeline has already upserted the user-summary doc."""
-    summary = payload.get("user_summary") or {}
-    return {"id": summary.get("id"), "persisted": True}
+    """Compute the embedding and persist the user summary."""
+    user_id = payload["user_id"]
+    summary = get_pipeline().persist_user_summary(
+        user_id=user_id,
+        user_summary_doc=payload["user_summary"],
+    )
+    logger.info("UserSummary persisted user=%s id=%s", user_id, summary.get("id"))
+    return summary

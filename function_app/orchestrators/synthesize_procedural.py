@@ -50,6 +50,8 @@ def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
 
 @bp.activity_trigger(input_name="payload")
 def sp_SynthesizeProcedural(payload: dict) -> dict:
+    # Keep procedural synthesis single-activity for GA: chunked LLM rewrites already
+    # retry internally, and the full procedural body is too bulky for history wins.
     user_id = payload["user_id"]
     force = bool(payload.get("force", False))
     pipeline = get_pipeline()

@@ -7,6 +7,12 @@ param useExisting bool = false
 @description('Name of the new Cosmos account (when useExisting=false).')
 param accountName string
 
+@description('Turns container name.')
+param turnsContainerName string = 'memories_turns'
+
+@description('Default TTL for turn documents, in seconds. Use -1 to disable expiry.')
+param memoriesTurnsDefaultTtl int = 2592000
+
 @description('Name of an existing Cosmos account (when useExisting=true).')
 param existingAccountName string = ''
 
@@ -154,6 +160,73 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
   }
 }
 
+resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = if (manageChildren) {
+  parent: database
+  name: turnsContainerName
+  properties: {
+    resource: {
+      id: turnsContainerName
+      defaultTtl: memoriesTurnsDefaultTtl
+      partitionKey: {
+        kind: 'MultiHash'
+        version: 2
+        paths: [
+          '/user_id'
+          '/thread_id'
+        ]
+      }
+      indexingPolicy: {
+        indexingMode: 'consistent'
+        automatic: true
+        includedPaths: [
+          {
+            path: '/*'
+          }
+        ]
+        excludedPaths: [
+          {
+            path: '/embedding/?'
+          }
+          {
+            path: '/source_memory_ids/*'
+          }
+          {
+            path: '/supersedes_ids/*'
+          }
+          {
+            path: '/"_etag"/?'
+          }
+        ]
+        vectorIndexes: [
+          {
+            path: '/embedding'
+            type: 'diskANN'
+          }
+        ]
+      }
+      vectorEmbeddingPolicy: {
+        vectorEmbeddings: [
+          {
+            path: '/embedding'
+            dataType: 'float32'
+            distanceFunction: 'cosine'
+            dimensions: 1536
+          }
+        ]
+      }
+      fullTextPolicy: {
+        defaultLanguage: 'en-US'
+        fullTextPaths: [
+          {
+            path: '/content'
+            language: 'en-US'
+          }
+        ]
+      }
+    }
+  }
+}
+
 resource leasesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = if (manageChildren && deployFunctionContainers) {
   parent: database
   name: 'leases'
@@ -195,6 +268,7 @@ output accountName string = effectiveAccountName
 output endpoint string = useExisting ? existingAccount!.properties.documentEndpoint : newAccount!.properties.documentEndpoint
 output databaseName string = databaseName
 output memoriesContainerName string = 'memories'
+output turnsContainerName string = turnsContainerName
 output leasesContainerName string = 'leases'
 output counterContainerName string = 'counter'
 output accountResourceId string = useExisting ? existingAccount!.id : newAccount!.id

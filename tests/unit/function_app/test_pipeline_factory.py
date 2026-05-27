@@ -36,6 +36,7 @@ def mocks(monkeypatch):
     Returns a namespace exposing each MagicMock so tests can assert on calls.
     """
     container = MagicMock(name="ContainerProxy")
+    turns_container = MagicMock(name="TurnsContainerProxy")
     credential = MagicMock(name="DefaultAzureCredential")
     chat_instance = MagicMock(name="ChatClient_instance")
     embed_instance = MagicMock(name="EmbeddingsClient_instance")
@@ -49,6 +50,7 @@ def mocks(monkeypatch):
     credential_ctor = MagicMock(name="DefaultAzureCredential_ctor", return_value=credential)
 
     monkeypatch.setattr(pipeline_factory, "get_memories_container", lambda: container)
+    monkeypatch.setattr(pipeline_factory, "get_turns_container", lambda: turns_container)
 
     patches = [
         patch("azure.identity.DefaultAzureCredential", credential_ctor),
@@ -61,6 +63,7 @@ def mocks(monkeypatch):
         p.start()
     yield MagicMock(
         container=container,
+        turns_container=turns_container,
         credential=credential,
         credential_ctor=credential_ctor,
         chat_ctor=chat_ctor,
@@ -85,8 +88,17 @@ def test_builds_pipeline_from_complete_env(mocks):
     result = pipeline_factory.get_pipeline()
 
     assert result is mocks.pipeline_instance
-    mocks.store_ctor.assert_called_once_with(mocks.container, embeddings_client=mocks.embed_instance)
-    mocks.pipeline_ctor.assert_called_once_with(mocks.store_instance, mocks.chat_instance, mocks.embed_instance)
+    mocks.store_ctor.assert_called_once_with(
+        mocks.container,
+        embeddings_client=mocks.embed_instance,
+        turns_container=mocks.turns_container,
+    )
+    mocks.pipeline_ctor.assert_called_once_with(
+        mocks.store_instance,
+        mocks.chat_instance,
+        mocks.embed_instance,
+        cosmos_turns_container=mocks.turns_container,
+    )
 
 
 def test_uses_chat_deployment_name_env_var(monkeypatch, mocks):

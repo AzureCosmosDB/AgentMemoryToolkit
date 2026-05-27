@@ -9,6 +9,7 @@ from agent_memory_toolkit.exceptions import (
     CosmosNotConnectedError,
     CosmosOperationError,
     LLMError,
+    MemoryConflictError,
     MemoryNotFoundError,
     ValidationError,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "CosmosNotConnectedError",
     "CosmosOperationError",
     "LLMError",
+    "MemoryConflictError",
     "MemoryNotFoundError",
     "ValidationError",
     "DEFAULT_FACT_EXTRACTION_EVERY_N",

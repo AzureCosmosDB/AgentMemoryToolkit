@@ -226,3 +226,75 @@ def test_add_in_filter_combined_with_other_filters():
     assert "c.type IN (@t_0, @t_1)" in where
     assert " AND " in where
     assert len(qb.get_parameters()) == 3
+
+# ---------------------------------------------------------------------------
+# add_time_range
+# ---------------------------------------------------------------------------
+
+
+def test_add_time_range_after_only():
+    qb = _QueryBuilder()
+    qb.add_time_range("c.created_at", after="2026-01-01T00:00:00+00:00")
+    assert qb.build_where() == " WHERE c.created_at >= @after"
+    assert qb.get_parameters() == [{"name": "@after", "value": "2026-01-01T00:00:00+00:00"}]
+
+
+def test_add_time_range_before_only():
+    qb = _QueryBuilder()
+    qb.add_time_range("c.created_at", before="2026-02-01T00:00:00+00:00")
+    assert qb.build_where() == " WHERE c.created_at <= @before"
+    assert qb.get_parameters() == [{"name": "@before", "value": "2026-02-01T00:00:00+00:00"}]
+
+
+def test_add_time_range_both_with_custom_params():
+    qb = _QueryBuilder()
+    qb.add_time_range(
+        "c.created_at",
+        after="2026-01-01T00:00:00+00:00",
+        before="2026-02-01T00:00:00+00:00",
+        after_param="@created_after",
+        before_param="@created_before",
+    )
+    assert qb.build_where() == " WHERE c.created_at >= @created_after AND c.created_at <= @created_before"
+    assert qb.get_parameters() == [
+        {"name": "@created_after", "value": "2026-01-01T00:00:00+00:00"},
+        {"name": "@created_before", "value": "2026-02-01T00:00:00+00:00"},
+    ]
+
+
+def test_add_time_range_neither_is_noop():
+    qb = _QueryBuilder()
+    qb.add_time_range("c.created_at")
+    assert qb.build_where() == ""
+    assert qb.get_parameters() == []
+
+
+# ---------------------------------------------------------------------------
+# add_metadata_filter
+# ---------------------------------------------------------------------------
+
+
+def test_add_metadata_filter_supported_ops():
+    for op in ["=", "!=", ">", "<", ">=", "<="]:
+        qb = _QueryBuilder()
+        qb.add_metadata_filter("c.metadata.score", op, 7, param_name="@score")
+        assert qb.build_where() == f" WHERE c.metadata.score {op} @score"
+        assert qb.get_parameters() == [{"name": "@score", "value": 7}]
+
+
+def test_add_metadata_filter_auto_param_name():
+    qb = _QueryBuilder()
+    qb.add_filter("c.user_id", "@user_id", "u1")
+    qb.add_metadata_filter("c.metadata.category", "=", "preference")
+    assert "c.metadata.category = @m_1" in qb.build_where()
+    assert {"name": "@m_1", "value": "preference"} in qb.get_parameters()
+
+
+def test_add_metadata_filter_rejects_unsupported_op():
+    qb = _QueryBuilder()
+    try:
+        qb.add_metadata_filter("c.metadata.category", "LIKE", "pref")
+    except ValueError as exc:
+        assert "unsupported op: LIKE" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

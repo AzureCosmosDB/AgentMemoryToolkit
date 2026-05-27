@@ -272,7 +272,7 @@ class TestTaggingAndSalience:
             )
             tagged = agent_memory.get_memories(
                 user_id=unique_user_id,
-                tags=["preference"],
+                tags_all=["preference"],
             )
             assert len(tagged) == 1
             mid = tagged[0]["id"]
@@ -292,7 +292,7 @@ class TestTaggingAndSalience:
 
             refreshed = agent_memory.get_memories(
                 user_id=unique_user_id,
-                tags=["ui"],
+                tags_all=["ui"],
             )
             assert any(m["id"] == mid for m in refreshed)
             stored = next(m for m in refreshed if m["id"] == mid)

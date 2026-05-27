@@ -57,6 +57,12 @@ class CosmosOperationError(AgentMemoryError):
     error_code = "cosmos_operation"
 
 
+class MemoryConflictError(AgentMemoryError):
+    """Raised when an optimistic-concurrency guarded memory update conflicts."""
+
+    error_code = "memory_conflict"
+
+
 class MemoryNotFoundError(AgentMemoryError):
     """Raised when a memory document is not found.
 

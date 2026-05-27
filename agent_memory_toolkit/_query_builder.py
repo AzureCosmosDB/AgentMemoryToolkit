@@ -77,6 +77,31 @@ class _QueryBuilder:
         self._conditions.append(f"{field} >= {param_name}")
         self._parameters.append({"name": param_name, "value": value})
 
+    def add_time_range(
+        self,
+        field: str,
+        *,
+        after: Any = None,
+        before: Any = None,
+        after_param: str = "@after",
+        before_param: str = "@before",
+    ) -> None:
+        """Add inclusive lower/upper bounds for an ISO-sortable time field."""
+        if after is not None:
+            self._conditions.append(f"{field} >= {after_param}")
+            self._parameters.append({"name": after_param, "value": after})
+        if before is not None:
+            self._conditions.append(f"{field} <= {before_param}")
+            self._parameters.append({"name": before_param, "value": before})
+
+    def add_metadata_filter(self, path: str, op: str, value: Any, *, param_name: str | None = None) -> None:
+        """Add a parameterized comparison filter for a metadata path."""
+        if op not in {"=", "!=", ">", "<", ">=", "<="}:
+            raise ValueError(f"unsupported op: {op}")
+        pname = param_name or f"@m_{len(self._parameters)}"
+        self._conditions.append(f"{path} {op} {pname}")
+        self._parameters.append({"name": pname, "value": value})
+
     def build_where(self) -> str:
         """Return the ``WHERE …`` clause (or empty string if no filters)."""
         if not self._conditions:

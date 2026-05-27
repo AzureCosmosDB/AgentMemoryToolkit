@@ -98,11 +98,11 @@ def test_compute_content_hash_different_content():
 
 def test_default_ttl_by_type():
     assert DEFAULT_TTL_BY_TYPE["turn"] == 2_592_000
-    assert DEFAULT_TTL_BY_TYPE["summary"] is None
-    assert DEFAULT_TTL_BY_TYPE["fact"] is None
-    assert DEFAULT_TTL_BY_TYPE["user_summary"] is None
     assert DEFAULT_TTL_BY_TYPE["episodic"] == 7_776_000
-    assert DEFAULT_TTL_BY_TYPE["procedural"] is None
+    assert DEFAULT_TTL_BY_TYPE["thread_summary"] == -1
+    assert DEFAULT_TTL_BY_TYPE["fact"] == -1
+    assert DEFAULT_TTL_BY_TYPE["user_summary"] == -1
+    assert DEFAULT_TTL_BY_TYPE["procedural"] == -1
 
 
 # ---------------------------------------------------------------------------

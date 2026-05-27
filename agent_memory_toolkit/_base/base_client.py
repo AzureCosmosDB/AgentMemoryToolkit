@@ -31,6 +31,7 @@ class _BaseMemoryClient:
         cosmos_key: Optional[str],
         cosmos_database: Optional[str],
         cosmos_container: Optional[str],
+        cosmos_turns_container: Optional[str] = None,
         cosmos_counter_container: Optional[str],
         cosmos_lease_container: Optional[str],
         cosmos_throughput_mode: Optional[str],
@@ -56,6 +57,10 @@ class _BaseMemoryClient:
         self._cosmos_key = cosmos_key
         self._cosmos_database = cosmos_database or "ai_memory"
         self._cosmos_container = cosmos_container or "memories"
+        # None means use the main container for turns. Note: change-feed-based
+        # triggers (e.g., Azure Functions) bound to the main container will NOT
+        # fire for turns written to a dedicated turns container.
+        self._cosmos_turns_container = cosmos_turns_container
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
@@ -94,6 +99,7 @@ class _BaseMemoryClient:
 
         self._cosmos_client: Any = None
         self._container_client: Any = None
+        self._turns_container_client: Any = None
         self._counter_container_client: Any = None
         self._store: Any = None
 

@@ -71,15 +71,19 @@ class _AsyncStoreContainerAdapter:
 class AsyncPipelineService:
     """Async LLM orchestration service backed by an async typed memory store."""
 
+    _turns_container: Any = None
+
     def __init__(
         self,
         store: AsyncMemoryStore,
         chat_client: Any,
         embeddings_client: Any,
         prompts_dir: str | None = None,
+        cosmos_turns_container: Any | None = None,
     ) -> None:
         self._store = store
         self._container = _AsyncStoreContainerAdapter(store)
+        self._turns_container = cosmos_turns_container
         self._chat_client = chat_client
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
@@ -228,6 +232,13 @@ class AsyncPipelineService:
                 parameters=parameters,
                 partition_key=[user_id, thread_id],
             )
+            if self._turns_container is not None:
+                async for item in self._turns_container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    partition_key=[user_id, thread_id],
+                ):
+                    items.append(item)
         else:
             items = list(turns)
 
@@ -843,6 +854,13 @@ class AsyncPipelineService:
             parameters=parameters,
             partition_key=[user_id, thread_id],
         )
+        if self._turns_container is not None:
+            async for item in self._turns_container.query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=[user_id, thread_id],
+            ):
+                items.append(item)
 
         if existing_summary and not items:
             logger.info("generate_thread_summary no new memories, returning existing")
@@ -986,6 +1004,13 @@ class AsyncPipelineService:
             parameters=parameters,
             enable_cross_partition_query=True,
         )
+        if self._turns_container is not None:
+            async for item in self._turns_container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
+            ):
+                items.append(item)
 
         if existing_summary and not items:
             logger.info("generate_user_summary no new memories, returning existing")

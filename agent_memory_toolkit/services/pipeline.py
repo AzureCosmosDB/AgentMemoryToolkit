@@ -68,15 +68,19 @@ class _StoreContainerAdapter:
 class PipelineService:
     """LLM orchestration service backed by a typed memory store."""
 
+    _turns_container: Any = None
+
     def __init__(
         self,
         store: MemoryStoreProtocol,
         chat_client: Any,
         embeddings_client: Any,
         prompts_dir: str | None = None,
+        cosmos_turns_container: Any | None = None,
     ) -> None:
         self._store = store
         self._container = _StoreContainerAdapter(store)
+        self._turns_container = cosmos_turns_container
         self._chat_client = chat_client
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
@@ -265,6 +269,16 @@ class PipelineService:
                     partition_key=[user_id, thread_id],
                 )
             )
+            if self._turns_container is not None:
+                items.extend(
+                    list(
+                        self._turns_container.query_items(
+                            query=query,
+                            parameters=parameters,
+                            partition_key=[user_id, thread_id],
+                        )
+                    )
+                )
         else:
             items = list(turns)
 
@@ -895,6 +909,17 @@ class PipelineService:
                 partition_key=[user_id, thread_id],
             )
         )
+        # Also fetch from the turns container if it differs from the main one
+        if self._turns_container is not None:
+            items.extend(
+                list(
+                    self._turns_container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        partition_key=[user_id, thread_id],
+                    )
+                )
+            )
 
         if existing_summary and not items:
             logger.info("generate_thread_summary no new memories, returning existing")
@@ -1040,6 +1065,17 @@ class PipelineService:
                 enable_cross_partition_query=True,
             )
         )
+        # Also fetch from the turns container if it differs from the main one
+        if self._turns_container is not None:
+            items.extend(
+                list(
+                    self._turns_container.query_items(
+                        query=query,
+                        parameters=parameters,
+                        enable_cross_partition_query=True,
+                    )
+                )
+            )
 
         if existing_summary and not items:
             logger.info("generate_user_summary no new memories, returning existing")

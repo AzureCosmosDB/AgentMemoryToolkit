@@ -34,14 +34,54 @@ logger = get_logger(__name__)
 class AsyncMemoryStore:
     """Typed CRUD and query primitives over an async Cosmos DB container."""
 
-    def __init__(self, container: Any, *, embeddings_client: Any = None) -> None:
+    def __init__(
+        self,
+        container: Any,
+        *,
+        embeddings_client: Any = None,
+        turns_container: Any = None,
+    ) -> None:
         self._container = container
+        self._turns_container = turns_container
         self._embeddings_client = embeddings_client
 
     @property
     def container(self) -> Any:
         """Return the underlying Cosmos container client."""
         return self._container
+
+    def _container_for_type(self, memory_type: str) -> Any:
+        """Route writes by memory type: turns → turns container if configured."""
+        if memory_type == "turn" and self._turns_container is not None:
+            return self._turns_container
+        return self._container
+
+    def _container_for_query(self, memory_types: Optional[list[str]] = None) -> Any:
+        """Single-container choice for read queries.
+
+        turn-only types → turns container; everything else → main.
+        """
+        if not memory_types or self._turns_container is None:
+            return self._container
+        has_turn = any(t == "turn" for t in memory_types)
+        has_not_turn = any(t != "turn" for t in memory_types)
+        if has_turn and not has_not_turn:
+            return self._turns_container
+        return self._container
+
+    def _containers_for_query(self, memory_types: Optional[list[str]] = None) -> list[Any]:
+        """All containers that need to be queried for complete results."""
+        if self._turns_container is None:
+            return [self._container]
+        if not memory_types:
+            return [self._container, self._turns_container]
+        has_turn = any(t == "turn" for t in memory_types)
+        has_not_turn = any(t != "turn" for t in memory_types)
+        if has_turn and has_not_turn:
+            return [self._container, self._turns_container]
+        if has_turn:
+            return [self._turns_container]
+        return [self._container]
 
     async def read_item(self, item_id: str, partition_key: Any) -> dict[str, Any]:
         """Point-read a memory document by id and partition key."""
@@ -78,22 +118,25 @@ class AsyncMemoryStore:
         partition_key: Any = None,
         cross_partition: bool = False,
         operation: str,
+        container: Any = None,
     ) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {"query": query, "parameters": parameters or None}
         if partition_key is not None:
             kwargs["partition_key"] = partition_key
         if cross_partition:
             kwargs["enable_cross_partition_query"] = True
+        target = container if container is not None else self._container
         try:
-            items_iter = self._container.query_items(**kwargs)
+            items_iter = target.query_items(**kwargs)
             return [item async for item in items_iter]
         except Exception as exc:
             raise CosmosOperationError(f"{operation} failed: {exc}") from exc
 
     async def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
         """Upsert a pre-built Cosmos memory document and return the stored body."""
+        container = self._container_for_type(record.get("type", "turn"))
         try:
-            response = await self._container.upsert_item(body=record)
+            response = await container.upsert_item(body=record)
         except Exception as exc:
             raise _wrap_cosmos_exception(
                 exc, message=f"async add_cosmos upsert failed for record {record.get('id')}: {exc}"
@@ -149,7 +192,8 @@ class AsyncMemoryStore:
                 )
 
         try:
-            await self._container.upsert_item(body=body)
+            container = self._container_for_type(memory_type)
+            await container.upsert_item(body=body)
         except Exception as exc:
             raise _wrap_cosmos_exception(
                 exc, message=f"Async upsert failed for record {record.id}: {exc}"
@@ -195,7 +239,7 @@ class AsyncMemoryStore:
                         len(to_embed_text),
                     )
 
-            tasks = [self._container.upsert_item(body=b) for b in bodies]
+            tasks = [self._container_for_type(b.get("type", "turn")).upsert_item(body=b) for b in bodies]
             try:
                 await asyncio.gather(*tasks)
             except Exception as exc:
@@ -265,6 +309,7 @@ class AsyncMemoryStore:
             query=query,
             parameters=parameters or None,
             operation="async get_memories query",
+            container=self._container_for_query(memory_types),
         )
 
         if recent_k is not None:
@@ -284,11 +329,20 @@ class AsyncMemoryStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Update a memory document in Cosmos DB."""
+        target_container = self._container
         docs = await self._query_items(
             query="SELECT * FROM c WHERE c.id = @id",
             parameters=[{"name": "@id", "value": memory_id}],
             operation="async update query",
         )
+        if not docs and self._turns_container is not None:
+            docs = await self._query_items(
+                query="SELECT * FROM c WHERE c.id = @id",
+                parameters=[{"name": "@id", "value": memory_id}],
+                operation="async update query (turns)",
+                container=self._turns_container,
+            )
+            target_container = self._turns_container
         if not docs:
             raise MemoryNotFoundError(memory_id=memory_id)
 
@@ -304,7 +358,7 @@ class AsyncMemoryStore:
         doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         try:
-            await self._container.replace_item(item=doc["id"], body=doc)
+            await target_container.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
             raise _wrap_cosmos_exception(
                 exc, message=f"async update replace failed for {memory_id}: {exc}"
@@ -314,22 +368,33 @@ class AsyncMemoryStore:
 
     async def delete(self, memory_id: str, thread_id: str, user_id: str) -> None:
         """Delete a memory document from Cosmos DB."""
+        lookup_query = (
+            "SELECT TOP 1 c.id FROM c WHERE c.id = @id AND c.thread_id = @thread_id AND c.user_id = @user_id"
+        )
+        lookup_parameters = [
+            {"name": "@id", "value": memory_id},
+            {"name": "@thread_id", "value": thread_id},
+            {"name": "@user_id", "value": user_id},
+        ]
+        target_container = self._container
         docs = await self._query_items(
-            query=(
-                "SELECT TOP 1 c.id FROM c WHERE c.id = @id AND c.thread_id = @thread_id AND c.user_id = @user_id"
-            ),
-            parameters=[
-                {"name": "@id", "value": memory_id},
-                {"name": "@thread_id", "value": thread_id},
-                {"name": "@user_id", "value": user_id},
-            ],
+            query=lookup_query,
+            parameters=lookup_parameters,
             operation="async delete lookup",
         )
+        if not docs and self._turns_container is not None:
+            docs = await self._query_items(
+                query=lookup_query,
+                parameters=lookup_parameters,
+                operation="async delete lookup (turns)",
+                container=self._turns_container,
+            )
+            target_container = self._turns_container
         if not docs:
             raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
 
         try:
-            await self._container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
+            await target_container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
             raise _wrap_cosmos_exception(
                 exc, message=f"async delete failed for {memory_id}: {exc}"
@@ -364,11 +429,19 @@ class AsyncMemoryStore:
 
         query = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
         logger.debug("async get_thread query: %s", query)
-        items = await self._query_items(
-            query=query,
-            parameters=qb.get_parameters(),
-            operation="async get_thread query",
-        )
+        containers = self._containers_for_query(memory_types)
+        items: list[dict[str, Any]] = []
+        for c in containers:
+            items.extend(
+                await self._query_items(
+                    query=query,
+                    parameters=qb.get_parameters(),
+                    operation="async get_thread query",
+                    container=c,
+                )
+            )
+        if len(containers) > 1:
+            items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:
             items = items[:recent_k]
         items.reverse()

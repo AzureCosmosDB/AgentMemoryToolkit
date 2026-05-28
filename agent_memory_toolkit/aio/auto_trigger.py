@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from agent_memory_toolkit.logging import get_logger
 from collections.abc import Callable
 from typing import Any
 
@@ -15,6 +14,7 @@ from agent_memory_toolkit import _counters
 from agent_memory_toolkit import thresholds as default_thresholds
 from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor
 from agent_memory_toolkit.auto_trigger import _threshold_int, _threshold_value
+from agent_memory_toolkit.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -135,10 +135,25 @@ async def _fire_thread_steps(
         )
     )
     calls = (
-        (fire_extract, "process_extract_memories", processor.process_extract_memories, {"user_id": user_id, "thread_id": thread_id}),
+        (
+            fire_extract,
+            "process_extract_memories",
+            processor.process_extract_memories,
+            {"user_id": user_id, "thread_id": thread_id},
+        ),
         (fire_dedup, "process_reconcile", processor.process_reconcile, {"user_id": user_id}),
-        (fire_procedural, "synthesize_procedural", processor.synthesize_procedural, {"user_id": user_id}),
-        (fire_summary, "process_thread_summary", processor.process_thread_summary, {"user_id": user_id, "thread_id": thread_id}),
+        (
+            fire_procedural,
+            "synthesize_procedural",
+            processor.synthesize_procedural,
+            {"user_id": user_id},
+        ),
+        (
+            fire_summary,
+            "process_thread_summary",
+            processor.process_thread_summary,
+            {"user_id": user_id, "thread_id": thread_id},
+        ),
     )
     for enabled, label, method, kwargs in calls:
         if not enabled:

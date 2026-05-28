@@ -227,6 +227,7 @@ def test_add_in_filter_combined_with_other_filters():
     assert " AND " in where
     assert len(qb.get_parameters()) == 3
 
+
 # ---------------------------------------------------------------------------
 # add_time_range
 # ---------------------------------------------------------------------------

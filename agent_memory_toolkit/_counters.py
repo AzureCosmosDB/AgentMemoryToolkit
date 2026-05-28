@@ -28,12 +28,13 @@ detect double-write configurations after the fact. It is not a lock.
 
 from __future__ import annotations
 
-from agent_memory_toolkit.logging import get_logger
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
+
+from agent_memory_toolkit.logging import get_logger
 
 logger = get_logger(__name__)
 

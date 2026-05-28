@@ -206,9 +206,7 @@ class TestGenerateBatchChunking:
         mock_client = MagicMock()
         MockAOAI.return_value = mock_client
         # 10 items, within default batch_size=16 → single API call.
-        mock_client.embeddings.create.return_value = _mock_batch_response(
-            [[float(i)] for i in range(10)]
-        )
+        mock_client.embeddings.create.return_value = _mock_batch_response([[float(i)] for i in range(10)])
 
         client = _make_client()
         result = client.generate_batch([f"t{i}" for i in range(10)])
@@ -235,9 +233,7 @@ class TestGenerateBatchChunking:
 
         # Three calls with expected chunk sizes in order.
         assert mock_client.embeddings.create.call_count == 3
-        chunk_sizes = [
-            len(call.kwargs["input"]) for call in mock_client.embeddings.create.call_args_list
-        ]
+        chunk_sizes = [len(call.kwargs["input"]) for call in mock_client.embeddings.create.call_args_list]
         assert chunk_sizes == [16, 16, 8]
 
         # Results preserved in input order across all chunks.
@@ -273,8 +269,6 @@ class TestGenerateBatchChunking:
 
         # ceil(12/5) = 3 calls with chunk sizes (5, 5, 2).
         assert mock_client.embeddings.create.call_count == 3
-        chunk_sizes = [
-            len(call.kwargs["input"]) for call in mock_client.embeddings.create.call_args_list
-        ]
+        chunk_sizes = [len(call.kwargs["input"]) for call in mock_client.embeddings.create.call_args_list]
         assert chunk_sizes == [5, 5, 2]
         assert result == [[float(i)] for i in range(12)]

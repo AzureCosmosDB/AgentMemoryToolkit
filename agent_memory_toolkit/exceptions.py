@@ -108,4 +108,3 @@ class LLMError(AgentMemoryError):
     as an exception (no choices, empty content, invalid JSON)."""
 
     error_code = "llm"
-

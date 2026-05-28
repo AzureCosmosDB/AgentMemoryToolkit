@@ -31,7 +31,6 @@ from agent_memory_toolkit.models import (
     construct_internal,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers — minimal valid kwargs per typed subclass
 # ---------------------------------------------------------------------------

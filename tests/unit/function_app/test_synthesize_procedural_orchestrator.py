@@ -8,12 +8,10 @@ import pytest
 from orchestrators import synthesize_procedural as sp_mod
 
 
-
 def _user_function(builder):
     if hasattr(builder, "_function"):
         return builder._function.get_user_function().orchestrator_function
     return builder
-
 
 
 def _make_context(payload):
@@ -29,7 +27,6 @@ def _make_context(payload):
     ctx.call_activity_with_retry.side_effect = call_activity_with_retry
     ctx._yielded_calls = yielded_calls
     return ctx
-
 
 
 def _drive(gen, activity_results):

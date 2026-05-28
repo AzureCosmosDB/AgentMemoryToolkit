@@ -99,9 +99,7 @@ def test_asyncio_to_thread_only_in_allowed_call_sites() -> None:
     """
     hits = _collect_to_thread_calls()
 
-    unexpected = [
-        (rel, lineno, chain) for (rel, lineno, chain) in hits if not _is_allowed(rel, chain)
-    ]
+    unexpected = [(rel, lineno, chain) for (rel, lineno, chain) in hits if not _is_allowed(rel, chain)]
     assert not unexpected, (
         "Unexpected asyncio.to_thread call site(s) found in "
         "agent_memory_toolkit/aio/. Each new to_thread reintroduces sync "

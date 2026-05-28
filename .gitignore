@@ -35,3 +35,10 @@ venv/
 
 # macOS
 .DS_Store
+
+# JetBrains IDEs
+.idea/
+
+# Local scratch notes
+Agent Memory Toolkit.txt
+Cosmos AI Memory Service.txt

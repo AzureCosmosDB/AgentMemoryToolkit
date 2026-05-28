@@ -14,7 +14,6 @@ import pytest
 
 from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
 
-
 ASYNC_LOGGER_NAME = "agent_memory_toolkit.pipeline.aio"
 
 
@@ -45,10 +44,7 @@ def _fact(fid: str, content: str, **extra) -> dict:
 
 
 def _outcome_records(caplog) -> list:
-    return [
-        r for r in caplog.records
-        if r.name == ASYNC_LOGGER_NAME and r.getMessage() == "reconcile.outcome"
-    ]
+    return [r for r in caplog.records if r.name == ASYNC_LOGGER_NAME and r.getMessage() == "reconcile.outcome"]
 
 
 @pytest.mark.asyncio

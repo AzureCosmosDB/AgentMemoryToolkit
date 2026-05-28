@@ -12,10 +12,11 @@ The async counterpart lives in :mod:`agent_memory_toolkit.aio.chat` as
 from __future__ import annotations
 
 import os
-from agent_memory_toolkit.logging import get_logger
 import re
 import time
 from typing import Any
+
+from agent_memory_toolkit.logging import get_logger
 
 from .exceptions import ConfigurationError, LLMError
 
@@ -60,8 +61,7 @@ def unsupported_param(exc: Exception) -> str | None:
 
 
 def extract_content(response: Any, model: str) -> str:
-    """Pull the assistant content out of a chat-completions response.
-    """
+    """Pull the assistant content out of a chat-completions response."""
     if not response.choices:
         raise LLMError(f"LLM returned no choices (model={model})")
     choice = response.choices[0]

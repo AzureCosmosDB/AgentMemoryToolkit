@@ -158,7 +158,6 @@ def test_single_doc_and_simple_query_helpers():
     assert store.get_procedural_memories("u1")
 
 
-
 def _params_by_name(call_kwargs):
     return {p["name"]: p["value"] for p in call_kwargs["parameters"]}
 

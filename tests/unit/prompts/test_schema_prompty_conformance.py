@@ -60,9 +60,7 @@ def _top_level_object_keys(text: str) -> list[set[str]]:
     sorted(PROMPTY_SCHEMAS.items()),
     ids=lambda v: v if isinstance(v, str) else "",
 )
-def test_prompty_describes_schema_shape(
-    filename: str, schema_entry: tuple[str, dict]
-) -> None:
+def test_prompty_describes_schema_shape(filename: str, schema_entry: tuple[str, dict]) -> None:
     """Each prompty must contain a JSON block matching its strict schema."""
     _name, schema = schema_entry
     properties = set(schema.get("properties", {}).keys())
@@ -80,9 +78,7 @@ def test_prompty_describes_schema_shape(
         f"{sorted(properties)}."
     )
 
-    matching_blocks = [
-        keys for keys in blocks_keys if required <= keys <= properties
-    ]
+    matching_blocks = [keys for keys in blocks_keys if required <= keys <= properties]
 
     if not matching_blocks:
         diagnostic_blocks = [sorted(k) for k in blocks_keys]
@@ -100,21 +96,13 @@ def test_prompty_describes_schema_shape(
 
 def test_every_registered_prompty_file_exists() -> None:
     """Guard against typos / removed prompties leaving dangling schema entries."""
-    missing = [
-        filename
-        for filename in PROMPTY_SCHEMAS
-        if not (_PROMPTS_DIR / filename).exists()
-    ]
+    missing = [filename for filename in PROMPTY_SCHEMAS if not (_PROMPTS_DIR / filename).exists()]
     assert not missing, f"PROMPTY_SCHEMAS references nonexistent files: {missing}"
 
 
 def test_every_prompty_file_has_a_registered_schema() -> None:
     """Guard against adding a prompty without wiring up a strict schema."""
-    prompty_files = {
-        path.name
-        for path in _PROMPTS_DIR.glob("*.prompty")
-        if not path.name.startswith("_")
-    }
+    prompty_files = {path.name for path in _PROMPTS_DIR.glob("*.prompty") if not path.name.startswith("_")}
     unregistered = prompty_files - set(PROMPTY_SCHEMAS)
     assert not unregistered, (
         f"These prompty files have no entry in PROMPTY_SCHEMAS — "

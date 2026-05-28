@@ -90,6 +90,7 @@ class TestJsonFormatter:
             raise ValidationError("bad input")
         except ValidationError:
             import sys
+
             record = logging.LogRecord(
                 name="agent_memory_toolkit.test",
                 level=logging.ERROR,
@@ -109,6 +110,7 @@ class TestJsonFormatter:
             raise MemoryNotFoundError(memory_id="m-1")
         except MemoryNotFoundError:
             import sys
+
             record = logging.LogRecord(
                 name="agent_memory_toolkit.test",
                 level=logging.ERROR,

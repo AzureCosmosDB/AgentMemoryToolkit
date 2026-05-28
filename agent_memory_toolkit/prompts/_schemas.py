@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # dedup.prompty — reconcile a pool of active facts
 # ---------------------------------------------------------------------------

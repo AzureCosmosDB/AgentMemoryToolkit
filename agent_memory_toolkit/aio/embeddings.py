@@ -8,11 +8,11 @@ OpenAI API.
 from __future__ import annotations
 
 import asyncio
-from agent_memory_toolkit.chat import resolve_api_version
-from agent_memory_toolkit.logging import get_logger
 from typing import Any
 
+from agent_memory_toolkit.chat import resolve_api_version
 from agent_memory_toolkit.exceptions import ConfigurationError
+from agent_memory_toolkit.logging import get_logger
 
 logger = get_logger(__name__)
 

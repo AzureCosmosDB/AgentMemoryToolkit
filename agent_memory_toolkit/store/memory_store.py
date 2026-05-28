@@ -6,7 +6,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
-from agent_memory_toolkit._utils import _build_memory_query_builder, _coerce_datetime_iso, _validate_hybrid_search, compute_content_hash, new_id
+from agent_memory_toolkit._utils import (
+    _build_memory_query_builder,
+    _coerce_datetime_iso,
+    _validate_hybrid_search,
+    compute_content_hash,
+    new_id,
+)
 from agent_memory_toolkit.exceptions import (
     ConfigurationError,
     CosmosOperationError,
@@ -15,7 +21,6 @@ from agent_memory_toolkit.exceptions import (
 )
 from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import MemoryRecord
-from agent_memory_toolkit.thresholds import default_ttl_for
 from agent_memory_toolkit.store._search_helpers import (
     add_salience_filter,
     add_tag_filters,
@@ -26,6 +31,7 @@ from agent_memory_toolkit.store._search_helpers import (
     require_search_terms,
     top_literal,
 )
+from agent_memory_toolkit.thresholds import default_ttl_for
 
 logger = get_logger(__name__)
 
@@ -225,9 +231,7 @@ class MemoryStore:
             container = self._container_for_type(memory_type)
             container.upsert_item(body=body)
         except Exception as exc:
-            raise _wrap_cosmos_exception(
-                exc, message=f"Upsert failed for record {record.id}: {exc}"
-            ) from exc
+            raise _wrap_cosmos_exception(exc, message=f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
         return record.id
 
@@ -271,9 +275,7 @@ class MemoryStore:
                     container = self._container_for_type(body.get("type", "turn"))
                     container.upsert_item(body=body)
                 except Exception as exc:
-                    raise _wrap_cosmos_exception(
-                        exc, message=f"Upsert failed for record {record.id}: {exc}"
-                    ) from exc
+                    raise _wrap_cosmos_exception(exc, message=f"Upsert failed for record {record.id}: {exc}") from exc
         logger.info("Upserted batch of %d records", len(records))
 
     def get_memories(
@@ -392,18 +394,13 @@ class MemoryStore:
         try:
             target_container.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
-            raise _wrap_cosmos_exception(
-                exc, message=f"update replace failed for {memory_id}: {exc}"
-            ) from exc
+            raise _wrap_cosmos_exception(exc, message=f"update replace failed for {memory_id}: {exc}") from exc
 
         logger.info("Updated record %s", memory_id)
 
     def delete(self, memory_id: str, thread_id: str, user_id: str) -> None:
         """Delete a memory document from Cosmos DB."""
-        lookup_query = (
-            "SELECT TOP 1 c.id FROM c WHERE c.id = @id "
-            "AND c.thread_id = @thread_id AND c.user_id = @user_id"
-        )
+        lookup_query = "SELECT TOP 1 c.id FROM c WHERE c.id = @id AND c.thread_id = @thread_id AND c.user_id = @user_id"
         lookup_parameters = [
             {"name": "@id", "value": memory_id},
             {"name": "@thread_id", "value": thread_id},
@@ -431,9 +428,7 @@ class MemoryStore:
         try:
             target_container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except Exception as exc:
-            raise _wrap_cosmos_exception(
-                exc, message=f"delete failed for {memory_id}: {exc}"
-            ) from exc
+            raise _wrap_cosmos_exception(exc, message=f"delete failed for {memory_id}: {exc}") from exc
 
         logger.info("Deleted record %s", memory_id)
 

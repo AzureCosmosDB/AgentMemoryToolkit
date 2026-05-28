@@ -349,7 +349,8 @@ def test_build_procedural_context_returns_active_procedural() -> None:
     )
 
     fake = FakeLLMService([])
-    assert PipelineService(store, fake.chat_client, fake.embeddings_client).build_procedural_context("u1") == "Active prompt"
+    result = PipelineService(store, fake.chat_client, fake.embeddings_client).build_procedural_context("u1")
+    assert result == "Active prompt"
 
 
 def test_build_procedural_context_requires_user_id() -> None:

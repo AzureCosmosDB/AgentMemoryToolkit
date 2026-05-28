@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from agent_memory_toolkit.logging import get_logger
 from typing import Any, Optional
 
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.processors.base import (
     ProcessThreadResult,
     UserSummaryResult,

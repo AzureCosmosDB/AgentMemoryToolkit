@@ -15,7 +15,8 @@ from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
 from .exceptions import ConfigurationError, ValidationError
-from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE, default_ttl_for
+from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE
+from .thresholds import default_ttl_for
 
 VALID_ROLES = {"agent", "user", "tool", "system"}
 VALID_TYPES = {"turn", "summary", "fact", "user_summary", "procedural", "episodic"}
@@ -57,6 +58,7 @@ def new_summary_id() -> str:
 def new_user_summary_id() -> str:
     """Return a fresh ``user_summary_*`` id."""
     return new_id("user_summary")
+
 
 _WHITESPACE_RE = re.compile(r"\s+")
 

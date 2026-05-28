@@ -24,13 +24,7 @@ def test_prepare_returns_messages_and_params() -> None:
 def test_prompt_version_reads_front_matter(tmp_path: Path) -> None:
     f = tmp_path / "t.prompty"
     f.write_text(
-        "---\n"
-        "name: t\n"
-        "version: v3\n"
-        "model:\n"
-        "  apiType: chat\n"
-        "---\n"
-        "system:\nhi\n",
+        "---\nname: t\nversion: v3\nmodel:\n  apiType: chat\n---\nsystem:\nhi\n",
         encoding="utf-8",
     )
     assert _read_prompty_version(f) == "v3"
@@ -39,12 +33,7 @@ def test_prompt_version_reads_front_matter(tmp_path: Path) -> None:
 def test_prompt_version_defaults_when_missing(tmp_path: Path) -> None:
     f = tmp_path / "t.prompty"
     f.write_text(
-        "---\n"
-        "name: t\n"
-        "model:\n"
-        "  apiType: chat\n"
-        "---\n"
-        "system:\nhi\n",
+        "---\nname: t\nmodel:\n  apiType: chat\n---\nsystem:\nhi\n",
         encoding="utf-8",
     )
     assert _read_prompty_version(f) == DEFAULT_PROMPT_VERSION

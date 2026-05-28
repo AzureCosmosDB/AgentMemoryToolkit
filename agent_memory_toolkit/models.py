@@ -12,7 +12,6 @@ field to the matching subclass.
 
 from __future__ import annotations
 
-from agent_memory_toolkit.logging import get_logger
 import re
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +27,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from agent_memory_toolkit.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -165,9 +166,7 @@ class MemoryRecordBase(BaseModel):
             if not tag:
                 continue
             if not TAG_PATTERN.match(tag):
-                raise ValueError(
-                    f"Invalid tag format: '{tag}'. Must match [a-z0-9][a-z0-9_:./-]{{0,99}}"
-                )
+                raise ValueError(f"Invalid tag format: '{tag}'. Must match [a-z0-9][a-z0-9_:./-]{{0,99}}")
             if not internal and tag.startswith("sys:"):
                 raise ValueError(
                     f"Invalid tag '{tag}': the 'sys:' namespace is reserved for "
@@ -176,9 +175,7 @@ class MemoryRecordBase(BaseModel):
             normalized.append(tag)
         deduped = sorted(set(normalized))
         if len(deduped) > MAX_TAGS_PER_RECORD:
-            raise ValueError(
-                f"too many tags: {len(deduped)} exceeds the {MAX_TAGS_PER_RECORD}-tag cap"
-            )
+            raise ValueError(f"too many tags: {len(deduped)} exceeds the {MAX_TAGS_PER_RECORD}-tag cap")
         return deduped
 
     @field_validator("salience", mode="before")
@@ -201,9 +198,7 @@ class MemoryRecordBase(BaseModel):
         if v is None:
             return v
         if not isinstance(v, str) or not CONTENT_HASH_PATTERN.match(v):
-            raise ValueError(
-                f"content_hash must be 32 lowercase hex chars, got {v!r}"
-            )
+            raise ValueError(f"content_hash must be 32 lowercase hex chars, got {v!r}")
         return v
 
     @field_validator("prompt_version", mode="before")
@@ -212,9 +207,7 @@ class MemoryRecordBase(BaseModel):
         if v is None:
             return v
         if not isinstance(v, str) or not PROMPT_VERSION_PATTERN.match(v):
-            raise ValueError(
-                f"prompt_version must match {PROMPT_VERSION_PATTERN.pattern!r}, got {v!r}"
-            )
+            raise ValueError(f"prompt_version must match {PROMPT_VERSION_PATTERN.pattern!r}, got {v!r}")
         return v
 
     @field_validator("use_count", mode="before")
@@ -230,9 +223,7 @@ class MemoryRecordBase(BaseModel):
     def _validate_id_prefix(self) -> "MemoryRecordBase":
         prefix = self.__class__._ID_PREFIX
         if prefix is not None and not self.id.startswith(prefix):
-            raise ValueError(
-                f"{self.__class__.__name__}.id must start with '{prefix}', got '{self.id}'"
-            )
+            raise ValueError(f"{self.__class__.__name__}.id must start with '{prefix}', got '{self.id}'")
         return self
 
     @classmethod
@@ -357,9 +348,7 @@ class TurnRecord(MemoryRecordBase):
         }
         for name, value in forbidden.items():
             if value is not None:
-                raise ValueError(
-                    f"TurnRecord rejects '{name}': raw turns are not LLM-derived"
-                )
+                raise ValueError(f"TurnRecord rejects '{name}': raw turns are not LLM-derived")
         return self
 
 
@@ -465,19 +454,13 @@ class EpisodicRecord(MemoryRecordBase):
                 "EpisodicRecord requires metadata.lesson, metadata.scope_type, "
                 "metadata.scope_value, and metadata.outcome_valence"
             )
-        missing = [
-            k for k in ("lesson", "scope_type", "scope_value", "outcome_valence")
-            if not meta.get(k)
-        ]
+        missing = [k for k in ("lesson", "scope_type", "scope_value", "outcome_valence") if not meta.get(k)]
         if missing:
-            raise ValueError(
-                f"EpisodicRecord missing required metadata field(s): {missing}"
-            )
+            raise ValueError(f"EpisodicRecord missing required metadata field(s): {missing}")
         valence = meta.get("outcome_valence")
         if valence not in _EPISODIC_ALLOWED_VALENCES:
             raise ValueError(
-                f"metadata.outcome_valence must be one of {sorted(_EPISODIC_ALLOWED_VALENCES)}, "
-                f"got {valence!r}"
+                f"metadata.outcome_valence must be one of {sorted(_EPISODIC_ALLOWED_VALENCES)}, got {valence!r}"
             )
         # Mirror metadata.scope_* to top-level fields so queries that filter
         # on the indexed top-level columns keep working.
@@ -515,9 +498,7 @@ class ProceduralRecord(MemoryRecordBase):
     @model_validator(mode="after")
     def _require_sources(self) -> "ProceduralRecord":
         if not self.source_fact_ids:
-            raise ValueError(
-                "ProceduralRecord requires a non-empty source_fact_ids list"
-            )
+            raise ValueError("ProceduralRecord requires a non-empty source_fact_ids list")
         return self
 
 

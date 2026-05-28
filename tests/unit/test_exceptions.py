@@ -12,7 +12,6 @@ from agent_memory_toolkit.exceptions import (
     ValidationError,
 )
 
-
 ALL_SUBTYPES = [
     ConfigurationError,
     ValidationError,

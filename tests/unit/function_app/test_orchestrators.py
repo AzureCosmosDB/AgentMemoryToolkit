@@ -235,8 +235,6 @@ class TestExtractMemoriesOrchestrator:
         """Procedural synthesis is best-effort; failure must not fail the orchestrator."""
         ctx = _make_context({"user_id": "u1", "thread_id": "t1", "reconcile": True})
 
-        original_sub = ctx.call_sub_orchestrator_with_retry.side_effect
-
         def boom_after_sub(name, retry, sub_payload, *args, **kwargs):
             ctx._yielded_sub_orchestrators.append((name, retry, sub_payload))
             return ("__sub_boom__", name, sub_payload)

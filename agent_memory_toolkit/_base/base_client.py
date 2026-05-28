@@ -208,8 +208,7 @@ class _BaseMemoryClient:
             raise CosmosNotConnectedError()
 
     def _warn_on_embedding_dim_mismatch(self, container: Any = None) -> None:
-        """Log a warning when the configured embedding dim differs from the container policy.
-        """
+        """Log a warning when the configured embedding dim differs from the container policy."""
         container = container if container is not None else self._container_client
         if container is None or self._embedding_dimensions is None:
             return

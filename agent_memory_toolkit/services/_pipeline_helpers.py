@@ -58,7 +58,7 @@ def build_topic_tags(values: Any) -> list[str]:
     for value in values or []:
         raw = str(value).strip().lower()
         if raw.startswith("topic:"):
-            raw = raw[len("topic:"):]
+            raw = raw[len("topic:") :]
         topic = _TOPIC_TAG_UNSAFE.sub("-", raw).strip("-")
         if topic:
             tags.add(f"topic:{topic}")
@@ -249,8 +249,7 @@ def default_prompts_dir() -> str:
 
 
 def _read_prompty_version(path: str | Path) -> str:
-    """Read the ``version:`` key from a prompty file's YAML front-matter.
-    """
+    """Read the ``version:`` key from a prompty file's YAML front-matter."""
     text = Path(path).read_text(encoding="utf-8")
     if text.startswith("---"):
         end = text.find("\n---", 3)
@@ -299,9 +298,7 @@ class PromptyLoader:
         self._version_cache[filename] = version
         return version
 
-    def prepare(
-        self, filename: str, inputs: dict[str, Any]
-    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    def prepare(self, filename: str, inputs: dict[str, Any]) -> tuple[list[dict[str, str]], dict[str, Any]]:
         """Render a prompty template and return ``(messages, model_params)``."""
         import prompty
 

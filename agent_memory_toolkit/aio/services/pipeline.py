@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-from agent_memory_toolkit.logging import get_logger
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -24,6 +23,7 @@ from azure.cosmos.exceptions import CosmosResourceExistsError
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
 from agent_memory_toolkit.exceptions import LLMError, ValidationError
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import (
     EpisodicRecord,
     FactRecord,
@@ -32,17 +32,23 @@ from agent_memory_toolkit.models import (
     UserSummaryRecord,
     construct_internal,
 )
+from agent_memory_toolkit.prompts._schemas import response_format_for
 from agent_memory_toolkit.services._pipeline_helpers import (
     ID_SEED_SEP as _ID_SEED_SEP,
+)
+from agent_memory_toolkit.services._pipeline_helpers import (
     PromptyLoader,
     build_topic_tags,
     build_transcript,
     chat_text,
-    is_real_number as _is_real_number,
-    max_or_none as _max_or_none,
     parse_llm_json,
 )
-from agent_memory_toolkit.prompts._schemas import response_format_for
+from agent_memory_toolkit.services._pipeline_helpers import (
+    is_real_number as _is_real_number,
+)
+from agent_memory_toolkit.services._pipeline_helpers import (
+    max_or_none as _max_or_none,
+)
 
 logger = get_logger("agent_memory_toolkit.pipeline.aio")
 
@@ -147,7 +153,6 @@ class AsyncPipelineService:
         if doc.get("type") == "episodic":
             return construct_internal(EpisodicRecord, doc).to_doc()
         return doc
-
 
     @staticmethod
     def _chat_text(response: Any) -> str:
@@ -477,7 +482,9 @@ class AsyncPipelineService:
                     "reasoning": ep.get("reasoning"),
                     "outcome_valence": ep.get("outcome_valence") or "neutral",
                     "lesson": ep.get("lesson")
-                    or (f"{situation} → {action_taken} → {outcome}" if situation and action_taken and outcome else text),
+                    or (
+                        f"{situation} → {action_taken} → {outcome}" if situation and action_taken and outcome else text
+                    ),
                     "domain": ep.get("domain"),
                 },
                 "salience": ep.get("salience"),
@@ -645,9 +652,16 @@ class AsyncPipelineService:
             ],
             enable_cross_partition_query=True,
         )
-        prior_docs.sort(key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)), reverse=True)
+        prior_docs.sort(
+            key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)),
+            reverse=True,
+        )
         if len(prior_docs) > 1:
-            logger.warning("synthesize_procedural found multiple active docs user_id=%s count=%d", user_id, len(prior_docs))
+            logger.warning(
+                "synthesize_procedural found multiple active docs user_id=%s count=%d",
+                user_id,
+                len(prior_docs),
+            )
         prior_doc = prior_docs[0] if prior_docs else None
 
         behavioral_fact_docs = await self._container.query_items(
@@ -853,7 +867,11 @@ class AsyncPipelineService:
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        items = await self._container.query_items(query=query, parameters=parameters, partition_key=[user_id, thread_id])
+        items = await self._container.query_items(
+            query=query,
+            parameters=parameters,
+            partition_key=[user_id, thread_id],
+        )
         if self._turns_container is not None:
             async for item in self._turns_container.query_items(
                 query=query,
@@ -891,7 +909,9 @@ class AsyncPipelineService:
         parsed = self._parse_llm_json(response_text)
         overview = parsed.get("overview", response_text)
         topics = parsed.get("topics", [])
-        total_source_count = (existing_summary.get("metadata", {}).get("source_count", 0) if existing_summary else 0) + len(items)
+        total_source_count = (
+            existing_summary.get("metadata", {}).get("source_count", 0) if existing_summary else 0
+        ) + len(items)
         topic_tags = build_topic_tags(topics)
         doc_timestamp = self._stable_source_timestamp(items)
         summary_doc: dict[str, Any] = {

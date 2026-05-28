@@ -101,4 +101,3 @@ async def test_process_thread_summary_returns_none_for_non_dict():
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     result = await proc.process_thread_summary(user_id="u", thread_id="t")
     assert result is None
-

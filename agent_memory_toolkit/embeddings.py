@@ -6,9 +6,10 @@ connection and generates embeddings via the OpenAI API.
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent_memory_toolkit.chat import resolve_api_version
 from agent_memory_toolkit.logging import get_logger
-from typing import Any
 
 from .exceptions import ConfigurationError
 

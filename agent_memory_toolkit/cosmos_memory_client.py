@@ -23,7 +23,7 @@ from .auto_trigger import maybe_trigger_steps
 from .chat import ChatClient
 from .embeddings import EmbeddingsClient
 from .exceptions import CosmosOperationError
-from .processors import DurableFunctionProcessor, InProcessProcessor, MemoryProcessor
+from .processors import InProcessProcessor, MemoryProcessor
 from .services.pipeline import PipelineService
 from .store import MemoryStore
 from .thresholds import DEFAULT_TTL_BY_TYPE
@@ -149,7 +149,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
         self._cosmos_container = container or self._cosmos_container
         if turns_container is not None:
             self._cosmos_turns_container = turns_container
-        _validate_connection(self._cosmos_endpoint, self._cosmos_credential, self._cosmos_database, self._cosmos_container)
+        _validate_connection(
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
+        )
         try:
             from azure.cosmos import CosmosClient
 
@@ -209,7 +214,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
             throughput_mode=self._cosmos_throughput_mode,
             autoscale_max_ru=autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru,
         )
-        _validate_connection(self._cosmos_endpoint, self._cosmos_credential, self._cosmos_database, self._cosmos_container)
+        _validate_connection(
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
+        )
         try:
             from azure.cosmos import CosmosClient, PartitionKey, ThroughputProperties
 
@@ -359,7 +369,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
         except Exception as exc:  # pragma: no cover - defensive
             if not self._warned_counter_unreachable:
                 self._warned_counter_unreachable = True
-                logger.warning("Counter container %s/%s unreachable: %s", self._cosmos_database, self._cosmos_counter_container, exc)
+                logger.warning(
+                    "Counter container %s/%s unreachable: %s",
+                    self._cosmos_database,
+                    self._cosmos_counter_container,
+                    exc,
+                )
             return None
 
     def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
@@ -441,7 +456,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
             return [self._turns_container_client]
         return [self._container_client]
 
-
     def add_cosmos(
         self,
         user_id: str,
@@ -457,7 +471,19 @@ class CosmosMemoryClient(_BaseMemoryClient):
         embed: Optional[bool] = None,
     ) -> str:
         """Add a memory to Cosmos DB."""
-        return self._get_store().add(user_id, role, content, memory_type, metadata, thread_id, tags, ttl, salience, embedding, embed)
+        return self._get_store().add(
+            user_id,
+            role,
+            content,
+            memory_type,
+            metadata,
+            thread_id,
+            tags,
+            ttl,
+            salience,
+            embedding,
+            embed,
+        )
 
     def push_to_cosmos(self, batch_size: int = 25) -> None:
         """Insert all local memories into Cosmos DB."""

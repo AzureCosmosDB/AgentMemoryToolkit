@@ -252,9 +252,7 @@ async def test_generate_batch_large_chunked_into_16_16_8(client):
     result = await client.generate_batch(texts)
 
     assert mock_openai.embeddings.create.await_count == 3
-    chunk_sizes = [
-        len(call.kwargs["input"]) for call in mock_openai.embeddings.create.await_args_list
-    ]
+    chunk_sizes = [len(call.kwargs["input"]) for call in mock_openai.embeddings.create.await_args_list]
     assert chunk_sizes == [16, 16, 8]
 
     assert len(result) == 40
@@ -285,9 +283,7 @@ async def test_generate_batch_custom_batch_size(client):
     result = await client.generate_batch(texts, batch_size=5)
 
     assert mock_openai.embeddings.create.await_count == 3
-    chunk_sizes = [
-        len(call.kwargs["input"]) for call in mock_openai.embeddings.create.await_args_list
-    ]
+    chunk_sizes = [len(call.kwargs["input"]) for call in mock_openai.embeddings.create.await_args_list]
     assert chunk_sizes == [5, 5, 2]
     assert result == [[float(i)] for i in range(12)]
 

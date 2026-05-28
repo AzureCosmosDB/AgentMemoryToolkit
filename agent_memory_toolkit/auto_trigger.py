@@ -12,12 +12,12 @@ import :func:`maybe_trigger_steps`; the async variant lives in
 
 from __future__ import annotations
 
-from agent_memory_toolkit.logging import get_logger
 from collections.abc import Mapping
 from typing import Any
 
 from agent_memory_toolkit import _counters
 from agent_memory_toolkit import thresholds as default_thresholds
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.processors import InProcessProcessor
 
 logger = get_logger(__name__)
@@ -179,10 +179,22 @@ def _fire_thread_steps(
         )
     )
     for enabled, label, call in (
-        (fire_extract, "process_extract_memories", lambda: processor.process_extract_memories(user_id=user_id, thread_id=thread_id)),
+        (
+            fire_extract,
+            "process_extract_memories",
+            lambda: processor.process_extract_memories(user_id=user_id, thread_id=thread_id),
+        ),
         (fire_dedup, "process_reconcile", lambda: processor.process_reconcile(user_id=user_id)),
-        (fire_procedural, "synthesize_procedural", lambda: processor.synthesize_procedural(user_id=user_id)),
-        (fire_summary, "process_thread_summary", lambda: processor.process_thread_summary(user_id=user_id, thread_id=thread_id)),
+        (
+            fire_procedural,
+            "synthesize_procedural",
+            lambda: processor.synthesize_procedural(user_id=user_id),
+        ),
+        (
+            fire_summary,
+            "process_thread_summary",
+            lambda: processor.process_thread_summary(user_id=user_id, thread_id=thread_id),
+        ),
     ):
         if not enabled:
             continue

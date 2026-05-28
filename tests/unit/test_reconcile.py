@@ -1471,9 +1471,9 @@ class TestReconcileOutcomeTelemetry:
     @staticmethod
     def _outcome_records(caplog) -> list:
         return [
-            r for r in caplog.records
-            if r.name == "agent_memory_toolkit.pipeline"
-            and r.getMessage() == "reconcile.outcome"
+            r
+            for r in caplog.records
+            if r.name == "agent_memory_toolkit.pipeline" and r.getMessage() == "reconcile.outcome"
         ]
 
     def test_reconcile_emits_outcome_log_line_on_success(self, caplog):

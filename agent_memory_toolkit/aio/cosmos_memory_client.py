@@ -6,8 +6,6 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from agent_memory_toolkit.logging import get_logger
-
 from agent_memory_toolkit._base import _BaseMemoryClient
 from agent_memory_toolkit._utils import (
     _build_container_kwargs,
@@ -20,13 +18,14 @@ from agent_memory_toolkit._utils import (
     _resolve_full_text_language,
     _validate_connection,
 )
+from agent_memory_toolkit.aio.auto_trigger import maybe_trigger_steps
 from agent_memory_toolkit.aio.chat import AsyncChatClient
 from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
 from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor, AsyncMemoryProcessor
-from agent_memory_toolkit.aio.auto_trigger import maybe_trigger_steps
 from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
 from agent_memory_toolkit.exceptions import CosmosNotConnectedError, CosmosOperationError
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.thresholds import DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -174,7 +173,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._cosmos_container = container or self._cosmos_container
         if turns_container is not None:
             self._cosmos_turns_container = turns_container
-        _validate_connection(self._cosmos_endpoint, self._cosmos_credential, self._cosmos_database, self._cosmos_container)
+        _validate_connection(
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
+        )
         try:
             from azure.cosmos.aio import CosmosClient
 
@@ -234,7 +238,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             throughput_mode=self._cosmos_throughput_mode,
             autoscale_max_ru=autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru,
         )
-        _validate_connection(self._cosmos_endpoint, self._cosmos_credential, self._cosmos_database, self._cosmos_container)
+        _validate_connection(
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
+        )
         try:
             from azure.cosmos import PartitionKey, ThroughputProperties
             from azure.cosmos.aio import CosmosClient
@@ -266,10 +275,18 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 )
             )
             await db.create_container_if_not_exists(
-                **_build_container_kwargs(container_id=self._cosmos_counter_container, partition_key=partition_key, offer_throughput=offer)
+                **_build_container_kwargs(
+                    container_id=self._cosmos_counter_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                )
             )
             await db.create_container_if_not_exists(
-                **_build_container_kwargs(container_id=self._cosmos_lease_container, partition_key=PartitionKey(path="/id"), offer_throughput=offer)
+                **_build_container_kwargs(
+                    container_id=self._cosmos_lease_container,
+                    partition_key=PartitionKey(path="/id"),
+                    offer_throughput=offer,
+                )
             )
             self._cosmos_client = client
             if self._cosmos_turns_container:
@@ -335,7 +352,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         if self._pipeline is None:
             if self._pipeline_init_error is not None:
                 raise CosmosNotConnectedError(
-                    f"Processing pipeline failed to initialize ({type(self._pipeline_init_error).__name__}: {self._pipeline_init_error})."
+                    f"Processing pipeline failed to initialize "
+                    f"({type(self._pipeline_init_error).__name__}: {self._pipeline_init_error})."
                 ) from self._pipeline_init_error
             raise CosmosNotConnectedError("Processing pipeline requires Cosmos DB connection.")
 
@@ -381,7 +399,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         except Exception as exc:  # pragma: no cover - defensive
             if not self._warned_counter_unreachable:
                 self._warned_counter_unreachable = True
-                logger.warning("Counter container %s/%s unreachable: %s", self._cosmos_database, self._cosmos_counter_container, exc)
+                logger.warning(
+                    "Counter container %s/%s unreachable: %s",
+                    self._cosmos_database,
+                    self._cosmos_counter_container,
+                    exc,
+                )
             return None
 
     async def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
@@ -462,7 +485,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             return [self._turns_container_client]
         return [self._container_client]
 
-
     async def add_cosmos(
         self,
         user_id: str,
@@ -477,7 +499,19 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         embedding: Optional[list[float]] = None,
         embed: Optional[bool] = None,
     ) -> str:
-        return await self._get_store().add(user_id, role, content, memory_type, metadata, thread_id, tags, ttl, salience, embedding, embed)
+        return await self._get_store().add(
+            user_id,
+            role,
+            content,
+            memory_type,
+            metadata,
+            thread_id,
+            tags,
+            ttl,
+            salience,
+            embedding,
+            embed,
+        )
 
     async def push_to_cosmos(self, batch_size: int = 25) -> None:
         """Insert all local memories into Cosmos DB and schedule processing."""
@@ -639,7 +673,13 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        return await self._get_store().get_procedural_memories(user_id, priority, category, min_salience, include_superseded)
+        return await self._get_store().get_procedural_memories(
+            user_id,
+            priority,
+            category,
+            min_salience,
+            include_superseded,
+        )
 
     async def search_episodic_memories(
         self,
@@ -725,4 +765,3 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         except Exception:
             return False
         return bool(results)
-

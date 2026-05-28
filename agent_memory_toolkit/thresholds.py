@@ -8,9 +8,10 @@ keys, so a single setting flips both.
 
 from __future__ import annotations
 
-from agent_memory_toolkit.logging import get_logger
 import os
 from typing import Optional
+
+from agent_memory_toolkit.logging import get_logger
 
 logger = get_logger(__name__)
 

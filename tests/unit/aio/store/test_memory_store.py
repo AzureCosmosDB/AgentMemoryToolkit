@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_memory_toolkit.exceptions import MemoryNotFoundError
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
+from agent_memory_toolkit.exceptions import MemoryNotFoundError
 
 
 class AsyncIterator:
@@ -174,7 +174,6 @@ async def test_single_doc_and_simple_query_helpers():
     assert await store.get_procedural_prompt("u1") == "prompt"
     assert await store.get_procedural_history("u1", limit=1)
     assert await store.get_procedural_memories("u1")
-
 
 
 def _params_by_name(call_kwargs):

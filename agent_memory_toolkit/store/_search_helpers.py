@@ -96,10 +96,7 @@ def build_search_sql(
         qb.add_is_null_or_undefined("c.superseded_by")
     order_by = "ORDER BY VectorDistance(c.embedding, @embedding)"
     if hybrid_search:
-        order_by = (
-            "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), "
-            "FullTextScore(c.content, @key_terms))"
-        )
+        order_by = "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), FullTextScore(c.content, @key_terms))"
     return (
         f"SELECT TOP {top} {MEMORY_PROJECTION}, "
         "VectorDistance(c.embedding, @embedding) AS similarity_score "

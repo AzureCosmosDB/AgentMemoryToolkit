@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_memory_toolkit.chat import ChatClient
-from agent_memory_toolkit.exceptions import ConfigurationError, LLMError
+from agent_memory_toolkit.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Initialization

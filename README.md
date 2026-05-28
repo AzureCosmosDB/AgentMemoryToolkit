@@ -68,9 +68,7 @@ cp .env.template .env
 # edit COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME, AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
 ```
 
-You can also point `azd up` at existing resources via `azd env set USE_EXISTING_COSMOS true` / `USE_EXISTING_AI_FOUNDRY true` (full BYOR flag list in `infra/README.md`).
-
-> For the Durable Function app counter-trigger settings, Bicep module reference, and RBAC scopes — see **[`infra/README.md`](infra/README.md)**.
+> For the Durable Function app counter-trigger settings, Bicep module reference, RBAC scopes, and the SDK-only escape hatch (`DEPLOY_FUNCTION_APP=false`) — see **[`infra/README.md`](infra/README.md)**.
 
 ### 3. Use the SDK
 
@@ -282,7 +280,7 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 - **[Docs/design_patterns.md](Docs/design_patterns.md)** — Integration patterns for chat apps and multi-agent systems
 - **[Docs/local_testing.md](Docs/local_testing.md)** — Prerequisites, environment setup, running locally, debugging
 - **[Docs/azure_testing.md](Docs/azure_testing.md)** — Azure deployment, RBAC, cloud validation
-- **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, BYOR settings, counter-trigger tuning
+- **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, RBAC, counter-trigger tuning, SDK-only mode
 - **[Docs/troubleshooting.md](Docs/troubleshooting.md)** — Common issues and resolutions for setup, auth, Cosmos DB, embeddings, Durable Functions, vector search, change feed, etc.
 
 ---

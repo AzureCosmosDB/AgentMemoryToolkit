@@ -14,24 +14,6 @@
     "deployFunctionApp": {
       "value": "${DEPLOY_FUNCTION_APP=true}"
     },
-    "useExistingCosmos": {
-      "value": "${USE_EXISTING_COSMOS=false}"
-    },
-    "existingCosmosAccountName": {
-      "value": "${EXISTING_COSMOS_ACCOUNT=}"
-    },
-    "existingCosmosResourceGroup": {
-      "value": "${EXISTING_COSMOS_RESOURCE_GROUP=}"
-    },
-    "useExistingAiFoundry": {
-      "value": "${USE_EXISTING_AI_FOUNDRY=false}"
-    },
-    "existingAiFoundryName": {
-      "value": "${EXISTING_AI_FOUNDRY_NAME=}"
-    },
-    "existingAiFoundryResourceGroup": {
-      "value": "${EXISTING_AI_FOUNDRY_RESOURCE_GROUP=}"
-    },
     "embeddingModelName": {
       "value": "${AI_FOUNDRY_EMBEDDING_MODEL_NAME=text-embedding-3-large}"
     },
@@ -52,6 +34,27 @@
     },
     "memoriesTurnsDefaultTtl": {
       "value": "${MEMORIES_TURNS_DEFAULT_TTL=2592000}"
+    },
+    "azureOpenAiApiVersion": {
+      "value": "${AZURE_OPENAI_API_VERSION=2024-12-01-preview}"
+    },
+    "threadSummaryEveryN": {
+      "value": "${THREAD_SUMMARY_EVERY_N=10}"
+    },
+    "factExtractionEveryN": {
+      "value": "${FACT_EXTRACTION_EVERY_N=5}"
+    },
+    "dedupEveryN": {
+      "value": "${DEDUP_EVERY_N=5}"
+    },
+    "userSummaryEveryN": {
+      "value": "${USER_SUMMARY_EVERY_N=20}"
+    },
+    "maxBatchSize": {
+      "value": "${MAX_BATCH_SIZE=20}"
+    },
+    "memoryProcessorOwner": {
+      "value": "${MEMORY_PROCESSOR_OWNER=durable}"
     }
   }
 }

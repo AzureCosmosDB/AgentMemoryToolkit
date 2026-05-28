@@ -115,10 +115,10 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 4. NOT filter: exclude_tags=[...] — drop anything carrying these tags
     # ------------------------------------------------------------------
-    print_section("NOT filter — exclude_tags=['ops']  (memory_type='procedural')")
+    print_section("NOT filter — exclude_tags=['ops']  (memory_types=['procedural'])")
     results = client.get_memories(
         user_id=user_id,
-        memory_type="procedural",
+        memory_types=["procedural"],
         exclude_tags=["ops"],
     )
     print_results(results)

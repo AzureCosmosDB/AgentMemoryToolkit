@@ -56,6 +56,39 @@ param embeddingDimensions int = 1536
 @description('LLM model deployment name.')
 param chatDeploymentName string = 'gpt-4o-mini'
 
+@description('Azure OpenAI REST API version pinned for both chat and embedding clients. Always supplied by main.bicep — declared here without a default so the wiring stays explicit.')
+param azureOpenAiApiVersion string
+
+// --- Function-app threshold / batching knobs ------------------------------
+//
+// All knobs are surfaced as Bicep params in main.bicep (bound to
+// `${THREAD_SUMMARY_EVERY_N=10}` etc. in main.parameters.json) so customers
+// can override them via `azd env set ...` before `azd up`. The defaults live
+// in main.bicep — these module params are declared without defaults so
+// main.bicep stays the single source of truth.
+
+@description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
+param threadSummaryEveryN int
+
+@description('Run fact / episodic / procedural extraction every N turns within a (user_id, thread_id). 0 = disabled.')
+param factExtractionEveryN int
+
+@description('Run dedup once per N fact-extraction batches. Effective cadence = factExtractionEveryN * dedupEveryN turns.')
+param dedupEveryN int
+
+@description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
+param userSummaryEveryN int
+
+@description('Maximum number of change-feed items processed per orchestration batch.')
+param maxBatchSize int
+
+@description('Backend that owns processing. `durable` = the function-app fleet owns processing; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing, function-app skips.')
+@allowed([
+  'durable'
+  'inprocess'
+])
+param memoryProcessorOwner string
+
 @description('Tags to apply.')
 param tags object = {}
 
@@ -205,18 +238,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: appInsights.properties.ConnectionString
         }
         {
-          name: 'FUNCTIONS_WORKER_RUNTIME'
-          value: 'python'
-        }
-        {
-          name: 'FUNCTIONS_EXTENSION_VERSION'
-          value: '~4'
-        }
-        // NOTE: WEBSITE_RUN_FROM_PACKAGE is intentionally NOT set on Flex
-        // Consumption — Flex uses functionAppConfig.deployment.storage instead
-        // and the legacy app setting is documented as "do not set" on Flex.
-        // --- Cosmos identity-based binding (used by the Cosmos DB trigger) ---
-        {
           name: 'COSMOS_DB__accountEndpoint'
           value: cosmosEndpoint
         }
@@ -275,45 +296,36 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: chatDeploymentName
         }
         {
+          name: 'AZURE_OPENAI_API_VERSION'
+          value: azureOpenAiApiVersion
+        }
+        {
           name: 'AZURE_CLIENT_ID'
           value: uamiClientId
         }
-        // --- Threshold/batching policy (see docs/processor_triggers.md) ---
         {
           name: 'THREAD_SUMMARY_EVERY_N'
-          value: '10'
+          value: string(threadSummaryEveryN)
         }
         {
-          // Production default = 5 (one extract per 5 turns). The SDK
-          // default is 1 for prototype/demo UX; azd-deployed fleets pay
-          // real LLM cost per turn, so we amortize.
           name: 'FACT_EXTRACTION_EVERY_N'
-          value: '5'
+          value: string(factExtractionEveryN)
         }
         {
           name: 'USER_SUMMARY_EVERY_N'
-          value: '20'
+          value: string(userSummaryEveryN)
         }
         {
-          // Run dedup once per N extract batches (see DEDUP_EVERY_N in
-          // agent_memory_toolkit.thresholds). Default 5 = one O(N²) sweep
-          // per 5 extracts so the SDK in-process backend doesn't slow
-          // down high-TPS workloads.
           name: 'DEDUP_EVERY_N'
-          value: '5'
+          value: string(dedupEveryN)
         }
         {
           name: 'MAX_BATCH_SIZE'
-          value: '20'
+          value: string(maxBatchSize)
         }
         {
-          // Owner exclusivity: the FA owns processing for any
-          // azd-deployed container. SDK clients pointed at the same
-          // Cosmos container will see this and skip their auto-trigger
-          // (loud one-shot WARN). Operators who want SDK ownership must
-          // override to `inprocess`.
           name: 'MEMORY_PROCESSOR_OWNER'
-          value: 'durable'
+          value: memoryProcessorOwner
         }
       ]
     }

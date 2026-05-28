@@ -109,7 +109,7 @@ def main() -> None:
     summaries = client.get_memories(
         user_id=user_id,
         thread_id=thread_id,
-        memory_type="summary",
+        memory_types=["summary"],
     )
     print(f"\n  thread summaries persisted: {len(summaries)}")
     for s in summaries[:3]:
@@ -117,7 +117,7 @@ def main() -> None:
 
     facts = client.get_memories(
         user_id=user_id,
-        memory_type="fact",
+        memory_types=["fact"],
     )
     print(f"\n  facts extracted: {len(facts)}")
     for f in facts[:5]:

@@ -8,6 +8,7 @@ OpenAI API.
 from __future__ import annotations
 
 import asyncio
+from agent_memory_toolkit.chat import resolve_api_version
 from agent_memory_toolkit.logging import get_logger
 from typing import Any
 
@@ -36,14 +37,14 @@ class AsyncEmbeddingsClient:
         api_key: str | None = None,
         model: str = "text-embedding-3-large",
         dimensions: int | None = None,
-        api_version: str = "2024-12-01-preview",
+        api_version: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._credential = credential
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
-        self._api_version = api_version
+        self._api_version = resolve_api_version(api_version)
         self._client: Any = None
 
     async def __aenter__(self) -> AsyncEmbeddingsClient:

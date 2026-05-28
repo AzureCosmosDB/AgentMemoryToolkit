@@ -77,7 +77,13 @@ def test_generate_returns_content():
     assert result == "Hello, world!"
 
 
-def test_generate_passes_temperature():
+def test_generate_forces_temperature_to_one():
+    """Temperature is hardcoded to 1.0; caller-supplied values are ignored.
+
+    Rationale: newer Azure OpenAI models (gpt-5.x, o-series) only accept
+    the default temperature value; older models accept 1.0 as a valid
+    value. Forcing 1.0 universally keeps behavior uniform and removes
+    the need for per-model sampling-knob carve-outs."""
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
 
     mock_choice = MagicMock()
@@ -95,7 +101,7 @@ def test_generate_passes_temperature():
         temperature=0.5,
     )
     call_kwargs = mock_openai_client.chat.completions.create.call_args[1]
-    assert call_kwargs["temperature"] == 0.5
+    assert call_kwargs["temperature"] == 1.0
 
 
 def test_generate_passes_response_format():
@@ -205,18 +211,19 @@ def test_build_kwargs_minimal():
     kwargs = client._build_kwargs([{"role": "user", "content": "hi"}])
     assert kwargs["model"] == "gpt-4o-mini"
     assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
-    assert "temperature" not in kwargs
+    assert kwargs["temperature"] == 1.0
     assert "response_format" not in kwargs
 
 
 def test_build_kwargs_with_all_options():
+    """Temperature is always forced to 1.0; other options pass through."""
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="key")
     kwargs = client._build_kwargs(
         [{"role": "user", "content": "hi"}],
         temperature=0.7,
         response_format={"type": "json_object"},
     )
-    assert kwargs["temperature"] == 0.7
+    assert kwargs["temperature"] == 1.0
     assert kwargs["response_format"] == {"type": "json_object"}
 
 

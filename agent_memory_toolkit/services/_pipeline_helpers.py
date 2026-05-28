@@ -26,15 +26,26 @@ from agent_memory_toolkit.exceptions import LLMError
 ID_SEED_SEP = "\x00"
 
 # Mapping from prompty 2.x ModelOptions field names (camelCase) to the
-# snake_case kwargs accepted by OpenAI's chat completions API.
+# snake_case kwargs accepted by OpenAI's chat completions API. We include
+# snake_case variants too because some prompty releases serialize options
+# already lowercased.
 PROMPTY_OPTION_ALIASES = {
     "topP": "top_p",
+    "top_p": "top_p",
     "topK": "top_k",
+    "top_k": "top_k",
     "frequencyPenalty": "frequency_penalty",
+    "frequency_penalty": "frequency_penalty",
     "presencePenalty": "presence_penalty",
-    "maxOutputTokens": "max_tokens",
+    "presence_penalty": "presence_penalty",
+    "maxOutputTokens": "max_completion_tokens",
+    "max_output_tokens": "max_completion_tokens",
+    "maxTokens": "max_completion_tokens",
+    "max_tokens": "max_completion_tokens",
     "stopSequences": "stop",
+    "stop_sequences": "stop",
     "allowMultipleToolCalls": "parallel_tool_calls",
+    "allow_multiple_tool_calls": "parallel_tool_calls",
 }
 
 _FRONT_MATTER_VERSION = re.compile(r"^version:\s*(\S+)\s*$", re.MULTILINE)
@@ -45,7 +56,10 @@ _TOPIC_TAG_UNSAFE = re.compile(r"[^a-z0-9_:./-]+")
 def build_topic_tags(values: Any) -> list[str]:
     tags: set[str] = set()
     for value in values or []:
-        topic = _TOPIC_TAG_UNSAFE.sub("-", str(value).strip().lower()).strip("-")
+        raw = str(value).strip().lower()
+        if raw.startswith("topic:"):
+            raw = raw[len("topic:"):]
+        topic = _TOPIC_TAG_UNSAFE.sub("-", raw).strip("-")
         if topic:
             tags.add(f"topic:{topic}")
     return sorted(tags)

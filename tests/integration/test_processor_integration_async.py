@@ -29,17 +29,26 @@ class TestAsyncInProcessProcessNowEndToEnd:
     @pytest.mark.asyncio
     async def test_process_now_invokes_pipeline_with_correct_args(self):
         pipeline = MagicMock()
-        pipeline.generate_thread_summary.return_value = {
-            "id": "summary-1",
-            "type": "summary",
-            "content": "Conversation about Paris.",
-        }
-        pipeline.extract_memories.return_value = {
-            "fact_count": 1,
-            "episodic_count": 0,
-            "updated_count": 0,
-        }
-        pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+        # ``AsyncInProcessProcessor`` awaits these three pipeline methods,
+        # so the mocks must be ``AsyncMock`` — a plain ``MagicMock`` returns
+        # the dict synchronously, which ``await`` cannot consume.
+        pipeline.generate_thread_summary = AsyncMock(
+            return_value={
+                "id": "summary-1",
+                "type": "summary",
+                "content": "Conversation about Paris.",
+            }
+        )
+        pipeline.extract_memories = AsyncMock(
+            return_value={
+                "fact_count": 1,
+                "episodic_count": 0,
+                "updated_count": 0,
+            }
+        )
+        pipeline.reconcile_memories = AsyncMock(
+            return_value={"kept": 0, "merged": 0, "contradicted": 0}
+        )
 
         processor = AsyncInProcessProcessor(pipeline=pipeline)
         client = _build_client(processor=processor)
@@ -64,9 +73,9 @@ class TestAsyncInProcessProcessNowEndToEnd:
             "updated_count": 0,
         }
         client.get_thread.assert_awaited_once_with(thread_id="thread-paris", user_id="u-paris", memory_types=["turn"])
-        pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
-        pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
-        pipeline.reconcile_memories.assert_called_once_with("u-paris", 50)
+        pipeline.generate_thread_summary.assert_awaited_once_with("u-paris", "thread-paris")
+        pipeline.extract_memories.assert_awaited_once_with("u-paris", "thread-paris")
+        pipeline.reconcile_memories.assert_awaited_once_with("u-paris", 50)
 
 
 # ---------------------------------------------------------------------------

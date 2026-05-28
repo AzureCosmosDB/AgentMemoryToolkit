@@ -11,6 +11,7 @@ The async counterpart lives in :mod:`agent_memory_toolkit.aio.chat` as
 
 from __future__ import annotations
 
+import os
 from agent_memory_toolkit.logging import get_logger
 import re
 import time
@@ -22,9 +23,21 @@ logger = get_logger(__name__)
 
 TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 RETRYABLE_STATUS_CODES = (429, 500, 503)
-# Sampling parameters that some reasoning models (gpt-5, o-series) reject.
-# When the API returns 400 with one of these in the message, we strip it and retry once.
+DEFAULT_AZURE_OPENAI_API_VERSION = "2024-12-01-preview"
 SAMPLING_PARAMS = ("temperature", "top_p", "frequency_penalty", "presence_penalty")
+
+
+def resolve_api_version(explicit: str | None) -> str:
+    """Resolve the Azure OpenAI API version to use.
+
+    Precedence: explicit constructor arg → ``AZURE_OPENAI_API_VERSION`` env
+    var → built-in default (``2024-12-01-preview``). The env-var hook lets
+    ``azd`` deployments and CI environments pin a single version across the
+    SDK + function-app without code changes.
+    """
+    if explicit:
+        return explicit
+    return os.environ.get("AZURE_OPENAI_API_VERSION") or DEFAULT_AZURE_OPENAI_API_VERSION
 
 
 def unsupported_param(exc: Exception) -> str | None:
@@ -74,7 +87,9 @@ class ChatClient:
     model:
         Deployment / model name.  Defaults to ``"gpt-4o-mini"``.
     api_version:
-        Azure OpenAI API version.  Defaults to ``"2024-12-01-preview"``.
+        Azure OpenAI API version.  When ``None`` (default), reads
+        ``AZURE_OPENAI_API_VERSION`` from the environment, falling back to
+        ``"2024-12-01-preview"``.
     """
 
     def __init__(
@@ -83,13 +98,13 @@ class ChatClient:
         credential: Any = None,
         api_key: str | None = None,
         model: str = "gpt-4o-mini",
-        api_version: str = "2024-12-01-preview",
+        api_version: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._credential = credential
         self._api_key = api_key
         self._model = model
-        self._api_version = api_version
+        self._api_version = resolve_api_version(api_version)
         self._client: Any = None
 
     def _ensure_client(self) -> Any:
@@ -139,14 +154,17 @@ class ChatClient:
             len(messages),
         )
         kwargs: dict[str, Any] = {"model": self._model, "messages": messages}
-        if temperature is not None:
-            kwargs["temperature"] = temperature
+        # Force temperature=1.0 across all callers. Newer Azure OpenAI models
+        # (gpt-5.x family, o-series reasoning models) only accept the default
+        # value (1.0) and reject any other; older models (gpt-4o, gpt-4o-mini)
+        # accept 1.0 as a valid value. Hardcoding to 1.0 keeps behavior uniform
+        # across the deployment matrix and lets prompt engineering — not a
+        # sampling knob — be the sole control for output determinism.
+        kwargs["temperature"] = 1.0
         if response_format is not None:
             kwargs["response_format"] = response_format
-        # Pass through any additional model parameters (e.g. top_p, seed)
-        # supplied by callers — typically sourced from a prompty file's
-        # ``model.parameters`` block.
         kwargs.update(extra)
+        kwargs["temperature"] = 1.0
         return kwargs
 
     def generate(

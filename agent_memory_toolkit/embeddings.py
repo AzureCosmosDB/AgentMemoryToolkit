@@ -6,6 +6,7 @@ connection and generates embeddings via the OpenAI API.
 
 from __future__ import annotations
 
+from agent_memory_toolkit.chat import resolve_api_version
 from agent_memory_toolkit.logging import get_logger
 from typing import Any
 
@@ -35,7 +36,9 @@ class EmbeddingsClient:
     dimensions:
         Optional embedding dimensions override.
     api_version:
-        Azure OpenAI API version.  Defaults to ``"2024-12-01-preview"``.
+        Azure OpenAI API version.  When ``None`` (default), reads
+        ``AZURE_OPENAI_API_VERSION`` from the environment, falling back to
+        ``"2024-12-01-preview"``.
     """
 
     def __init__(
@@ -45,14 +48,14 @@ class EmbeddingsClient:
         api_key: str | None = None,
         model: str = "text-embedding-3-large",
         dimensions: int | None = None,
-        api_version: str = "2024-12-01-preview",
+        api_version: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._credential = credential
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
-        self._api_version = api_version
+        self._api_version = resolve_api_version(api_version)
         self._client: Any = None
 
     def _ensure_client(self) -> Any:

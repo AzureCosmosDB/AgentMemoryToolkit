@@ -1,29 +1,18 @@
-// AI Foundry account (Cognitive Services kind=AIServices) + 2 model deployments.
+// AI Foundry (Cognitive Services kind=AIServices) account + chat + embedding
+// model deployments. Single-file module — no `existing` keyword tricks because
+// the account is always created fresh by this template.
 //
-// Implementation choice:
-//   We use a single Microsoft.CognitiveServices/accounts resource with kind=AIServices
-//   instead of the full AI Foundry hub+project (which would also require a
-//   Storage account, Key Vault, Application Insights, and an ML workspace).
-//   The AIServices account exposes the same Azure OpenAI–compatible endpoint
-//   (https://<name>.cognitiveservices.azure.com/) and supports Entra-based
-//   "Cognitive Services OpenAI User" RBAC, which is exactly what the toolkit
-//   needs for embedding and chat completion calls. This is the pattern used by
-//   most current Azure-Samples azd templates (e.g. azure-search-openai-demo,
-//   openai-chat-app-quickstart).
+// We use a single Microsoft.CognitiveServices/accounts resource with
+// kind=AIServices instead of the full AI Foundry hub+project (which would
+// also require Storage, Key Vault, App Insights, and an ML workspace). The
+// AIServices account exposes the Azure OpenAI–compatible endpoint
+// (https://<name>.cognitiveservices.azure.com/) and supports Entra-based
+// "Cognitive Services OpenAI User" RBAC, which is what the toolkit needs.
 
-@description('Whether to use an existing AI Foundry / Cognitive Services account.')
-param useExisting bool = false
-
-@description('Name of the new AI Foundry account (when useExisting=false).')
+@description('Name of the AI Foundry account to create.')
 param accountName string
 
-@description('Name of an existing account (when useExisting=true).')
-param existingAccountName string = ''
-
-@description('Resource group of the existing account (when useExisting=true). If empty, current RG is used.')
-param existingResourceGroup string = ''
-
-@description('Azure region. Pin to one with required model availability (eastus2, swedencentral, westus3).')
+@description('Azure region. Pin to one with required model availability.')
 @allowed([
   'eastus2'
   'swedencentral'
@@ -31,6 +20,9 @@ param existingResourceGroup string = ''
   'eastus'
 ])
 param location string = 'eastus2'
+
+@description('Tags to apply to the account.')
+param tags object = {}
 
 @description('Catalog name of the chat completion model (e.g. gpt-4o-mini).')
 param chatModelName string = 'gpt-4o-mini'
@@ -56,12 +48,12 @@ param embeddingDeploymentName string = ''
 @description('Embedding model SKU capacity (TPM, in thousands).')
 param embeddingCapacity int = 30
 
-@description('Tags to apply to created resources.')
-param tags object = {}
+var effectiveChatDeploymentName = empty(chatDeploymentName) ? chatModelName : chatDeploymentName
+var effectiveEmbeddingDeploymentName = empty(embeddingDeploymentName) ? embeddingModelName : embeddingDeploymentName
 
-// --- Account ---------------------------------------------------------------
+// --- Account --------------------------------------------------------------
 
-resource newAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (!useExisting) {
+resource account 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   name: accountName
   location: location
   tags: tags
@@ -79,29 +71,13 @@ resource newAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (!use
   }
 }
 
-resource existingAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (useExisting) {
-  name: existingAccountName
-  scope: resourceGroup(empty(existingResourceGroup) ? resourceGroup().name : existingResourceGroup)
-}
-
-var effectiveAccountName = useExisting ? existingAccountName : accountName
-var manageDeployments = !useExisting || empty(existingResourceGroup)
-var effectiveChatDeploymentName = empty(chatDeploymentName) ? chatModelName : chatDeploymentName
-var effectiveEmbeddingDeploymentName = empty(embeddingDeploymentName) ? embeddingModelName : embeddingDeploymentName
-
-resource accountRef 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (manageDeployments) {
-  name: effectiveAccountName
-  dependsOn: [
-    newAccount
-  ]
-}
-
-// --- Model deployments -----------------------------------------------------
-// Note: deployments are serialized via dependsOn — Cognitive Services rejects
+// --- Model deployments ----------------------------------------------------
+//
+// Deployments are serialized via dependsOn — Cognitive Services rejects
 // concurrent deployment writes on the same account.
 
-resource llmDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = if (manageDeployments) {
-  parent: accountRef
+resource llmDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+  parent: account
   name: effectiveChatDeploymentName
   sku: {
     name: 'GlobalStandard'
@@ -118,8 +94,8 @@ resource llmDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10
   }
 }
 
-resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = if (manageDeployments) {
-  parent: accountRef
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+  parent: account
   name: effectiveEmbeddingDeploymentName
   sku: {
     name: 'Standard'
@@ -139,10 +115,10 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
   ]
 }
 
-// --- Outputs ---------------------------------------------------------------
+// --- Outputs --------------------------------------------------------------
 
-output accountName string = effectiveAccountName
-output endpoint string = useExisting ? existingAccount!.properties.endpoint : newAccount!.properties.endpoint
-output accountResourceId string = useExisting ? existingAccount!.id : newAccount!.id
+output accountName string = account.name
+output accountResourceId string = account.id
+output endpoint string = account.properties.endpoint
 output chatDeploymentName string = effectiveChatDeploymentName
 output embeddingDeploymentName string = effectiveEmbeddingDeploymentName

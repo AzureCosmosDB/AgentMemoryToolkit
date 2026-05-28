@@ -13,6 +13,7 @@ import hashlib
 import json
 from agent_memory_toolkit.logging import get_logger
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
@@ -42,6 +43,7 @@ from agent_memory_toolkit.services._pipeline_helpers import (
     max_or_none as _max_or_none,
     parse_llm_json,
 )
+from agent_memory_toolkit.prompts._schemas import response_format_for
 
 
 logger = get_logger("agent_memory_toolkit.pipeline")
@@ -108,6 +110,9 @@ class PipelineService:
     ) -> str:
         """Render a prompty template, run the LLM, and return the response text."""
         messages, params = self._prompty.prepare(filename, inputs)
+        schema_format = response_format_for(filename)
+        if schema_format is not None:
+            params["response_format"] = schema_format
         response = self._chat_client.generate(messages, **params)
         return chat_text(response)
 

@@ -16,6 +16,7 @@ from agent_memory_toolkit.chat import (
     RETRYABLE_STATUS_CODES,
     TOKEN_SCOPE,
     extract_content,
+    resolve_api_version,
     unsupported_param,
 )
 from agent_memory_toolkit.exceptions import ConfigurationError, LLMError
@@ -71,13 +72,13 @@ class AsyncChatClient:
         credential: Any = None,
         api_key: str | None = None,
         model: str = "gpt-4o-mini",
-        api_version: str = "2024-12-01-preview",
+        api_version: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._credential = credential
         self._api_key = api_key
         self._model = model
-        self._api_version = api_version
+        self._api_version = resolve_api_version(api_version)
         self._client: Any = None
 
     async def __aenter__(self) -> AsyncChatClient:
@@ -145,11 +146,12 @@ class AsyncChatClient:
             len(messages),
         )
         kwargs: dict[str, Any] = {"model": self._model, "messages": messages}
-        if temperature is not None:
-            kwargs["temperature"] = temperature
+        # Force temperature=1.0 across all callers — see chat.py for rationale.
+        kwargs["temperature"] = 1.0
         if response_format is not None:
             kwargs["response_format"] = response_format
         kwargs.update(extra)
+        kwargs["temperature"] = 1.0
         return kwargs
 
     async def generate(

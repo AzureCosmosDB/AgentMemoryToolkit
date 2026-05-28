@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from agent_memory_toolkit._query_builder import _QueryBuilder
-from agent_memory_toolkit._utils import _build_memory_query_builder, _coerce_datetime_iso, _validate_hybrid_search
+from agent_memory_toolkit._utils import _build_memory_query_builder, _coerce_datetime_iso, _validate_hybrid_search, compute_content_hash, new_id
 from agent_memory_toolkit.exceptions import (
     ConfigurationError,
     CosmosOperationError,
@@ -188,6 +188,21 @@ class MemoryStore:
             kwargs["ttl"] = ttl
         if salience is not None:
             kwargs["salience"] = salience
+        if memory_type != "turn":
+            kwargs.setdefault("content_hash", compute_content_hash(content))
+            kwargs.setdefault("prompt_id", "manual:add")
+            kwargs.setdefault("id", new_id(memory_type))
+            meta = kwargs.get("metadata") or {}
+            if memory_type == "fact":
+                meta.setdefault("category", "unclassified:manual")
+            elif memory_type == "episodic":
+                meta.setdefault("lesson", content)
+                meta.setdefault("scope_type", "manual")
+                meta.setdefault("scope_value", "manual")
+                meta.setdefault("outcome_valence", "neutral")
+            elif memory_type == "procedural":
+                kwargs.setdefault("source_fact_ids", ["manual"])
+            kwargs["metadata"] = meta
         record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
 

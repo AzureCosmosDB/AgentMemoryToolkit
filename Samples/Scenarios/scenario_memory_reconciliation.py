@@ -137,7 +137,7 @@ def main() -> None:
         banner("6. Audit trail (soft-deleted records)")
         all_facts = mem.get_memories(
             user_id=unique_user_id,
-            memory_type="fact",
+            memory_types=["fact"],
             include_superseded=True,
         )
         soft_deleted = [f for f in all_facts if f.get("supersede_reason")]

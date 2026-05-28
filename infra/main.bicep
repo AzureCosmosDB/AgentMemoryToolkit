@@ -1,13 +1,5 @@
 // Agent Memory Toolkit — main entry point.
-// Provisions: Cosmos NoSQL serverless + AI Foundry (Cognitive Services
-// AIServices, two model deployments) + user-assigned managed identity +
-// RBAC + Function app on Flex Consumption (Storage, App Insights, Log
-// Analytics, leases + counter containers, storage RBAC).
-//
-// The Function app is always deployed (Flex Consumption is pay-per-execution
-// — idle cost is essentially $0). Customers using the in-process
-// MemoryProcessor simply ignore it. An advanced escape hatch exists via the
-// `deployFunctionApp` parameter (default `true`); see infra/README.md.
+// See infra/README.md for architecture and operational knobs.
 
 targetScope = 'subscription'
 
@@ -33,24 +25,6 @@ param principalId string = ''
 @description('Whether to deploy the Function app. Defaults to true. Set false only if you have a strong reason to skip it (Flex Consumption is pay-per-execution — idle cost is ~$0).')
 param deployFunctionApp bool = true
 
-@description('Use an existing Cosmos account instead of creating a new one (BYOR).')
-param useExistingCosmos bool = false
-
-@description('Existing Cosmos account name (when useExistingCosmos=true).')
-param existingCosmosAccountName string = ''
-
-@description('Existing Cosmos account resource group (when useExistingCosmos=true).')
-param existingCosmosResourceGroup string = ''
-
-@description('Use an existing AI Foundry / Cognitive Services account instead of creating a new one (BYOR).')
-param useExistingAiFoundry bool = false
-
-@description('Existing AI Foundry account name (when useExistingAiFoundry=true).')
-param existingAiFoundryName string = ''
-
-@description('Existing AI Foundry account resource group (when useExistingAiFoundry=true).')
-param existingAiFoundryResourceGroup string = ''
-
 @description('Cosmos database name.')
 param cosmosDatabaseName string = 'ai_memory'
 
@@ -71,6 +45,31 @@ param chatModelName string = 'gpt-4o-mini'
 
 @description('Deployment name to expose the chat model under. Defaults to the model name when empty.')
 param chatDeploymentName string = ''
+
+@description('Azure OpenAI REST API version pinned for both chat and embedding clients (SDK + function-app). Newer preview versions are required for strict JSON-schema response_format on gpt-5.x models.')
+param azureOpenAiApiVersion string = '2024-12-01-preview'
+
+@description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
+param threadSummaryEveryN int = 10
+
+@description('Run fact / episodic / procedural extraction every N turns within a (user_id, thread_id). 0 = disabled.')
+param factExtractionEveryN int = 5
+
+@description('Run dedup once per N fact-extraction batches. Effective cadence = factExtractionEveryN * dedupEveryN turns.')
+param dedupEveryN int = 5
+
+@description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
+param userSummaryEveryN int = 20
+
+@description('Maximum number of change-feed items processed per orchestration batch.')
+param maxBatchSize int = 20
+
+@description('Backend that owns processing. `durable` (default) = the function-app fleet owns processing; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing, function-app skips.')
+@allowed([
+  'durable'
+  'inprocess'
+])
+param memoryProcessorOwner string = 'durable'
 
 // --- Naming ---------------------------------------------------------------
 
@@ -112,41 +111,35 @@ module identity 'modules/identity.bicep' = {
   }
 }
 
-// --- Cosmos ---------------------------------------------------------------
+// --- Cosmos (account + database + containers) -----------------------------
 
 module cosmos 'modules/cosmos.bicep' = {
   scope: rg
   name: 'cosmos'
   params: {
-    useExisting: useExistingCosmos
     accountName: cosmosAccountName
-    existingAccountName: existingCosmosAccountName
-    existingResourceGroup: existingCosmosResourceGroup
     location: location
+    tags: commonTags
     databaseName: cosmosDatabaseName
     turnsContainerName: turnsContainerName
     memoriesTurnsDefaultTtl: memoriesTurnsDefaultTtl
     deployFunctionContainers: deployFunctionApp
-    tags: commonTags
   }
 }
 
-// --- AI Foundry (Cognitive Services AIServices) ---------------------------
+// --- AI Foundry (account + model deployments) -----------------------------
 
 module aiFoundry 'modules/ai-foundry.bicep' = {
   scope: rg
-  name: 'aiFoundry'
+  name: 'ai-foundry'
   params: {
-    useExisting: useExistingAiFoundry
     accountName: aiFoundryAccountName
-    existingAccountName: existingAiFoundryName
-    existingResourceGroup: existingAiFoundryResourceGroup
     location: location
+    tags: commonTags
     chatModelName: chatModelName
     chatDeploymentName: chatDeploymentName
     embeddingModelName: embeddingModelName
     embeddingDeploymentName: embeddingDeploymentName
-    tags: commonTags
   }
 }
 
@@ -173,27 +166,56 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
     aiFoundryEndpoint: aiFoundry.outputs.endpoint
     embeddingDeploymentName: aiFoundry.outputs.embeddingDeploymentName
     chatDeploymentName: aiFoundry.outputs.chatDeploymentName
+    azureOpenAiApiVersion: azureOpenAiApiVersion
+    threadSummaryEveryN: threadSummaryEveryN
+    factExtractionEveryN: factExtractionEveryN
+    dedupEveryN: dedupEveryN
+    userSummaryEveryN: userSummaryEveryN
+    maxBatchSize: maxBatchSize
+    memoryProcessorOwner: memoryProcessorOwner
     tags: commonTags
   }
 }
 
 // --- RBAC -----------------------------------------------------------------
+//
 // Granted to:
-//   - The function app's user-assigned managed identity (always; harmless when
-//     the function app isn't deployed yet because nothing is using it).
+//   - The function app's user-assigned managed identity (always; harmless
+//     when the function app isn't deployed because nothing is using it).
 //   - The deploying user (when principalId is supplied) so they can hit the
 //     Cosmos data plane and AI Foundry from local samples.
 
-module rbac 'modules/rbac.bicep' = {
+module cosmosRbac 'modules/cosmos-rbac.bicep' = {
   scope: rg
-  name: 'rbac'
+  name: 'cosmos-rbac'
   params: {
     cosmosAccountName: cosmos.outputs.accountName
-    aiFoundryAccountName: aiFoundry.outputs.accountName
-    storageAccountName: deployFunctionApp ? functions!.outputs.storageAccountName : ''
     functionPrincipalId: identity.outputs.principalId
     userPrincipalId: principalId
   }
+}
+
+module aiFoundryRbac 'modules/ai-foundry-rbac.bicep' = {
+  scope: rg
+  name: 'ai-foundry-rbac'
+  params: {
+    aiFoundryAccountName: aiFoundry.outputs.accountName
+    functionPrincipalId: identity.outputs.principalId
+    userPrincipalId: principalId
+  }
+}
+
+module storageRbac 'modules/storage-rbac.bicep' = if (deployFunctionApp) {
+  scope: rg
+  name: 'storage-rbac'
+  params: {
+    storageAccountName: storageAccountName
+    functionPrincipalId: identity.outputs.principalId
+    userPrincipalId: principalId
+  }
+  dependsOn: [
+    functions
+  ]
 }
 
 // --- Outputs (consumed by azd → .azure/<env>/.env) ------------------------

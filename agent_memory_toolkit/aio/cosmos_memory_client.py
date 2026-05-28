@@ -311,7 +311,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             cosmos_turns_container=self._turns_container_client,
         )
         self._pipeline_init_error = None
-        self._warn_on_embedding_dim_mismatch(self._container_client)
 
     async def _drain_cosmos_client(self) -> None:
         prior = self._cosmos_client

@@ -140,7 +140,7 @@ def filtered_by_memory_type(mem: CosmosMemoryClient, user_id: str) -> None:
     results = mem.search_cosmos(
         search_terms="food preferences",
         user_id=user_id,
-        memory_type="fact",
+        memory_types=["fact"],
         top_k=3,
     )
     print_results(results)

@@ -170,9 +170,18 @@ def _fire_thread_steps(
     fire_summary: bool,
     fire_dedup: bool,
 ) -> None:
+    fire_procedural = fire_dedup and bool(
+        _threshold_value(
+            default_thresholds,
+            "get_procedural_synthesis_auto",
+            "PROCEDURAL_SYNTHESIS_AUTO",
+            default=True,
+        )
+    )
     for enabled, label, call in (
         (fire_extract, "process_extract_memories", lambda: processor.process_extract_memories(user_id=user_id, thread_id=thread_id)),
         (fire_dedup, "process_reconcile", lambda: processor.process_reconcile(user_id=user_id)),
+        (fire_procedural, "synthesize_procedural", lambda: processor.synthesize_procedural(user_id=user_id)),
         (fire_summary, "process_thread_summary", lambda: processor.process_thread_summary(user_id=user_id, thread_id=thread_id)),
     ):
         if not enabled:

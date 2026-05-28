@@ -5,10 +5,11 @@ activity, then a best-effort ``SynthesizeProceduralOrchestrator`` sub-call.
 Reconciliation is gated by the change-feed trigger (which tracks the
 per-user/thread turn counter) and signaled to the orchestrator via the
 ``reconcile`` flag on its input payload. Procedural synthesis fires only
-after reconcile, so the prompt is always derived from the deduped fact pool.
-Redundant concurrent runs across threads are cheap because the pipeline
-short-circuits with ``status="unchanged"`` when the source fact/episodic
-IDs have not moved.
+after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO`` is enabled, so
+operators have a kill-switch for the extra LLM call. The prompt is always
+derived from the deduped fact pool. Redundant concurrent runs across threads
+are cheap because the pipeline short-circuits with ``status="unchanged"``
+when the source fact/episodic IDs have not moved.
 """
 
 from __future__ import annotations
@@ -53,19 +54,20 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
             retry,
             {"user_id": user_id},
         )
-        try:
-            procedural = yield context.call_sub_orchestrator_with_retry(
-                "SynthesizeProceduralOrchestrator",
-                retry,
-                {"user_id": user_id, "force": False},
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort; next reconcile will retry
-            logger.warning(
-                "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
-                user_id,
-                thread_id,
-                exc,
-            )
+        if config.get_procedural_synthesis_auto():
+            try:
+                procedural = yield context.call_sub_orchestrator_with_retry(
+                    "SynthesizeProceduralOrchestrator",
+                    retry,
+                    {"user_id": user_id, "force": False},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
+                    user_id,
+                    thread_id,
+                    exc,
+                )
 
     return {
         "persisted": True,

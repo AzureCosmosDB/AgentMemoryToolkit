@@ -270,16 +270,8 @@ SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "system_prompt": {"type": "string"},
-        "change_summary": {"type": "string"},
-        "source_fact_ids": {"type": "array", "items": {"type": "string"}},
-        "source_episodic_ids": {"type": "array", "items": {"type": "string"}},
     },
-    "required": [
-        "system_prompt",
-        "change_summary",
-        "source_fact_ids",
-        "source_episodic_ids",
-    ],
+    "required": ["system_prompt"],
     "additionalProperties": False,
 }
 

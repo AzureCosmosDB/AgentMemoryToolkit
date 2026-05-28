@@ -43,6 +43,10 @@ from agent_memory_toolkit.services._pipeline_helpers import (
     parse_llm_json,
 )
 from agent_memory_toolkit.prompts._schemas import response_format_for
+from agent_memory_toolkit.services.pipeline import (
+    PROCEDURAL_MAX_EPISODES,
+    PROCEDURAL_MAX_FACTS,
+)
 
 logger = get_logger("agent_memory_toolkit.pipeline.aio")
 
@@ -679,6 +683,14 @@ class AsyncPipelineService:
             for doc in behavioral_fact_docs
             if isinstance(doc.get("content"), str) and doc.get("content", "").strip()
         ]
+        if len(behavioral_fact_docs) > PROCEDURAL_MAX_FACTS:
+            logger.warning(
+                "synthesize_procedural truncating behavioral facts user_id=%s total=%d cap=%d",
+                user_id,
+                len(behavioral_fact_docs),
+                PROCEDURAL_MAX_FACTS,
+            )
+            behavioral_fact_docs = behavioral_fact_docs[:PROCEDURAL_MAX_FACTS]
         behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
 
         episodic_docs = await self._container.query_items(
@@ -709,6 +721,14 @@ class AsyncPipelineService:
             if isinstance(doc.get("metadata", {}).get("lesson"), str)
             and doc.get("metadata", {}).get("lesson", "").strip()
         ]
+        if len(episodic_with_lessons) > PROCEDURAL_MAX_EPISODES:
+            logger.warning(
+                "synthesize_procedural truncating episodic lessons user_id=%s total=%d cap=%d",
+                user_id,
+                len(episodic_with_lessons),
+                PROCEDURAL_MAX_EPISODES,
+            )
+            episodic_with_lessons = episodic_with_lessons[:PROCEDURAL_MAX_EPISODES]
         source_episodic_ids = [doc["id"] for doc in episodic_with_lessons]
 
         current_source_ids = set(behavioral_fact_ids) | set(source_episodic_ids)

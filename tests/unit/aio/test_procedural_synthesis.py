@@ -164,14 +164,11 @@ async def test_async_get_procedural_history_orders_active_first_then_newest_vers
 
 
 @pytest.mark.asyncio
-async def test_async_client_synthesize_procedural_defers_remote_processors():
+async def test_async_client_synthesize_procedural_raises_for_remote_processors():
     client = _make_client(processor=AsyncDurableFunctionProcessor())
     client._pipeline = AsyncMock()
 
-    result = await client.synthesize_procedural("u1")
+    with pytest.raises(NotImplementedError, match="durable mode"):
+        await client.synthesize_procedural("u1")
 
-    assert result["status"] == "deferred"
-    assert result["reason"] == "durable_auto_trigger"
-    assert isinstance(result["message"], str)
-    assert result["message"]
     client._pipeline.synthesize_procedural.assert_not_called()

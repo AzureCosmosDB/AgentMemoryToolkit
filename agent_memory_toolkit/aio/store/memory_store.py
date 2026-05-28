@@ -540,12 +540,22 @@ class AsyncMemoryStore:
 
     async def _mutate_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str], *, add: bool) -> None:
         from azure.core import MatchConditions
-        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+        from azure.cosmos.exceptions import (
+            CosmosAccessConditionFailedError,
+            CosmosResourceNotFoundError,
+        )
 
         normalized = {t.strip().lower() for t in tags if t and t.strip()}
         attempts = 0
         while True:
-            doc = await self._container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+            try:
+                doc = await self._container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+                target_container = self._container
+            except CosmosResourceNotFoundError:
+                if self._turns_container is None:
+                    raise
+                doc = await self._turns_container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+                target_container = self._turns_container
             existing_tags = set(doc.get("tags", []))
             if add:
                 existing_tags.update(normalized)
@@ -558,7 +568,7 @@ class AsyncMemoryStore:
             if etag := doc.get("_etag"):
                 kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
             try:
-                await self._container.replace_item(**kwargs)
+                await target_container.replace_item(**kwargs)
                 return
             except CosmosAccessConditionFailedError as exc:
                 attempts += 1

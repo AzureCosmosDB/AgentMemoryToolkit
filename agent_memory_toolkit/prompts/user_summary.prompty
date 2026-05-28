@@ -5,8 +5,6 @@ description: Build a structured JSON user profile from one or more conversation 
 model:
   apiType: chat
   options:
-    # temperature 0.2 preserved — first-time profile may have stylistic latitude.
-    temperature: 0.2
     seed: 42
     maxOutputTokens: 3000
     additionalProperties:

@@ -154,16 +154,15 @@ class ChatClient:
             len(messages),
         )
         kwargs: dict[str, Any] = {"model": self._model, "messages": messages}
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        kwargs.update(extra)
         # Force temperature=1.0 across all callers. Newer Azure OpenAI models
         # (gpt-5.x family, o-series reasoning models) only accept the default
         # value (1.0) and reject any other; older models (gpt-4o, gpt-4o-mini)
         # accept 1.0 as a valid value. Hardcoding to 1.0 keeps behavior uniform
         # across the deployment matrix and lets prompt engineering — not a
         # sampling knob — be the sole control for output determinism.
-        kwargs["temperature"] = 1.0
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        kwargs.update(extra)
         kwargs["temperature"] = 1.0
         return kwargs
 

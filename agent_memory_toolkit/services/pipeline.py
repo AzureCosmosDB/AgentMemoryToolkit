@@ -49,6 +49,16 @@ from agent_memory_toolkit.prompts._schemas import response_format_for
 logger = get_logger("agent_memory_toolkit.pipeline")
 
 
+# Per-user caps applied AFTER salience+recency sort inside
+# ``synthesize_procedural``. The raw queries still return all matching docs;
+# this bound protects the prompty + LLM context window from ballooning when a
+# user accumulates hundreds or thousands of behavioral facts or episodic
+# lessons. Tuned conservatively — the top-N highest-salience entries dominate
+# the synthesized prompt anyway.
+PROCEDURAL_MAX_FACTS = 50
+PROCEDURAL_MAX_EPISODES = 50
+
+
 class _StoreContainerAdapter:
     """Adapter that exposes :class:`MemoryStore` via the Cosmos container method shapes."""
 
@@ -721,6 +731,14 @@ class PipelineService:
             for doc in behavioral_fact_docs
             if isinstance(doc.get("content"), str) and doc.get("content", "").strip()
         ]
+        if len(behavioral_fact_docs) > PROCEDURAL_MAX_FACTS:
+            logger.warning(
+                "synthesize_procedural truncating behavioral facts user_id=%s total=%d cap=%d",
+                user_id,
+                len(behavioral_fact_docs),
+                PROCEDURAL_MAX_FACTS,
+            )
+            behavioral_fact_docs = behavioral_fact_docs[:PROCEDURAL_MAX_FACTS]
         behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
 
         episodic_docs = list(
@@ -753,6 +771,14 @@ class PipelineService:
             if isinstance(doc.get("metadata", {}).get("lesson"), str)
             and doc.get("metadata", {}).get("lesson", "").strip()
         ]
+        if len(episodic_with_lessons) > PROCEDURAL_MAX_EPISODES:
+            logger.warning(
+                "synthesize_procedural truncating episodic lessons user_id=%s total=%d cap=%d",
+                user_id,
+                len(episodic_with_lessons),
+                PROCEDURAL_MAX_EPISODES,
+            )
+            episodic_with_lessons = episodic_with_lessons[:PROCEDURAL_MAX_EPISODES]
         source_episodic_ids = [doc["id"] for doc in episodic_with_lessons]
 
         current_source_ids = set(behavioral_fact_ids) | set(source_episodic_ids)

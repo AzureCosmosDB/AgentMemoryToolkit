@@ -5,7 +5,6 @@ description: Reconcile a pool of active facts — collapse duplicates and resolv
 model:
   apiType: chat
   options:
-    temperature: 0.0
     seed: 43
     maxOutputTokens: 2000
     additionalProperties:

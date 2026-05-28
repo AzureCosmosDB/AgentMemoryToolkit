@@ -124,6 +124,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             self._turns_container_client = None
             self._counter_container_client = None
             self._store = None
+            self._pipeline = None
+        if self._processor is not None and not self._processor_explicit:
+            await self._close_maybe_async(self._processor)
+            self._processor = None
         await self._embeddings_client.close()
         await self._close_maybe_async(self._chat_client)
         for owns, cred in (
@@ -659,11 +663,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:
         processor = self._get_processor()
         if not isinstance(processor, AsyncInProcessProcessor):
-            return {
-                "status": "deferred",
-                "reason": "durable_auto_trigger",
-                "message": "Procedural synthesis runs reactively in the Function App; call get_procedural_prompt() later.",
-            }
+            raise NotImplementedError(
+                "Procedural synthesis runs automatically after reconcile in durable mode; "
+                "manual invocation via the SDK is not supported when the Durable Function "
+                "app is the active processor. Use get_procedural_prompt() to read the "
+                "latest synthesized prompt."
+            )
         return await processor.synthesize_procedural(user_id=user_id, force=force)
 
     async def generate_thread_summary(

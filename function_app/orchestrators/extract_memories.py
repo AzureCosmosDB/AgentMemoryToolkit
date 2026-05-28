@@ -1,9 +1,14 @@
 """Memory-extraction orchestrator + activities.
 
 Chain: ``Extract`` → ``Persist`` followed by an optional ``ReconcileMemories``
-activity. Reconciliation is gated by the change-feed trigger (which tracks the
+activity, then a best-effort ``SynthesizeProceduralOrchestrator`` sub-call.
+Reconciliation is gated by the change-feed trigger (which tracks the
 per-user/thread turn counter) and signaled to the orchestrator via the
-``reconcile`` flag on its input payload.
+``reconcile`` flag on its input payload. Procedural synthesis fires only
+after reconcile, so the prompt is always derived from the deduped fact pool.
+Redundant concurrent runs across threads are cheap because the pipeline
+short-circuits with ``status="unchanged"`` when the source fact/episodic
+IDs have not moved.
 """
 
 from __future__ import annotations
@@ -41,14 +46,33 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     )
 
     reconciled = None
+    procedural = None
     if should_reconcile:
         reconciled = yield context.call_activity_with_retry(
             "em_ReconcileMemories",
             retry,
             {"user_id": user_id},
         )
+        try:
+            procedural = yield context.call_sub_orchestrator_with_retry(
+                "SynthesizeProceduralOrchestrator",
+                retry,
+                {"user_id": user_id, "force": False},
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort; next reconcile will retry
+            logger.warning(
+                "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
+                user_id,
+                thread_id,
+                exc,
+            )
 
-    return {"persisted": True, "extracted": persisted, "reconciled": reconciled}
+    return {
+        "persisted": True,
+        "extracted": persisted,
+        "reconciled": reconciled,
+        "procedural": procedural,
+    }
 
 
 @bp.activity_trigger(input_name="payload")

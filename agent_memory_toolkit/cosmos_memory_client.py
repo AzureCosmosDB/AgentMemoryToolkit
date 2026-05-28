@@ -113,6 +113,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
             self._counter_container_client = None
             self._store = None
             self._pipeline = None
+        if self._processor is not None and not self._processor_explicit:
+            self._close_sync_closeable(self._processor)
+            self._processor = None
         self._close_sync_closeable(self._chat_client)
         self._close_sync_closeable(self._embeddings_client)
         for owns, cred in (
@@ -657,15 +660,14 @@ class CosmosMemoryClient(_BaseMemoryClient):
         return self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
 
     def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:
-        """Trigger synthesized procedural prompt generation for a user."""
         processor = self._get_processor()
         if not isinstance(processor, InProcessProcessor):
-            logger.debug("synthesize_procedural deferred to Function App auto-trigger user_id=%s", user_id)
-            return {
-                "status": "deferred",
-                "reason": "durable_auto_trigger",
-                "message": "Procedural synthesis runs reactively in the Function App; call get_procedural_prompt() later.",
-            }
+            raise NotImplementedError(
+                "Procedural synthesis runs automatically after reconcile in durable mode; "
+                "manual invocation via the SDK is not supported when the Durable Function "
+                "app is the active processor. Use get_procedural_prompt() to read the "
+                "latest synthesized prompt."
+            )
         return processor.synthesize_procedural(user_id=user_id, force=force)
 
     def generate_thread_summary(

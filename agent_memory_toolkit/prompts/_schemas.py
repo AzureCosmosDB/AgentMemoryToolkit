@@ -174,42 +174,91 @@ EXTRACT_MEMORIES_SCHEMA: dict[str, Any] = {
 
 # ---------------------------------------------------------------------------
 # summarize.prompty — first-pass thread summary
+#
+# Mirrors the 6-field shape the prompty actually instructs the model to emit
+# (see ``summarize.prompty`` lines ~69-88). Strict mode would silently drop
+# every field outside this list; the consumer in ``services/pipeline.py``
+# reads ``parsed["overview"]`` and stores ``parsed`` whole under
+# ``metadata.structured_summary``, so the schema must carry the full shape.
 # ---------------------------------------------------------------------------
+_SUMMARY_ACTION_ITEM = {
+    "type": "object",
+    "properties": {
+        "owner": {"type": ["string", "null"]},
+        "task": {"type": "string"},
+        "deadline": {"type": ["string", "null"]},
+    },
+    "required": ["owner", "task", "deadline"],
+    "additionalProperties": False,
+}
+
 SUMMARIZE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string"},
+        "overview": {"type": "string"},
         "key_points": {"type": "array", "items": {"type": "string"}},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "open_issues": {"type": "array", "items": {"type": "string"}},
+        "action_items": {"type": "array", "items": _SUMMARY_ACTION_ITEM},
         "topics": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["summary", "key_points", "topics"],
+    "required": [
+        "overview",
+        "key_points",
+        "decisions",
+        "open_issues",
+        "action_items",
+        "topics",
+    ],
     "additionalProperties": False,
 }
 
 
 # ---------------------------------------------------------------------------
 # summarize_update.prompty — incremental thread summary update
+# Same shape as the first-pass schema; both prompties emit the same payload.
 # ---------------------------------------------------------------------------
 SUMMARIZE_UPDATE_SCHEMA: dict[str, Any] = SUMMARIZE_SCHEMA
 
 
 # ---------------------------------------------------------------------------
 # user_summary.prompty — first-pass user profile
+#
+# Mirrors the 8 sections the prompty body documents (see
+# ``user_summary.prompty`` lines ~35-86 and the JSON example block). Each
+# section is a flat string array; the full ``parsed`` dict is persisted under
+# ``metadata.structured_summary`` and the ``content`` field is composed from
+# ``key_facts`` for vector retrieval.
 # ---------------------------------------------------------------------------
 USER_SUMMARY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string"},
-        "key_attributes": {"type": "array", "items": {"type": "string"}},
+        "key_facts": {"type": "array", "items": {"type": "string"}},
+        "personal_preferences": {"type": "array", "items": {"type": "string"}},
+        "account_environment": {"type": "array", "items": {"type": "string"}},
+        "goals_current_work": {"type": "array", "items": {"type": "string"}},
+        "behavioral_patterns": {"type": "array", "items": {"type": "string"}},
+        "compliance_requirements": {"type": "array", "items": {"type": "string"}},
+        "open_items": {"type": "array", "items": {"type": "string"}},
         "topics": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["summary", "key_attributes", "topics"],
+    "required": [
+        "key_facts",
+        "personal_preferences",
+        "account_environment",
+        "goals_current_work",
+        "behavioral_patterns",
+        "compliance_requirements",
+        "open_items",
+        "topics",
+    ],
     "additionalProperties": False,
 }
 
 
 # ---------------------------------------------------------------------------
 # user_summary_update.prompty — incremental user profile update
+# Same shape as the first-pass schema.
 # ---------------------------------------------------------------------------
 USER_SUMMARY_UPDATE_SCHEMA: dict[str, Any] = USER_SUMMARY_SCHEMA
 

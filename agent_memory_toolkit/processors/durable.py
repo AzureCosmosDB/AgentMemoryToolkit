@@ -104,12 +104,11 @@ class DurableFunctionProcessor:
         user_id: str,
         force: bool = False,
     ) -> dict[str, Any]:
-        logger.debug(
-            "DurableFunctionProcessor.synthesize_procedural deferred user_id=%s force=%s",
-            user_id,
-            force,
+        raise NotImplementedError(
+            "Procedural synthesis runs automatically after reconcile in durable mode; "
+            "manual invocation via the SDK is not supported when the Durable Function "
+            "app is the active processor."
         )
-        return {"status": "deferred", "reason": "durable_auto_trigger"}
 
     def close(self) -> None:
         logger.debug("DurableFunctionProcessor.close no-op")

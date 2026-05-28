@@ -5,8 +5,6 @@ description: Produce a structured JSON summary of a single conversation thread.
 model:
   apiType: chat
   options:
-    # temperature 0.2 preserved — first-time summary may have stylistic latitude.
-    temperature: 0.2
     # seed pinned for reproducibility even though some output drift is acceptable.
     seed: 42
     maxOutputTokens: 1500

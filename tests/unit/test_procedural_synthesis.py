@@ -6,6 +6,8 @@ import json
 from datetime import datetime
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
 from agent_memory_toolkit.processors import DurableFunctionProcessor
 from agent_memory_toolkit.services.pipeline import PipelineService
@@ -464,14 +466,11 @@ def test_get_procedural_history_respects_limit():
     assert len(history) == 2
 
 
-def test_client_synthesize_procedural_defers_remote_processors():
+def test_client_synthesize_procedural_raises_for_remote_processors():
     client = _make_client(processor=DurableFunctionProcessor())
     client._pipeline = MagicMock()
 
-    result = client.synthesize_procedural("u1")
+    with pytest.raises(NotImplementedError, match="durable mode"):
+        client.synthesize_procedural("u1")
 
-    assert result["status"] == "deferred"
-    assert result["reason"] == "durable_auto_trigger"
-    assert isinstance(result["message"], str)
-    assert result["message"]
     client._pipeline.synthesize_procedural.assert_not_called()

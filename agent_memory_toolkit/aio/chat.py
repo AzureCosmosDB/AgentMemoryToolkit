@@ -146,8 +146,6 @@ class AsyncChatClient:
             len(messages),
         )
         kwargs: dict[str, Any] = {"model": self._model, "messages": messages}
-        # Force temperature=1.0 across all callers — see chat.py for rationale.
-        kwargs["temperature"] = 1.0
         if response_format is not None:
             kwargs["response_format"] = response_format
         kwargs.update(extra)

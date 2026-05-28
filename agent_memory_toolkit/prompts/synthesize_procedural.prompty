@@ -5,7 +5,6 @@ description: Synthesize a personalized system prompt for an agent serving this u
 model:
   apiType: chat
   options:
-    temperature: 0.0
     seed: 44
     maxOutputTokens: 2000
     additionalProperties:

@@ -356,6 +356,67 @@ def test_synthesize_procedural_force_true_reruns_when_source_ids_are_unchanged()
     assert body["supersede_reason"] == "update"
 
 
+def test_synthesize_procedural_short_circuits_for_cold_user_with_no_sources():
+    """B2 regression: a user with no facts and no episodics must not consume an
+    LLM call. Without this guard, ``synthesize_procedural`` for cold users
+    would invoke the chat client and then discard the result, wasting tokens
+    on every auto-trigger.
+    """
+    pipeline, container, upserted = _make_synthesis_pipeline()
+
+    result = pipeline.synthesize_procedural("u1")
+
+    pipeline._run_prompty.assert_not_called()
+    container.upsert_item.assert_not_called()
+    container.replace_item.assert_not_called()
+    assert result == {"status": "unchanged", "procedural": None}
+    assert upserted == []
+
+
+def test_synthesize_procedural_short_circuits_on_second_call_with_tied_salience():
+    """B1 regression: 60 facts at the default salience must yield a deterministic
+    selection so the source-id short-circuit fires on the second call.
+
+    Before the SQL composite ORDER BY (salience DESC, created_at ASC, id ASC),
+    Cosmos returned an arbitrary 50-of-60 per query; the prior/current source
+    sets never matched and the LLM fired on every reconcile. The Python re-sort
+    that previously masked this in unit tests has been removed — the SQL itself
+    must be deterministic.
+    """
+    fact_docs = [
+        _fact_doc(
+            f"f{i:03}",
+            f"Fact {i}",
+            category="preference",
+            salience=0.5,
+            created_at=f"2025-01-{(i % 28) + 1:02}T00:00:00+00:00",
+        )
+        for i in range(60)
+    ]
+    pipeline, container, upserted = _make_synthesis_pipeline(
+        fact_docs=fact_docs,
+        llm_output="Generated prompt",
+    )
+
+    first = pipeline.synthesize_procedural("u1")
+    assert first["status"] == "synthesized"
+    assert pipeline._run_prompty.call_count == 1
+
+    synthesized = first["procedural"]
+    container.query_items.side_effect = [
+        [synthesized],
+        list(fact_docs),
+        [],
+        [],
+    ]
+
+    second = pipeline.synthesize_procedural("u1")
+
+    assert pipeline._run_prompty.call_count == 1
+    assert second["status"] == "unchanged"
+    assert second["procedural"]["id"] == synthesized["id"]
+
+
 def test_get_procedural_prompt_returns_none_when_missing():
     client = _make_client()
     client._container_client.query_items.return_value = []

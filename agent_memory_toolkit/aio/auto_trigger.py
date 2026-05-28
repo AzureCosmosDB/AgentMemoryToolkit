@@ -71,6 +71,7 @@ async def maybe_trigger_steps(
         n_facts=n_facts,
         n_summary=n_summary,
         n_dedup_turns=n_dedup_turns,
+        thresholds=thresholds,
     )
     await _trigger_user_steps(processor, counter_container, user_batch_counts, n_user=n_user)
 
@@ -83,6 +84,7 @@ async def _trigger_thread_steps(
     n_facts: int,
     n_summary: int,
     n_dedup_turns: int,
+    thresholds: Any = None,
 ) -> dict[str, int]:
     user_batch_counts: dict[str, int] = {}
     for (user_id, thread_id), batch_count in turn_counts.items():
@@ -111,6 +113,7 @@ async def _trigger_thread_steps(
             fire_extract=n_facts > 0 and _counters.crosses_threshold(old_count, new_count, n_facts),
             fire_summary=n_summary > 0 and _counters.crosses_threshold(old_count, new_count, n_summary),
             fire_dedup=n_dedup_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_dedup_turns),
+            thresholds=thresholds,
         )
     return user_batch_counts
 
@@ -125,10 +128,11 @@ async def _fire_thread_steps(
     fire_extract: bool,
     fire_summary: bool,
     fire_dedup: bool,
+    thresholds: Any = None,
 ) -> None:
     fire_procedural = fire_dedup and bool(
         _threshold_value(
-            default_thresholds,
+            thresholds,
             "get_procedural_synthesis_auto",
             "PROCEDURAL_SYNTHESIS_AUTO",
             default=True,

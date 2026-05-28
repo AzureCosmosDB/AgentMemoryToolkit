@@ -336,15 +336,27 @@ class MemoryStore:
             query = f"SELECT * FROM c{where}"
 
         logger.debug("get_memories query: %s", query)
-        items = self._query_items(
-            query=query,
-            parameters=parameters or None,
-            cross_partition=True,
-            operation="get_memories query",
-            container=self._container_for_query(memory_types),
-        )
+        # Iterate over all containers that may hold the requested memory types.
+        # _container_for_query (singular) silently dropped one container when
+        # callers mixed turn + non-turn types and a dedicated turns container
+        # was configured; using the plural helper unions both result sets.
+        items: list[dict] = []
+        for container in self._containers_for_query(memory_types):
+            items.extend(
+                self._query_items(
+                    query=query,
+                    parameters=parameters or None,
+                    cross_partition=True,
+                    operation="get_memories query",
+                    container=container,
+                )
+            )
 
         if recent_k is not None:
+            # SQL ORDER BY c._ts DESC is per-container; re-rank globally so the
+            # mixed-container case still returns the most-recent N across both.
+            items.sort(key=lambda i: i.get("_ts") or 0, reverse=True)
+            items = items[:recent_k]
             items.reverse()
         if min_salience is not None:
             items = [i for i in items if (i.get("salience") or 0.0) >= min_salience]
@@ -504,6 +516,7 @@ class MemoryStore:
         thread_id: Optional[str] = None,
         prefix: Optional[str] = None,
         include_sys: bool = False,
+        include_superseded: bool = False,
     ) -> list[str]:
         """Return sorted distinct tags for a user, optionally scoped to one thread."""
         query = "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
@@ -511,6 +524,8 @@ class MemoryStore:
         if thread_id is not None:
             query += " AND c.thread_id = @thread_id"
             parameters.append({"name": "@thread_id", "value": thread_id})
+        if not include_superseded:
+            query += " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
 
         prefix_norm = prefix.strip().lower() if prefix else None
         partition_key, cross_partition = query_scope(user_id, thread_id)

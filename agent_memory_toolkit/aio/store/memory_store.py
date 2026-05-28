@@ -339,14 +339,22 @@ class AsyncMemoryStore:
             query = f"SELECT * FROM c{where}"
 
         logger.debug("async get_memories query: %s", query)
-        results = await self._query_items(
-            query=query,
-            parameters=parameters or None,
-            operation="async get_memories query",
-            container=self._container_for_query(memory_types),
-        )
+        # Iterate over all containers that may hold the requested memory types
+        # so mixed turn + non-turn queries do not silently drop one container.
+        results: list[dict] = []
+        for container in self._containers_for_query(memory_types):
+            results.extend(
+                await self._query_items(
+                    query=query,
+                    parameters=parameters or None,
+                    operation="async get_memories query",
+                    container=container,
+                )
+            )
 
         if recent_k is not None:
+            results.sort(key=lambda i: i.get("_ts") or 0, reverse=True)
+            results = results[:recent_k]
             results.reverse()
         if min_salience is not None:
             results = [i for i in results if (i.get("salience") or 0.0) >= min_salience]
@@ -501,6 +509,7 @@ class AsyncMemoryStore:
         thread_id: Optional[str] = None,
         prefix: Optional[str] = None,
         include_sys: bool = False,
+        include_superseded: bool = False,
     ) -> list[str]:
         """Return sorted distinct tags for a user, optionally scoped to one thread."""
         query = "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
@@ -508,6 +517,8 @@ class AsyncMemoryStore:
         if thread_id is not None:
             query += " AND c.thread_id = @thread_id"
             parameters.append({"name": "@thread_id", "value": thread_id})
+        if not include_superseded:
+            query += " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
 
         prefix_norm = prefix.strip().lower() if prefix else None
         partition_key, cross_partition = query_scope(user_id, thread_id)

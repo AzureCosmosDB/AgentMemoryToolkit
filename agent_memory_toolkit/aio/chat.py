@@ -136,7 +136,6 @@ class AsyncChatClient:
         self,
         messages: list[dict[str, str]],
         *,
-        temperature: float | None = None,
         response_format: dict | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
@@ -156,7 +155,6 @@ class AsyncChatClient:
         self,
         messages: list[dict[str, str]],
         *,
-        temperature: float | None = None,
         response_format: dict | None = None,
         max_retries: int = 3,
         base_delay: float = 2.0,
@@ -185,7 +183,6 @@ class AsyncChatClient:
         client = self._ensure_client()
         kwargs = self._build_kwargs(
             messages,
-            temperature=temperature,
             response_format=response_format,
             **extra,
         )

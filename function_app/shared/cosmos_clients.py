@@ -14,6 +14,7 @@ per worker instead of one per invocation.
 
 from __future__ import annotations
 
+import atexit
 from typing import Any
 
 from . import config
@@ -87,3 +88,44 @@ async def get_counter_container_async():
     db = _async_cosmos_client.get_database_client(config.CHANGE_FEED_DATABASE)
     _async_counter_container = db.get_container_client(config.COUNTERS_CONTAINER)
     return _async_counter_container
+
+
+async def close_async_clients() -> None:
+    """Close the cached async Cosmos client and credential.
+
+    Idempotent — safe to call multiple times. Exposed so tests and explicit
+    shutdown hooks can release the underlying ``aiohttp`` session cleanly.
+    """
+    global _async_cosmos_client, _async_counter_container, _async_credential
+    if _async_cosmos_client is not None:
+        try:
+            await _async_cosmos_client.close()
+        except Exception:
+            pass
+        _async_cosmos_client = None
+        _async_counter_container = None
+    if _async_credential is not None:
+        try:
+            await _async_credential.close()
+        except Exception:
+            pass
+        _async_credential = None
+
+
+def _close_at_exit() -> None:
+    """``atexit`` hook: run :func:`close_async_clients` if any async client is live."""
+    if _async_cosmos_client is None and _async_credential is None:
+        return
+    import asyncio
+
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(close_async_clients())
+        finally:
+            loop.close()
+    except Exception:
+        pass
+
+
+atexit.register(_close_at_exit)

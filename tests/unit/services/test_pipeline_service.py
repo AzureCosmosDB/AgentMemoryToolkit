@@ -99,7 +99,9 @@ class FakeStore:
         for doc in self.docs:
             if doc.get("id") == item_id:
                 return dict(doc)
-        raise KeyError(item_id)
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        raise CosmosResourceNotFoundError(message=f"not found: {item_id}")
 
     def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
         body = dict(record)

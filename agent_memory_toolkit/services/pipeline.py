@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from azure.cosmos.exceptions import CosmosResourceExistsError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.exceptions import (
@@ -716,7 +716,7 @@ class PipelineService:
                     "AND ((IS_DEFINED(c.metadata.category) "
                     "AND c.metadata.category IN ('preference', 'requirement')) "
                     "OR (IS_DEFINED(c.salience) AND c.salience >= @min_salience)) "
-                    "ORDER BY c.salience DESC"
+                    "ORDER BY c.salience DESC, c.created_at ASC, c.id ASC"
                 ),
                 parameters=[
                     {"name": "@uid", "value": user_id},
@@ -725,14 +725,6 @@ class PipelineService:
                 ],
                 enable_cross_partition_query=True,
             )
-        )
-        behavioral_fact_docs.sort(
-            key=lambda doc: (
-                float(doc.get("salience") or 0.0),
-                doc.get("created_at", ""),
-                doc.get("id", ""),
-            ),
-            reverse=True,
         )
         behavioral_fact_docs = [
             doc
@@ -749,7 +741,7 @@ class PipelineService:
                     f"AND {active_filter} "
                     "AND IS_DEFINED(c.metadata.lesson) "
                     "AND c.metadata.lesson != null "
-                    "ORDER BY c.salience DESC"
+                    "ORDER BY c.salience DESC, c.created_at ASC, c.id ASC"
                 ),
                 parameters=[
                     {"name": "@uid", "value": user_id},
@@ -757,14 +749,6 @@ class PipelineService:
                 ],
                 enable_cross_partition_query=True,
             )
-        )
-        episodic_docs.sort(
-            key=lambda doc: (
-                float(doc.get("salience") or 0.0),
-                doc.get("created_at", ""),
-                doc.get("id", ""),
-            ),
-            reverse=True,
         )
         episodic_with_lessons = [
             doc
@@ -786,6 +770,13 @@ class PipelineService:
                 user_id,
                 len(behavioral_fact_ids),
                 len(source_episodic_ids),
+            )
+            return {"status": "unchanged", "procedural": prior_doc}
+
+        if not current_source_ids:
+            logger.info(
+                "synthesize_procedural skipping LLM user_id=%s — no behavioral facts or episodic lessons",
+                user_id,
             )
             return {"status": "unchanged", "procedural": prior_doc}
 
@@ -906,7 +897,7 @@ class PipelineService:
         existing_summary: Optional[dict[str, Any]] = None
         try:
             existing_summary = self._container.read_item(item=summary_id, partition_key=[user_id, thread_id])
-        except Exception:
+        except CosmosResourceNotFoundError:
             pass
 
         query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type != 'summary'"
@@ -1052,7 +1043,7 @@ class PipelineService:
                 item=user_summary_id,
                 partition_key=[user_id, "__user_summary__"],
             )
-        except Exception:
+        except CosmosResourceNotFoundError:
             pass
 
         query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.type != 'user_summary'"

@@ -100,9 +100,9 @@ N. ID: <uuid> | Content: "<text>" | Confidence: 0.85 | Salience: 0.7 | Created: 
 
 Some facts may show `Confidence: N/A`, `Salience: N/A`, or `Created: N/A`.
 
-- Treat `N/A` confidence/salience as **unknown** — omit those fields from the
-  `duplicate_groups` output; the pipeline will fall back to
-  `max(source.confidence)` / `max(source.salience)`.
+- Treat `N/A` confidence/salience as **unknown** — set those fields to `null`
+  in the `duplicate_groups` output (do NOT omit the keys); the pipeline will
+  fall back to `max(source.confidence)` / `max(source.salience)`.
 - Treat `N/A` created_at as **older than any real timestamp** for
   winner-selection purposes (a fact with a real date beats one with N/A).
 
@@ -121,9 +121,9 @@ You must output ONLY valid JSON matching this exact schema. No preamble, no expl
   "kept_ids": ["<id>", "<id>"]
 }
 ```
-<!-- confidence/salience: float 0..1, or omit the field if unknown -->
+<!-- confidence/salience: float 0..1, or null if you cannot infer -->
 
-The `confidence` and `salience` values **must** be real numbers between 0 and 1 in the actual output — the `0.0` above is a structural placeholder, not a literal value to echo. Compute them as the maximum across source facts in the group. If you cannot determine confidence or salience, omit the field entirely (the pipeline will fall back to `max(source.*)` from the source records).
+The `confidence` and `salience` values **must** be real numbers between 0 and 1 in the actual output — the `0.0` above is a structural placeholder, not a literal value to echo. Compute them as the maximum across source facts in the group. If you cannot determine confidence or salience, set the field to `null` (the pipeline will fall back to `max(source.*)` from the source records). **Do not omit the keys** — the response schema requires both fields to appear on every group, with either a number or `null` as the value.
 
 If a bucket is empty, emit it as an empty array (`[]`) rather than omitting the key.
 

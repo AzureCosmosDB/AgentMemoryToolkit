@@ -378,6 +378,18 @@ def _container_policies(
         ],
         "vectorIndexes": [{"path": "/embedding", "type": "diskANN"}],
         "fullTextIndexes": [{"path": "/content"}],
+        # Procedural synthesis selects TOP N by (salience DESC, created_at ASC, id ASC).
+        # Cosmos requires a composite index for multi-property ORDER BY; without it the
+        # query returns a non-deterministic 50 of N when many docs share the default
+        # salience (0.5), which makes the source-id short-circuit in synthesize_procedural
+        # thrash and burn LLM calls on every reconcile.
+        "compositeIndexes": [
+            [
+                {"path": "/salience", "order": "descending"},
+                {"path": "/created_at", "order": "ascending"},
+                {"path": "/id", "order": "ascending"},
+            ]
+        ],
     }
 
     full_text_policy = {

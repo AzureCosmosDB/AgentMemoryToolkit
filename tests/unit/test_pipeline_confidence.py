@@ -6,6 +6,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
 from agent_memory_toolkit.services.pipeline import PipelineService
 from agent_memory_toolkit.store import MemoryStore
@@ -217,7 +218,7 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
     def test_thread_ids_does_not_appear_in_query_or_parameters(self):
         pipeline = self._build_pipeline()
         # No prior user-summary; first-pass full generation.
-        pipeline._container.read_item.side_effect = Exception("not found")
+        pipeline._container.read_item.side_effect = CosmosResourceNotFoundError(message="not found")
         # Two memories on different threads; the IN filter would drop t3.
         pipeline._container.query_items.return_value = iter(
             [

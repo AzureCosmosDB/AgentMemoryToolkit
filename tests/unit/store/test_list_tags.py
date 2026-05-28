@@ -30,7 +30,10 @@ def test_list_tags_flattens_dedupes_sorts_and_hides_sys_tags():
 
     for target in (container, turns_container):
         kwargs = target.query_items.call_args.kwargs
-        assert kwargs["query"] == "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+        assert kwargs["query"] == (
+            "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+            " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+        )
         assert kwargs["enable_cross_partition_query"] is True
 
 
@@ -69,7 +72,10 @@ async def test_async_list_tags_flattens_dedupes_sorts_and_hides_sys_tags():
 
     for target in (container, turns_container):
         kwargs = target.query_items.call_args.kwargs
-        assert kwargs["query"] == "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+        assert kwargs["query"] == (
+            "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+            " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+        )
         assert kwargs["enable_cross_partition_query"] is True
 
 

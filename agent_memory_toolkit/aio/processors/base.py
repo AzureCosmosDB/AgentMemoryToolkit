@@ -62,6 +62,13 @@ class AsyncMemoryProcessor(Protocol):
         thread_summaries: list[dict[str, Any]],
     ) -> UserSummaryResult: ...
 
+    async def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]: ...
+
     async def close(self) -> None: ...
 
 

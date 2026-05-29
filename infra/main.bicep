@@ -63,8 +63,8 @@ param embeddingDimensions int = 1536
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int = 10
 
-@description('Run fact / episodic / procedural extraction every N turns within a (user_id, thread_id). 0 = disabled.')
-param factExtractionEveryN int = 5
+@description('Run extract-memories every N change-feed batches. Default 1 = run on every batch (matches SDK + local template). Bump for cost-sensitive production deployments.')
+param factExtractionEveryN int = 1
 
 @description('Run dedup once per N fact-extraction batches. Effective cadence = factExtractionEveryN * dedupEveryN turns.')
 param dedupEveryN int = 5

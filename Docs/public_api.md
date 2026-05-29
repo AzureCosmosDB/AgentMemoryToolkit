@@ -14,10 +14,10 @@
 
 ### Connection
 
-- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure local state, model clients, optional Cosmos auto-connect, and optional processing backend.
+- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_turns_container=None, cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure local state, model clients, optional Cosmos auto-connect, and optional processing backend. When `cosmos_turns_container` is set, turn-type documents land in a dedicated container so the main `memories` container only fires the Durable change-feed trigger for processed memory writes.
 - `close() -> None` — close Cosmos/model clients and owned credentials.
-- `connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None) -> None` — connect to an existing memory container.
-- `create_memory_store(database=None, container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect the memory, counter, and lease containers.
+- `connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None, turns_container=None) -> None` — connect to an existing memory container.
+- `create_memory_store(database=None, container=None, turns_container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect the memory, optional turns, counter, and lease containers.
 
 ### Memory CRUD
 
@@ -65,10 +65,10 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 
 ### Connection
 
-- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure async local state, model clients, and optional processing backend.
+- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_turns_container=None, cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure async local state, model clients, and optional processing backend. When `cosmos_turns_container` is set, turn-type documents land in a dedicated container so the main `memories` container only fires the Durable change-feed trigger for processed memory writes.
 - `async close() -> None` — close async/sync resources and owned credentials.
-- `async connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None) -> None` — connect to an existing memory container.
-- `async create_memory_store(database=None, container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect memory, counter, and lease containers.
+- `async connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None, turns_container=None) -> None` — connect to an existing memory container.
+- `async create_memory_store(database=None, container=None, turns_container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect memory, optional turns, counter, and lease containers.
 
 ### Memory CRUD
 
@@ -119,5 +119,5 @@ Sync extension protocols live in `agent_memory_toolkit.services`; async variants
 Concrete service classes are exported from their respective packages:
 
 - Sync: `RetrievalService`, `PipelineService` from `agent_memory_toolkit.services` (sub-modules `retrieval`, `pipeline`).
-- Async: `AsyncRetrievalService` from `agent_memory_toolkit.aio.services` (sub-module `retrieval`). The pipeline is sync-only and is driven through `asyncio.to_thread` by the async client.
+- Async: `AsyncRetrievalService` and `AsyncPipelineService` from `agent_memory_toolkit.aio.services` (sub-modules `retrieval`, `pipeline`). The async pipeline is a fully-native asyncio implementation — not an `asyncio.to_thread` shim over the sync pipeline.
 - Threshold-driven auto-trigger: `maybe_trigger_steps` from `agent_memory_toolkit.auto_trigger` (sync) and `agent_memory_toolkit.aio.auto_trigger` (async).

@@ -99,6 +99,13 @@ class MemoryProcessor(Protocol):
         thread_summaries: list[dict[str, Any]],
     ) -> UserSummaryResult: ...
 
+    def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]: ...
+
     def close(self) -> None: ...
 
 

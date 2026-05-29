@@ -119,7 +119,11 @@ def _close_at_exit() -> None:
     import asyncio
 
     try:
-        asyncio.run(close_async_clients())
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(close_async_clients())
+        finally:
+            loop.close()
     except Exception:
         pass
 

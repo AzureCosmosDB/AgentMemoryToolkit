@@ -66,6 +66,14 @@ class _FullAsyncDummy:
     ) -> UserSummaryResult:
         return UserSummaryResult()
 
+    async def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        return {"status": "unchanged", "procedural": None}
+
     async def close(self) -> None:
         return None
 
@@ -80,6 +88,14 @@ class _MissingAsyncProcessThread:
         thread_summaries: list[dict[str, Any]],
     ) -> UserSummaryResult:
         return UserSummaryResult()
+
+    async def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        return {"status": "unchanged", "procedural": None}
 
     async def close(self) -> None:
         return None

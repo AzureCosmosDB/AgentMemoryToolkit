@@ -22,6 +22,9 @@
     "FACT_EXTRACTION_EVERY_N": "1",
     "USER_SUMMARY_EVERY_N": "20",
 
+    "// --- Processor ownership: 'durable' (FA owns) or 'sdk' (in-process owns). FA hard-fails if unset to avoid silent default-deny. ---": "",
+    "MEMORY_PROCESSOR_OWNER": "durable",
+
     "// --- Batch knob ---": "",
     "MAX_BATCH_SIZE": "20"
   }

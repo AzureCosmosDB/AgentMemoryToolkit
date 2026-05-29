@@ -546,13 +546,12 @@ def test_client_synthesize_procedural_raises_for_remote_processors():
     client._pipeline.synthesize_procedural.assert_not_called()
 
 
-def test_synthesize_procedural_retries_on_id_collision_and_bumps_version():
-    """Two concurrent writers compute the same ``proc_u1_2`` id; the loser
-    must reread the now-existing prior, bump to ``proc_u1_3``, and succeed.
-
-    Without this, the second writer would silently overwrite the first
-    (the old ``upsert_item`` path). With it, ``create_item`` raises
-    :class:`CosmosResourceExistsError`, the loop rereads and retries.
+def test_synthesize_procedural_retries_with_fresh_llm_call_when_winner_has_partial_coverage():
+    """Two concurrent writers race on ``proc_u1_2``; loser must re-read the
+    winner, see that its source set does NOT cover the loser's current set,
+    re-call the LLM with the winner as the new prior, and write at the
+    bumped version. Verifies content monotonicity in source coverage, not
+    just version number.
     """
     from azure.cosmos.exceptions import CosmosResourceExistsError
 
@@ -564,17 +563,13 @@ def test_synthesize_procedural_retries_on_id_collision_and_bumps_version():
         source_episodic_ids=[],
         ts=1,
     )
-    # Add a second fact so current_source_ids differs from prior, bypassing
-    # the unchanged short-circuit and forcing the LLM + write path.
+    # Loser sees f1 and f2; winner only saw f1 → not covered → must re-call LLM.
     fact_docs = [
         _fact_doc("f1", "Always use bullet points.", category="preference"),
         _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
     ]
 
     container = MagicMock()
-    # Sequence: first prior read → just v1. After 409, second prior read
-    # returns the freshly-written v2 from the racing writer; the retry
-    # then computes proc_u1_3 and succeeds.
     container.query_items.side_effect = [
         [prior_v1],
         fact_docs,
@@ -585,7 +580,7 @@ def test_synthesize_procedural_retries_on_id_collision_and_bumps_version():
             _procedural_doc(
                 "proc_u1_2",
                 version=2,
-                content="v2 by other writer",
+                content="v2 by winner",
                 source_fact_ids=["f1"],
                 source_episodic_ids=[],
                 ts=2,
@@ -609,15 +604,88 @@ def test_synthesize_procedural_retries_on_id_collision_and_bumps_version():
     mock_embeddings = MagicMock()
     store = MemoryStore(container, embeddings_client=mock_embeddings)
     pipeline = PipelineService(store, MagicMock(), mock_embeddings)
-    pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": "v3 by us"}))
+    # Two LLM calls expected: once against v1, once against v2-winner after 409.
+    pipeline._run_prompty = MagicMock(
+        side_effect=[
+            json.dumps({"system_prompt": "v2 by us (stale, will lose race)"}),
+            json.dumps({"system_prompt": "v3 by us (fresh, prior=winner)"}),
+        ]
+    )
 
     result = pipeline.synthesize_procedural("u1", force=False)
 
     assert result["status"] == "synthesized"
     assert result["procedural"]["id"] == "proc_u1_3"
     assert result["procedural"]["version"] == 3
-    # First attempt was proc_u1_2 (409); second attempt was proc_u1_3 (success)
     assert write_log == ["proc_u1_2", "proc_u1_3"]
-    assert pipeline._run_prompty.call_count == 1
-    # supersedes the latest seen prior, not the original v1
+    # LLM called twice: stale content discarded, fresh content reflects winner as prior.
+    assert pipeline._run_prompty.call_count == 2
+    assert "v3 by us" in result["procedural"]["content"]
     assert result["procedural"]["supersedes_ids"] == ["proc_u1_2"]
+
+
+def test_synthesize_procedural_short_circuits_when_race_winner_covers_loser_sources():
+    """Common race case: both writers process the same source set. After 409,
+    loser re-reads, finds winner's source_ids ⊇ loser's, and returns the
+    winner's doc as ``unchanged`` — no second LLM call, no wasted write.
+    """
+    from azure.cosmos.exceptions import CosmosResourceExistsError
+
+    prior_v1 = _procedural_doc(
+        "proc_u1_1",
+        version=1,
+        content="v1 prompt",
+        source_fact_ids=["f1"],
+        source_episodic_ids=[],
+        ts=1,
+    )
+    fact_docs = [
+        _fact_doc("f1", "Always use bullet points.", category="preference"),
+        _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
+    ]
+    # Winner already wrote v2 with the same source set we see now.
+    winner_v2 = _procedural_doc(
+        "proc_u1_2",
+        version=2,
+        content="v2 by winner",
+        source_fact_ids=["f1", "f2"],
+        source_episodic_ids=[],
+        ts=2,
+    )
+
+    container = MagicMock()
+    container.query_items.side_effect = [
+        [prior_v1],
+        fact_docs,
+        [],
+        [],
+        [prior_v1, winner_v2],
+    ]
+    upserted, capture = _capture_upserts()
+    container.upsert_item.side_effect = capture
+
+    write_log: list[str] = []
+
+    def _create(*, body):
+        write_log.append(body["id"])
+        if body["id"] == "proc_u1_2":
+            raise CosmosResourceExistsError(message="conflict")
+        capture(body=body)
+        return body
+
+    container.create_item.side_effect = _create
+
+    mock_embeddings = MagicMock()
+    store = MemoryStore(container, embeddings_client=mock_embeddings)
+    pipeline = PipelineService(store, MagicMock(), mock_embeddings)
+    pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": "stale v2 by us"}))
+
+    result = pipeline.synthesize_procedural("u1", force=False)
+
+    # Loser short-circuits: returns winner's doc, never retries the LLM.
+    assert result["status"] == "unchanged"
+    assert result["procedural"]["id"] == "proc_u1_2"
+    assert result["procedural"]["content"] == "v2 by winner"
+    # Only the losing write attempt; no retry write at proc_u1_3.
+    assert write_log == ["proc_u1_2"]
+    assert pipeline._run_prompty.call_count == 1

@@ -62,6 +62,18 @@ logger = get_logger("agent_memory_toolkit.pipeline")
 _coerce_valence = coerce_valence
 _cap_structured_summary = cap_structured_summary
 
+# Standard SQL predicate that selects "active" (non-superseded) docs.
+# Used in every query that should ignore superseded history. Kept as a single
+# constant so any tweak (e.g. switching to a computed property) only happens
+# once.
+_ACTIVE_DOC_FILTER = "(NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+
+# Maximum number of create_item retries inside synthesize_procedural's
+# race-recovery loop. Each attempt costs one LLM round-trip in the worst case;
+# 5 is comfortably above the realistic worst-case race depth (two parallel
+# threads per user, occasional triple-fanout) without inflating the cost cap.
+_PROCEDURAL_MAX_CREATE_ATTEMPTS = 5
+
 
 class _StoreContainerAdapter:
     """Adapter that exposes :class:`MemoryStore` via the Cosmos container method shapes."""
@@ -184,7 +196,7 @@ class PipelineService:
             f"SELECT TOP {capped_limit} * FROM c "
             f"WHERE c.user_id = @user_id "
             f"AND c.type IN ({type_placeholders}) "
-            f"AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
+            f"AND {_ACTIVE_DOC_FILTER} "
             f"ORDER BY c._ts DESC"
         )
         parameters: list[dict[str, Any]] = [
@@ -269,7 +281,7 @@ class PipelineService:
         try:
             q = (
                 "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
-                "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+                f"AND {_ACTIVE_DOC_FILTER}"
             )
             results = list(
                 self._container.query_items(
@@ -430,8 +442,6 @@ class PipelineService:
 
         for fact in facts:
             action = fact.get("action", "ADD").upper()
-            if action == "NONE":
-                continue
             text = fact.get("text")
             if not text:
                 logger.warning("extract_memories: dropping malformed fact (missing 'text'): %r", fact)
@@ -636,6 +646,11 @@ class PipelineService:
                 doc["embedding"] = embedding
 
         for doc in docs_to_create:
+            # Intentionally re-validates even though extract_memories_dry did:
+            # persist_extracted_memories is a public surface (recovery scripts,
+            # custom processors, third-party callers) so we don't trust input
+            # shape. Cost is microseconds per doc; the safety boundary is the
+            # whole point.
             validated = self._validate_extracted_doc(doc)
             try:
                 self._create_memory(validated)
@@ -703,8 +718,6 @@ class PipelineService:
 
         logger.info("synthesize_procedural started user_id=%s force=%s", user_id, force)
 
-        active_filter = "(NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null)"
-
         def _read_latest_procedural() -> Optional[dict[str, Any]]:
             docs = list(
                 self._container.query_items(
@@ -712,7 +725,7 @@ class PipelineService:
                         "SELECT * FROM c WHERE c.user_id = @uid "
                         "AND c.thread_id = @thread_id "
                         "AND c.type = @type "
-                        f"AND {active_filter}"
+                        f"AND {_ACTIVE_DOC_FILTER}"
                     ),
                     parameters=[
                         {"name": "@uid", "value": user_id},
@@ -741,7 +754,7 @@ class PipelineService:
                 query=(
                     "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                     "AND c.type = @type "
-                    f"AND {active_filter} "
+                    f"AND {_ACTIVE_DOC_FILTER} "
                     "AND ((IS_DEFINED(c.metadata.category) "
                     "AND c.metadata.category IN ('preference', 'requirement')) "
                     "OR (IS_DEFINED(c.salience) AND c.salience >= @min_salience)) "
@@ -767,7 +780,7 @@ class PipelineService:
                 query=(
                     "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                     "AND c.type = @type "
-                    f"AND {active_filter} "
+                    f"AND {_ACTIVE_DOC_FILTER} "
                     "AND IS_DEFINED(c.metadata.lesson) "
                     "AND c.metadata.lesson != null "
                     "ORDER BY c.salience DESC, c.created_at ASC, c.id ASC"
@@ -788,12 +801,14 @@ class PipelineService:
         source_episodic_ids = [doc["id"] for doc in episodic_with_lessons]
 
         current_source_ids = set(behavioral_fact_ids) | set(source_episodic_ids)
-        prior_source_ids = (
-            set(prior_doc.get("source_fact_ids") or []) | set(prior_doc.get("source_episodic_ids") or [])
-            if prior_doc
-            else set()
-        )
-        if prior_doc and not force and current_source_ids == prior_source_ids:
+
+        def _covered_by(prior: Optional[dict[str, Any]]) -> bool:
+            if prior is None:
+                return False
+            covered = set(prior.get("source_fact_ids") or []) | set(prior.get("source_episodic_ids") or [])
+            return current_source_ids.issubset(covered)
+
+        if prior_doc and not force and _covered_by(prior_doc):
             logger.info(
                 "synthesize_procedural unchanged user_id=%s fact_count=%d episodic_count=%d",
                 user_id,
@@ -814,7 +829,7 @@ class PipelineService:
                 query=(
                     "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
                     "AND c.type = @type "
-                    f"AND {active_filter} "
+                    f"AND {_ACTIVE_DOC_FILTER} "
                     "AND IS_DEFINED(c.metadata.category) "
                     "AND c.metadata.category = @category "
                     "AND IS_DEFINED(c.metadata.predicate) "
@@ -845,58 +860,53 @@ class PipelineService:
                 return "(none)"
             return "\n".join(f"- {value}" for value in cleaned)
 
-        response_text = self._run_prompty(
-            "synthesize_procedural.prompty",
-            inputs={
-                "prior_prompt": (prior_doc.get("content") or "") if prior_doc else "",
-                "behavioral_facts": _render_bullets([doc.get("content", "") for doc in behavioral_fact_docs]),
-                "episodic_lessons": _render_bullets(
-                    [doc.get("metadata", {}).get("lesson", "") for doc in episodic_with_lessons]
-                ),
-                "user_name": user_name,
-            },
-        )
-
-        parsed = self._parse_llm_json(response_text)
-        system_prompt = parsed.get("system_prompt") if isinstance(parsed, dict) else None
-        if not isinstance(system_prompt, str) or not system_prompt.strip():
-            raise LLMError("synthesize_procedural returned JSON without a non-empty 'system_prompt' string")
-        system_prompt = system_prompt.strip()
-
-        new_seq = (int(prior_doc.get("version") or 0) + 1) if prior_doc else 1
-        new_doc: dict[str, Any] = {
-            "id": f"proc_{user_id}_{new_seq}",
-            "user_id": user_id,
-            "thread_id": "__procedural__",
-            "type": "procedural",
-            "version": new_seq,
-            "content": system_prompt,
-            "source_fact_ids": behavioral_fact_ids,
-            "source_episodic_ids": source_episodic_ids,
-            "supersedes_ids": [prior_doc["id"]] if prior_doc else [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "role": "system",
-            "tags": ["sys:procedural", "sys:synthesized"],
-            **self._prompt_lineage("synthesize_procedural.prompty"),
-            "metadata": {},
+        static_prompty_inputs = {
+            "behavioral_facts": _render_bullets([doc.get("content", "") for doc in behavioral_fact_docs]),
+            "episodic_lessons": _render_bullets(
+                [doc.get("metadata", {}).get("lesson", "") for doc in episodic_with_lessons]
+            ),
+            "user_name": user_name,
         }
-        if not new_doc["source_fact_ids"] and not new_doc["source_episodic_ids"]:
-            logger.info(
-                "synthesize_procedural skipping write user_id=%s — no source facts or episodics",
-                user_id,
-            )
-            return {"status": "unchanged", "procedural": prior_doc}
 
-        max_attempts = 5
-        new_id = new_doc["id"]
+        # Retry loop: LLM call lives inside so that on a race-induced 409
+        # we (a) check whether the winner already covers our source set and
+        # short-circuit if so, and (b) re-call the LLM with the winner as
+        # the new prior if not — keeping synthesized content monotonic in
+        # source coverage, not just version number.
         written_doc: Optional[dict[str, Any]] = None
-        for attempt in range(1, max_attempts + 1):
-            new_doc["id"] = f"proc_{user_id}_{new_seq}"
-            new_doc["version"] = new_seq
-            new_doc["supersedes_ids"] = [prior_doc["id"]] if prior_doc else []
-            new_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
-            new_id = new_doc["id"]
+        for attempt in range(1, _PROCEDURAL_MAX_CREATE_ATTEMPTS + 1):
+            response_text = self._run_prompty(
+                "synthesize_procedural.prompty",
+                inputs={
+                    "prior_prompt": (prior_doc.get("content") or "") if prior_doc else "",
+                    **static_prompty_inputs,
+                },
+            )
+
+            parsed = self._parse_llm_json(response_text)
+            system_prompt = parsed.get("system_prompt") if isinstance(parsed, dict) else None
+            if not isinstance(system_prompt, str) or not system_prompt.strip():
+                raise LLMError("synthesize_procedural returned JSON without a non-empty 'system_prompt' string")
+            system_prompt = system_prompt.strip()
+
+            new_seq = (int(prior_doc.get("version") or 0) + 1) if prior_doc else 1
+            new_doc: dict[str, Any] = {
+                "id": f"proc_{user_id}_{new_seq}",
+                "user_id": user_id,
+                "thread_id": "__procedural__",
+                "type": "procedural",
+                "version": new_seq,
+                "content": system_prompt,
+                "source_fact_ids": behavioral_fact_ids,
+                "source_episodic_ids": source_episodic_ids,
+                "supersedes_ids": [prior_doc["id"]] if prior_doc else [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "role": "system",
+                "tags": ["sys:procedural", "sys:synthesized"],
+                **self._prompt_lineage("synthesize_procedural.prompty"),
+                "metadata": {},
+            }
             validated = construct_internal(ProceduralRecord, new_doc).to_doc()
             try:
                 self._container.create_item(body=validated)
@@ -908,26 +918,34 @@ class PipelineService:
                     user_id,
                     new_seq,
                     attempt,
-                    max_attempts,
+                    _PROCEDURAL_MAX_CREATE_ATTEMPTS,
                 )
                 latest = _read_latest_procedural()
-                if latest is not None:
-                    prior_doc = latest
-                    new_seq = int(latest.get("version") or 0) + 1
-                else:
-                    new_seq += 1
+                if latest is None:
+                    continue
+                prior_doc = latest
+                if _covered_by(prior_doc):
+                    logger.info(
+                        "synthesize_procedural race resolved by coverage user_id=%s winner=%s",
+                        user_id,
+                        prior_doc["id"],
+                    )
+                    return {"status": "unchanged", "procedural": prior_doc}
         if written_doc is None:
             raise MemoryConflictError(
-                f"synthesize_procedural failed after {max_attempts} attempts due to id collisions user_id={user_id!r}"
+                "synthesize_procedural failed after "
+                f"{_PROCEDURAL_MAX_CREATE_ATTEMPTS} attempts due to id collisions "
+                f"user_id={user_id!r}"
             )
 
+        new_id = written_doc["id"]
         if prior_doc:
             self._mark_superseded(prior_doc, new_id, reason="update")
 
         logger.info(
             "synthesize_procedural synthesized user_id=%s version=%d fact_count=%d episodic_count=%d",
             user_id,
-            new_seq,
+            written_doc["version"],
             len(behavioral_fact_ids),
             len(source_episodic_ids),
         )
@@ -1292,7 +1310,7 @@ class PipelineService:
             f"SELECT TOP {n} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = 'fact' "
-            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
+            f"AND {_ACTIVE_DOC_FILTER} "
             "ORDER BY c.created_at DESC"
         )
         parameters: list[dict[str, Any]] = [
@@ -1699,7 +1717,7 @@ class PipelineService:
         query = (
             "SELECT TOP 1 c.content, c.version FROM c WHERE c.user_id = @user_id "
             "AND c.thread_id = @thread_id AND c.type = @type "
-            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
+            f"AND {_ACTIVE_DOC_FILTER} "
             "ORDER BY c.version DESC"
         )
         items = self._store.query(

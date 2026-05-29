@@ -11,6 +11,9 @@
     "principalId": {
       "value": "${AZURE_PRINCIPAL_ID}"
     },
+    "principalType": {
+      "value": "${AZURE_PRINCIPAL_TYPE=User}"
+    },
     "deployFunctionApp": {
       "value": "${DEPLOY_FUNCTION_APP=true}"
     },
@@ -42,7 +45,7 @@
       "value": "${THREAD_SUMMARY_EVERY_N=10}"
     },
     "factExtractionEveryN": {
-      "value": "${FACT_EXTRACTION_EVERY_N=5}"
+      "value": "${FACT_EXTRACTION_EVERY_N=1}"
     },
     "dedupEveryN": {
       "value": "${DEDUP_EVERY_N=5}"

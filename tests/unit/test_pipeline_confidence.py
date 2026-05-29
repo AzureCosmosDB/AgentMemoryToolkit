@@ -28,9 +28,13 @@ def _make_pipeline(llm_response: dict):
             }
         ]
     )
-    # Capture upserts for inspection.
+    # Capture writes from both upsert_item and create_item. The pipeline now
+    # uses create_item for facts/episodics/procedural (for 409 idempotency),
+    # so a fixture that only watches upsert_item would silently observe zero
+    # writes against a MagicMock container.
     upserted: list[dict] = []
     container.upsert_item.side_effect = lambda body: upserted.append(body) or body
+    container.create_item.side_effect = lambda body: upserted.append(body) or body
 
     chat = MagicMock()
     embeddings = MagicMock()
@@ -342,7 +346,13 @@ def test_extract_past_event_episodic_uses_arrow_form_and_keeps_scope():
     assert "topic:db" in ep["tags"]
 
 
-def test_extract_summary_field_preferred_over_arrow_form():
+def test_extract_episodic_falls_back_to_arrow_form_when_summary_field_present():
+    """The schema dropped ``summary``; pipeline now always uses arrow form.
+
+    Even if a non-strict LLM smuggles a ``summary`` field through, the
+    pipeline ignores it and builds content from
+    ``situation → action_taken → outcome``.
+    """
     pipeline, upserted = _make_pipeline(
         {
             "episodic": [
@@ -361,7 +371,7 @@ def test_extract_summary_field_preferred_over_arrow_form():
     pipeline.extract_memories("u1", "t1")
 
     [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["content"] == "User wants luxury hotels for the Paris trip."
+    assert ep["content"] == "Planning Paris trip → Said luxury → Pending"
 
 
 def test_extract_drops_episodic_missing_scope_type(caplog):

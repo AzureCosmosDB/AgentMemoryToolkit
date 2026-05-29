@@ -16,6 +16,14 @@ param functionPrincipalId string = ''
 @description('Optional user principal id (the deploying user) for local sample access. Empty string skips.')
 param userPrincipalId string = ''
 
+@description('AAD principal type for userPrincipalId. Use ServicePrincipal when deploying from CI under an SP.')
+@allowed([
+  'User'
+  'ServicePrincipal'
+  'Group'
+])
+param userPrincipalType string = 'User'
+
 resource aiFoundry 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
   name: aiFoundryAccountName
 }
@@ -38,6 +46,6 @@ resource aiFoundryRoleUser 'Microsoft.Authorization/roleAssignments@2022-04-01' 
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesOpenAIUserRoleId)
     principalId: userPrincipalId
-    principalType: 'User'
+    principalType: userPrincipalType
   }
 }

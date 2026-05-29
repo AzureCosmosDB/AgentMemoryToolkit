@@ -60,6 +60,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
                     "SynthesizeProceduralOrchestrator",
                     retry,
                     {"user_id": user_id, "force": False},
+                    instance_id=f"procedural:{user_id}:{thread_id}:{payload.get('count', 'manual')}",
                 )
             except Exception as exc:
                 logger.warning(

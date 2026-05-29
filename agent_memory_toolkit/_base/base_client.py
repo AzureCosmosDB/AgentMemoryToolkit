@@ -237,18 +237,6 @@ class _BaseMemoryClient:
             )
 
     @staticmethod
-    def _resolve_scope(
-        *,
-        user_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-        **kwargs: Any,
-    ) -> tuple[Optional[str], Optional[str]]:
-        """Resolve user/thread scope from explicit args or keyword aliases."""
-        resolved_user_id = user_id if user_id is not None else kwargs.get("user_id")
-        resolved_thread_id = thread_id if thread_id is not None else kwargs.get("thread_id")
-        return resolved_user_id, resolved_thread_id
-
-    @staticmethod
     def _close_sync_closeable(closeable: Any) -> None:
         close = getattr(closeable, "close", None)
         if callable(close):

@@ -20,6 +20,13 @@ def _assert_iso8601(text: str) -> None:
 
 
 def _capture_upserts():
+    """Capture documents written via upsert_item OR create_item.
+
+    The pipeline writes new facts/episodics via ``create_item`` (for 409
+    idempotency) and writes new procedural versions via ``create_item +
+    bump-seq-retry``. Either way, tests want the persisted body — so the
+    helper now wires the same capture to both side_effects.
+    """
     upserted: list[dict] = []
 
     def _capture(*, body):
@@ -44,6 +51,7 @@ def _make_extract_pipeline(llm_response: dict):
     ]
     upserted, capture = _capture_upserts()
     container.upsert_item.side_effect = capture
+    container.create_item.side_effect = capture
 
     embeddings = MagicMock()
     embeddings.generate_batch.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
@@ -152,6 +160,7 @@ def _make_synthesis_pipeline(
     ]
     upserted, capture = _capture_upserts()
     container.upsert_item.side_effect = capture
+    container.create_item.side_effect = capture
 
     mock_embeddings = MagicMock()
     store = MemoryStore(container, embeddings_client=mock_embeddings)
@@ -535,3 +544,80 @@ def test_client_synthesize_procedural_raises_for_remote_processors():
         client.synthesize_procedural("u1")
 
     client._pipeline.synthesize_procedural.assert_not_called()
+
+
+def test_synthesize_procedural_retries_on_id_collision_and_bumps_version():
+    """Two concurrent writers compute the same ``proc_u1_2`` id; the loser
+    must reread the now-existing prior, bump to ``proc_u1_3``, and succeed.
+
+    Without this, the second writer would silently overwrite the first
+    (the old ``upsert_item`` path). With it, ``create_item`` raises
+    :class:`CosmosResourceExistsError`, the loop rereads and retries.
+    """
+    from azure.cosmos.exceptions import CosmosResourceExistsError
+
+    prior_v1 = _procedural_doc(
+        "proc_u1_1",
+        version=1,
+        content="v1 prompt",
+        source_fact_ids=["f1"],
+        source_episodic_ids=[],
+        ts=1,
+    )
+    # Add a second fact so current_source_ids differs from prior, bypassing
+    # the unchanged short-circuit and forcing the LLM + write path.
+    fact_docs = [
+        _fact_doc("f1", "Always use bullet points.", category="preference"),
+        _fact_doc("f2", "Never use var in TypeScript.", category="requirement"),
+    ]
+
+    container = MagicMock()
+    # Sequence: first prior read → just v1. After 409, second prior read
+    # returns the freshly-written v2 from the racing writer; the retry
+    # then computes proc_u1_3 and succeeds.
+    container.query_items.side_effect = [
+        [prior_v1],
+        fact_docs,
+        [],
+        [],
+        [
+            prior_v1,
+            _procedural_doc(
+                "proc_u1_2",
+                version=2,
+                content="v2 by other writer",
+                source_fact_ids=["f1"],
+                source_episodic_ids=[],
+                ts=2,
+            ),
+        ],
+    ]
+    upserted, capture = _capture_upserts()
+    container.upsert_item.side_effect = capture
+
+    write_log: list[str] = []
+
+    def _create(*, body):
+        write_log.append(body["id"])
+        if body["id"] == "proc_u1_2":
+            raise CosmosResourceExistsError(message="conflict")
+        capture(body=body)
+        return body
+
+    container.create_item.side_effect = _create
+
+    mock_embeddings = MagicMock()
+    store = MemoryStore(container, embeddings_client=mock_embeddings)
+    pipeline = PipelineService(store, MagicMock(), mock_embeddings)
+    pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": "v3 by us"}))
+
+    result = pipeline.synthesize_procedural("u1", force=False)
+
+    assert result["status"] == "synthesized"
+    assert result["procedural"]["id"] == "proc_u1_3"
+    assert result["procedural"]["version"] == 3
+    # First attempt was proc_u1_2 (409); second attempt was proc_u1_3 (success)
+    assert write_log == ["proc_u1_2", "proc_u1_3"]
+    assert pipeline._run_prompty.call_count == 1
+    # supersedes the latest seen prior, not the original v1
+    assert result["procedural"]["supersedes_ids"] == ["proc_u1_2"]

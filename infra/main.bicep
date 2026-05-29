@@ -22,6 +22,14 @@ param location string = 'eastus2'
 @description('Object id of the user running azd. Used to grant data-plane RBAC (Cosmos, AI Foundry, Storage) so the deployer can run samples locally.')
 param principalId string = ''
 
+@description('AAD principal type for principalId. Defaults to User; set to ServicePrincipal when deploying from CI under an SP to avoid PrincipalTypeMismatch on AI Foundry / Storage RBAC.')
+@allowed([
+  'User'
+  'ServicePrincipal'
+  'Group'
+])
+param principalType string = 'User'
+
 @description('Whether to deploy the Function app. Defaults to true. Set false only if you have a strong reason to skip it (Flex Consumption is pay-per-execution — idle cost is ~$0).')
 param deployFunctionApp bool = true
 
@@ -48,6 +56,9 @@ param chatDeploymentName string = ''
 
 @description('Azure OpenAI REST API version pinned for both chat and embedding clients (SDK + function-app). Newer preview versions are required for strict JSON-schema response_format on gpt-5.x models.')
 param azureOpenAiApiVersion string = '2024-12-01-preview'
+
+@description('Embedding output dimensions. MUST equal the dimensions configured on the Cosmos memories container vectorEmbeddingPolicy. text-embedding-3-large natively returns 3072; we set 1536 here so DiskANN (also 1536 in cosmos.bicep) can match. Change this only if you also change cosmos.bicep.')
+param embeddingDimensions int = 1536
 
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int = 10
@@ -124,6 +135,7 @@ module cosmos 'modules/cosmos.bicep' = {
     turnsContainerName: turnsContainerName
     memoriesTurnsDefaultTtl: memoriesTurnsDefaultTtl
     deployFunctionContainers: deployFunctionApp
+    embeddingDimensions: embeddingDimensions
   }
 }
 
@@ -167,6 +179,7 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
     embeddingDeploymentName: aiFoundry.outputs.embeddingDeploymentName
     chatDeploymentName: aiFoundry.outputs.chatDeploymentName
     azureOpenAiApiVersion: azureOpenAiApiVersion
+    embeddingDimensions: embeddingDimensions
     threadSummaryEveryN: threadSummaryEveryN
     factExtractionEveryN: factExtractionEveryN
     dedupEveryN: dedupEveryN
@@ -202,6 +215,7 @@ module aiFoundryRbac 'modules/ai-foundry-rbac.bicep' = {
     aiFoundryAccountName: aiFoundry.outputs.accountName
     functionPrincipalId: identity.outputs.principalId
     userPrincipalId: principalId
+    userPrincipalType: principalType
   }
 }
 
@@ -212,6 +226,7 @@ module storageRbac 'modules/storage-rbac.bicep' = if (deployFunctionApp) {
     storageAccountName: storageAccountName
     functionPrincipalId: identity.outputs.principalId
     userPrincipalId: principalId
+    userPrincipalType: principalType
   }
   dependsOn: [
     functions

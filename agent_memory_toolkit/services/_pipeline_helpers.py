@@ -311,7 +311,7 @@ class PromptyLoader:
 # Allowed values for the EpisodicRecord ``outcome_valence`` field — mirrors
 # ``agent_memory_toolkit.models._EPISODIC_ALLOWED_VALENCES`` but kept inline
 # to avoid an import cycle (helpers must not import models).
-_VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})
+VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})
 
 
 def coerce_valence(value: Any) -> str:
@@ -321,7 +321,7 @@ def coerce_valence(value: Any) -> str:
     | null``; null and any unknown value fall through to ``"neutral"`` so a
     single drifted episode never aborts the whole extract batch.
     """
-    if isinstance(value, str) and value in _VALID_VALENCES:
+    if isinstance(value, str) and value in VALID_VALENCES:
         return value
     return "neutral"
 

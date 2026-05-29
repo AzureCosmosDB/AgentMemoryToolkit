@@ -88,11 +88,3 @@ def test_warn_on_embedding_dim_mismatch_logs_warning(caplog):
     client._warn_on_embedding_dim_mismatch(container)
 
     assert "Embedding dimension mismatch" in caplog.text
-
-
-def test_resolve_scope_prefers_explicit_values():
-    assert _BaseMemoryClient._resolve_scope(user_id="u1", thread_id="t1") == ("u1", "t1")
-    assert _BaseMemoryClient._resolve_scope(**{"user_id": "kw-user", "thread_id": "kw-thread"}) == (
-        "kw-user",
-        "kw-thread",
-    )

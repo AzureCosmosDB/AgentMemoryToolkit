@@ -22,7 +22,11 @@ from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNot
 
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
-from agent_memory_toolkit.exceptions import LLMError, ValidationError
+from agent_memory_toolkit.exceptions import (
+    LLMError,
+    MemoryConflictError,
+    ValidationError,
+)
 from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import (
     EpisodicRecord,
@@ -37,6 +41,7 @@ from agent_memory_toolkit.services._pipeline_helpers import (
     ID_SEED_SEP as _ID_SEED_SEP,
 )
 from agent_memory_toolkit.services._pipeline_helpers import (
+    VALID_VALENCES,
     PromptyLoader,
     build_topic_tags,
     build_transcript,
@@ -91,9 +96,7 @@ class _AsyncStoreContainerAdapter:
             response = container.create_item(body=body)
             if inspect.isawaitable(response):
                 response = await response
-            if isinstance(response, dict):
-                return response
-            return await self._store.add_cosmos(body)
+            return response if isinstance(response, dict) else body
         create = getattr(self._store, "create_item", None)
         if create is not None:
             response = create(body=body)
@@ -258,25 +261,36 @@ class AsyncPipelineService:
                 )
                 return False
             return await self._mark_superseded(old_mem, superseder_id, reason=reason)
-        except Exception:
-            logger.debug("Could not read superseded item %s directly, trying cross-partition", supersedes_id)
-            try:
-                q = (
-                    "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
-                    "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
-                )
-                results = await self._container.query_items(
-                    query=q,
-                    parameters=[
-                        {"name": "@id", "value": supersedes_id},
-                        {"name": "@uid", "value": user_id},
-                    ],
-                    enable_cross_partition_query=True,
-                )
-                if results and not results[0].get("superseded_by"):
-                    return await self._mark_superseded(results[0], superseder_id, reason=reason)
-            except Exception as exc:
-                logger.warning("Failed to mark superseded memory %s: %s", supersedes_id, exc)
+        except CosmosResourceNotFoundError:
+            logger.debug(
+                "extract_memories: %s not found at (user_id, thread_id) — retrying cross-partition",
+                supersedes_id,
+            )
+        except Exception as exc:
+            # Includes 429s, 503s, transient connection errors — surface at WARNING
+            # so they're not masked by the silent cross-partition fallback below.
+            logger.warning(
+                "extract_memories: read_item failed for %s (%s); retrying cross-partition",
+                supersedes_id,
+                type(exc).__name__,
+            )
+        try:
+            q = (
+                "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
+                "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+            )
+            results = await self._container.query_items(
+                query=q,
+                parameters=[
+                    {"name": "@id", "value": supersedes_id},
+                    {"name": "@uid", "value": user_id},
+                ],
+                enable_cross_partition_query=True,
+            )
+            if results and not results[0].get("superseded_by"):
+                return await self._mark_superseded(results[0], superseder_id, reason=reason)
+        except Exception as exc:
+            logger.warning("Failed to mark superseded memory %s: %s", supersedes_id, exc)
         return False
 
     async def _mark_superseded(
@@ -457,10 +471,7 @@ class AsyncPipelineService:
             situation = ep.get("situation")
             action_taken = ep.get("action_taken")
             outcome = ep.get("outcome")
-            summary = ep.get("summary")
-            if isinstance(summary, str) and summary.strip():
-                text = summary.strip()
-            elif situation and action_taken and outcome:
+            if situation and action_taken and outcome:
                 text = f"{situation} → {action_taken} → {outcome}"
             else:
                 text = f"For the user's {scope_value} {scope_type}, intent recorded."
@@ -470,6 +481,16 @@ class AsyncPipelineService:
             det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(ep.get("tags", []))
             confidence = ep.get("confidence")
+            raw_valence = ep.get("outcome_valence")
+            coerced_valence = _coerce_valence(raw_valence)
+            if raw_valence is not None and raw_valence not in VALID_VALENCES:
+                logger.warning(
+                    "extract_memories: coercing unknown outcome_valence=%r → %r user_id=%s thread_id=%s",
+                    raw_valence,
+                    coerced_valence,
+                    user_id,
+                    thread_id,
+                )
             doc = {
                 "id": det_id,
                 "user_id": user_id,
@@ -488,7 +509,7 @@ class AsyncPipelineService:
                     "action_taken": action_taken,
                     "outcome": outcome,
                     "reasoning": ep.get("reasoning"),
-                    "outcome_valence": _coerce_valence(ep.get("outcome_valence")),
+                    "outcome_valence": coerced_valence,
                     "lesson": ep.get("lesson")
                     or (
                         f"{situation} → {action_taken} → {outcome}" if situation and action_taken and outcome else text
@@ -646,31 +667,34 @@ class AsyncPipelineService:
 
         active_filter = "(NOT IS_DEFINED(c.superseded_by) OR c.superseded_by = null)"
 
-        prior_docs = await self._container.query_items(
-            query=(
-                "SELECT * FROM c WHERE c.user_id = @uid "
-                "AND c.thread_id = @thread_id "
-                "AND c.type = @type "
-                f"AND {active_filter}"
-            ),
-            parameters=[
-                {"name": "@uid", "value": user_id},
-                {"name": "@thread_id", "value": "__procedural__"},
-                {"name": "@type", "value": "procedural"},
-            ],
-            enable_cross_partition_query=True,
-        )
-        prior_docs.sort(
-            key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)),
-            reverse=True,
-        )
-        if len(prior_docs) > 1:
-            logger.warning(
-                "synthesize_procedural found multiple active docs user_id=%s count=%d",
-                user_id,
-                len(prior_docs),
+        async def _read_latest_procedural() -> Optional[dict[str, Any]]:
+            docs = await self._container.query_items(
+                query=(
+                    "SELECT * FROM c WHERE c.user_id = @uid "
+                    "AND c.thread_id = @thread_id "
+                    "AND c.type = @type "
+                    f"AND {active_filter}"
+                ),
+                parameters=[
+                    {"name": "@uid", "value": user_id},
+                    {"name": "@thread_id", "value": "__procedural__"},
+                    {"name": "@type", "value": "procedural"},
+                ],
+                enable_cross_partition_query=True,
             )
-        prior_doc = prior_docs[0] if prior_docs else None
+            docs.sort(
+                key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)),
+                reverse=True,
+            )
+            if len(docs) > 1:
+                logger.warning(
+                    "synthesize_procedural found multiple active docs user_id=%s count=%d",
+                    user_id,
+                    len(docs),
+                )
+            return docs[0] if docs else None
+
+        prior_doc = await _read_latest_procedural()
 
         behavioral_fact_docs = await self._container.query_items(
             query=(
@@ -794,9 +818,8 @@ class AsyncPipelineService:
         system_prompt = system_prompt.strip()
 
         new_seq = (int(prior_doc.get("version") or 0) + 1) if prior_doc else 1
-        new_id = f"proc_{user_id}_{new_seq}"
         new_doc: dict[str, Any] = {
-            "id": new_id,
+            "id": f"proc_{user_id}_{new_seq}",
             "user_id": user_id,
             "thread_id": "__procedural__",
             "type": "procedural",
@@ -818,8 +841,39 @@ class AsyncPipelineService:
                 user_id,
             )
             return {"status": "unchanged", "procedural": prior_doc}
-        new_doc = construct_internal(ProceduralRecord, new_doc).to_doc()
-        await self._container.upsert_item(body=new_doc)
+
+        max_attempts = 5
+        new_id = new_doc["id"]
+        written_doc: Optional[dict[str, Any]] = None
+        for attempt in range(1, max_attempts + 1):
+            new_doc["id"] = f"proc_{user_id}_{new_seq}"
+            new_doc["version"] = new_seq
+            new_doc["supersedes_ids"] = [prior_doc["id"]] if prior_doc else []
+            new_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+            new_id = new_doc["id"]
+            validated = construct_internal(ProceduralRecord, new_doc).to_doc()
+            try:
+                await self._container.create_item(body=validated)
+                written_doc = validated
+                break
+            except CosmosResourceExistsError:
+                logger.info(
+                    "synthesize_procedural id collision user_id=%s seq=%d attempt=%d/%d — re-reading",
+                    user_id,
+                    new_seq,
+                    attempt,
+                    max_attempts,
+                )
+                latest = await _read_latest_procedural()
+                if latest is not None:
+                    prior_doc = latest
+                    new_seq = int(latest.get("version") or 0) + 1
+                else:
+                    new_seq += 1
+        if written_doc is None:
+            raise MemoryConflictError(
+                f"synthesize_procedural failed after {max_attempts} attempts due to id collisions user_id={user_id!r}"
+            )
 
         if prior_doc:
             await self._mark_superseded(prior_doc, new_id, reason="update")
@@ -831,7 +885,7 @@ class AsyncPipelineService:
             len(behavioral_fact_ids),
             len(source_episodic_ids),
         )
-        return {"status": "synthesized", "procedural": new_doc}
+        return {"status": "synthesized", "procedural": written_doc}
 
     async def generate_thread_summary_dry(
         self,

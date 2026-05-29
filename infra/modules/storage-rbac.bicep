@@ -23,6 +23,14 @@ param functionPrincipalId string = ''
 @description('Optional user principal id (the deploying user) for local sample access. Empty string skips.')
 param userPrincipalId string = ''
 
+@description('AAD principal type for userPrincipalId. Use ServicePrincipal when deploying from CI under an SP.')
+@allowed([
+  'User'
+  'ServicePrincipal'
+  'Group'
+])
+param userPrincipalType string = 'User'
+
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
 }
@@ -67,6 +75,6 @@ resource storageBlobRoleUser 'Microsoft.Authorization/roleAssignments@2022-04-01
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataOwnerRoleId)
     principalId: userPrincipalId
-    principalType: 'User'
+    principalType: userPrincipalType
   }
 }

@@ -283,11 +283,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: embeddingDeploymentName
         }
         {
-          // Pins the embedding output dim. Without this, text-embedding-3-large
-          // returns its native 3072-dim vectors and Cosmos accepts them silently —
-          // but DiskANN (configured for 1536 in cosmos.bicep) cannot match
-          // them, so every FA-written memory becomes invisible to vector /
-          // hybrid search. Must equal cosmos.bicep vectorEmbeddingPolicy dimensions.
           name: 'AI_FOUNDRY_EMBEDDING_DIMENSIONS'
           value: string(embeddingDimensions)
         }

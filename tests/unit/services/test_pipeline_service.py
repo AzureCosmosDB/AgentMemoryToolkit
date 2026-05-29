@@ -170,7 +170,9 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
                     {
                         "scope_type": "project",
                         "scope_value": "CI",
-                        "summary": "CI retries resolved flaky tests.",
+                        "situation": "CI tests flaked intermittently",
+                        "action_taken": "Added retries",
+                        "outcome": "Tests stabilized",
                         "lesson": "Use retries for flaky CI tests.",
                         "confidence": 0.8,
                     }
@@ -187,7 +189,12 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
     assert [doc["type"] for doc in store.upserts] == ["fact", "episodic"]
     assert set(store.upserts[0]["tags"]) == {"sys:fact", "sys:auto-extracted", "topic:ui"}
     assert llm.chat_calls
-    assert llm.embed_calls == [["The user prefers dark mode.", "CI retries resolved flaky tests."]]
+    assert llm.embed_calls == [
+        [
+            "The user prefers dark mode.",
+            "CI tests flaked intermittently → Added retries → Tests stabilized",
+        ]
+    ]
 
 
 def test_extract_memories_contradict_supersedes_existing_fact() -> None:

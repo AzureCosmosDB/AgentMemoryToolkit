@@ -273,6 +273,8 @@ A fact is a standing claim that holds outside any specific context. The test: if
   ],
   "episodic": [
     {
+      "scope_type": "incident",
+      "scope_value": "Q3 K8s OOM outage",
       "situation": "Kubernetes pods in production were repeatedly OOM-killed, causing an outage.",
       "action_taken": "Bumped pod memory limits from 512MB to 1GB and added resource quotas per namespace.",
       "outcome": "The OOM-killing stopped and production stabilized.",

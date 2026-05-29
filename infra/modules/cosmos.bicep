@@ -23,6 +23,9 @@ param memoriesTurnsDefaultTtl int = 2592000
 @description('Whether to also create the Durable Function support containers (leases, counter).')
 param deployFunctionContainers bool = true
 
+@description('Vector embedding output dimensions. Wired through from main.bicep so both Cosmos and the function app stay in sync.')
+param embeddingDimensions int = 1536
+
 // --- Account --------------------------------------------------------------
 
 resource account 'Microsoft.DocumentDB/databaseAccounts@2024-11-15' = {
@@ -122,7 +125,7 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
             path: '/embedding'
             dataType: 'float32'
             distanceFunction: 'cosine'
-            dimensions: 1536
+            dimensions: embeddingDimensions
           }
         ]
       }
@@ -189,7 +192,7 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
             path: '/embedding'
             dataType: 'float32'
             distanceFunction: 'cosine'
-            dimensions: 1536
+            dimensions: embeddingDimensions
           }
         ]
       }

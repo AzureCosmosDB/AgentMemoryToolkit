@@ -34,9 +34,10 @@ Produce a single, authoritative JSON summary that reflects the full state of the
 - Do not simply append new content — synthesize old and new into a single coherent overview.
 
 **key_points**
-- Retain all prior key points that remain relevant and have not been superseded.
+- Retain unique prior key points that remain relevant and have not been superseded; **merge near-duplicates into a single entry** rather than keeping both.
 - Add new key points introduced in the new messages.
 - Remove or rewrite any point that the new messages have contradicted, corrected, or made obsolete.
+- **Self-cap at ~20-30 entries.** When the list grows beyond that, consolidate related points and drop the least informative — the summary should grow in fidelity, not in length.
 
 **decisions**
 - Retain all prior decisions unless explicitly reversed or superseded by the new messages.

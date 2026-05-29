@@ -58,27 +58,32 @@ async def process_changefeed_batch(
         counter_container: Optional counter container for testing. When omitted
             the cached async container client is used.
     """
-    # Owner exclusivity: when MEMORY_PROCESSOR_OWNER=inprocess is set the SDK
-    # client owns auto-trigger for this Cosmos container; the FA must stay
-    # silent or both backends would double-extract / double-dedup against
-    # the same writes. The default (unset) preserves today's behavior so
-    # existing deployments don't need to change anything.
+    # Owner exclusivity (default-deny on the FA side):
+    #
+    #   * SDK-only deployments: leave ``MEMORY_PROCESSOR_OWNER`` unset →
+    #     SDK fires, FA stays silent (this branch returns early).
+    #   * Function-App deployments: must set ``MEMORY_PROCESSOR_OWNER=durable``
+    #     explicitly to enable the change-feed trigger. Without that opt-in
+    #     both backends would double-extract / double-dedup against the same
+    #     writes — exactly the customer-day-one footgun this guard prevents.
     from agent_memory_toolkit.thresholds import (
-        PROCESSOR_OWNER_INPROCESS,
+        PROCESSOR_OWNER_DURABLE,
         get_processor_owner,
     )
 
-    if get_processor_owner() == PROCESSOR_OWNER_INPROCESS:
+    owner = get_processor_owner()
+    if owner != PROCESSOR_OWNER_DURABLE:
         global _warned_owner_skip
         if not _warned_owner_skip:
             _warned_owner_skip = True
             logger.warning(
-                "MEMORY_PROCESSOR_OWNER=inprocess; change-feed trigger skipping batch "
-                "(SDK owns auto-trigger for this container). Further skipped batches "
-                "will be logged at DEBUG level."
+                "Change-feed trigger skipping batch — MEMORY_PROCESSOR_OWNER is %r, "
+                "set it to 'durable' on the Function App to enable Durable orchestration. "
+                "Further skipped batches will be logged at DEBUG level.",
+                owner,
             )
         else:
-            logger.debug("Change-feed batch skipped: MEMORY_PROCESSOR_OWNER=inprocess")
+            logger.debug("Change-feed batch skipped: MEMORY_PROCESSOR_OWNER=%r (need 'durable')", owner)
         return
 
     n_thread = config.get_thread_summary_every_n()

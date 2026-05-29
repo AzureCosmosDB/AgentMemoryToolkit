@@ -428,7 +428,7 @@ class FactRecord(MemoryRecordBase):
         return self
 
 
-_EPISODIC_ALLOWED_VALENCES = {"positive", "negative", "neutral"}
+_EPISODIC_ALLOWED_VALENCES = {"positive", "negative", "neutral", "mixed"}
 
 
 class EpisodicRecord(MemoryRecordBase):
@@ -497,8 +497,10 @@ class ProceduralRecord(MemoryRecordBase):
 
     @model_validator(mode="after")
     def _require_sources(self) -> "ProceduralRecord":
-        if not self.source_fact_ids:
-            raise ValueError("ProceduralRecord requires a non-empty source_fact_ids list")
+        if not self.source_fact_ids and not self.source_episodic_ids:
+            raise ValueError(
+                "ProceduralRecord requires at least one of source_fact_ids or source_episodic_ids to be non-empty"
+            )
         return self
 
 

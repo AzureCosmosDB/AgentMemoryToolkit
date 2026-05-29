@@ -11,8 +11,21 @@ import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from triggers.change_feed import process_changefeed_batch
+
+
+@pytest.fixture(autouse=True)
+def _default_owner_durable(monkeypatch):
+    """The change-feed trigger now requires ``MEMORY_PROCESSOR_OWNER=durable``
+    to fire (default-deny). The legacy tests in this file all assume the
+    trigger runs, so we set the env var by default; tests that need to
+    exercise the skip path override it explicitly with their own
+    ``@patch.dict`` or ``monkeypatch``.
+    """
+    monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "durable")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -478,8 +491,14 @@ def test_runs_normally_when_owner_durable():
     },
     clear=False,
 )
-def test_runs_normally_when_owner_unset(monkeypatch):
-    """When MEMORY_PROCESSOR_OWNER is unset, legacy behavior — FA still runs."""
+def test_skips_when_owner_unset(monkeypatch):
+    """Default-deny: the FA must NOT fire when MEMORY_PROCESSOR_OWNER is unset.
+
+    This is the protection against the day-one footgun where a customer
+    deploys the Function App next to an existing SDK install without
+    configuring the env var — without this guard both backends would
+    race on the same writes.
+    """
     monkeypatch.delenv("MEMORY_PROCESSOR_OWNER", raising=False)
 
     starter = _make_starter()
@@ -488,9 +507,11 @@ def test_runs_normally_when_owner_unset(monkeypatch):
 
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
 
-    assert container._state["thread:u1:t1"]["count"] == 2
-    summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
-    assert len(summary_starts) == 1
+    # Trigger short-circuited before touching the counter or starting orchestrators.
+    container.read_item.assert_not_called()
+    container.upsert_item.assert_not_called()
+    container.create_item.assert_not_called()
+    starter.start_new.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

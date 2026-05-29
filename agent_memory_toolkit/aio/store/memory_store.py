@@ -546,6 +546,9 @@ class AsyncMemoryStore:
         return sorted(tags)
 
     async def _mutate_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str], *, add: bool) -> None:
+        import asyncio
+        import random
+
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import (
             CosmosAccessConditionFailedError,
@@ -553,6 +556,7 @@ class AsyncMemoryStore:
         )
 
         normalized = {t.strip().lower() for t in tags if t and t.strip()}
+        max_attempts = 5
         attempts = 0
         while True:
             try:
@@ -579,8 +583,12 @@ class AsyncMemoryStore:
                 return
             except CosmosAccessConditionFailedError as exc:
                 attempts += 1
-                if attempts > 1:
-                    raise MemoryConflictError(f"Tag update conflicted for memory_id={memory_id!r}") from exc
+                if attempts >= max_attempts:
+                    raise MemoryConflictError(
+                        f"Tag update conflicted after {max_attempts} attempts for memory_id={memory_id!r}"
+                    ) from exc
+                base = 0.02 * (2 ** (attempts - 1))
+                await asyncio.sleep(base + random.uniform(0, base))
 
     async def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
         """Add tags to an existing memory document."""

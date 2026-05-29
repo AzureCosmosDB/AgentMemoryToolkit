@@ -553,6 +553,9 @@ class MemoryStore:
         return sorted(tags)
 
     def _mutate_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str], *, add: bool) -> None:
+        import random
+        import time
+
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import (
             CosmosAccessConditionFailedError,
@@ -560,6 +563,7 @@ class MemoryStore:
         )
 
         normalized = {t.strip().lower() for t in tags if t and t.strip()}
+        max_attempts = 5
         attempts = 0
         while True:
             try:
@@ -586,8 +590,13 @@ class MemoryStore:
                 return
             except CosmosAccessConditionFailedError as exc:
                 attempts += 1
-                if attempts > 1:
-                    raise MemoryConflictError(f"Tag update conflicted for memory_id={memory_id!r}") from exc
+                if attempts >= max_attempts:
+                    raise MemoryConflictError(
+                        f"Tag update conflicted after {max_attempts} attempts for memory_id={memory_id!r}"
+                    ) from exc
+                # Exponential backoff with jitter: 0.02-0.06s, 0.04-0.12s, 0.08-0.24s, ...
+                base = 0.02 * (2 ** (attempts - 1))
+                time.sleep(base + random.uniform(0, base))
 
     def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
         """Add tags to an existing memory document."""

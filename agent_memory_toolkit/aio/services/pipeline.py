@@ -40,7 +40,9 @@ from agent_memory_toolkit.services._pipeline_helpers import (
     PromptyLoader,
     build_topic_tags,
     build_transcript,
+    cap_structured_summary,
     chat_text,
+    coerce_valence,
     parse_llm_json,
 )
 from agent_memory_toolkit.services._pipeline_helpers import (
@@ -49,8 +51,13 @@ from agent_memory_toolkit.services._pipeline_helpers import (
 from agent_memory_toolkit.services._pipeline_helpers import (
     max_or_none as _max_or_none,
 )
+from agent_memory_toolkit.store._search_helpers import top_literal
 
 logger = get_logger("agent_memory_toolkit.pipeline.aio")
+
+
+_coerce_valence = coerce_valence
+_cap_structured_summary = cap_structured_summary
 
 
 class _AsyncStoreContainerAdapter:
@@ -180,8 +187,9 @@ class AsyncPipelineService:
         non-deterministic.
         """
         type_placeholders = ", ".join(f"@mtype{i}" for i in range(len(memory_types)))
+        capped_limit = top_literal(limit, name="_load_existing_memories.limit")
         query = (
-            f"SELECT TOP {limit} * FROM c "
+            f"SELECT TOP {capped_limit} * FROM c "
             f"WHERE c.user_id = @user_id "
             f"AND c.type IN ({type_placeholders}) "
             f"AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by)) "
@@ -480,7 +488,7 @@ class AsyncPipelineService:
                     "action_taken": action_taken,
                     "outcome": outcome,
                     "reasoning": ep.get("reasoning"),
-                    "outcome_valence": ep.get("outcome_valence") or "neutral",
+                    "outcome_valence": _coerce_valence(ep.get("outcome_valence")),
                     "lesson": ep.get("lesson")
                     or (
                         f"{situation} → {action_taken} → {outcome}" if situation and action_taken and outcome else text
@@ -804,9 +812,7 @@ class AsyncPipelineService:
             **self._prompt_lineage("synthesize_procedural.prompty"),
             "metadata": {},
         }
-        if not new_doc["source_fact_ids"]:
-            new_doc["source_fact_ids"] = list(new_doc.get("source_episodic_ids") or [])
-        if not new_doc["source_fact_ids"]:
+        if not new_doc["source_fact_ids"] and not new_doc["source_episodic_ids"]:
             logger.info(
                 "synthesize_procedural skipping write user_id=%s — no source facts or episodics",
                 user_id,
@@ -898,6 +904,7 @@ class AsyncPipelineService:
             summary_prompt_filename = "summarize.prompty"
 
         parsed = self._parse_llm_json(response_text)
+        parsed = _cap_structured_summary(parsed)
         overview = parsed.get("overview", response_text)
         topics = parsed.get("topics", [])
         total_source_count = (
@@ -1041,6 +1048,7 @@ class AsyncPipelineService:
             prompt_filename = "user_summary.prompty"
 
         parsed = self._parse_llm_json(response_text)
+        parsed = _cap_structured_summary(parsed)
         key_facts = parsed.get("key_facts", [])
         overview = "; ".join(key_facts) if key_facts else response_text
         if existing_summary:

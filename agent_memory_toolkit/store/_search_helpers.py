@@ -67,8 +67,13 @@ def query_scope(user_id: Optional[str], thread_id: Optional[str]) -> tuple[Any, 
 def coerce_embedding(result: Any) -> list[float]:
     if result is None:
         raise ConfigurationError("Embedder returned no vector", parameter="embeddings_client")
-    if isinstance(result, list) and (not result or isinstance(result[0], (int, float))):
+    if isinstance(result, list) and result and isinstance(result[0], (int, float)):
         return result
+    if isinstance(result, list) and not result:
+        raise ConfigurationError(
+            "Embedder returned an empty vector — likely an upstream embedding failure",
+            parameter="embeddings_client",
+        )
     raise ConfigurationError("Embedder must return list[float]", parameter="embeddings_client")
 
 

@@ -304,6 +304,20 @@ class TestEpisodicRecord:
         with pytest.raises(pydantic.ValidationError, match="outcome_valence"):
             EpisodicRecord(**_episodic_kwargs(metadata=meta))
 
+    @pytest.mark.parametrize("valence", ["positive", "negative", "neutral", "mixed"])
+    def test_outcome_valence_accepts_all_schema_permitted_values(self, valence):
+        """Round-trip regression: every value the strict schema permits must
+        also be accepted by ``EpisodicRecord``. Previously ``"mixed"`` slipped
+        through schema validation but crashed the whole extract batch."""
+        meta = {
+            "lesson": "x",
+            "scope_type": "t",
+            "scope_value": "v",
+            "outcome_valence": valence,
+        }
+        rec = EpisodicRecord(**_episodic_kwargs(metadata=meta))
+        assert rec.metadata["outcome_valence"] == valence
+
     def test_id_must_start_with_ep_prefix(self):
         with pytest.raises(pydantic.ValidationError, match="id must start with 'ep_'"):
             EpisodicRecord(**_episodic_kwargs(id="bad-id"))
@@ -365,6 +379,17 @@ class TestProceduralRecord:
     def test_requires_non_empty_source_fact_ids(self):
         with pytest.raises(pydantic.ValidationError, match="source"):
             ProceduralRecord(**_procedural_kwargs(source_fact_ids=[]))
+
+    def test_accepts_episodic_only_sources(self):
+        """Procedural records driven purely off episodic lessons must be valid;
+        the validator should accept either source set being non-empty."""
+        rec = ProceduralRecord(**_procedural_kwargs(source_fact_ids=[], source_episodic_ids=["ep_abc"]))
+        assert rec.source_fact_ids == []
+        assert rec.source_episodic_ids == ["ep_abc"]
+
+    def test_rejects_when_both_source_sets_empty(self):
+        with pytest.raises(pydantic.ValidationError, match="source"):
+            ProceduralRecord(**_procedural_kwargs(source_fact_ids=[], source_episodic_ids=[]))
 
     def test_id_must_start_with_proc_prefix(self):
         with pytest.raises(pydantic.ValidationError, match="id must start with 'proc_'"):

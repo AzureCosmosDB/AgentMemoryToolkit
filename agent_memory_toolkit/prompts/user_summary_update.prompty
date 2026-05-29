@@ -29,7 +29,8 @@ The output should be indistinguishable from a freshly built profile — not a pa
 
 ## General Update Principles
 - **New data wins** — If new conversations contradict the existing profile, always trust the newer data. The existing profile reflects a past state; the new threads reflect the current one.
-- **Preserve by default** — Retain every existing entry that the new conversations do not contradict, supersede, or invalidate. Do not drop information simply because the new threads don't repeat it.
+- **Preserve & consolidate** — Retain unique entries that the new conversations do not contradict, supersede, or invalidate. **Merge near-duplicates into a single entry** rather than keeping both. When a section already contains many entries, **prefer consolidation to accumulation** — combine related items, drop minor or stale entries not surfaced in recent threads, and keep the section focused on the most informative facts. The profile should grow in fidelity, not in length.
+- **Target length per section** — Aim for roughly 20-40 entries per array section. If a section already exceeds that, treat it as overdue for consolidation: merge similar items and drop the least informative. Hard cap is enforced downstream, but you should self-cap by quality.
 - **Correct silently** — Fix outdated or incorrect entries without meta-commentary. Do not write "previously X, now Y" unless the transition itself is useful context.
 - **No empty sections** — Use empty arrays `[]` for sections with no relevant data. Do not omit fields from the JSON.
 

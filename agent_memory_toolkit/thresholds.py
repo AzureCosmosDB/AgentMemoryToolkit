@@ -146,18 +146,25 @@ def get_procedural_synthesis_auto() -> bool:
 def get_processor_owner() -> Optional[str]:
     """Return the configured ``MEMORY_PROCESSOR_OWNER`` or ``None``.
 
-    Both the SDK and the function app should consult this to decide whether
-    to run their auto-trigger. When unset, neither side enforces exclusivity
-    (today's behavior). When set to a known value but mismatched, the side
-    that does not own the container should skip and log.
+    Each side reads this to decide whether to run its auto-trigger. The
+    contract is **asymmetric** by design — there is no cross-process lock,
+    so the two sides default differently to avoid double-firing:
 
-    .. note::
-       This is **operator-configured exclusivity, not enforced**. Each
-       backend reads its own env var; there is no cross-process lock. If
-       the SDK has ``inprocess`` but the FA is unset, both will run.
-       As a backstop, counter writes stamp ``last_owner`` and a one-shot
-       WARN is emitted when the observed owner doesn't match this process's
-       owner — treat that as a configuration audit signal, not a guarantee.
+      * **SDK** (in-process) fires when the value is ``None`` (unset) or
+        ``"inprocess"``; it skips on ``"durable"``. Pure SDK deployments
+        therefore work without any environment configuration.
+      * **Function App** (durable) fires **only** when the value is
+        explicitly ``"durable"``; anything else (including ``None``) causes
+        the change-feed trigger to skip. This default-deny posture is what
+        prevents both backends from racing on the same writes when an
+        operator deploys the FA next to an existing SDK install without
+        setting the env var.
+
+    . note::
+       This is **operator-configured exclusivity, not enforced**. Counter
+       writes still stamp ``last_owner`` and emit a one-shot WARN when the
+       observed owner disagrees with the writer — treat that as a
+       configuration audit signal, not a guarantee.
     """
     raw = os.environ.get("MEMORY_PROCESSOR_OWNER")
     if raw is None or raw == "":

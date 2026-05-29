@@ -306,3 +306,58 @@ class PromptyLoader:
         messages = messages_to_dicts(prompty.prepare(p, inputs=inputs))
         params = extract_prompty_params(p)
         return messages, params
+
+
+# Allowed values for the EpisodicRecord ``outcome_valence`` field — mirrors
+# ``agent_memory_toolkit.models._EPISODIC_ALLOWED_VALENCES`` but kept inline
+# to avoid an import cycle (helpers must not import models).
+_VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})
+
+
+def coerce_valence(value: Any) -> str:
+    """Map an LLM-emitted ``outcome_valence`` to a record-safe value.
+
+    The strict response schema permits ``positive | negative | mixed | neutral
+    | null``; null and any unknown value fall through to ``"neutral"`` so a
+    single drifted episode never aborts the whole extract batch.
+    """
+    if isinstance(value, str) and value in _VALID_VALENCES:
+        return value
+    return "neutral"
+
+
+# Per-section caps on the persisted ``structured_summary``. Strict-mode JSON
+# output does not enforce ``maxItems``, so the LLM grows lists unboundedly
+# across incremental updates. Capping at persist time keeps both Cosmos
+# document size and the next call's ``prior_summary`` prompt bounded.
+SUMMARY_LIST_CAPS: dict[str, int] = {
+    "key_facts": 50,
+    "personal_preferences": 30,
+    "account_environment": 30,
+    "goals_current_work": 30,
+    "behavioral_patterns": 30,
+    "compliance_requirements": 30,
+    "open_items": 30,
+    "topics": 15,
+    "goals": 30,
+    "relationships": 30,
+    "entities": 30,
+}
+SUMMARY_DEFAULT_CAP = 30
+
+
+def cap_structured_summary(parsed: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Truncate every list field of a parsed summary to its configured cap.
+
+    Returns a shallow copy with list fields replaced by their first-N slice.
+    Non-list values are passed through unchanged. ``None`` returns ``None``.
+    """
+    if not isinstance(parsed, dict):
+        return parsed
+    out = dict(parsed)
+    for key, value in list(out.items()):
+        if isinstance(value, list):
+            cap = SUMMARY_LIST_CAPS.get(key, SUMMARY_DEFAULT_CAP)
+            if len(value) > cap:
+                out[key] = value[:cap]
+    return out

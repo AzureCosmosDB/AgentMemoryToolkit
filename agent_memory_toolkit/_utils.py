@@ -19,7 +19,7 @@ from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE
 from .thresholds import default_ttl_for
 
 VALID_ROLES = {"agent", "user", "tool", "system"}
-VALID_TYPES = {"turn", "summary", "fact", "user_summary", "procedural", "episodic"}
+VALID_TYPES = {"turn", "thread_summary", "fact", "user_summary", "procedural", "episodic"}
 
 
 def new_id(memory_type: str) -> str:
@@ -28,7 +28,7 @@ def new_id(memory_type: str) -> str:
         "fact": "fact_",
         "episodic": "ep_",
         "procedural": "proc_",
-        "summary": "summary_",
+        "thread_summary": "summary_",
         "user_summary": "user_summary_",
     }
     prefix = prefix_map.get(memory_type, "")
@@ -50,9 +50,9 @@ def new_procedural_id() -> str:
     return new_id("procedural")
 
 
-def new_summary_id() -> str:
-    """Return a fresh ``summary_*`` id."""
-    return new_id("summary")
+def new_thread_summary_id() -> str:
+    """Return a fresh ``summary_*`` id for a thread-summary doc."""
+    return new_id("thread_summary")
 
 
 def new_user_summary_id() -> str:

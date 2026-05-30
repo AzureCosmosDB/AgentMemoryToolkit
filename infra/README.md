@@ -6,7 +6,15 @@ This folder provisions everything the Agent Memory Toolkit needs in a single Azu
 
 `azd up` creates **all** of the following:
 
-- **Cosmos DB for NoSQL** — serverless account with the `ai_memory` database and the `memories`, `memories_turns`, `leases`, and `counter` containers
+- **Cosmos DB for NoSQL** — serverless account with the `ai_memory` database and this container topology:
+
+  | Container | Purpose |
+  | --- | --- |
+  | `memories` | Facts, episodics, and procedural memories; vector + FTS index |
+  | `memories_turns` | Turns; minimal index, change-feed binding target |
+  | `memories_summaries` | Thread + user summaries; minimal index, point-read access pattern |
+  | `leases` | Change-feed checkpoints |
+  | `counter` | Atomic counters |
 - **AI Foundry** (`Microsoft.CognitiveServices/accounts` with `kind: AIServices`) — with `gpt-4o-mini` and `text-embedding-3-large` deployments
 - **User-assigned managed identity (UAMI)** — used by the Function app
 - **RBAC role assignments** — Cosmos DB Built-in Data Reader + Contributor, Cognitive Services OpenAI User, Storage Blob/Queue/Table data roles, granted to both the UAMI and the deploying user (full table in [Identity & RBAC](#identity--rbac))
@@ -43,7 +51,7 @@ azd up
 ```
 COSMOS_DB_ENDPOINT=...
 COSMOS_DB_DATABASE=ai_memory
-COSMOS_DB_CONTAINER=memories
+COSMOS_DB_MEMORIES_CONTAINER=memories
 AI_FOUNDRY_ENDPOINT=...
 AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-4o-mini

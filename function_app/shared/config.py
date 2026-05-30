@@ -47,10 +47,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CHANGE_FEED_DATABASE = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
-CHANGE_FEED_CONTAINER = os.environ.get("COSMOS_DB_CONTAINER", "memories")
-CHANGE_FEED_LEASE_CONTAINER = os.environ.get("COSMOS_DB_LEASE_CONTAINER", "leases")
+MEMORIES_CONTAINER = os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories")
+TURNS_CONTAINER = os.environ.get("COSMOS_DB_TURNS_CONTAINER", "memories_turns")
+SUMMARIES_CONTAINER = os.environ.get("COSMOS_DB_SUMMARIES_CONTAINER", "memories_summaries")
+LEASE_CONTAINER = os.environ.get("COSMOS_DB_LEASE_CONTAINER", "leases")
 COUNTERS_CONTAINER = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")
-COSMOS_TURNS_CONTAINER = os.environ.get("COSMOS_TURNS_CONTAINER", "")
 
 USER_COUNTER_THREAD_ID = "__counters__"
 

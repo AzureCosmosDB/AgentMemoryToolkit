@@ -20,6 +20,7 @@ from typing import Any, Literal, Optional
 
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
+from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
 from agent_memory_toolkit.exceptions import (
@@ -69,32 +70,73 @@ _PROCEDURAL_MAX_CREATE_ATTEMPTS = 5
 
 
 class _AsyncStoreContainerAdapter:
-    """Async equivalent of ``services.pipeline._StoreContainerAdapter``.
+    """Expose one split ``AsyncMemoryStore`` container via Cosmos method shapes."""
 
-    Exposes the ``query_items``/``read_item``/``upsert_item`` shape over
-    :class:`AsyncMemoryStore` so the orchestration body can match the sync
-    path.
-    """
-
-    def __init__(self, store: AsyncMemoryStore) -> None:
+    def __init__(self, store: AsyncMemoryStore, container_key: ContainerKey) -> None:
         self._store = store
+        self._container_key = container_key
+
+    def _target_container(self) -> Any | None:
+        containers = getattr(self._store, "_containers", None)
+        if isinstance(containers, dict):
+            return containers.get(self._container_key)
+        if self._container_key is ContainerKey.MEMORIES:
+            return getattr(self._store, "container", None)
+        return None
+
+    async def _collect_query(self, result: Any) -> list[dict[str, Any]]:
+        if inspect.isawaitable(result):
+            result = await result
+        if hasattr(result, "__aiter__"):
+            return [item async for item in result]
+        return list(result)
 
     async def query_items(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return await self._store.query(
-            kwargs["query"],
-            parameters=kwargs.get("parameters"),
-            partition_key=kwargs.get("partition_key"),
-            cross_partition=bool(kwargs.get("enable_cross_partition_query")),
-        )
+        container = self._target_container()
+        if container is not None and hasattr(container, "query_items"):
+            # Drop `enable_cross_partition_query` — async SDK leaks it to aiohttp
+            # (azure-cosmos 4.16.0 bug); SDK auto-detects cross-partition when
+            # partition_key is absent.
+            kwargs.pop("enable_cross_partition_query", None)
+            return await self._collect_query(container.query_items(**kwargs))
+        try:
+            return await self._store.query(
+                kwargs["query"],
+                parameters=kwargs.get("parameters"),
+                container_key=self._container_key,
+                partition_key=kwargs.get("partition_key"),
+            )
+        except TypeError:
+            return await self._store.query(
+                kwargs["query"],
+                parameters=kwargs.get("parameters"),
+                partition_key=kwargs.get("partition_key"),
+            )
 
     async def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
-        return await self._store.read_item(item, partition_key)
+        container = self._target_container()
+        if container is not None and hasattr(container, "read_item"):
+            response = container.read_item(item=item, partition_key=partition_key)
+            if inspect.isawaitable(response):
+                response = await response
+            return response
+        try:
+            return await self._store.read_item(item, partition_key, container_key=self._container_key)
+        except TypeError:
+            return await self._store.read_item(item, partition_key)
 
     async def upsert_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
-        return await self._store.add_cosmos(body)
+        container = self._target_container()
+        if container is not None and hasattr(container, "upsert_item"):
+            response = container.upsert_item(body=body)
+            if inspect.isawaitable(response):
+                response = await response
+            return response if isinstance(response, dict) else body
+        response = await self._store.add_cosmos(body)
+        return response if isinstance(response, dict) else body
 
     async def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
-        container = getattr(self._store, "container", None)
+        container = self._target_container()
         if container is not None and hasattr(container, "create_item"):
             response = container.create_item(body=body)
             if inspect.isawaitable(response):
@@ -106,13 +148,21 @@ class _AsyncStoreContainerAdapter:
             if inspect.isawaitable(response):
                 response = await response
             return response if isinstance(response, dict) else body
-        return await self._store.add_cosmos(body)
+        response = await self._store.add_cosmos(body)
+        return response if isinstance(response, dict) else body
+
+    async def replace_item(self, **kwargs: Any) -> Any:
+        container = self._target_container()
+        if container is not None and hasattr(container, "replace_item"):
+            response = container.replace_item(**kwargs)
+            if inspect.isawaitable(response):
+                response = await response
+            return response
+        return await self.upsert_item(body=kwargs["body"])
 
 
 class AsyncPipelineService:
     """Async LLM orchestration service backed by an async typed memory store."""
-
-    _turns_container: Any = None
 
     def __init__(
         self,
@@ -120,14 +170,50 @@ class AsyncPipelineService:
         chat_client: Any,
         embeddings_client: Any,
         prompts_dir: str | None = None,
-        cosmos_turns_container: Any | None = None,
+        *,
+        containers: dict[ContainerKey, Any],
     ) -> None:
         self._store = store
-        self._container = _AsyncStoreContainerAdapter(store)
-        self._turns_container = cosmos_turns_container
+        self._containers = containers
+        self._memories_container = containers[ContainerKey.MEMORIES]
+        self._turns_container = containers[ContainerKey.TURNS]
+        self._summaries_container = containers[ContainerKey.SUMMARIES]
+        self._container = self._memories_container
         self._chat_client = chat_client
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
+
+    async def _query_items(self, container: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        result = container.query_items(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        if hasattr(result, "__aiter__"):
+            return [item async for item in result]
+        return list(result)
+
+    async def _read_item(self, container: Any, *, item: str, partition_key: Any) -> dict[str, Any]:
+        result = container.read_item(item=item, partition_key=partition_key)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def _upsert_item(self, container: Any, *, body: dict[str, Any]) -> dict[str, Any]:
+        result = container.upsert_item(body=body)
+        if inspect.isawaitable(result):
+            result = await result
+        return result if isinstance(result, dict) else body
+
+    async def _create_item(self, container: Any, *, body: dict[str, Any]) -> dict[str, Any]:
+        result = container.create_item(body=body)
+        if inspect.isawaitable(result):
+            result = await result
+        return result if isinstance(result, dict) else body
+
+    async def _replace_item(self, container: Any, **kwargs: Any) -> Any:
+        result = container.replace_item(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     async def _run_prompty(
         self,
@@ -207,25 +293,23 @@ class AsyncPipelineService:
         for i, mt in enumerate(memory_types):
             parameters.append({"name": f"@mtype{i}", "value": mt})
 
-        return await self._container.query_items(
+        return await self._query_items(
+            self._memories_container,
             query=query,
             parameters=parameters,
-            enable_cross_partition_query=True,
         )
 
     async def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Upsert a single memory document via the async memory store."""
-        response = await self._store.add_cosmos(doc)
-        if isinstance(response, dict):
-            return response
-        return doc
+        """Upsert a fact, episodic, or procedural document to the memories container."""
+        return await self._upsert_item(self._memories_container, body=doc)
+
+    async def _upsert_summary(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Upsert a thread/user summary document to the summaries container."""
+        return await self._upsert_item(self._summaries_container, body=doc)
 
     async def _create_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Create a memory document and let Cosmos raise 409 for duplicates."""
-        if getattr(self, "_store", None) is None:
-            return await self._upsert_memory(doc)
-        response = await self._container.create_item(body=doc)
-        return response if isinstance(response, dict) else doc
+        return await self._create_item(self._memories_container, body=doc)
 
     @staticmethod
     def _empty_extract_counts() -> dict[str, int]:
@@ -255,7 +339,11 @@ class AsyncPipelineService:
         reason: Literal["update", "contradict"],
     ) -> bool:
         try:
-            old_mem = await self._container.read_item(item=supersedes_id, partition_key=[user_id, thread_id])
+            old_mem = await self._read_item(
+                self._memories_container,
+                item=supersedes_id,
+                partition_key=[user_id, thread_id],
+            )
             if old_mem.get("superseded_by"):
                 logger.debug(
                     "extract_memories: skipping UPDATE — target %s already superseded by %s",
@@ -282,13 +370,13 @@ class AsyncPipelineService:
                 "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
                 f"AND {_ACTIVE_DOC_FILTER}"
             )
-            results = await self._container.query_items(
+            results = await self._query_items(
+                self._memories_container,
                 query=q,
                 parameters=[
                     {"name": "@id", "value": supersedes_id},
                     {"name": "@uid", "value": user_id},
                 ],
-                enable_cross_partition_query=True,
             )
             if results and not results[0].get("superseded_by"):
                 return await self._mark_superseded(results[0], superseder_id, reason=reason)
@@ -335,23 +423,17 @@ class AsyncPipelineService:
         logger.info("extract_memories_dry started user_id=%s thread_id=%s", user_id, thread_id)
 
         if turns is None:
-            query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id"
+            query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
             parameters: list[dict[str, Any]] = [
                 {"name": "@user_id", "value": user_id},
                 {"name": "@thread_id", "value": thread_id},
             ]
-            items = await self._container.query_items(
+            items = await self._query_items(
+                self._turns_container,
                 query=query,
                 parameters=parameters,
                 partition_key=[user_id, thread_id],
             )
-            if self._turns_container is not None:
-                async for item in self._turns_container.query_items(
-                    query=query,
-                    parameters=parameters,
-                    partition_key=[user_id, thread_id],
-                ):
-                    items.append(item)
         else:
             items = list(turns)
 
@@ -667,7 +749,8 @@ class AsyncPipelineService:
         logger.info("synthesize_procedural started user_id=%s force=%s", user_id, force)
 
         async def _read_latest_procedural() -> Optional[dict[str, Any]]:
-            docs = await self._container.query_items(
+            docs = await self._query_items(
+                self._memories_container,
                 query=(
                     "SELECT * FROM c WHERE c.user_id = @uid "
                     "AND c.thread_id = @thread_id "
@@ -679,7 +762,6 @@ class AsyncPipelineService:
                     {"name": "@thread_id", "value": "__procedural__"},
                     {"name": "@type", "value": "procedural"},
                 ],
-                enable_cross_partition_query=True,
             )
             docs.sort(
                 key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)),
@@ -695,7 +777,8 @@ class AsyncPipelineService:
 
         prior_doc = await _read_latest_procedural()
 
-        behavioral_fact_docs = await self._container.query_items(
+        behavioral_fact_docs = await self._query_items(
+            self._memories_container,
             query=(
                 "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                 "AND c.type = @type "
@@ -710,7 +793,6 @@ class AsyncPipelineService:
                 {"name": "@type", "value": "fact"},
                 {"name": "@min_salience", "value": 0.8},
             ],
-            enable_cross_partition_query=True,
         )
         behavioral_fact_docs = [
             doc
@@ -719,7 +801,8 @@ class AsyncPipelineService:
         ]
         behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
 
-        episodic_docs = await self._container.query_items(
+        episodic_docs = await self._query_items(
+            self._memories_container,
             query=(
                 "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                 "AND c.type = @type "
@@ -732,7 +815,6 @@ class AsyncPipelineService:
                 {"name": "@uid", "value": user_id},
                 {"name": "@type", "value": "episodic"},
             ],
-            enable_cross_partition_query=True,
         )
         episodic_with_lessons = [
             doc
@@ -766,7 +848,8 @@ class AsyncPipelineService:
             )
             return {"status": "unchanged", "procedural": prior_doc}
 
-        name_docs = await self._container.query_items(
+        name_docs = await self._query_items(
+            self._memories_container,
             query=(
                 "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
                 "AND c.type = @type "
@@ -783,7 +866,6 @@ class AsyncPipelineService:
                 {"name": "@category", "value": "biographical"},
                 {"name": "@predicate", "value": "name"},
             ],
-            enable_cross_partition_query=True,
         )
         user_name = "the user"
         if name_docs:
@@ -849,7 +931,7 @@ class AsyncPipelineService:
             }
             validated = construct_internal(ProceduralRecord, new_doc).to_doc()
             try:
-                await self._container.create_item(body=validated)
+                await self._create_item(self._memories_container, body=validated)
                 written_doc = validated
                 break
             except CosmosResourceExistsError:
@@ -908,11 +990,15 @@ class AsyncPipelineService:
         summary_id = f"summary_{user_id}_{thread_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = await self._container.read_item(item=summary_id, partition_key=[user_id, thread_id])
+            existing_summary = await self._read_item(
+                self._summaries_container,
+                item=summary_id,
+                partition_key=[user_id, thread_id],
+            )
         except CosmosResourceNotFoundError:
             pass
 
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type != 'summary'"
+        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
             {"name": "@thread_id", "value": thread_id},
@@ -922,18 +1008,12 @@ class AsyncPipelineService:
             query += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        items = await self._container.query_items(
+        items = await self._query_items(
+            self._turns_container,
             query=query,
             parameters=parameters,
             partition_key=[user_id, thread_id],
         )
-        if self._turns_container is not None:
-            async for item in self._turns_container.query_items(
-                query=query,
-                parameters=parameters,
-                partition_key=[user_id, thread_id],
-            ):
-                items.append(item)
 
         if existing_summary and not items:
             logger.info("generate_thread_summary_dry no new memories, returning existing")
@@ -975,7 +1055,7 @@ class AsyncPipelineService:
             "user_id": user_id,
             "thread_id": thread_id,
             "role": "system",
-            "type": "summary",
+            "type": "thread_summary",
             "content": overview,
             "salience": 1.0,
             "tags": ["sys:summary"] + topic_tags,
@@ -1014,7 +1094,7 @@ class AsyncPipelineService:
         if doc.get("content") and not doc.get("embedding"):
             doc["embedding"] = await self._embed_one(doc["content"])
         validated = construct_internal(ThreadSummaryRecord, doc).to_doc()
-        stored = await self._upsert_memory(validated)
+        stored = await self._upsert_summary(validated)
         logger.info("persist_thread_summary completed id=%s", validated.get("id"))
         return stored
 
@@ -1047,28 +1127,42 @@ class AsyncPipelineService:
         user_summary_id = f"user_summary_{user_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = await self._container.read_item(
+            existing_summary = await self._read_item(
+                self._summaries_container,
                 item=user_summary_id,
                 partition_key=[user_id, "__user_summary__"],
             )
         except CosmosResourceNotFoundError:
             pass
 
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.type != 'user_summary'"
+        query_predicate = "c.user_id = @user_id"
         parameters: list[dict[str, Any]] = [{"name": "@user_id", "value": user_id}]
         if existing_summary:
             since = existing_summary["updated_at"]
-            query += " AND c.created_at > @since"
+            query_predicate += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        items = await self._container.query_items(query=query, parameters=parameters, enable_cross_partition_query=True)
-        if self._turns_container is not None:
-            async for item in self._turns_container.query_items(
-                query=query,
+        memories_query = (
+            f"SELECT * FROM c WHERE {query_predicate} "
+            "AND c.type IN ('fact', 'episodic', 'procedural')"
+        )
+        summaries_query = (
+            f"SELECT * FROM c WHERE {query_predicate} "
+            "AND c.type = 'thread_summary'"
+        )
+
+        items = await self._query_items(
+            self._memories_container,
+            query=memories_query,
+            parameters=parameters,
+        )
+        items.extend(
+            await self._query_items(
+                self._summaries_container,
+                query=summaries_query,
                 parameters=parameters,
-                enable_cross_partition_query=True,
-            ):
-                items.append(item)
+            )
+        )
 
         if existing_summary and not items:
             logger.info("generate_user_summary_dry no new memories, returning existing")
@@ -1166,7 +1260,7 @@ class AsyncPipelineService:
         if doc.get("content") and not doc.get("embedding"):
             doc["embedding"] = await self._embed_one(doc["content"])
         validated = construct_internal(UserSummaryRecord, doc).to_doc()
-        stored = await self._upsert_memory(validated)
+        stored = await self._upsert_summary(validated)
         logger.info("persist_user_summary completed id=%s", validated.get("id"))
         return stored
 
@@ -1248,10 +1342,10 @@ class AsyncPipelineService:
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
         ]
-        facts = await self._container.query_items(
+        facts = await self._query_items(
+            self._memories_container,
             query=query,
             parameters=parameters,
-            enable_cross_partition_query=True,
         )
 
         if len(facts) <= 1:
@@ -1650,14 +1744,14 @@ class AsyncPipelineService:
             f"AND {_ACTIVE_DOC_FILTER} "
             "ORDER BY c.version DESC"
         )
-        items = await self._store.query(
-            query,
+        items = await self._query_items(
+            self._memories_container,
+            query=query,
             parameters=[
                 {"name": "@user_id", "value": user_id},
                 {"name": "@thread_id", "value": "__procedural__"},
                 {"name": "@type", "value": "procedural"},
             ],
-            cross_partition=True,
         )
         if not items:
             return ""

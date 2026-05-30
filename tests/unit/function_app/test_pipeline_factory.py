@@ -37,6 +37,7 @@ def mocks(monkeypatch):
     """
     container = MagicMock(name="ContainerProxy")
     turns_container = MagicMock(name="TurnsContainerProxy")
+    summaries_container = MagicMock(name="SummariesContainerProxy")
     credential = MagicMock(name="DefaultAzureCredential")
     chat_instance = MagicMock(name="ChatClient_instance")
     embed_instance = MagicMock(name="EmbeddingsClient_instance")
@@ -51,6 +52,7 @@ def mocks(monkeypatch):
 
     monkeypatch.setattr(pipeline_factory, "get_memories_container", lambda: container)
     monkeypatch.setattr(pipeline_factory, "get_turns_container", lambda: turns_container)
+    monkeypatch.setattr(pipeline_factory, "get_summaries_container", lambda: summaries_container)
 
     patches = [
         patch("azure.identity.DefaultAzureCredential", credential_ctor),
@@ -64,6 +66,7 @@ def mocks(monkeypatch):
     yield MagicMock(
         container=container,
         turns_container=turns_container,
+        summaries_container=summaries_container,
         credential=credential,
         credential_ctor=credential_ctor,
         chat_ctor=chat_ctor,
@@ -88,16 +91,22 @@ def test_builds_pipeline_from_complete_env(mocks):
     result = pipeline_factory.get_pipeline()
 
     assert result is mocks.pipeline_instance
+    from agent_memory_toolkit._container_routing import ContainerKey
+
+    expected_containers = {
+        ContainerKey.TURNS: mocks.turns_container,
+        ContainerKey.MEMORIES: mocks.container,
+        ContainerKey.SUMMARIES: mocks.summaries_container,
+    }
     mocks.store_ctor.assert_called_once_with(
-        mocks.container,
+        containers=expected_containers,
         embeddings_client=mocks.embed_instance,
-        turns_container=mocks.turns_container,
     )
     mocks.pipeline_ctor.assert_called_once_with(
         mocks.store_instance,
         mocks.chat_instance,
         mocks.embed_instance,
-        cosmos_turns_container=mocks.turns_container,
+        containers=expected_containers,
     )
 
 
@@ -163,6 +172,8 @@ def test_missing_ai_foundry_endpoint_raises(monkeypatch):
     with (
         patch("azure.identity.DefaultAzureCredential", MagicMock()),
         patch.object(pipeline_factory, "get_memories_container", return_value=MagicMock()),
+        patch.object(pipeline_factory, "get_turns_container", return_value=MagicMock()),
+        patch.object(pipeline_factory, "get_summaries_container", return_value=MagicMock()),
     ):
         with pytest.raises(RuntimeError, match="AI_FOUNDRY_ENDPOINT"):
             pipeline_factory.get_pipeline()

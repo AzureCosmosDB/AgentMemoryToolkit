@@ -66,7 +66,9 @@ def _procedural_doc(
 
 def _make_client(*, processor=None) -> AsyncCosmosMemoryClient:
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()
+    client._memories_container_client = MagicMock()
+    client._turns_container_client = client._memories_container_client
+    client._summaries_container_client = client._memories_container_client
     return client
 
 
@@ -78,6 +80,8 @@ async def test_async_synthesize_procedural_awaits_async_pipeline():
     pipeline = AsyncMock()
     expected = {"status": "synthesized", "procedural": {"id": "proc_u1_1", "version": 1}}
     pipeline.synthesize_procedural.return_value = expected
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
 
     result = await client.synthesize_procedural("u1", force=True)
@@ -89,7 +93,7 @@ async def test_async_synthesize_procedural_awaits_async_pipeline():
 @pytest.mark.asyncio
 async def test_async_get_procedural_prompt_returns_none_when_missing():
     client = _make_client()
-    client._container_client.query_items = MagicMock(return_value=AsyncIterator([]))
+    client._memories_container_client.query_items = MagicMock(return_value=AsyncIterator([]))
 
     assert await client.get_procedural_prompt("u1") is None
 
@@ -122,7 +126,7 @@ async def test_async_get_procedural_prompt_returns_active_content():
             return AsyncIterator([doc for doc in docs if not doc.get("superseded_by")])
         return AsyncIterator(docs)
 
-    client._container_client.query_items = MagicMock(side_effect=_query_items)
+    client._memories_container_client.query_items = MagicMock(side_effect=_query_items)
 
     assert await client.get_procedural_prompt("u1") == "Active prompt"
 
@@ -156,7 +160,7 @@ async def test_async_get_procedural_history_orders_active_first_then_newest_vers
         ts=3,
     )
     client = _make_client()
-    client._container_client.query_items = MagicMock(return_value=AsyncIterator([v1, v3, v2]))
+    client._memories_container_client.query_items = MagicMock(return_value=AsyncIterator([v1, v3, v2]))
 
     history = await client.get_procedural_history("u1", limit=10)
 

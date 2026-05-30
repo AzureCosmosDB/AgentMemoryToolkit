@@ -72,7 +72,7 @@ def test_require_cosmos_guard_and_context_manager():
     with pytest.raises(CosmosNotConnectedError):
         client._require_cosmos()
 
-    client._container_client = object()
+    client._memories_container_client = object()
     client._require_cosmos()
 
     with client as entered:

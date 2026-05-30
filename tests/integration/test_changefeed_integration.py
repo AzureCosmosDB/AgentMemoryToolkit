@@ -10,8 +10,10 @@ Enable by setting both::
     AGENT_MEMORY_RUN_CHANGEFEED=true
 
 A running Azure Functions host (deployed or local ``func start``) with the
-change-feed trigger configured is required, along with the ``memories``,
-``counter``, and ``leases`` containers.
+change-feed trigger configured is required, along with the ``turns``,
+``counter``, and ``leases`` containers. Post container-split, the change-feed
+trigger binds to the ``turns`` container — turn documents must be inserted
+there, not into ``memories``.
 """
 
 import os
@@ -35,7 +37,7 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def cosmos_clients():
-    """Cosmos DB container clients for memories and counters.
+    """Cosmos DB container clients for turns and counters.
 
     Uses ``COSMOS_DB_KEY`` when set (relief while control-plane RBAC is in
     private preview); otherwise falls back to ``DefaultAzureCredential``.
@@ -44,7 +46,7 @@ def cosmos_clients():
 
     endpoint = os.environ.get("COSMOS_DB__accountEndpoint") or os.environ.get("COSMOS_DB_ENDPOINT")
     database_name = os.environ.get("COSMOS_DB_DATABASE", "ai_memory")
-    memories_container_name = os.environ.get("COSMOS_DB_CONTAINER", "memories")
+    turns_container_name = os.environ.get("COSMOS_DB_TURNS_CONTAINER", "turns")
     counter_container_name = os.environ.get("COSMOS_DB_COUNTERS_CONTAINER", "counter")
     cosmos_key = os.environ.get("COSMOS_DB_KEY")
 
@@ -57,7 +59,7 @@ def cosmos_clients():
 
     db = client.get_database_client(database_name)
     return (
-        db.get_container_client(memories_container_name),
+        db.get_container_client(turns_container_name),
         db.get_container_client(counter_container_name),
     )
 
@@ -74,8 +76,8 @@ def unique_ids():
 class TestChangeFeedIntegration:
     """Integration tests for change feed trigger with live Cosmos DB."""
 
-    def _insert_turn(self, memories_container, user_id, thread_id):
-        """Insert a single turn document into the memories container."""
+    def _insert_turn(self, turns_container, user_id, thread_id):
+        """Insert a single turn document into the turns container."""
         doc = {
             "id": str(uuid.uuid4()),
             "user_id": user_id,
@@ -86,7 +88,7 @@ class TestChangeFeedIntegration:
             "metadata": {},
             "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
-        memories_container.upsert_item(body=doc)
+        turns_container.upsert_item(body=doc)
         return doc
 
     def _read_counter(self, counter_container, counter_id, user_id, thread_id):
@@ -102,17 +104,17 @@ class TestChangeFeedIntegration:
         """Insert turn documents and verify the thread counter increments.
 
         Note: This test depends on the change feed trigger running. It inserts
-        documents and then polls the memories container for up to 60 seconds
+        documents and then polls the counter container for up to 60 seconds
         waiting for the change feed to process them.
         """
-        memories, counters = cosmos_clients
+        turns, counters = cosmos_clients
         user_id = unique_ids["user_id"]
         thread_id = unique_ids["thread_id"]
         counter_id = f"thread:{user_id}:{thread_id}"
 
         # Insert 3 turn documents
         for _ in range(3):
-            self._insert_turn(memories, user_id, thread_id)
+            self._insert_turn(turns, user_id, thread_id)
 
         # Poll for counter to appear (change feed has latency)
         deadline = time.time() + 60

@@ -105,7 +105,7 @@ az functionapp config appsettings set \
   --settings \
     COSMOS_DB_ENDPOINT="https://<cosmos-account-name>.documents.azure.com:443/" \
     COSMOS_DB_DATABASE="ai_memory" \
-    COSMOS_DB_CONTAINER="memories" \
+    COSMOS_DB_MEMORIES_CONTAINER="memories" \
     COSMOS_DB_COUNTERS_CONTAINER="counter" \
     COSMOS_DB_LEASE_CONTAINER="leases" \
     COSMOS_DB_THROUGHPUT_MODE="serverless" \
@@ -178,7 +178,7 @@ Update `.env` to point at Azure instead of localhost:
 ```env
 COSMOS_DB_ENDPOINT=https://<cosmos-account-name>.documents.azure.com:443/
 COSMOS_DB_DATABASE=ai_memory
-COSMOS_DB_CONTAINER=memories
+COSMOS_DB_MEMORIES_CONTAINER=memories
 COSMOS_DB_COUNTERS_CONTAINER=counter
 COSMOS_DB_LEASE_CONTAINER=leases
 COSMOS_DB_THROUGHPUT_MODE=serverless
@@ -213,7 +213,7 @@ load_dotenv()
 memory = CosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
@@ -242,7 +242,7 @@ load_dotenv()
 memory = AsyncCosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),

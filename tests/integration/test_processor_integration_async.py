@@ -16,7 +16,7 @@ from agent_memory_toolkit.aio.processors import (
 
 def _build_client(processor=None) -> AsyncCosmosMemoryClient:
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()  # truthy → _require_cosmos passes
+    client._memories_container_client = MagicMock()  # truthy → _require_cosmos passes
     return client
 
 
@@ -35,7 +35,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
         pipeline.generate_thread_summary = AsyncMock(
             return_value={
                 "id": "summary-1",
-                "type": "summary",
+                "type": "thread_summary",
                 "content": "Conversation about Paris.",
             }
         )
@@ -62,7 +62,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary == {
             "id": "summary-1",
-            "type": "summary",
+            "type": "thread_summary",
             "content": "Conversation about Paris.",
         }
         assert result.extracted_counts == {
@@ -122,7 +122,7 @@ class TestAsyncDurableProcessNowAndWaitPolling:
             side_effect=[
                 [],
                 [],
-                [{"id": "summary-1", "memory_type": "summary", "content": "..."}],
+                [{"id": "summary-1", "memory_type": "thread_summary", "content": "..."}],
             ]
         )
 
@@ -139,7 +139,7 @@ class TestAsyncDurableProcessNowAndWaitPolling:
             kwargs = call.kwargs
             assert kwargs["user_id"] == "u-poll"
             assert kwargs["thread_id"] == "th-poll"
-            assert kwargs["memory_types"] == ["summary"]
+            assert kwargs["memory_types"] == ["thread_summary"]
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,9 @@ from agent_memory_toolkit.processors import (
 
 def _connected(processor=None) -> CosmosMemoryClient:
     client = CosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()
+    client._memories_container_client = MagicMock()
+    client._turns_container_client = client._memories_container_client
+    client._summaries_container_client = client._memories_container_client
     return client
 
 
@@ -29,9 +31,11 @@ def _patch_get_thread(client, turns):
 def test_process_now_with_inprocess_invokes_pipeline():
     client = _connected()  # default → InProcessProcessor lazily built
     pipeline = MagicMock()
-    pipeline.generate_thread_summary.return_value = {"id": "s", "type": "summary"}
+    pipeline.generate_thread_summary.return_value = {"id": "s", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline  # short-circuit lazy build
     _patch_get_thread(client, [{"role": "user", "content": "hi"}])
 
@@ -71,6 +75,8 @@ def test_process_now_and_wait_inprocess_returns_true():
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {}
     pipeline.reconcile_memories.return_value = {}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 

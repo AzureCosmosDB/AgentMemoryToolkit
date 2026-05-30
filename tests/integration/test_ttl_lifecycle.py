@@ -47,7 +47,7 @@ def ttl_client(
         cosmos_key=cosmos_key or None,
         cosmos_database=cosmos_database,
         cosmos_container=cosmos_container,
-        cosmos_turns_container=os.environ.get("COSMOS_TURNS_CONTAINER") or None,
+        cosmos_turns_container=os.environ.get("COSMOS_DB_TURNS_CONTAINER") or None,
     )
 
 

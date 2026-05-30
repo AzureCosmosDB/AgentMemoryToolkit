@@ -29,10 +29,20 @@ def _make_client(**overrides) -> CosmosMemoryClient:
 
 
 def _connected_client() -> tuple[CosmosMemoryClient, MagicMock]:
-    """Return a client with a mocked container client already wired up."""
+    """Return a client with mocked split containers already wired up."""
     client = _make_client()
     container = MagicMock()
-    client._container_client = container
+    turns = MagicMock()
+    summaries = MagicMock()
+    container.id = "memories"
+    turns.id = "memories_turns"
+    summaries.id = "memories_summaries"
+    container.query_items.return_value = []
+    turns.query_items.return_value = []
+    summaries.query_items.return_value = []
+    client._memories_container_client = container
+    client._turns_container_client = turns
+    client._summaries_container_client = summaries
     return client, container
 
 
@@ -105,7 +115,7 @@ class TestAddLocal:
             user_id="u1",
             role="agent",
             content="hi",
-            memory_type="summary",
+            memory_type="thread_summary",
             agent_id="a1",
             metadata={"k": "v"},
             thread_id="t1",
@@ -113,7 +123,7 @@ class TestAddLocal:
 
         m = mem.local_memory[0]
         assert m["role"] == "agent"
-        assert m["type"] == "summary"
+        assert m["type"] == "thread_summary"
         assert m["metadata"] == {"k": "v"}
         assert m["thread_id"] == "t1"
 
@@ -138,7 +148,7 @@ class TestAddLocal:
 
     def test_add_local_non_turn_thread_id_optional(self):
         mem = _make_client()
-        # Non-turn types (summary, fact, etc.) accept an omitted thread_id;
+        # Non-turn types (thread_summary, fact, etc.) accept an omitted thread_id;
         # _make_memory auto-generates a UUID for hierarchical-PK validity.
         mem.add_local(user_id="u1", role="user", content="profile", memory_type="user_summary")
         assert len(mem.local_memory) == 1
@@ -157,7 +167,7 @@ class TestGetLocal:
         mem = _make_client()
         mem.add_local(user_id="u1", role="user", content="a", memory_type="turn", thread_id="t1")
         mem.add_local(user_id="u1", role="agent", content="b", memory_type="turn", thread_id="t1")
-        mem.add_local(user_id="u2", role="user", content="c", memory_type="summary")
+        mem.add_local(user_id="u2", role="user", content="c", memory_type="thread_summary")
 
         results = mem.get_local(user_id="u1", role="user", memory_types=["turn"])
         assert len(results) == 1
@@ -236,8 +246,12 @@ class TestAutoCreateOnInit:
         mock_lease_container = MagicMock()
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
+        mock_turns_container = MagicMock()
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists.side_effect = [
             mock_memories_container,
+            mock_turns_container,
+            mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
         ]
@@ -257,9 +271,11 @@ class TestAutoCreateOnInit:
                 cosmos_credential="fake-key",
             )
 
-        assert mem._container_client is mock_memories_container
+        assert mem._memories_container_client is mock_memories_container
+        assert mem._turns_container_client is mock_turns_container
+        assert mem._summaries_container_client is mock_summaries_container
         mock_client.create_database_if_not_exists.assert_called_once()
-        assert mock_db.create_container_if_not_exists.call_count == 3
+        assert mock_db.create_container_if_not_exists.call_count == 5
 
 
 class TestRequireCosmos:
@@ -267,6 +283,41 @@ class TestRequireCosmos:
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
             mem._require_cosmos()
+
+
+class TestValidateTopology:
+    def test_validate_topology_succeeds_on_healthy_deploy(self):
+        mem = _make_client()
+        memories = MagicMock(id="memories")
+        turns = MagicMock(id="memories_turns")
+        summaries = MagicMock(id="memories_summaries")
+        mem._memories_container_client = memories
+        mem._turns_container_client = turns
+        mem._summaries_container_client = summaries
+
+        mem.validate_topology()
+
+        memories.read.assert_called_once()
+        turns.read.assert_called_once()
+        summaries.read.assert_called_once()
+
+    def test_validate_topology_raises_on_missing_container(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        mem = _make_client()
+        mem._memories_container_client = MagicMock(id="memories")
+        mem._turns_container_client = MagicMock(id="memories_turns")
+        mem._summaries_container_client = MagicMock(id="memories_summaries")
+        mem._summaries_container_client.read.side_effect = CosmosResourceNotFoundError(message="missing")
+
+        with pytest.raises(RuntimeError, match="memories_summaries"):
+            mem.validate_topology()
+
+    def test_validate_topology_raises_when_not_connected(self):
+        mem = _make_client()
+
+        with pytest.raises(RuntimeError, match="call connect_cosmos"):
+            mem.validate_topology()
 
 
 class TestCreateMemoryStore:
@@ -281,8 +332,12 @@ class TestCreateMemoryStore:
         mock_throughput_cls = MagicMock(side_effect=lambda **kwargs: type("Throughput", (), kwargs)())
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
+        mock_turns_container = MagicMock()
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists.side_effect = [
             mock_memories_container,
+            mock_turns_container,
+            mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
         ]
@@ -310,8 +365,9 @@ class TestCreateMemoryStore:
 
         mock_client.create_database_if_not_exists.assert_called_once()
         memories_call = mock_db.create_container_if_not_exists.call_args_list[0]
-        counter_call = mock_db.create_container_if_not_exists.call_args_list[1]
-        lease_call = mock_db.create_container_if_not_exists.call_args_list[2]
+        summaries_call = mock_db.create_container_if_not_exists.call_args_list[2]
+        counter_call = mock_db.create_container_if_not_exists.call_args_list[3]
+        lease_call = mock_db.create_container_if_not_exists.call_args_list[4]
         vec_policy = memories_call.kwargs["vector_embedding_policy"]
         assert vec_policy["vectorEmbeddings"][0]["dimensions"] == 256
         ft_policy = memories_call.kwargs["full_text_policy"]
@@ -320,8 +376,15 @@ class TestCreateMemoryStore:
         assert counter_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
         assert lease_call.kwargs["id"] == "leases"
         assert lease_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
+        assert summaries_call.kwargs["id"] == "memories_summaries"
+        assert "vector_embedding_policy" not in summaries_call.kwargs
+        assert "full_text_policy" not in summaries_call.kwargs
+        assert summaries_call.kwargs["indexing_policy"]["compositeIndexes"][0][-1] == {
+            "path": "/version",
+            "order": "descending",
+        }
         assert "vector_embedding_policy" not in counter_call.kwargs
-        assert mem._container_client is mock_memories_container
+        assert mem._memories_container_client is mock_memories_container
 
     def test_create_memory_store_turns_container_uses_30_day_ttl(self):
         mock_cosmos_cls = MagicMock()
@@ -333,11 +396,13 @@ class TestCreateMemoryStore:
         mock_turns_container = MagicMock()
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists.side_effect = [
             mock_memories_container,
+            mock_turns_container,
+            mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
-            mock_turns_container,
         ]
 
         mem = _make_client()
@@ -358,7 +423,7 @@ class TestCreateMemoryStore:
                 turns_container="memories_turns",
             )
 
-        turns_call = mock_db.create_container_if_not_exists.call_args_list[3]
+        turns_call = mock_db.create_container_if_not_exists.call_args_list[1]
         assert turns_call.kwargs["id"] == "memories_turns"
         assert turns_call.kwargs["default_ttl"] == 2_592_000
         assert "vector_embedding_policy" in turns_call.kwargs
@@ -373,8 +438,12 @@ class TestCreateMemoryStore:
         mock_lease_container = MagicMock()
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists.return_value = mock_db
+        mock_turns_container = MagicMock()
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists.side_effect = [
             mock_memories_container,
+            mock_turns_container,
+            mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
         ]
@@ -413,7 +482,7 @@ class TestCreateMemoryStore:
 
 
 # ===================================================================
-# Cosmos CRUD (mock _container_client)
+# Cosmos CRUD (mock _memories_container_client)
 # ===================================================================
 
 
@@ -422,8 +491,9 @@ class TestAddCosmos:
         mem, container = _connected_client()
         mem.add_cosmos(user_id="u1", role="user", content="hello")
 
-        container.upsert_item.assert_called_once()
-        body = container.upsert_item.call_args.kwargs["body"]
+        turns = mem._turns_container_client
+        turns.upsert_item.assert_called_once()
+        body = turns.upsert_item.call_args.kwargs["body"]
         assert body["content"] == "hello"
         assert body["user_id"] == "u1"
         assert body["role"] == "user"
@@ -442,7 +512,7 @@ class TestPushToCosmos:
 
         mem.push_to_cosmos()
 
-        assert container.upsert_item.call_count == 2
+        assert mem._turns_container_client.upsert_item.call_count == 2
 
     def test_push_to_cosmos_not_connected(self):
         mem = _make_client()
@@ -480,9 +550,10 @@ class TestPushToCosmos:
 
         # Only the fact (non-turn) should have been included in the batch embed call.
         assert embed_calls == [["user prefers dark mode"]]
-        upserted_bodies = [c.kwargs["body"] for c in container.upsert_item.call_args_list]
-        fact_body = next(b for b in upserted_bodies if b["type"] == "fact")
-        turn_body = next(b for b in upserted_bodies if b["type"] == "turn")
+        fact_bodies = [c.kwargs["body"] for c in container.upsert_item.call_args_list]
+        turn_bodies = [c.kwargs["body"] for c in mem._turns_container_client.upsert_item.call_args_list]
+        fact_body = next(b for b in fact_bodies if b["type"] == "fact")
+        turn_body = next(b for b in turn_bodies if b["type"] == "turn")
         assert fact_body["embedding"] == [0.1, 0.2, 0.3]
         assert "embedding" not in turn_body
 
@@ -523,7 +594,8 @@ class TestGetMemories:
     def test_with_filters(self):
         mem, container = _connected_client()
         doc = _make_doc()
-        container.query_items.return_value = [doc]
+        turns = mem._turns_container_client
+        turns.query_items.return_value = [doc]
 
         mem.get_memories(
             memory_id="m1",
@@ -533,7 +605,7 @@ class TestGetMemories:
             memory_types=["turn"],
         )
 
-        call_kwargs = container.query_items.call_args.kwargs
+        call_kwargs = turns.query_items.call_args.kwargs
         query = call_kwargs["query"]
         assert "WHERE" in query
         params = call_kwargs["parameters"]
@@ -563,19 +635,21 @@ class TestGetMemories:
 
 class TestGetThread:
     def test_basic(self, sample_memory_dicts):
-        mem, container = _connected_client()
-        container.query_items.return_value = list(reversed(sample_memory_dicts))
+        mem, _ = _connected_client()
+        turns = mem._turns_container_client
+        turns.query_items.return_value = list(reversed(sample_memory_dicts))
 
         result = mem.get_thread(thread_id="t1")
 
-        call_kwargs = container.query_items.call_args.kwargs
+        call_kwargs = turns.query_items.call_args.kwargs
         params = call_kwargs["parameters"]
         assert any(p["name"] == "@thread_id" for p in params)
         assert len(result) == 3
 
     def test_with_recent_k(self, sample_memory_dicts):
-        mem, container = _connected_client()
-        container.query_items.return_value = list(reversed(sample_memory_dicts))
+        mem, _ = _connected_client()
+        turns = mem._turns_container_client
+        turns.query_items.return_value = list(reversed(sample_memory_dicts))
 
         result = mem.get_thread(thread_id="t1", recent_k=2)
         assert len(result) == 2
@@ -584,7 +658,7 @@ class TestGetThread:
 class TestUpdateCosmos:
     def test_success(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1")
+        doc = _make_doc(id="m1", type="fact")
         container.query_items.return_value = [doc.copy()]
 
         mem.update_cosmos(memory_id="m1", content="updated")
@@ -605,7 +679,7 @@ class TestUpdateCosmos:
 class TestDeleteCosmos:
     def test_success(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1", user_id="u1", thread_id="t1")
+        doc = _make_doc(id="m1", user_id="u1", thread_id="t1", type="fact")
         container.query_items.return_value = [doc]
 
         mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
@@ -622,13 +696,14 @@ class TestDeleteCosmos:
 
 class TestGetUserSummary:
     def test_returns_doc_when_present(self):
-        mem, container = _connected_client()
+        mem, _ = _connected_client()
+        summaries = mem._summaries_container_client
         doc = _make_doc(type="user_summary", id="user_summary_u1")
-        container.read_item.return_value = doc
+        summaries.read_item.return_value = doc
 
         result = mem.get_user_summary(user_id="u1")
 
-        call_kwargs = container.read_item.call_args.kwargs
+        call_kwargs = summaries.read_item.call_args.kwargs
         assert call_kwargs["item"] == "user_summary_u1"
         assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
         assert result == doc
@@ -636,8 +711,9 @@ class TestGetUserSummary:
     def test_returns_none_when_absent(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-        mem, container = _connected_client()
-        container.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+        mem, _ = _connected_client()
+        summaries = mem._summaries_container_client
+        summaries.read_item.side_effect = CosmosResourceNotFoundError(message="404")
 
         result = mem.get_user_summary(user_id="u1")
 
@@ -708,6 +784,8 @@ class TestGenerateThreadSummary:
         mem, container = _connected_client()
         mock_pipeline = MagicMock()
         mock_pipeline.generate_thread_summary.return_value = {"status": "ok"}
+        mock_pipeline._store = mem._get_store()
+        mock_pipeline._containers = dict(mem._containers)
         mem._pipeline = mock_pipeline
 
         result = mem.generate_thread_summary(user_id="u1", thread_id="t1")
@@ -756,7 +834,7 @@ class TestClose:
 
         mock_cosmos.close.assert_called_once()
         assert mem._cosmos_client is None
-        assert mem._container_client is None
+        assert mem._memories_container_client is None
 
     def test_close_without_cosmos(self):
         mem = _make_client()

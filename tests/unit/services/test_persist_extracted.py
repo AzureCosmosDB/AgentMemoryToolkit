@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import hashlib
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from azure.cosmos.exceptions import CosmosResourceExistsError
 
+from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit._utils import compute_content_hash
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
+from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
 from agent_memory_toolkit.services._pipeline_helpers import ID_SEED_SEP
-from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class _Container:
@@ -71,6 +73,22 @@ class _AsyncStore(_Store):
         return super().mark_superseded(old_doc, superseder_id, reason=reason)
 
 
+def _containers_for_store(store: _Store) -> dict[ContainerKey, _StoreContainerAdapter]:
+    return {
+        ContainerKey.TURNS: _StoreContainerAdapter(_Store(_Container()), ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _StoreContainerAdapter(store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _StoreContainerAdapter(_Store(_Container()), ContainerKey.SUMMARIES),
+    }
+
+
+def _async_containers_for_store(store: _AsyncStore) -> dict[ContainerKey, _AsyncStoreContainerAdapter]:
+    return {
+        ContainerKey.TURNS: _AsyncStoreContainerAdapter(_AsyncStore(_AsyncContainer()), ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _AsyncStoreContainerAdapter(store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _AsyncStoreContainerAdapter(_AsyncStore(_AsyncContainer()), ContainerKey.SUMMARIES),
+    }
+
+
 class _Embeddings:
     def __init__(self):
         self.batch_calls: list[list[str]] = []
@@ -115,7 +133,13 @@ def _fact_doc(content: str = "The user prefers dark mode.") -> dict[str, Any]:
 
 def test_persist_extracted_memories_uses_deterministic_ids_and_skips_replay() -> None:
     container = _Container()
-    service = PipelineService(_Store(container), chat_client=object(), embeddings_client=_Embeddings())
+    store = _Store(container)
+    service = PipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_Embeddings(),
+        containers=_containers_for_store(store),
+    )
     doc = _fact_doc()
 
     first = service.persist_extracted_memories("u1", {"facts": [doc], "episodic": [], "updates": []})
@@ -127,11 +151,45 @@ def test_persist_extracted_memories_uses_deterministic_ids_and_skips_replay() ->
     assert container.created_ids == [doc["id"]]
 
 
+def test_persist_extracted_memories_routes_facts_to_memories_container() -> None:
+    turns_container = MagicMock()
+    memories_container = MagicMock()
+    summaries_container = MagicMock()
+    memories_container.create_item.side_effect = lambda body: body
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    service = PipelineService(
+        _Store(_Container()),
+        chat_client=object(),
+        embeddings_client=_Embeddings(),
+        containers=containers,
+    )
+    doc = _fact_doc()
+
+    result = service.persist_extracted_memories("u1", {"facts": [doc], "episodic": [], "updates": []})
+
+    assert result["fact_count"] == 1
+    memories_container.create_item.assert_called_once()
+    assert memories_container.create_item.call_args.kwargs["body"]["type"] == "fact"
+    turns_container.method_calls == []
+    summaries_container.method_calls == []
+
+
+
 def test_persist_extracted_memories_409_skip_continues_to_next_doc() -> None:
     first = _fact_doc("The user prefers dark mode.")
     second = _fact_doc("The user prefers concise answers.")
     container = _Container(raise_for_ids={first["id"]})
-    service = PipelineService(_Store(container), chat_client=object(), embeddings_client=_Embeddings())
+    store = _Store(container)
+    service = PipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_Embeddings(),
+        containers=_containers_for_store(store),
+    )
 
     result = service.persist_extracted_memories("u1", {"facts": [first, second], "episodic": [], "updates": []})
 
@@ -142,7 +200,13 @@ def test_persist_extracted_memories_409_skip_continues_to_next_doc() -> None:
 @pytest.mark.asyncio
 async def test_async_persist_extracted_memories_uses_deterministic_ids_and_skips_replay() -> None:
     container = _AsyncContainer()
-    service = AsyncPipelineService(_AsyncStore(container), chat_client=object(), embeddings_client=_AsyncEmbeddings())
+    store = _AsyncStore(container)
+    service = AsyncPipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_AsyncEmbeddings(),
+        containers=_async_containers_for_store(store),
+    )
     doc = _fact_doc()
 
     first = await service.persist_extracted_memories("u1", {"facts": [doc], "episodic": [], "updates": []})
@@ -159,7 +223,13 @@ async def test_async_persist_extracted_memories_409_skip_continues_to_next_doc()
     first = _fact_doc("The user prefers dark mode.")
     second = _fact_doc("The user prefers concise answers.")
     container = _AsyncContainer(raise_for_ids={first["id"]})
-    service = AsyncPipelineService(_AsyncStore(container), chat_client=object(), embeddings_client=_AsyncEmbeddings())
+    store = _AsyncStore(container)
+    service = AsyncPipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_AsyncEmbeddings(),
+        containers=_async_containers_for_store(store),
+    )
 
     result = await service.persist_extracted_memories("u1", {"facts": [first, second], "episodic": [], "updates": []})
 

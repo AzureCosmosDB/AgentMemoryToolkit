@@ -24,7 +24,7 @@ def _connected_client() -> tuple[CosmosMemoryClient, MagicMock]:
     client = CosmosMemoryClient(use_default_credential=False)
     container = MagicMock()
     container.query_items.return_value = []
-    client._container_client = container
+    client._memories_container_client = container
     return client, container
 
 
@@ -102,7 +102,7 @@ def test_get_memories_passes_list_to_in_clause():
 
 def test_get_thread_accepts_list():
     client, container = _connected_client()
-    client.get_thread(thread_id="t1", memory_types=["turn", "summary"])
+    client.get_thread(thread_id="t1", memory_types=["turn", "thread_summary"])
     query = _captured_query(container)
     assert "c.type IN (@memory_type_0, @memory_type_1)" in query
 

@@ -16,7 +16,9 @@ from agent_memory_toolkit.processors import DurableFunctionProcessor, InProcessP
 
 def _connected(processor=None) -> CosmosMemoryClient:
     client = CosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()
+    client._memories_container_client = MagicMock()
+    client._turns_container_client = client._memories_container_client
+    client._summaries_container_client = client._memories_container_client
     return client
 
 

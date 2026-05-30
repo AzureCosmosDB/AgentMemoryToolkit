@@ -45,13 +45,22 @@ def _make_client(**overrides) -> AsyncCosmosMemoryClient:
 
 
 def _connected_client() -> tuple[AsyncCosmosMemoryClient, MagicMock]:
-    """Return a client with a mocked container client already wired up."""
+    """Return a client with mocked split containers already wired up."""
     client = _make_client()
     container = MagicMock()
-    container.upsert_item = AsyncMock()
-    container.replace_item = AsyncMock()
-    container.delete_item = AsyncMock()
-    client._container_client = container
+    turns = MagicMock()
+    summaries = MagicMock()
+    container.id = "memories"
+    turns.id = "memories_turns"
+    summaries.id = "memories_summaries"
+    for c in (container, turns, summaries):
+        c.upsert_item = AsyncMock()
+        c.replace_item = AsyncMock()
+        c.delete_item = AsyncMock()
+        c.query_items = MagicMock(return_value=AsyncIterator([]))
+    client._memories_container_client = container
+    client._turns_container_client = turns
+    client._summaries_container_client = summaries
     return client, container
 
 
@@ -79,7 +88,7 @@ class TestConstructor:
     def test_default_credential_disabled(self):
         mem = _make_client()
         assert mem.local_memory == []
-        assert mem._container_client is None
+        assert mem._memories_container_client is None
         assert mem._cosmos_credential is None
         assert mem._ai_foundry_credential is None
 
@@ -116,14 +125,14 @@ class TestAddLocal:
             user_id="u1",
             role="agent",
             content="response",
-            memory_type="summary",
+            memory_type="thread_summary",
             agent_id="bot-1",
             metadata={"k": "v"},
             thread_id="t-custom",
         )
         m = mem.local_memory[0]
         assert m["role"] == "agent"
-        assert m["type"] == "summary"
+        assert m["type"] == "thread_summary"
         assert m["agent_id"] == "bot-1"
         assert m["metadata"] == {"k": "v"}
         assert m["thread_id"] == "t-custom"
@@ -239,7 +248,7 @@ class TestConnectCosmos:
         ):
             await mem.connect_cosmos()
 
-        assert mem._container_client is mock_container
+        assert mem._memories_container_client is mock_container
 
 
 class TestCreateMemoryStore:
@@ -255,8 +264,16 @@ class TestCreateMemoryStore:
 
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists = AsyncMock(return_value=mock_db)
+        mock_turns_container = MagicMock()
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists = AsyncMock(
-            side_effect=[mock_memories_container, mock_counter_container, mock_lease_container]
+            side_effect=[
+                mock_memories_container,
+                mock_turns_container,
+                mock_summaries_container,
+                mock_counter_container,
+                mock_lease_container,
+            ]
         )
 
         with patch.dict(
@@ -279,8 +296,9 @@ class TestCreateMemoryStore:
 
         mock_client.create_database_if_not_exists.assert_awaited_once()
         memories_call = mock_db.create_container_if_not_exists.await_args_list[0]
-        counter_call = mock_db.create_container_if_not_exists.await_args_list[1]
-        lease_call = mock_db.create_container_if_not_exists.await_args_list[2]
+        summaries_call = mock_db.create_container_if_not_exists.await_args_list[2]
+        counter_call = mock_db.create_container_if_not_exists.await_args_list[3]
+        lease_call = mock_db.create_container_if_not_exists.await_args_list[4]
         vec_policy = memories_call.kwargs["vector_embedding_policy"]
         assert vec_policy["vectorEmbeddings"][0]["dimensions"] == 256
         ft_policy = memories_call.kwargs["full_text_policy"]
@@ -289,8 +307,15 @@ class TestCreateMemoryStore:
         assert counter_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
         assert lease_call.kwargs["id"] == "leases"
         assert lease_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
+        assert summaries_call.kwargs["id"] == "memories_summaries"
+        assert "vector_embedding_policy" not in summaries_call.kwargs
+        assert "full_text_policy" not in summaries_call.kwargs
+        assert summaries_call.kwargs["indexing_policy"]["compositeIndexes"][0][-1] == {
+            "path": "/version",
+            "order": "descending",
+        }
         assert "vector_embedding_policy" not in counter_call.kwargs
-        assert mem._container_client is mock_memories_container
+        assert mem._memories_container_client is mock_memories_container
 
     async def test_create_memory_store_turns_container_uses_30_day_ttl(self):
         mem = _make_client()
@@ -304,8 +329,15 @@ class TestCreateMemoryStore:
 
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists = AsyncMock(return_value=mock_db)
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists = AsyncMock(
-            side_effect=[mock_memories_container, mock_counter_container, mock_lease_container, mock_turns_container]
+            side_effect=[
+                mock_memories_container,
+                mock_turns_container,
+                mock_summaries_container,
+                mock_counter_container,
+                mock_lease_container,
+            ]
         )
 
         with patch.dict(
@@ -324,7 +356,7 @@ class TestCreateMemoryStore:
                 turns_container="memories_turns",
             )
 
-        turns_call = mock_db.create_container_if_not_exists.await_args_list[3]
+        turns_call = mock_db.create_container_if_not_exists.await_args_list[1]
         assert turns_call.kwargs["id"] == "memories_turns"
         assert turns_call.kwargs["default_ttl"] == 2_592_000
         assert "vector_embedding_policy" in turns_call.kwargs
@@ -341,8 +373,16 @@ class TestCreateMemoryStore:
 
         mock_cosmos_cls.return_value = mock_client
         mock_client.create_database_if_not_exists = AsyncMock(return_value=mock_db)
+        mock_turns_container = MagicMock()
+        mock_summaries_container = MagicMock()
         mock_db.create_container_if_not_exists = AsyncMock(
-            side_effect=[mock_memories_container, mock_counter_container, mock_lease_container]
+            side_effect=[
+                mock_memories_container,
+                mock_turns_container,
+                mock_summaries_container,
+                mock_counter_container,
+                mock_lease_container,
+            ]
         )
 
         with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
@@ -387,8 +427,50 @@ class TestRequireCosmos:
         await mem._require_cosmos()  # should not raise
 
 
+class TestValidateTopology:
+    async def test_validate_topology_succeeds_on_healthy_deploy(self):
+        mem = _make_client()
+        memories = MagicMock(id="memories")
+        turns = MagicMock(id="memories_turns")
+        summaries = MagicMock(id="memories_summaries")
+        memories.read = AsyncMock()
+        turns.read = AsyncMock()
+        summaries.read = AsyncMock()
+        mem._memories_container_client = memories
+        mem._turns_container_client = turns
+        mem._summaries_container_client = summaries
+
+        await mem.validate_topology()
+
+        memories.read.assert_awaited_once()
+        turns.read.assert_awaited_once()
+        summaries.read.assert_awaited_once()
+
+    async def test_validate_topology_raises_on_missing_container(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        mem = _make_client()
+        mem._memories_container_client = MagicMock(id="memories")
+        mem._turns_container_client = MagicMock(id="memories_turns")
+        mem._summaries_container_client = MagicMock(id="memories_summaries")
+        mem._memories_container_client.read = AsyncMock()
+        mem._turns_container_client.read = AsyncMock()
+        mem._summaries_container_client.read = AsyncMock(
+            side_effect=CosmosResourceNotFoundError(message="missing")
+        )
+
+        with pytest.raises(RuntimeError, match="memories_summaries"):
+            await mem.validate_topology()
+
+    async def test_validate_topology_raises_when_not_connected(self):
+        mem = _make_client()
+
+        with pytest.raises(RuntimeError, match="call connect_cosmos"):
+            await mem.validate_topology()
+
+
 # ===================================================================
-# Cosmos CRUD (async, mock _container_client)
+# Cosmos CRUD (async, mock _memories_container_client)
 # ===================================================================
 
 
@@ -397,8 +479,9 @@ class TestAddCosmos:
         mem, container = _connected_client()
         await mem.add_cosmos(user_id="u1", role="user", content="hello")
 
-        container.upsert_item.assert_awaited_once()
-        body = container.upsert_item.call_args.kwargs["body"]
+        turns = mem._turns_container_client
+        turns.upsert_item.assert_awaited_once()
+        body = turns.upsert_item.call_args.kwargs["body"]
         assert body["content"] == "hello"
         assert body["user_id"] == "u1"
 
@@ -416,7 +499,7 @@ class TestPushToCosmos:
 
         await mem.push_to_cosmos(batch_size=5)
 
-        assert container.upsert_item.await_count == 2
+        assert mem._turns_container_client.upsert_item.await_count == 2
 
     async def test_push_to_cosmos_not_connected(self):
         mem = _make_client()
@@ -470,19 +553,28 @@ class TestGetMemories:
 
 class TestGetThread:
     async def test_basic(self):
-        mem, container = _connected_client()
-        docs = [_make_doc(content="second"), _make_doc(content="first")]
-        container.query_items = MagicMock(return_value=AsyncIterator(docs))
+        mem, _ = _connected_client()
+        # Simulate Cosmos returning DESC order (newest first). Explicit timestamps
+        # so the global re-rank in get_thread is deterministic.
+        docs = [
+            _make_doc(content="second", created_at="2026-01-02T00:00:00+00:00"),
+            _make_doc(content="first", created_at="2026-01-01T00:00:00+00:00"),
+        ]
+        mem._turns_container_client.query_items = MagicMock(return_value=AsyncIterator(docs))
 
         result = await mem.get_thread(thread_id="t1")
-        # Reversed to chronological
+        # Reversed to chronological (oldest first)
         assert result[0]["content"] == "first"
         assert result[1]["content"] == "second"
 
     async def test_with_recent_k(self):
-        mem, container = _connected_client()
-        docs = [_make_doc(content="c"), _make_doc(content="b"), _make_doc(content="a")]
-        container.query_items = MagicMock(return_value=AsyncIterator(docs))
+        mem, _ = _connected_client()
+        docs = [
+            _make_doc(content="c", created_at="2026-01-03T00:00:00+00:00"),
+            _make_doc(content="b", created_at="2026-01-02T00:00:00+00:00"),
+            _make_doc(content="a", created_at="2026-01-01T00:00:00+00:00"),
+        ]
+        mem._turns_container_client.query_items = MagicMock(return_value=AsyncIterator(docs))
 
         result = await mem.get_thread(thread_id="t1", recent_k=2)
         assert len(result) == 2
@@ -491,7 +583,7 @@ class TestGetThread:
 class TestUpdateCosmos:
     async def test_success(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1")
+        doc = _make_doc(id="m1", type="fact")
         container.query_items = MagicMock(return_value=AsyncIterator([doc]))
 
         await mem.update_cosmos(memory_id="m1", content="updated")
@@ -510,7 +602,7 @@ class TestUpdateCosmos:
 
     async def test_partial_fields(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1", role="user", content="old")
+        doc = _make_doc(id="m1", role="user", content="old", type="fact")
         container.query_items = MagicMock(return_value=AsyncIterator([doc]))
 
         await mem.update_cosmos(memory_id="m1", role="agent", metadata={"key": "val"})
@@ -524,7 +616,7 @@ class TestUpdateCosmos:
 class TestDeleteCosmos:
     async def test_success(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1", user_id="u1", thread_id="t1")
+        doc = _make_doc(id="m1", user_id="u1", thread_id="t1", type="fact")
         container.query_items = MagicMock(return_value=AsyncIterator([doc]))
 
         await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
@@ -541,13 +633,14 @@ class TestDeleteCosmos:
 
 class TestGetUserSummary:
     async def test_returns_doc_when_present(self):
-        mem, container = _connected_client()
+        mem, _ = _connected_client()
+        summaries = mem._summaries_container_client
         doc = _make_doc(type="user_summary", id="user_summary_u1")
-        container.read_item = AsyncMock(return_value=doc)
+        summaries.read_item = AsyncMock(return_value=doc)
 
         result = await mem.get_user_summary(user_id="u1")
 
-        call_kwargs = container.read_item.call_args.kwargs
+        call_kwargs = summaries.read_item.call_args.kwargs
         assert call_kwargs["item"] == "user_summary_u1"
         assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
         assert result == doc
@@ -555,8 +648,9 @@ class TestGetUserSummary:
     async def test_returns_none_when_absent(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-        mem, container = _connected_client()
-        container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
+        mem, _ = _connected_client()
+        summaries = mem._summaries_container_client
+        summaries.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
 
         result = await mem.get_user_summary(user_id="u1")
 
@@ -647,6 +741,8 @@ class TestGenerateThreadSummary:
         mem, container = _connected_client()
         mock_pipeline = AsyncMock()
         mock_pipeline.generate_thread_summary.return_value = {"status": "ok"}
+        mock_pipeline._store = mem._get_store()
+        mock_pipeline._containers = dict(mem._containers)
         mem._pipeline = mock_pipeline
 
         result = await mem.generate_thread_summary(user_id="u1", thread_id="t1")
@@ -675,7 +771,7 @@ class TestClose:
 
         mock_cosmos.close.assert_awaited_once()
         assert mem._cosmos_client is None
-        assert mem._container_client is None
+        assert mem._memories_container_client is None
 
     async def test_close_without_cosmos(self):
         mem = _make_client()

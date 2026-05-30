@@ -17,6 +17,9 @@ param databaseName string = 'ai_memory'
 @description('Turns container name.')
 param turnsContainerName string = 'memories_turns'
 
+@description('Summaries container name.')
+param summariesContainerName string = 'memories_summaries'
+
 @description('Default TTL for turn documents, in seconds. Use -1 to disable expiry.')
 param memoriesTurnsDefaultTtl int = 2592000
 
@@ -179,30 +182,63 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
             path: '/"_etag"/?'
           }
         ]
-        vectorIndexes: [
-          {
-            path: '/embedding'
-            type: 'diskANN'
-          }
+      }
+    }
+  }
+}
+
+resource memoriesSummariesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
+  parent: database
+  name: summariesContainerName
+  properties: {
+    resource: {
+      id: summariesContainerName
+      defaultTtl: -1
+      partitionKey: {
+        kind: 'MultiHash'
+        version: 2
+        paths: [
+          '/user_id'
+          '/thread_id'
         ]
       }
-      vectorEmbeddingPolicy: {
-        vectorEmbeddings: [
+      indexingPolicy: {
+        indexingMode: 'consistent'
+        automatic: true
+        includedPaths: [
           {
-            path: '/embedding'
-            dataType: 'float32'
-            distanceFunction: 'cosine'
-            dimensions: embeddingDimensions
+            path: '/*'
           }
         ]
-      }
-      fullTextPolicy: {
-        defaultLanguage: 'en-US'
-        fullTextPaths: [
+        excludedPaths: [
           {
-            path: '/content'
-            language: 'en-US'
+            path: '/embedding/?'
           }
+          {
+            path: '/source_memory_ids/*'
+          }
+          {
+            path: '/supersedes_ids/*'
+          }
+          {
+            path: '/"_etag"/?'
+          }
+        ]
+        compositeIndexes: [
+          [
+            {
+              path: '/user_id'
+              order: 'ascending'
+            }
+            {
+              path: '/thread_id'
+              order: 'ascending'
+            }
+            {
+              path: '/version'
+              order: 'descending'
+            }
+          ]
         ]
       }
     }
@@ -252,5 +288,6 @@ output endpoint string = account.properties.documentEndpoint
 output databaseName string = databaseName
 output memoriesContainerName string = 'memories'
 output turnsContainerName string = turnsContainerName
+output summariesContainerName string = memoriesSummariesContainer.name
 output leasesContainerName string = 'leases'
 output counterContainerName string = 'counter'

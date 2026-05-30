@@ -6,8 +6,9 @@ from typing import Any
 import pytest
 from azure.cosmos.exceptions import CosmosResourceExistsError
 
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
-from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit._container_routing import ContainerKey
+from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
+from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class _FlakyContainer:
@@ -75,6 +76,33 @@ class _AsyncStore(_Store):
         return super().mark_superseded(old_doc, superseder_id, reason=reason)
 
 
+def _containers_for_store(
+    store: _Store,
+    *,
+    turns_store: _Store,
+) -> dict[ContainerKey, _StoreContainerAdapter]:
+    return {
+        ContainerKey.TURNS: _StoreContainerAdapter(turns_store, ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _StoreContainerAdapter(store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _StoreContainerAdapter(_Store(_FlakyContainer(), []), ContainerKey.SUMMARIES),
+    }
+
+
+def _async_containers_for_store(
+    store: _AsyncStore,
+    *,
+    turns_store: _AsyncStore,
+) -> dict[ContainerKey, _AsyncStoreContainerAdapter]:
+    return {
+        ContainerKey.TURNS: _AsyncStoreContainerAdapter(turns_store, ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _AsyncStoreContainerAdapter(store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _AsyncStoreContainerAdapter(
+            _AsyncStore(_AsyncFlakyContainer(), []),
+            ContainerKey.SUMMARIES,
+        ),
+    }
+
+
 class _Chat:
     def __init__(self):
         self.calls = 0
@@ -129,7 +157,14 @@ def _turn() -> dict[str, Any]:
 def test_persist_retry_reuses_extract_output_without_second_llm_call() -> None:
     container = _FlakyContainer()
     chat = _Chat()
-    service = PipelineService(_Store(container, [_turn()]), chat, _Embeddings())
+    store = _Store(container, [])
+    turns_store = _Store(_FlakyContainer(), [_turn()])
+    service = PipelineService(
+        store,
+        chat,
+        _Embeddings(),
+        containers=_containers_for_store(store, turns_store=turns_store),
+    )
 
     extracted = service.extract_memories_dry("u1", "t1")
     with pytest.raises(RuntimeError, match="transient"):
@@ -145,7 +180,14 @@ def test_persist_retry_reuses_extract_output_without_second_llm_call() -> None:
 async def test_async_persist_retry_reuses_extract_output_without_second_llm_call() -> None:
     container = _AsyncFlakyContainer()
     chat = _AsyncChat()
-    service = AsyncPipelineService(_AsyncStore(container, [_turn()]), chat, _AsyncEmbeddings())
+    store = _AsyncStore(container, [])
+    turns_store = _AsyncStore(_AsyncFlakyContainer(), [_turn()])
+    service = AsyncPipelineService(
+        store,
+        chat,
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(store, turns_store=turns_store),
+    )
 
     extracted = await service.extract_memories_dry("u1", "t1")
     with pytest.raises(RuntimeError, match="transient"):

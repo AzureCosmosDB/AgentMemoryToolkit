@@ -9,7 +9,11 @@ from __future__ import annotations
 from typing import Any
 
 from . import config
-from .cosmos_clients import get_memories_container, get_turns_container
+from .cosmos_clients import (
+    get_memories_container,
+    get_summaries_container,
+    get_turns_container,
+)
 
 _pipeline: Any | None = None
 
@@ -22,6 +26,7 @@ def get_pipeline():
 
     from azure.identity import DefaultAzureCredential
 
+    from agent_memory_toolkit._container_routing import ContainerKey
     from agent_memory_toolkit._utils import _resolve_embedding_dimensions
     from agent_memory_toolkit.chat import ChatClient
     from agent_memory_toolkit.embeddings import EmbeddingsClient
@@ -29,8 +34,9 @@ def get_pipeline():
     from agent_memory_toolkit.store import MemoryStore
 
     credential = DefaultAzureCredential()
-    container = get_memories_container()
+    memories_container = get_memories_container()
     turns_container = get_turns_container()
+    summaries_container = get_summaries_container()
     ai_endpoint = config.get_ai_foundry_endpoint()
 
     embedding_dimensions = _resolve_embedding_dimensions(None)
@@ -47,6 +53,11 @@ def get_pipeline():
         dimensions=embedding_dimensions,
     )
 
-    store = MemoryStore(container, embeddings_client=embeddings, turns_container=turns_container)
-    _pipeline = PipelineService(store, chat, embeddings, cosmos_turns_container=turns_container)
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    store = MemoryStore(containers=containers, embeddings_client=embeddings)
+    _pipeline = PipelineService(store, chat, embeddings, containers=containers)
     return _pipeline

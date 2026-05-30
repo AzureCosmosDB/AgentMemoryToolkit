@@ -2,8 +2,11 @@
 
 Both sync and async clients are exposed:
 
-* ``get_memories_container()`` returns a *sync* ContainerProxy used by the
+* ``get_memories_container()`` / ``get_turns_container()`` /
+  ``get_summaries_container()`` return *sync* ContainerProxy instances used by
   ``PipelineService`` activities (the pipeline is sync today).
+* ``get_cosmos_database_async()`` returns an async DatabaseProxy used by
+  startup topology validation.
 * ``get_counter_container_async()`` returns an *async* AsyncContainerProxy
   used by the change-feed trigger to update counters.
 
@@ -23,6 +26,7 @@ from . import config
 _sync_cosmos_client: Any | None = None
 _sync_memories_container: Any | None = None
 _sync_turns_container: Any | None = None
+_sync_summaries_container: Any | None = None
 
 # Async clients (for the change-feed trigger)
 _async_cosmos_client: Any | None = None
@@ -53,28 +57,35 @@ def get_memories_container():
         return _sync_memories_container
 
     db = _get_sync_database()
-    _sync_memories_container = db.get_container_client(config.CHANGE_FEED_CONTAINER)
+    _sync_memories_container = db.get_container_client(config.MEMORIES_CONTAINER)
     return _sync_memories_container
 
 
 def get_turns_container():
-    """Return the sync ContainerProxy for the optional turns container."""
+    """Return the sync ContainerProxy for the turns container."""
     global _sync_turns_container
-    if not config.COSMOS_TURNS_CONTAINER:
-        return None
     if _sync_turns_container is not None:
         return _sync_turns_container
 
     db = _get_sync_database()
-    _sync_turns_container = db.get_container_client(config.COSMOS_TURNS_CONTAINER)
+    _sync_turns_container = db.get_container_client(config.TURNS_CONTAINER)
     return _sync_turns_container
 
 
-async def get_counter_container_async():
-    """Return the async AsyncContainerProxy for the counter container."""
-    global _async_cosmos_client, _async_counter_container, _async_credential
-    if _async_counter_container is not None:
-        return _async_counter_container
+def get_summaries_container():
+    """Return the sync ContainerProxy for the summaries container."""
+    global _sync_summaries_container
+    if _sync_summaries_container is not None:
+        return _sync_summaries_container
+
+    db = _get_sync_database()
+    _sync_summaries_container = db.get_container_client(config.SUMMARIES_CONTAINER)
+    return _sync_summaries_container
+
+
+async def get_cosmos_database_async():
+    """Return the async DatabaseProxy for the configured Cosmos database."""
+    global _async_cosmos_client, _async_credential
 
     from azure.cosmos.aio import CosmosClient as AsyncCosmosClient
     from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
@@ -85,7 +96,16 @@ async def get_counter_container_async():
     if _async_cosmos_client is None:
         _async_cosmos_client = AsyncCosmosClient(config.get_cosmos_endpoint(), credential=_async_credential)
 
-    db = _async_cosmos_client.get_database_client(config.CHANGE_FEED_DATABASE)
+    return _async_cosmos_client.get_database_client(config.CHANGE_FEED_DATABASE)
+
+
+async def get_counter_container_async():
+    """Return the async AsyncContainerProxy for the counter container."""
+    global _async_counter_container
+    if _async_counter_container is not None:
+        return _async_counter_container
+
+    db = await get_cosmos_database_async()
     _async_counter_container = db.get_container_client(config.COUNTERS_CONTAINER)
     return _async_counter_container
 

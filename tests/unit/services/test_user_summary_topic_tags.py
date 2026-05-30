@@ -38,25 +38,25 @@ def test_persist_user_summary_emits_topic_tags_from_summary_topics():
     pipeline = PipelineService.__new__(PipelineService)
     pipeline._embeddings = MagicMock()
     pipeline._embeddings.generate.return_value = [0.1, 0.2]
-    pipeline._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+    pipeline._upsert_summary = MagicMock(side_effect=lambda doc: doc)
 
     result = pipeline.persist_user_summary("u1", _user_summary_doc())
 
     assert "sys:user-summary" in result["tags"]
     assert "topic:python" in result["tags"]
     assert "topic:data-science" in result["tags"]
-    pipeline._upsert_memory.assert_called_once()
+    pipeline._upsert_summary.assert_called_once()
 
 
 async def test_async_persist_user_summary_emits_topic_tags_from_summary_topics():
     pipeline = AsyncPipelineService.__new__(AsyncPipelineService)
     pipeline._embeddings = MagicMock()
     pipeline._embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
-    pipeline._upsert_memory = AsyncMock(side_effect=lambda doc: doc)
+    pipeline._upsert_summary = AsyncMock(side_effect=lambda doc: doc)
 
     result = await pipeline.persist_user_summary("u1", _user_summary_doc())
 
     assert "sys:user-summary" in result["tags"]
     assert "topic:python" in result["tags"]
     assert "topic:data-science" in result["tags"]
-    pipeline._upsert_memory.assert_awaited_once()
+    pipeline._upsert_summary.assert_awaited_once()

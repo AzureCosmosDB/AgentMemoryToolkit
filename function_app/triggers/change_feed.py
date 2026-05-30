@@ -13,12 +13,14 @@ Functions middleware.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from typing import Any
 
 import azure.durable_functions as df
 import azure.functions as func
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from shared import config
 from shared.cosmos_clients import get_counter_container_async
 from shared.counters import (
@@ -36,6 +38,36 @@ bp = df.Blueprint()
 # the SDK owns processing (potentially many batches per minute). Function
 # instances are short-lived, so worst case is one INFO per cold start.
 _warned_owner_skip: bool = False
+
+_topology_validated: bool = False
+_topology_validation_lock = asyncio.Lock()
+
+
+async def _ensure_topology() -> None:
+    """Validate that all split-topology containers are reachable once per worker."""
+    global _topology_validated
+    if _topology_validated:
+        return
+    async with _topology_validation_lock:
+        if _topology_validated:
+            return
+        from shared.cosmos_clients import get_cosmos_database_async
+
+        db = await get_cosmos_database_async()
+        for name in (config.TURNS_CONTAINER, config.MEMORIES_CONTAINER, config.SUMMARIES_CONTAINER):
+            try:
+                container = db.get_container_client(name)
+                await container.read()
+            except CosmosResourceNotFoundError as exc:
+                raise RuntimeError(
+                    f"Topology error: container {name!r} does not exist. "
+                    "Run azd up to provision the 3-container split or fix env vars."
+                ) from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Topology error: cannot read container {name!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+        _topology_validated = True
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +90,8 @@ async def process_changefeed_batch(
         counter_container: Optional counter container for testing. When omitted
             the cached async container client is used.
     """
+    await _ensure_topology()
+
     # Owner exclusivity (default-deny on the FA side):
     #
     #   * SDK-only deployments: leave ``MEMORY_PROCESSOR_OWNER`` unset →
@@ -274,12 +308,14 @@ async def _safe_start(
 # ---------------------------------------------------------------------------
 
 
+# Bind directly to the turns container so only turn writes can fire this trigger;
+# the old mixed-container topology trap is structurally impossible.
 @bp.cosmos_db_trigger(
     arg_name="documents",
     connection="COSMOS_DB",
     database_name=config.CHANGE_FEED_DATABASE,
-    container_name=config.CHANGE_FEED_CONTAINER,
-    lease_container_name=config.CHANGE_FEED_LEASE_CONTAINER,
+    container_name=config.TURNS_CONTAINER,
+    lease_container_name=config.LEASE_CONTAINER,
     create_lease_container_if_not_exists=True,
 )
 @bp.durable_client_input(client_name="starter")

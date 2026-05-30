@@ -6,7 +6,7 @@ connect, add, get, update, delete, and push local memories to Cosmos.
 Required env vars (or .env file):
     COSMOS_DB_ENDPOINT   – Cosmos DB account endpoint URL
     COSMOS_DB_DATABASE   – database name (default: "ai_memory")
-    COSMOS_DB_CONTAINER  – container name (default: "memories")
+    COSMOS_DB_MEMORIES_CONTAINER  – container name (default: "memories")
 """
 
 import os
@@ -22,7 +22,7 @@ def main() -> None:
     mem = CosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         ai_foundry_endpoint=os.environ.get("AI_FOUNDRY_ENDPOINT"),
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),

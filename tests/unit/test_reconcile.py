@@ -36,6 +36,9 @@ def _make_pipeline() -> PipelineService:
     p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
     p._mark_superseded = MagicMock(return_value=True)
     p._container = MagicMock()
+    p._memories_container = p._container
+    p._turns_container = p._container
+    p._summaries_container = p._container
     p._chat = MagicMock()
     return p
 
@@ -93,6 +96,9 @@ class TestMarkSupersededReason:
     def _build(self) -> PipelineService:
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         return p
 
     def test_writes_reason_duplicate_and_at(self):
@@ -473,8 +479,12 @@ class TestExactDedupShortCircuit:
         p._embeddings = MagicMock()
         p._embeddings.generate.return_value = [0.1] * 8
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         p._chat = MagicMock()
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._create_memory = MagicMock(side_effect=lambda doc: doc)
         p._mark_superseded = MagicMock(return_value=True)
         return p
 
@@ -566,7 +576,7 @@ class TestExactDedupShortCircuit:
 
         p.extract_memories("u1", "t1")
 
-        fact_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
+        fact_docs = [c.args[0] for c in p._create_memory.call_args_list if c.args[0].get("type") == "fact"]
         assert len(fact_docs) == 1
         assert fact_docs[0]["content_hash"] == compute_content_hash("User loves tea")
 
@@ -580,7 +590,11 @@ class TestExactDedupCrossTypeIsolation:
         p._embeddings.generate.return_value = [0.1] * 8
         p._embeddings.generate_batch.return_value = [[0.1] * 8]
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._create_memory = MagicMock(side_effect=lambda doc: doc)
         p._mark_superseded = MagicMock(return_value=True)
         return p
 
@@ -630,7 +644,7 @@ class TestExactDedupCrossTypeIsolation:
         )
         out = p.extract_memories("u1", "t1")
         assert out["exact_dedup_skipped"] == 0
-        fact_docs = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
+        fact_docs = [c.args[0] for c in p._create_memory.call_args_list if c.args[0].get("type") == "fact"]
         assert len(fact_docs) == 1
         assert fact_docs[0]["content"] == text
 
@@ -643,6 +657,9 @@ class TestExtractEarlyReturnShape:
     def test_empty_thread_returns_full_dict_shape(self):
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         p._container.query_items.return_value = iter([])  # no items
         out = p.extract_memories("u1", "t-empty")
         for key in (
@@ -664,6 +681,9 @@ class TestReconcileEmbeddingFailureAborts:
     def test_embedding_failure_skips_upsert_and_supersede(self):
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         facts = [
             _fact("f1", "alpha"),
             _fact("f2", "alpha-restated"),
@@ -705,6 +725,9 @@ class TestReconcileSupersedeRaceCounting:
     def test_failed_supersede_does_not_consume_source(self):
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         facts = [
             _fact("f1", "alpha"),
             _fact("f2", "alpha-restated"),
@@ -744,6 +767,9 @@ class TestReconcileWinnerValidation:
     def test_hallucinated_winner_id_skipped(self):
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         facts = [
             _fact("f1", "user is vegetarian"),
             _fact("f2", "user loves ribeye"),
@@ -777,6 +803,9 @@ class TestReconcileWinnerValidation:
         duplicate group, the merged_id must satisfy the validation."""
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         facts = [
             _fact("f1", "alpha"),
             _fact("f2", "alpha-paraphrased"),
@@ -818,6 +847,9 @@ class TestReconcileBoolNotNumeric:
     def test_bool_confidence_falls_back_to_max_source(self):
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         facts = [
             _fact("f1", "alpha", confidence=0.7, salience=0.5),
             _fact("f2", "alpha-restated", confidence=0.85, salience=0.6),
@@ -856,6 +888,9 @@ class TestReconcileFactsTextEscapesContent:
     def test_special_chars_in_content_are_json_escaped(self):
         p = PipelineService.__new__(PipelineService)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         facts = [
             _fact("f1", 'She said "hi" | weird'),
             _fact("f2", "normal text"),
@@ -1301,6 +1336,9 @@ class TestExtractUpdateSupersedeReason:
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
         p._mark_superseded = MagicMock(return_value=True)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         p._chat = MagicMock()
         p._load_existing_memories = MagicMock(
             return_value=[
@@ -1367,6 +1405,9 @@ class TestExtractUpdateSelfCollapseGuard:
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
         p._mark_superseded = MagicMock(return_value=True)
         p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
         p._chat = MagicMock()
         p._load_existing_memories = MagicMock(return_value=[])
         return p

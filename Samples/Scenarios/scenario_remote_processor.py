@@ -25,13 +25,18 @@ import os
 
 from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
 
 def main() -> None:
     client = CosmosMemoryClient(
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         # Hand processing off to the sibling Azure Function app.
         processor=DurableFunctionProcessor(),
     )

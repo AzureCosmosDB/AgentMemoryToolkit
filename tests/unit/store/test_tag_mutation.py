@@ -6,6 +6,8 @@ import pytest
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
+from agent_memory_toolkit._container_routing import ContainerKey
+from agent_memory_toolkit.aio.store import AsyncMemoryStore
 from agent_memory_toolkit.exceptions import MemoryConflictError
 from agent_memory_toolkit.store import MemoryStore
 
@@ -28,11 +30,18 @@ def _conflict():
     return CosmosAccessConditionFailedError(message="412", response=None)
 
 
+def _containers(*, turns=None, memories=None, summaries=None):
+    return {
+        ContainerKey.TURNS: turns if turns is not None else MagicMock(),
+        ContainerKey.MEMORIES: memories if memories is not None else MagicMock(),
+        ContainerKey.SUMMARIES: summaries if summaries is not None else MagicMock(),
+    }
+
 def test_add_tags_retries_once_after_etag_conflict_and_wins():
     container = MagicMock()
     container.read_item.side_effect = [_doc("v1", ["old"]), _doc("v2", ["old", "other"])]
     container.replace_item.side_effect = [_conflict(), None]
-    store = MemoryStore(container)
+    store = MemoryStore(containers=_containers(turns=container))
 
     store.add_tags("m1", "u1", "t1", ["New"])
 
@@ -49,7 +58,7 @@ def test_add_tags_raises_memory_conflict_after_max_retries(monkeypatch):
     container = MagicMock()
     container.read_item.side_effect = [_doc(f"v{i}", ["old"]) for i in range(5)]
     container.replace_item.side_effect = [_conflict() for _ in range(5)]
-    store = MemoryStore(container)
+    store = MemoryStore(containers=_containers(turns=container))
 
     with pytest.raises(MemoryConflictError, match="after 5 attempts"):
         store.add_tags("m1", "u1", "t1", ["new"])
@@ -59,12 +68,10 @@ def test_add_tags_raises_memory_conflict_after_max_retries(monkeypatch):
 
 
 async def test_async_add_tags_retries_once_after_etag_conflict_and_wins():
-    from agent_memory_toolkit.aio.store import AsyncMemoryStore
-
     container = MagicMock()
     container.read_item = AsyncMock(side_effect=[_doc("v1", ["old"]), _doc("v2", ["old", "other"])])
     container.replace_item = AsyncMock(side_effect=[_conflict(), None])
-    store = AsyncMemoryStore(container)
+    store = AsyncMemoryStore(containers=_containers(turns=container))
 
     await store.add_tags("m1", "u1", "t1", ["New"])
 
@@ -77,8 +84,6 @@ async def test_async_add_tags_retries_once_after_etag_conflict_and_wins():
 
 
 async def test_async_add_tags_raises_memory_conflict_after_max_retries(monkeypatch):
-    from agent_memory_toolkit.aio.store import AsyncMemoryStore
-
     async def _noop_sleep(*_a, **_kw):
         return None
 
@@ -87,7 +92,7 @@ async def test_async_add_tags_raises_memory_conflict_after_max_retries(monkeypat
     container = MagicMock()
     container.read_item = AsyncMock(side_effect=[_doc(f"v{i}", ["old"]) for i in range(5)])
     container.replace_item = AsyncMock(side_effect=[_conflict() for _ in range(5)])
-    store = AsyncMemoryStore(container)
+    store = AsyncMemoryStore(containers=_containers(turns=container))
 
     with pytest.raises(MemoryConflictError, match="after 5 attempts"):
         await store.add_tags("m1", "u1", "t1", ["new"])

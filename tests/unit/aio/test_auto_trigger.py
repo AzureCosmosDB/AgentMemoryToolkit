@@ -38,8 +38,10 @@ class TestAsyncAutoTriggerNonBlocking:
         async def fake_upsert(body):
             return body
 
-        client._container_client = MagicMock()
-        client._container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._memories_container_client = MagicMock()
+        client._memories_container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._turns_container_client = client._memories_container_client
+        client._summaries_container_client = client._memories_container_client
         client._counter_container_client = MagicMock()
 
         with patch(
@@ -75,8 +77,10 @@ class TestPushToCosmosUnflushedDelta:
         async def fake_upsert(body):
             return body
 
-        client._container_client = MagicMock()
-        client._container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._memories_container_client = MagicMock()
+        client._memories_container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._turns_container_client = client._memories_container_client
+        client._summaries_container_client = client._memories_container_client
         client._counter_container_client = MagicMock()
 
         client.add_local(user_id="u1", role="user", thread_id="t1", content="a")
@@ -116,8 +120,10 @@ class TestPushToCosmosUnflushedDelta:
         async def fake_upsert(body):
             return body
 
-        client._container_client = MagicMock()
-        client._container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._memories_container_client = MagicMock()
+        client._memories_container_client.upsert_item = MagicMock(side_effect=fake_upsert)
+        client._turns_container_client = client._memories_container_client
+        client._summaries_container_client = client._memories_container_client
         client._counter_container_client = MagicMock()
 
         client.add_local(user_id="u1", role="user", thread_id="t1", content="a")

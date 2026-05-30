@@ -14,10 +14,11 @@
 
 ### Connection
 
-- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_turns_container=None, cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure local state, model clients, optional Cosmos auto-connect, and optional processing backend. When `cosmos_turns_container` is set, turn-type documents land in a dedicated container so the main `memories` container only fires the Durable change-feed trigger for processed memory writes.
+- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_turns_container='memories_turns', cosmos_summaries_container='memories_summaries', cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure local state, model clients, optional Cosmos auto-connect, and optional processing backend. The SDK uses a hard 3-container topology: turns in `memories_turns`, facts/episodic/procedural in `memories`, and summaries in `memories_summaries` (or the names you pass).
 - `close() -> None` — close Cosmos/model clients and owned credentials.
-- `connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None, turns_container=None) -> None` — connect to an existing memory container.
-- `create_memory_store(database=None, container=None, turns_container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect the memory, optional turns, counter, and lease containers.
+- `connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None, turns_container=None, summaries_container=None) -> None` — connect to existing memory, turns, and summaries containers.
+- `create_memory_store(database=None, container=None, turns_container=None, summaries_container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect the memory, turns, summaries, counter, and lease containers.
+- `validate_topology() -> None` — read metadata for all three memory containers and raise `RuntimeError` if any is missing or unreachable; call after connecting to catch infrastructure/config drift before writes.
 
 ### Memory CRUD
 
@@ -65,10 +66,11 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 
 ### Connection
 
-- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_turns_container=None, cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure async local state, model clients, and optional processing backend. When `cosmos_turns_container` is set, turn-type documents land in a dedicated container so the main `memories` container only fires the Durable change-feed trigger for processed memory writes.
+- `__init__(cosmos_endpoint=None, cosmos_credential=None, cosmos_key=None, cosmos_database=None, cosmos_container=None, cosmos_turns_container='memories_turns', cosmos_summaries_container='memories_summaries', cosmos_counter_container=None, cosmos_lease_container=None, cosmos_throughput_mode=None, cosmos_autoscale_max_ru=None, ai_foundry_endpoint=None, ai_foundry_credential=None, ai_foundry_api_key=None, embedding_deployment_name='text-embedding-3-large', embedding_dimensions=None, chat_deployment_name='gpt-4o-mini', use_default_credential=True, processor=None) -> None` — configure async local state, model clients, and optional processing backend. The async SDK uses the same hard 3-container topology as the sync client.
 - `async close() -> None` — close async/sync resources and owned credentials.
-- `async connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None, turns_container=None) -> None` — connect to an existing memory container.
-- `async create_memory_store(database=None, container=None, turns_container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect memory, optional turns, counter, and lease containers.
+- `async connect_cosmos(endpoint=None, credential=None, key=None, database=None, container=None, turns_container=None, summaries_container=None) -> None` — connect to existing memory, turns, and summaries containers.
+- `async create_memory_store(database=None, container=None, turns_container=None, summaries_container=None, counter_container=None, lease_container=None, endpoint=None, credential=None, key=None, embedding_dimensions=None, embedding_data_type=None, distance_function=None, full_text_language=None, throughput_mode=None, autoscale_max_ru=None) -> None` — create/connect memory, turns, summaries, counter, and lease containers.
+- `async validate_topology() -> None` — read metadata for all three memory containers and raise `RuntimeError` if any is missing or unreachable; call after connecting to catch infrastructure/config drift before writes.
 
 ### Memory CRUD
 
@@ -109,6 +111,10 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 - `async add_tags(memory_id, user_id, thread_id, tags) -> None` — add tags to a memory.
 - `async remove_tags(memory_id, user_id, thread_id, tags) -> None` — remove tags from a memory.
 - `async list_tags(user_id, *, thread_id=None, prefix=None, include_sys=False) -> list[str]` — list sorted, deduped tags for a user; omits `sys:*` by default.
+
+## Topology validation
+
+Use `validate_topology()` (sync) or `await validate_topology()` (async) after `connect_cosmos()` or `create_memory_store()` to verify that `memories`, `memories_turns`, and `memories_summaries` all exist and are readable. The method raises `RuntimeError` with redeploy guidance on the first missing or unreachable container.
 
 ## Extension Points
 

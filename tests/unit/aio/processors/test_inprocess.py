@@ -12,7 +12,7 @@ from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor, Process
 @pytest.mark.asyncio
 async def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline = AsyncMock()
-    pipeline.generate_thread_summary.return_value = {"id": "summary"}
+    pipeline.generate_thread_summary.return_value = {"id": "summary", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 0, "kept": 3}
 
@@ -26,7 +26,7 @@ async def test_process_thread_calls_summarize_extract_reconcile_in_order():
         "reconcile_memories",
     ]
     assert isinstance(result, ProcessThreadResult)
-    assert result.thread_summary == {"id": "summary"}
+    assert result.thread_summary == {"id": "summary", "type": "thread_summary"}
     assert result.reconciled_count == 2
 
 

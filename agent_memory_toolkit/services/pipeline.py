@@ -18,6 +18,7 @@ from typing import Any, Literal, Optional
 
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
+from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
 from agent_memory_toolkit.exceptions import (
     LLMError,
@@ -76,27 +77,58 @@ _PROCEDURAL_MAX_CREATE_ATTEMPTS = 5
 
 
 class _StoreContainerAdapter:
-    """Adapter that exposes :class:`MemoryStore` via the Cosmos container method shapes."""
+    """Expose one split ``MemoryStore`` container via Cosmos method shapes."""
 
-    def __init__(self, store: MemoryStoreProtocol) -> None:
+    def __init__(self, store: MemoryStoreProtocol, container_key: ContainerKey) -> None:
         self._store = store
+        self._container_key = container_key
+
+    def _target_container(self) -> Any | None:
+        containers = getattr(self._store, "_containers", None)
+        if isinstance(containers, dict):
+            return containers.get(self._container_key)
+        if self._container_key is ContainerKey.MEMORIES:
+            return getattr(self._store, "container", None)
+        return None
 
     def query_items(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return self._store.query(
-            kwargs["query"],
-            parameters=kwargs.get("parameters"),
-            partition_key=kwargs.get("partition_key"),
-            cross_partition=bool(kwargs.get("enable_cross_partition_query")),
-        )
+        container = self._target_container()
+        if container is not None and hasattr(container, "query_items"):
+            return list(container.query_items(**kwargs))
+        try:
+            return self._store.query(
+                kwargs["query"],
+                parameters=kwargs.get("parameters"),
+                container_key=self._container_key,
+                partition_key=kwargs.get("partition_key"),
+                cross_partition=bool(kwargs.get("enable_cross_partition_query")),
+            )
+        except TypeError:
+            return self._store.query(
+                kwargs["query"],
+                parameters=kwargs.get("parameters"),
+                partition_key=kwargs.get("partition_key"),
+                cross_partition=bool(kwargs.get("enable_cross_partition_query")),
+            )
 
     def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
-        return self._store.read_item(item, partition_key)
+        container = self._target_container()
+        if container is not None and hasattr(container, "read_item"):
+            return container.read_item(item=item, partition_key=partition_key)
+        try:
+            return self._store.read_item(item, partition_key, container_key=self._container_key)
+        except TypeError:
+            return self._store.read_item(item, partition_key)
 
     def upsert_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        container = self._target_container()
+        if container is not None and hasattr(container, "upsert_item"):
+            response = container.upsert_item(body=body)
+            return response if isinstance(response, dict) else body
         return self._store.add_cosmos(body)
 
     def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
-        container = getattr(self._store, "container", None)
+        container = self._target_container()
         if container is not None and hasattr(container, "create_item"):
             response = container.create_item(body=body)
             return response if isinstance(response, dict) else body
@@ -106,11 +138,16 @@ class _StoreContainerAdapter:
             return response if isinstance(response, dict) else body
         return self._store.add_cosmos(body)
 
+    def replace_item(self, **kwargs: Any) -> Any:
+        container = self._target_container()
+        if container is not None and hasattr(container, "replace_item"):
+            return container.replace_item(**kwargs)
+        body = kwargs["body"]
+        return self.upsert_item(body=body)
+
 
 class PipelineService:
     """LLM orchestration service backed by a typed memory store."""
-
-    _turns_container: Any = None
 
     def __init__(
         self,
@@ -118,11 +155,15 @@ class PipelineService:
         chat_client: Any,
         embeddings_client: Any,
         prompts_dir: str | None = None,
-        cosmos_turns_container: Any | None = None,
+        *,
+        containers: dict[ContainerKey, Any],
     ) -> None:
         self._store = store
-        self._container = _StoreContainerAdapter(store)
-        self._turns_container = cosmos_turns_container
+        self._containers = containers
+        self._memories_container = containers[ContainerKey.MEMORIES]
+        self._turns_container = containers[ContainerKey.TURNS]
+        self._summaries_container = containers[ContainerKey.SUMMARIES]
+        self._container = self._memories_container
         self._chat_client = chat_client
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
@@ -206,7 +247,7 @@ class PipelineService:
             parameters.append({"name": f"@mtype{i}", "value": mt})
 
         items = list(
-            self._container.query_items(
+            self._memories_container.query_items(
                 query=query,
                 parameters=parameters,
                 enable_cross_partition_query=True,
@@ -215,17 +256,22 @@ class PipelineService:
         return items
 
     def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Upsert a single memory document via the memory store."""
-        response = self._store.add_cosmos(doc)
+        """Upsert a fact, episodic, or procedural document to the memories container."""
+        response = self._memories_container.upsert_item(body=doc)
+        if isinstance(response, dict):
+            return response
+        return doc
+
+    def _upsert_summary(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Upsert a thread/user summary document to the summaries container."""
+        response = self._summaries_container.upsert_item(body=doc)
         if isinstance(response, dict):
             return response
         return doc
 
     def _create_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Create a memory document and let Cosmos raise 409 for duplicates."""
-        if getattr(self, "_store", None) is None:
-            return self._upsert_memory(doc)
-        response = self._container.create_item(body=doc)
+        response = self._memories_container.create_item(body=doc)
         return response if isinstance(response, dict) else doc
 
     @staticmethod
@@ -256,7 +302,7 @@ class PipelineService:
         reason: Literal["update", "contradict"],
     ) -> bool:
         try:
-            old_mem = self._container.read_item(item=supersedes_id, partition_key=[user_id, thread_id])
+            old_mem = self._memories_container.read_item(item=supersedes_id, partition_key=[user_id, thread_id])
             if old_mem.get("superseded_by"):
                 logger.debug(
                     "extract_memories: skipping UPDATE — target %s already superseded by %s",
@@ -284,7 +330,7 @@ class PipelineService:
                 f"AND {_ACTIVE_DOC_FILTER}"
             )
             results = list(
-                self._container.query_items(
+                self._memories_container.query_items(
                     query=q,
                     parameters=[
                         {"name": "@id", "value": supersedes_id},
@@ -339,14 +385,14 @@ class PipelineService:
         }
         try:
             if old_doc.get("_etag"):
-                self._container.replace_item(
+                self._memories_container.replace_item(
                     item=new_doc["id"],
                     body=new_doc,
                     match_condition=MatchConditions.IfNotModified,
                     etag=old_doc["_etag"],
                 )
             else:
-                self._container.upsert_item(body=new_doc)
+                self._memories_container.upsert_item(body=new_doc)
             return True
         except CosmosAccessConditionFailedError:
             logger.info(
@@ -377,28 +423,18 @@ class PipelineService:
         logger.info("extract_memories_dry started user_id=%s thread_id=%s", user_id, thread_id)
 
         if turns is None:
-            query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id"
+            query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
             parameters: list[dict[str, Any]] = [
                 {"name": "@user_id", "value": user_id},
                 {"name": "@thread_id", "value": thread_id},
             ]
             items = list(
-                self._container.query_items(
+                self._turns_container.query_items(
                     query=query,
                     parameters=parameters,
                     partition_key=[user_id, thread_id],
                 )
             )
-            if self._turns_container is not None:
-                items.extend(
-                    list(
-                        self._turns_container.query_items(
-                            query=query,
-                            parameters=parameters,
-                            partition_key=[user_id, thread_id],
-                        )
-                    )
-                )
         else:
             items = list(turns)
 
@@ -720,7 +756,7 @@ class PipelineService:
 
         def _read_latest_procedural() -> Optional[dict[str, Any]]:
             docs = list(
-                self._container.query_items(
+                self._memories_container.query_items(
                     query=(
                         "SELECT * FROM c WHERE c.user_id = @uid "
                         "AND c.thread_id = @thread_id "
@@ -750,7 +786,7 @@ class PipelineService:
         prior_doc = _read_latest_procedural()
 
         behavioral_fact_docs = list(
-            self._container.query_items(
+            self._memories_container.query_items(
                 query=(
                     "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                     "AND c.type = @type "
@@ -776,7 +812,7 @@ class PipelineService:
         behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
 
         episodic_docs = list(
-            self._container.query_items(
+            self._memories_container.query_items(
                 query=(
                     "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                     "AND c.type = @type "
@@ -825,7 +861,7 @@ class PipelineService:
             return {"status": "unchanged", "procedural": prior_doc}
 
         name_docs = list(
-            self._container.query_items(
+            self._memories_container.query_items(
                 query=(
                     "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
                     "AND c.type = @type "
@@ -909,7 +945,7 @@ class PipelineService:
             }
             validated = construct_internal(ProceduralRecord, new_doc).to_doc()
             try:
-                self._container.create_item(body=validated)
+                self._memories_container.create_item(body=validated)
                 written_doc = validated
                 break
             except CosmosResourceExistsError:
@@ -968,11 +1004,11 @@ class PipelineService:
         summary_id = f"summary_{user_id}_{thread_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._container.read_item(item=summary_id, partition_key=[user_id, thread_id])
+            existing_summary = self._summaries_container.read_item(item=summary_id, partition_key=[user_id, thread_id])
         except CosmosResourceNotFoundError:
             pass
 
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type != 'summary'"
+        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
         parameters: list[dict[str, Any]] = [
             {"name": "@user_id", "value": user_id},
             {"name": "@thread_id", "value": thread_id},
@@ -983,22 +1019,12 @@ class PipelineService:
             parameters.append({"name": "@since", "value": since})
 
         items = list(
-            self._container.query_items(
+            self._turns_container.query_items(
                 query=query,
                 parameters=parameters,
                 partition_key=[user_id, thread_id],
             )
         )
-        if self._turns_container is not None:
-            items.extend(
-                list(
-                    self._turns_container.query_items(
-                        query=query,
-                        parameters=parameters,
-                        partition_key=[user_id, thread_id],
-                    )
-                )
-            )
 
         if existing_summary and not items:
             logger.info("generate_thread_summary_dry no new memories, returning existing")
@@ -1040,7 +1066,7 @@ class PipelineService:
             "user_id": user_id,
             "thread_id": thread_id,
             "role": "system",
-            "type": "summary",
+            "type": "thread_summary",
             "content": overview,
             "salience": 1.0,
             "tags": ["sys:summary"] + topic_tags,
@@ -1079,7 +1105,7 @@ class PipelineService:
         if doc.get("content") and not doc.get("embedding"):
             doc["embedding"] = self._embed_one(doc["content"])
         validated = construct_internal(ThreadSummaryRecord, doc).to_doc()
-        stored = self._upsert_memory(validated)
+        stored = self._upsert_summary(validated)
         logger.info("persist_thread_summary completed id=%s", validated.get("id"))
         return stored
 
@@ -1112,31 +1138,43 @@ class PipelineService:
         user_summary_id = f"user_summary_{user_id}"
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._container.read_item(
+            existing_summary = self._summaries_container.read_item(
                 item=user_summary_id,
                 partition_key=[user_id, "__user_summary__"],
             )
         except CosmosResourceNotFoundError:
             pass
 
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.type != 'user_summary'"
+        query_predicate = "c.user_id = @user_id"
         parameters: list[dict[str, Any]] = [{"name": "@user_id", "value": user_id}]
         if existing_summary:
             since = existing_summary["updated_at"]
-            query += " AND c.created_at > @since"
+            query_predicate += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        items = list(self._container.query_items(query=query, parameters=parameters, enable_cross_partition_query=True))
-        if self._turns_container is not None:
-            items.extend(
-                list(
-                    self._turns_container.query_items(
-                        query=query,
-                        parameters=parameters,
-                        enable_cross_partition_query=True,
-                    )
-                )
+        memories_query = (
+            f"SELECT * FROM c WHERE {query_predicate} "
+            "AND c.type IN ('fact', 'episodic', 'procedural')"
+        )
+        summaries_query = (
+            f"SELECT * FROM c WHERE {query_predicate} "
+            "AND c.type = 'thread_summary'"
+        )
+
+        items = list(
+            self._memories_container.query_items(
+                query=memories_query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
             )
+        )
+        items.extend(
+            self._summaries_container.query_items(
+                query=summaries_query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
+            )
+        )
 
         if existing_summary and not items:
             logger.info("generate_user_summary_dry no new memories, returning existing")
@@ -1234,7 +1272,7 @@ class PipelineService:
         if doc.get("content") and not doc.get("embedding"):
             doc["embedding"] = self._embed_one(doc["content"])
         validated = construct_internal(UserSummaryRecord, doc).to_doc()
-        stored = self._upsert_memory(validated)
+        stored = self._upsert_summary(validated)
         logger.info("persist_user_summary completed id=%s", validated.get("id"))
         return stored
 
@@ -1317,7 +1355,7 @@ class PipelineService:
             {"name": "@user_id", "value": user_id},
         ]
         facts = list(
-            self._container.query_items(
+            self._memories_container.query_items(
                 query=query,
                 parameters=parameters,
                 enable_cross_partition_query=True,
@@ -1720,14 +1758,16 @@ class PipelineService:
             f"AND {_ACTIVE_DOC_FILTER} "
             "ORDER BY c.version DESC"
         )
-        items = self._store.query(
-            query,
-            parameters=[
-                {"name": "@user_id", "value": user_id},
-                {"name": "@thread_id", "value": "__procedural__"},
-                {"name": "@type", "value": "procedural"},
-            ],
-            cross_partition=True,
+        items = list(
+            self._memories_container.query_items(
+                query=query,
+                parameters=[
+                    {"name": "@user_id", "value": user_id},
+                    {"name": "@thread_id", "value": "__procedural__"},
+                    {"name": "@type", "value": "procedural"},
+                ],
+                enable_cross_partition_query=True,
+            )
         )
         if not items:
             return ""

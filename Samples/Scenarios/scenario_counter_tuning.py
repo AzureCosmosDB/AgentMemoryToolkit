@@ -44,6 +44,11 @@ import uuid
 
 from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
 
 def main() -> None:
     user_id = "alice"
@@ -53,7 +58,7 @@ def main() -> None:
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         # Hand processing off to the sibling Azure Function app.
         processor=DurableFunctionProcessor(),
     )
@@ -109,7 +114,7 @@ def main() -> None:
     summaries = client.get_memories(
         user_id=user_id,
         thread_id=thread_id,
-        memory_types=["summary"],
+        memory_types=["thread_summary"],
     )
     print(f"\n  thread summaries persisted: {len(summaries)}")
     for s in summaries[:3]:

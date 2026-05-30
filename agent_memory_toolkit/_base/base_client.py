@@ -6,6 +6,7 @@ import importlib
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit._utils import (
     VALID_ROLES,
     VALID_TYPES,
@@ -31,7 +32,8 @@ class _BaseMemoryClient:
         cosmos_key: Optional[str],
         cosmos_database: Optional[str],
         cosmos_container: Optional[str],
-        cosmos_turns_container: Optional[str] = None,
+        cosmos_turns_container: str = "memories_turns",
+        cosmos_summaries_container: str = "memories_summaries",
         cosmos_counter_container: Optional[str],
         cosmos_lease_container: Optional[str],
         cosmos_throughput_mode: Optional[str],
@@ -57,10 +59,8 @@ class _BaseMemoryClient:
         self._cosmos_key = cosmos_key
         self._cosmos_database = cosmos_database or "ai_memory"
         self._cosmos_container = cosmos_container or "memories"
-        # None means use the main container for turns. Note: change-feed-based
-        # triggers (e.g., Azure Functions) bound to the main container will NOT
-        # fire for turns written to a dedicated turns container.
         self._cosmos_turns_container = cosmos_turns_container
+        self._cosmos_summaries_container = cosmos_summaries_container
         self._cosmos_counter_container = cosmos_counter_container or "counter"
         self._cosmos_lease_container = cosmos_lease_container or "leases"
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(cosmos_throughput_mode)
@@ -98,10 +98,19 @@ class _BaseMemoryClient:
                     pass
 
         self._cosmos_client: Any = None
-        self._container_client: Any = None
+        self._memories_container_client: Any = None
         self._turns_container_client: Any = None
+        self._summaries_container_client: Any = None
         self._counter_container_client: Any = None
         self._store: Any = None
+
+    @property
+    def _containers(self) -> dict[ContainerKey, Any]:
+        return {
+            ContainerKey.TURNS: self._turns_container_client,
+            ContainerKey.MEMORIES: self._memories_container_client,
+            ContainerKey.SUMMARIES: self._summaries_container_client,
+        }
 
     def __enter__(self) -> Any:
         return self
@@ -204,12 +213,12 @@ class _BaseMemoryClient:
 
     def _require_cosmos(self) -> None:
         """Raise if Cosmos DB is not connected."""
-        if self._container_client is None:
+        if self._memories_container_client is None:
             raise CosmosNotConnectedError()
 
     def _warn_on_embedding_dim_mismatch(self, container: Any = None) -> None:
         """Log a warning when the configured embedding dim differs from the container policy."""
-        container = container if container is not None else self._container_client
+        container = container if container is not None else self._memories_container_client
         if container is None or self._embedding_dimensions is None:
             return
         try:

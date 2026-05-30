@@ -21,20 +21,35 @@ class InProcessProcessor:
         pipeline: Any = None,
         *,
         cosmos_container: Any = None,
+        turns_container: Any = None,
+        summaries_container: Any = None,
         chat_client: Any = None,
         embeddings_client: Any = None,
     ) -> None:
         if pipeline is None:
-            if cosmos_container is None or chat_client is None or embeddings_client is None:
+            if (
+                cosmos_container is None
+                or turns_container is None
+                or summaries_container is None
+                or chat_client is None
+                or embeddings_client is None
+            ):
                 raise ValueError(
                     "InProcessProcessor requires either a `pipeline` instance or "
-                    "`cosmos_container`, `chat_client`, and `embeddings_client`."
+                    "`cosmos_container`, `turns_container`, `summaries_container`, "
+                    "`chat_client`, and `embeddings_client`."
                 )
+            from .._container_routing import ContainerKey
             from ..services.pipeline import PipelineService
             from ..store import MemoryStore
 
-            store = MemoryStore(cosmos_container, embeddings_client=embeddings_client)
-            pipeline = PipelineService(store, chat_client, embeddings_client)
+            containers = {
+                ContainerKey.TURNS: turns_container,
+                ContainerKey.MEMORIES: cosmos_container,
+                ContainerKey.SUMMARIES: summaries_container,
+            }
+            store = MemoryStore(containers=containers, embeddings_client=embeddings_client)
+            pipeline = PipelineService(store, chat_client, embeddings_client, containers=containers)
 
         self._pipeline = pipeline
 

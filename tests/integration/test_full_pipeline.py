@@ -129,13 +129,13 @@ class TestThreadSummary:
                 thread_id=unique_thread_id,
             )
             assert doc.get("id"), f"Expected summary doc with id, got {doc}"
-            assert doc.get("type") == "summary"
+            assert doc.get("type") == "thread_summary"
             assert doc.get("content"), "Summary content must not be empty"
 
             summaries = agent_memory.get_memories(
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
-                memory_types=["summary"],
+                memory_types=["thread_summary"],
             )
             assert len(summaries) >= 1
         finally:
@@ -204,6 +204,9 @@ class TestUserSummary:
                 ],
             )
             time.sleep(1)
+
+            agent_memory.generate_thread_summary(user_id=unique_user_id, thread_id=t1)
+            agent_memory.generate_thread_summary(user_id=unique_user_id, thread_id=t2)
 
             doc = agent_memory.generate_user_summary(
                 user_id=unique_user_id,

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit._container_routing import ContainerKey
+from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class FakeLLMService:
@@ -72,8 +74,8 @@ class FakeStore:
             docs = [doc for doc in docs if doc.get("type") in types]
         if "c.type = 'fact'" in sql:
             docs = [doc for doc in docs if doc.get("type") == "fact"]
-        if "c.type != 'summary'" in sql:
-            docs = [doc for doc in docs if doc.get("type") != "summary"]
+        if "c.type != 'thread_summary'" in sql:
+            docs = [doc for doc in docs if doc.get("type") != "thread_summary"]
         if "c.type != 'user_summary'" in sql:
             docs = [doc for doc in docs if doc.get("type") != "user_summary"]
         if "@id" in params:
@@ -121,8 +123,37 @@ class FakeStore:
         return False
 
 
-def _turn(content: str = "I prefer dark mode.") -> dict[str, Any]:
+def _containers_for_store(
+    memories_store: FakeStore,
+    *,
+    turns_store: FakeStore | None = None,
+    summaries_store: FakeStore | None = None,
+) -> dict[ContainerKey, _StoreContainerAdapter]:
+    turns_store = turns_store or FakeStore()
+    summaries_store = summaries_store or FakeStore()
     return {
+        ContainerKey.TURNS: _StoreContainerAdapter(turns_store, ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _StoreContainerAdapter(memories_store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _StoreContainerAdapter(summaries_store, ContainerKey.SUMMARIES),
+    }
+
+
+def _pipeline(
+    memories_store: FakeStore,
+    llm: FakeLLMService,
+    *,
+    turns_store: FakeStore | None = None,
+    summaries_store: FakeStore | None = None,
+) -> PipelineService:
+    return PipelineService(
+        memories_store,
+        llm.chat_client,
+        llm.embeddings_client,
+        containers=_containers_for_store(memories_store, turns_store=turns_store, summaries_store=summaries_store),
+    )
+
+
+def _turn(content: str = "I prefer dark mode.") -> dict[str, Any]:    return {
         "id": "turn1",
         "user_id": "u1",
         "thread_id": "t1",
@@ -152,7 +183,8 @@ def _fact(fid: str, content: str, **extra: Any) -> dict[str, Any]:
 
 
 def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
-    store = FakeStore([_turn("I prefer dark mode and learned CI needs retries.")])
+    store = FakeStore()
+    turns_store = FakeStore([_turn("I prefer dark mode and learned CI needs retries.")])
     llm = FakeLLMService(
         [
             {
@@ -181,7 +213,7 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
         ]
     )
 
-    result = PipelineService(store, llm.chat_client, llm.embeddings_client).extract_memories("u1", "t1")
+    result = _pipeline(store, llm, turns_store=turns_store).extract_memories("u1", "t1")
 
     assert result["fact_count"] == 1
     assert result["episodic_count"] == 1
@@ -199,7 +231,8 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
 
 def test_extract_memories_contradict_supersedes_existing_fact() -> None:
     old = _fact("old_fact", "The user prefers light mode.")
-    store = FakeStore([_turn("Actually, I prefer dark mode now."), old])
+    store = FakeStore([old])
+    turns_store = FakeStore([_turn("Actually, I prefer dark mode now.")])
     llm = FakeLLMService(
         [
             {
@@ -215,7 +248,7 @@ def test_extract_memories_contradict_supersedes_existing_fact() -> None:
         ]
     )
 
-    result = PipelineService(store, llm.chat_client, llm.embeddings_client).extract_memories("u1", "t1")
+    result = _pipeline(store, llm, turns_store=turns_store).extract_memories("u1", "t1")
 
     assert result["fact_count"] == 1
     assert result["contradicted_count"] == 1
@@ -245,7 +278,7 @@ def test_synthesize_procedural_produces_procedural_memory() -> None:
     )
     llm = FakeLLMService([{"system_prompt": "Use concise bullet points."}])
 
-    result = PipelineService(store, llm.chat_client, llm.embeddings_client).synthesize_procedural("u1")
+    result = _pipeline(store, llm).synthesize_procedural("u1")
 
     assert result["status"] == "synthesized"
     proc = result["procedural"]
@@ -277,7 +310,7 @@ def test_reconcile_memories_returns_three_bucket_counts() -> None:
         ]
     )
 
-    result = PipelineService(store, llm.chat_client, llm.embeddings_client).reconcile_memories("u1", n=4)
+    result = _pipeline(store, llm).reconcile_memories("u1", n=4)
 
     assert result == {"kept": 1, "merged": 2, "contradicted": 1}
 
@@ -301,7 +334,7 @@ def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
         ]
     )
 
-    PipelineService(store, llm.chat_client, llm.embeddings_client).reconcile_memories("u1", n=4)
+    _pipeline(store, llm).reconcile_memories("u1", n=4)
 
     by_id = {doc["id"]: doc for doc in store.docs}
     assert by_id["f1"]["supersede_reason"] == "duplicate"
@@ -310,21 +343,61 @@ def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
     assert by_id["f4"]["superseded_by"] == "f3"
 
 
+def test_thread_summary_persists_to_summaries_container() -> None:
+    turns_container = MagicMock()
+    memories_container = MagicMock()
+    summaries_container = MagicMock()
+    summaries_container.upsert_item.side_effect = lambda body: body
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    embeddings = FakeLLMService([]).embeddings_client
+    service = PipelineService(FakeStore(), object(), embeddings, containers=containers)
+    summary_doc = {
+        "id": "summary_u1_t1",
+        "user_id": "u1",
+        "thread_id": "t1",
+        "role": "system",
+        "type": "thread_summary",
+        "content": "Thread discussed retries.",
+        "salience": 1.0,
+        "tags": ["sys:summary"],
+        "prompt_id": "summarize.prompty",
+        "prompt_version": "v1",
+        "metadata": {"structured_summary": {"overview": "Thread discussed retries."}},
+        "created_at": "2025-01-01T00:00:00+00:00",
+        "updated_at": "2025-01-01T00:00:00+00:00",
+    }
+
+    stored = service.persist_thread_summary("u1", "t1", summary_doc)
+
+    assert stored["type"] == "thread_summary"
+    summaries_container.upsert_item.assert_called_once()
+    assert summaries_container.upsert_item.call_args.kwargs["body"]["id"] == "summary_u1_t1"
+    memories_container.method_calls == []
+    turns_container.method_calls == []
+
+
+
 def test_generate_thread_and_user_summary_basic_shape() -> None:
-    store = FakeStore([_turn("We decided to add retries."), _fact("f1", "The project needs retries.")])
+    store = FakeStore()
+    turns_store = FakeStore([_turn("We decided to add retries.")])
+    summaries_store = FakeStore()
     llm = FakeLLMService(
         [
             {"overview": "Thread discussed retries.", "topics": ["retries"], "decisions": ["Add retries"]},
             {"key_facts": ["The project needs retries."], "open_questions": []},
         ]
     )
-    service = PipelineService(store, llm.chat_client, llm.embeddings_client)
+    service = _pipeline(store, llm, turns_store=turns_store, summaries_store=summaries_store)
 
     thread_summary = service.generate_thread_summary("u1", "t1")
     user_summary = service.generate_user_summary("u1", thread_ids=["t1"])
 
     assert thread_summary["id"] == "summary_u1_t1"
-    assert thread_summary["type"] == "summary"
+    assert thread_summary["type"] == "thread_summary"
     assert thread_summary["content"] == "Thread discussed retries."
     assert "topic:retries" in thread_summary["tags"]
     assert user_summary["id"] == "user_summary_u1"
@@ -358,11 +431,11 @@ def test_build_procedural_context_returns_active_procedural() -> None:
     )
 
     fake = FakeLLMService([])
-    result = PipelineService(store, fake.chat_client, fake.embeddings_client).build_procedural_context("u1")
+    result = _pipeline(store, fake).build_procedural_context("u1")
     assert result == "Active prompt"
 
 
 def test_build_procedural_context_requires_user_id() -> None:
     with pytest.raises(Exception, match="user_id is required"):
         fake = FakeLLMService([])
-        PipelineService(FakeStore(), fake.chat_client, fake.embeddings_client).build_procedural_context("")
+        _pipeline(FakeStore(), fake).build_procedural_context("")

@@ -21,7 +21,7 @@ from agent_memory_toolkit.processors import (
 def _build_client(processor=None) -> CosmosMemoryClient:
     """Build a CosmosMemoryClient with a fake container client attached."""
     client = CosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()
+    client._memories_container_client = MagicMock()
     return client
 
 
@@ -35,7 +35,7 @@ class TestInProcessProcessNowEndToEnd:
         pipeline = MagicMock()
         pipeline.generate_thread_summary.return_value = {
             "id": "summary-1",
-            "type": "summary",
+            "type": "thread_summary",
             "content": "Conversation about Paris.",
         }
         pipeline.extract_memories.return_value = {
@@ -59,7 +59,7 @@ class TestInProcessProcessNowEndToEnd:
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary == {
             "id": "summary-1",
-            "type": "summary",
+            "type": "thread_summary",
             "content": "Conversation about Paris.",
         }
         assert result.extracted_counts == {
@@ -120,7 +120,7 @@ class TestDurableProcessNowAndWaitPolling:
             side_effect=[
                 [],
                 [],
-                [{"id": "summary-1", "memory_type": "summary", "content": "..."}],
+                [{"id": "summary-1", "memory_type": "thread_summary", "content": "..."}],
             ]
         )
 
@@ -136,7 +136,7 @@ class TestDurableProcessNowAndWaitPolling:
             kwargs = call.kwargs
             assert kwargs["user_id"] == "u-poll"
             assert kwargs["thread_id"] == "th-poll"
-            assert kwargs["memory_types"] == ["summary"]
+            assert kwargs["memory_types"] == ["thread_summary"]
 
 
 # ---------------------------------------------------------------------------

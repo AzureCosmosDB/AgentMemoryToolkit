@@ -71,7 +71,7 @@ Minimum `.env` values:
 ```env
 COSMOS_DB_ENDPOINT=https://<your-account>.documents.azure.com:443/
 COSMOS_DB_DATABASE=ai_memory
-COSMOS_DB_CONTAINER=memories
+COSMOS_DB_MEMORIES_CONTAINER=memories
 COSMOS_DB_COUNTERS_CONTAINER=counter
 COSMOS_DB_LEASE_CONTAINER=leases
 COSMOS_DB_THROUGHPUT_MODE=serverless
@@ -160,7 +160,7 @@ load_dotenv()
 memory = AgentMemory(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
@@ -203,7 +203,7 @@ load_dotenv()
 memory = AsyncAgentMemory(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
@@ -219,7 +219,7 @@ memory = AsyncAgentMemory(
 await memory.connect_cosmos(
     endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     database=os.getenv("COSMOS_DB_DATABASE"),
-    container=os.getenv("COSMOS_DB_CONTAINER"),
+    container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER"),
     credential=AsyncDefaultAzureCredential(),
 )
 await memory.create_memory_store()

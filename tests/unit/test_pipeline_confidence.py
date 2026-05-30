@@ -8,14 +8,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
+from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit.services.pipeline import PipelineService
 from agent_memory_toolkit.store import MemoryStore
 
 
 def _make_pipeline(llm_response: dict):
-    container = MagicMock()
+    turns_container = MagicMock()
+    memories_container = MagicMock()
+    summaries_container = MagicMock()
     # Single turn so the pipeline doesn't bail on "no memories found".
-    container.query_items.return_value = iter(
+    turns_container.query_items.return_value = iter(
         [
             {
                 "id": "turn1",
@@ -28,20 +31,21 @@ def _make_pipeline(llm_response: dict):
             }
         ]
     )
-    # Capture writes from both upsert_item and create_item. The pipeline now
-    # uses create_item for facts/episodics/procedural (for 409 idempotency),
-    # so a fixture that only watches upsert_item would silently observe zero
-    # writes against a MagicMock container.
     upserted: list[dict] = []
-    container.upsert_item.side_effect = lambda body: upserted.append(body) or body
-    container.create_item.side_effect = lambda body: upserted.append(body) or body
+    memories_container.upsert_item.side_effect = lambda body: upserted.append(body) or body
+    memories_container.create_item.side_effect = lambda body: upserted.append(body) or body
 
     chat = MagicMock()
     embeddings = MagicMock()
     embeddings.generate_batch.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
 
-    store = MemoryStore(container, embeddings_client=embeddings)
-    pipeline = PipelineService(store, chat, embeddings)
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    store = MemoryStore(containers=containers, embeddings_client=embeddings)
+    pipeline = PipelineService(store, chat, embeddings, containers=containers)
     # Avoid real LLM/prompty calls.
     pipeline._run_prompty = MagicMock(return_value=json.dumps(llm_response))
     pipeline._load_existing_memories = MagicMock(return_value=[])
@@ -163,7 +167,8 @@ class TestMarkSupersededDoesNotMutate:
         from agent_memory_toolkit.services.pipeline import PipelineService
 
         pipeline = PipelineService.__new__(PipelineService)
-        pipeline._container = MagicMock()
+        pipeline._store = None
+        pipeline._memories_container = MagicMock()
 
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
@@ -172,11 +177,14 @@ class TestMarkSupersededDoesNotMutate:
 
         assert result is True
         assert old_doc == snapshot
-        body = pipeline._container.replace_item.call_args.kwargs["body"]
+        body = pipeline._memories_container.replace_item.call_args.kwargs["body"]
         assert body["superseded_by"] == "fact-2"
         assert body["supersede_reason"] == "duplicate"
         assert "superseded_at" in body
-        assert pipeline._container.replace_item.call_args.kwargs["match_condition"] == MatchConditions.IfNotModified
+        assert (
+            pipeline._memories_container.replace_item.call_args.kwargs["match_condition"]
+            == MatchConditions.IfNotModified
+        )
 
     def test_input_dict_unchanged_on_failure(self):
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
@@ -184,8 +192,12 @@ class TestMarkSupersededDoesNotMutate:
         from agent_memory_toolkit.services.pipeline import PipelineService
 
         pipeline = PipelineService.__new__(PipelineService)
-        pipeline._container = MagicMock()
-        pipeline._container.replace_item.side_effect = CosmosAccessConditionFailedError(message="412", response=None)
+        pipeline._store = None
+        pipeline._memories_container = MagicMock()
+        pipeline._memories_container.replace_item.side_effect = CosmosAccessConditionFailedError(
+            message="412",
+            response=None,
+        )
 
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
@@ -214,31 +226,34 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
         pipeline = PipelineService.__new__(PipelineService)
         pipeline._embeddings = MagicMock()
         pipeline._embeddings.generate.return_value = [0.1] * 8
-        pipeline._upsert_memory = MagicMock()
-        pipeline._container = MagicMock()
+        pipeline._upsert_summary = MagicMock(side_effect=lambda doc: doc)
+        pipeline._memories_container = MagicMock()
+        pipeline._summaries_container = MagicMock()
         pipeline._chat = MagicMock()
         return pipeline
 
     def test_thread_ids_does_not_appear_in_query_or_parameters(self):
         pipeline = self._build_pipeline()
         # No prior user-summary; first-pass full generation.
-        pipeline._container.read_item.side_effect = CosmosResourceNotFoundError(message="not found")
-        # Two memories on different threads; the IN filter would drop t3.
-        pipeline._container.query_items.return_value = iter(
+        pipeline._summaries_container.read_item.side_effect = CosmosResourceNotFoundError(message="not found")
+        # No facts/episodics in MEMORIES for this user.
+        pipeline._memories_container.query_items.return_value = iter([])
+        # Two thread summaries on different threads; the IN filter would drop t3.
+        pipeline._summaries_container.query_items.return_value = iter(
             [
                 {
-                    "id": "f1",
+                    "id": "summary_u1_t1",
                     "user_id": "u1",
                     "thread_id": "t1",
-                    "type": "fact",
+                    "type": "thread_summary",
                     "content": "User likes coffee.",
                     "created_at": "2025-01-01T00:00:00+00:00",
                 },
                 {
-                    "id": "f3",
+                    "id": "summary_u1_t3",
                     "user_id": "u1",
                     "thread_id": "t3",
-                    "type": "fact",
+                    "type": "thread_summary",
                     "content": "User lives in Seattle.",
                     "created_at": "2025-01-01T00:00:01+00:00",
                 },
@@ -252,15 +267,15 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
         ):
             pipeline.generate_user_summary(user_id="u1", thread_ids=["t1"])
 
-        call = pipeline._container.query_items.call_args
-        query = call.kwargs["query"]
-        params = call.kwargs["parameters"]
+        for container_mock in (pipeline._memories_container, pipeline._summaries_container):
+            call = container_mock.query_items.call_args
+            query = call.kwargs["query"]
+            params = call.kwargs["parameters"]
+            assert "IN (@tid" not in query
+            assert "@tid" not in query
+            assert not any(p["name"].startswith("@tid") for p in params)
 
-        assert "IN (" not in query
-        assert "@tid" not in query
-        assert not any(p["name"].startswith("@tid") for p in params)
-
-        upserted = pipeline._upsert_memory.call_args.args[0]
+        upserted = pipeline._upsert_summary.call_args.args[0]
         # Both threads must contribute to the resulting summary metadata.
         assert sorted(upserted["metadata"]["thread_ids"]) == ["t1", "t3"]
 

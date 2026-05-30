@@ -15,6 +15,9 @@ from agent_memory_toolkit.aio import (
     AsyncCosmosMemoryClient,
     AsyncDurableFunctionProcessor,
 )
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 async def main() -> None:
@@ -22,7 +25,7 @@ async def main() -> None:
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         # Hand processing off to the sibling Azure Function app.
         processor=AsyncDurableFunctionProcessor(),
     )

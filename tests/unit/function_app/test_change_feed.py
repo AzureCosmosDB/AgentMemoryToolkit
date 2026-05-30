@@ -12,6 +12,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import triggers.change_feed as change_feed_module
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from triggers.change_feed import process_changefeed_batch
 
@@ -25,6 +26,7 @@ def _default_owner_durable(monkeypatch):
     ``@patch.dict`` or ``monkeypatch``.
     """
     monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "durable")
+    change_feed_module._topology_validated = True
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,73 @@ def _make_counter_container_starting_at(start_count: int = 0) -> MagicMock:
     container.upsert_item = AsyncMock(side_effect=upsert_item)
     container._state = state  # exposed for assertions
     return container
+
+
+def _make_topology_db(missing_name: str | None = None):
+    containers: dict[str, MagicMock] = {}
+    for name in (
+        change_feed_module.config.TURNS_CONTAINER,
+        change_feed_module.config.MEMORIES_CONTAINER,
+        change_feed_module.config.SUMMARIES_CONTAINER,
+    ):
+        container = MagicMock()
+        if name == missing_name:
+            container.read = AsyncMock(side_effect=CosmosResourceNotFoundError(message="missing"))
+        else:
+            container.read = AsyncMock()
+        containers[name] = container
+
+    db = MagicMock()
+    db.get_container_client.side_effect = lambda name: containers[name]
+    return db, containers
+
+
+# ---------------------------------------------------------------------------
+# Topology validation
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_topology_succeeds_when_all_containers_exist():
+    change_feed_module._topology_validated = False
+    db, containers = _make_topology_db()
+
+    with patch("shared.cosmos_clients.get_cosmos_database_async", new=AsyncMock(return_value=db)):
+        asyncio.run(change_feed_module._ensure_topology())
+
+    assert change_feed_module._topology_validated is True
+    assert db.get_container_client.call_count == 3
+    for container in containers.values():
+        container.read.assert_awaited_once()
+
+
+def test_ensure_topology_raises_on_missing_container():
+    change_feed_module._topology_validated = False
+    missing = change_feed_module.config.SUMMARIES_CONTAINER
+    db, _containers = _make_topology_db(missing_name=missing)
+
+    with patch("shared.cosmos_clients.get_cosmos_database_async", new=AsyncMock(return_value=db)):
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(change_feed_module._ensure_topology())
+
+    assert missing in str(exc_info.value)
+    assert "does not exist" in str(exc_info.value)
+    assert change_feed_module._topology_validated is False
+
+
+def test_ensure_topology_is_idempotent():
+    change_feed_module._topology_validated = False
+    db, containers = _make_topology_db()
+    get_db = AsyncMock(return_value=db)
+
+    async def run_twice():
+        await change_feed_module._ensure_topology()
+        await change_feed_module._ensure_topology()
+
+    with patch("shared.cosmos_clients.get_cosmos_database_async", new=get_db):
+        asyncio.run(run_twice())
+
+    assert get_db.await_count == 1
+    assert sum(container.read.await_count for container in containers.values()) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +231,7 @@ def test_non_turn_documents_are_filtered_out():
     container = _make_counter_container_starting_at()
 
     docs = [
-        {"type": "summary", "user_id": "u1", "thread_id": "t1"},
+        {"type": "thread_summary", "user_id": "u1", "thread_id": "t1"},
         {"type": "fact", "user_id": "u1", "thread_id": "t1"},
         {"type": "user_summary", "user_id": "u1", "thread_id": "__user_summary__"},
     ]

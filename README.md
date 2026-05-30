@@ -82,7 +82,7 @@ load_dotenv()
 memory = CosmosMemoryClient(
     cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
     cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
     ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
     embedding_deployment_name=os.getenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
     chat_deployment_name=os.getenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
@@ -137,7 +137,13 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 | **Search** | Vector + full-text + filter; returns any of the above | `search_cosmos(...)` |
 | **Process now** | Run the full pipeline (summary → facts → user profile) for recent turns | `process_now(...)`, `process_now_and_wait(...)` |
 
-All memory kinds live in the same Cosmos container, partitioned by `(user_id, thread_id)`, distinguished by a `type` discriminator.
+AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarchical `(user_id, thread_id)` keys:
+
+| Container | Holds | Notes |
+|---|---|---|
+| `memories_turns` | raw `turn` documents | append-only conversation timeline |
+| `memories` | `fact`, `episodic`, `procedural` documents | vector + full-text retrieval path |
+| `memories_summaries` | thread and user summaries | latest-summary point/read path |
 
 ### Memory Type Taxonomy
 

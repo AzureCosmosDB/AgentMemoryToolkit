@@ -25,6 +25,9 @@ def _make_async_pipeline() -> AsyncPipelineService:
     p._mark_superseded = AsyncMock(return_value=True)
     p._container = MagicMock()
     p._container.query_items = AsyncMock(return_value=[])
+    p._memories_container = p._container
+    p._turns_container = p._container
+    p._summaries_container = p._container
     p._chat = MagicMock()
     return p
 

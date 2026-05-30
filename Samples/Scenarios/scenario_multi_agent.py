@@ -16,7 +16,7 @@ Workflow:
 Required environment variables (or .env file):
     COSMOS_DB_ENDPOINT   – Azure Cosmos DB endpoint URL
     COSMOS_DB_DATABASE   – database name  (default: "ai_memory")
-    COSMOS_DB_CONTAINER  – container name (default: "memories")
+    COSMOS_DB_MEMORIES_CONTAINER  – container name (default: "memories")
 """
 
 import os
@@ -232,7 +232,7 @@ def step5_review_shared_thread(
     print_thread(planner_only, label=f"Filtered — {PLANNER} only")
     print_thread(researcher_only, label=f"Filtered — {RESEARCHER} only")
 
-    # You can also filter by memory_types (e.g. only "turn" or "summary")
+    # You can also filter by memory_types (e.g. only "turn" or "thread_summary")
     turns = mem.get_thread(
         thread_id=thread_id, user_id=user_id, memory_types=["turn"],
     )
@@ -253,7 +253,7 @@ def main() -> None:
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         ai_foundry_endpoint=os.environ.get("AI_FOUNDRY_ENDPOINT"),
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),

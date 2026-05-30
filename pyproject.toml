@@ -16,14 +16,14 @@ readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
-    "azure-cosmos>=4.15.0",
-    "azure-identity>=1.17",
-    "openai>=1.40",
-    "aiohttp>=3.9",
-    "pydantic>=2.0",
+    "azure-cosmos>=4.16.0",
+    "azure-identity>=1.20",
+    "openai>=1.60",
+    "aiohttp>=3.10",
+    "pydantic>=2.10",
     "prompty>=2.0.0a9",
-    "jinja2>=3.0",
-    "typing_extensions>=4.5",
+    "jinja2>=3.1.4",
+    "typing_extensions>=4.10",
 ]
 
 [project.optional-dependencies]

@@ -24,20 +24,35 @@ class AsyncInProcessProcessor:
         pipeline: Any = None,
         *,
         cosmos_container: Any = None,
+        turns_container: Any = None,
+        summaries_container: Any = None,
         chat_client: Any = None,
         embeddings_client: Any = None,
     ) -> None:
         if pipeline is None:
-            if cosmos_container is None or chat_client is None or embeddings_client is None:
+            if (
+                cosmos_container is None
+                or turns_container is None
+                or summaries_container is None
+                or chat_client is None
+                or embeddings_client is None
+            ):
                 raise ValueError(
                     "AsyncInProcessProcessor requires either a `pipeline` instance "
-                    "or `cosmos_container`, `chat_client`, and `embeddings_client`."
+                    "or `cosmos_container`, `turns_container`, `summaries_container`, "
+                    "`chat_client`, and `embeddings_client`."
                 )
+            from agent_memory_toolkit._container_routing import ContainerKey
             from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
             from agent_memory_toolkit.aio.store import AsyncMemoryStore
 
-            store = AsyncMemoryStore(cosmos_container, embeddings_client=embeddings_client)
-            pipeline = AsyncPipelineService(store, chat_client, embeddings_client)
+            containers = {
+                ContainerKey.TURNS: turns_container,
+                ContainerKey.MEMORIES: cosmos_container,
+                ContainerKey.SUMMARIES: summaries_container,
+            }
+            store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings_client)
+            pipeline = AsyncPipelineService(store, chat_client, embeddings_client, containers=containers)
 
         self._pipeline = pipeline
 

@@ -47,7 +47,7 @@ COSMOS_DB_ENDPOINT=https://<account>.documents.azure.com:443/
 COSMOS_DB__accountEndpoint=https://<account>.documents.azure.com:443/
 COSMOS_DB_KEY=
 COSMOS_DB_DATABASE=ai_memory
-COSMOS_DB_CONTAINER=memories
+COSMOS_DB_MEMORIES_CONTAINER=memories
 COSMOS_DB_COUNTERS_CONTAINER=counter
 COSMOS_DB_LEASE_CONTAINER=leases
 COSMOS_DB_THROUGHPUT_MODE=serverless
@@ -68,7 +68,7 @@ The notebooks and samples pass these values into the client like this:
 |---|---|
 | `COSMOS_DB_ENDPOINT` | `cosmos_endpoint` |
 | `COSMOS_DB_DATABASE` | `cosmos_database` |
-| `COSMOS_DB_CONTAINER` | `cosmos_container` |
+| `COSMOS_DB_MEMORIES_CONTAINER` | `cosmos_container` |
 | `COSMOS_DB_COUNTERS_CONTAINER` | `cosmos_counter_container` |
 | `COSMOS_DB_LEASE_CONTAINER` | `cosmos_lease_container` |
 | `COSMOS_DB_KEY` | `cosmos_key` |
@@ -149,7 +149,7 @@ Automatic processing requires these settings in the Functions app or `local.sett
 "COSMOS_DB__accountEndpoint": "https://<account>.documents.azure.com:443/",
 "COSMOS_DB_ENDPOINT": "https://<account>.documents.azure.com:443/",
 "COSMOS_DB_DATABASE": "ai_memory",
-"COSMOS_DB_CONTAINER": "memories",
+"COSMOS_DB_MEMORIES_CONTAINER": "memories",
 "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 "COSMOS_DB_LEASE_CONTAINER": "leases",
 "AI_FOUNDRY_ENDPOINT": "https://<account>.openai.azure.com/",

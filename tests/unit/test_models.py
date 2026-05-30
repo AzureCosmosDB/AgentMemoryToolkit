@@ -132,7 +132,7 @@ def test_factory_accepts_type_alias_alongside_memory_type():
 
 def test_factory_dispatches_to_all_subclasses():
     cases = [
-        ("summary", _thread_summary_kwargs(), ThreadSummaryRecord),
+        ("thread_summary", _thread_summary_kwargs(), ThreadSummaryRecord),
         ("user_summary", _user_summary_kwargs(), UserSummaryRecord),
         ("fact", _fact_kwargs(), FactRecord),
         ("episodic", _episodic_kwargs(), EpisodicRecord),
@@ -331,7 +331,7 @@ class TestEpisodicRecord:
 class TestThreadSummaryRecord:
     def test_minimal_valid(self):
         rec = ThreadSummaryRecord(**_thread_summary_kwargs())
-        assert rec.memory_type == "summary"
+        assert rec.memory_type == "thread_summary"
         assert rec.salience == 1.0
 
     def test_id_must_start_with_sum_prefix(self):
@@ -696,5 +696,5 @@ def test_orchestration_result():
 
 
 def test_memory_type_enum_values():
-    expected = {"turn", "summary", "user_summary", "fact", "episodic", "procedural"}
+    expected = {"turn", "thread_summary", "user_summary", "fact", "episodic", "procedural"}
     assert {m.value for m in MemoryType} == expected

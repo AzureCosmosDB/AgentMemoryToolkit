@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
-from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit._container_routing import ContainerKey
+from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
+from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class _SyncChat:
@@ -103,8 +104,37 @@ class _AsyncStore(_Store):
         return super().mark_superseded(old_doc, superseder_id, reason=reason)
 
 
-def _turn(i: int) -> dict[str, Any]:
+def _containers_for_store(
+    memories_store: _Store,
+    *,
+    turns_store: _Store | None = None,
+    summaries_store: _Store | None = None,
+) -> dict[ContainerKey, _StoreContainerAdapter]:
+    turns_store = turns_store or _Store([])
+    summaries_store = summaries_store or _Store([])
     return {
+        ContainerKey.TURNS: _StoreContainerAdapter(turns_store, ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _StoreContainerAdapter(memories_store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _StoreContainerAdapter(summaries_store, ContainerKey.SUMMARIES),
+    }
+
+
+def _async_containers_for_store(
+    memories_store: _AsyncStore,
+    *,
+    turns_store: _AsyncStore | None = None,
+    summaries_store: _AsyncStore | None = None,
+) -> dict[ContainerKey, _AsyncStoreContainerAdapter]:
+    turns_store = turns_store or _AsyncStore([])
+    summaries_store = summaries_store or _AsyncStore([])
+    return {
+        ContainerKey.TURNS: _AsyncStoreContainerAdapter(turns_store, ContainerKey.TURNS),
+        ContainerKey.MEMORIES: _AsyncStoreContainerAdapter(memories_store, ContainerKey.MEMORIES),
+        ContainerKey.SUMMARIES: _AsyncStoreContainerAdapter(summaries_store, ContainerKey.SUMMARIES),
+    }
+
+
+def _turn(i: int) -> dict[str, Any]:    return {
         "id": f"turn-{i}",
         "user_id": "u1",
         "thread_id": "t1",
@@ -142,7 +172,14 @@ def _response() -> dict[str, Any]:
 def test_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
     chat = _SyncChat([_response()])
     embeddings = _SyncEmbeddings()
-    service = PipelineService(_Store([_turn(i) for i in range(50)]), chat, embeddings)
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(50)])
+    service = PipelineService(
+        memories_store,
+        chat,
+        embeddings,
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
 
     output = service.extract_memories_dry("u1", "t1")
 
@@ -154,8 +191,14 @@ def test_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
 
 
 def test_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> None:
-    store = _Store([_turn(1)])
-    service = PipelineService(store, _SyncChat([_response(), _response()]), _SyncEmbeddings())
+    store = _Store([])
+    turns_store = _Store([_turn(1)])
+    service = PipelineService(
+        store,
+        _SyncChat([_response(), _response()]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(store, turns_store=turns_store),
+    )
 
     first = service.extract_memories_dry("u1", "t1")
     second = service.extract_memories_dry("u1", "t1")
@@ -169,7 +212,14 @@ def test_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> N
 async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
     chat = _AsyncChat([_response()])
     embeddings = _AsyncEmbeddings()
-    service = AsyncPipelineService(_AsyncStore([_turn(i) for i in range(50)]), chat, embeddings)
+    memories_store = _AsyncStore([])
+    turns_store = _AsyncStore([_turn(i) for i in range(50)])
+    service = AsyncPipelineService(
+        memories_store,
+        chat,
+        embeddings,
+        containers=_async_containers_for_store(memories_store, turns_store=turns_store),
+    )
 
     output = await service.extract_memories_dry("u1", "t1")
 
@@ -181,7 +231,14 @@ async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings()
 
 @pytest.mark.asyncio
 async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> None:
-    service = AsyncPipelineService(_AsyncStore([_turn(1)]), _AsyncChat([_response(), _response()]), _AsyncEmbeddings())
+    store = _AsyncStore([])
+    turns_store = _AsyncStore([_turn(1)])
+    service = AsyncPipelineService(
+        store,
+        _AsyncChat([_response(), _response()]),
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(store, turns_store=turns_store),
+    )
 
     first = await service.extract_memories_dry("u1", "t1")
     second = await service.extract_memories_dry("u1", "t1")

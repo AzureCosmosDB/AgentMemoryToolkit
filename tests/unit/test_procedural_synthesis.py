@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
 from agent_memory_toolkit.processors import DurableFunctionProcessor
 from agent_memory_toolkit.services.pipeline import PipelineService
@@ -37,8 +38,10 @@ def _capture_upserts():
 
 
 def _make_extract_pipeline(llm_response: dict):
-    container = MagicMock()
-    container.query_items.return_value = [
+    turns_container = MagicMock()
+    memories_container = MagicMock()
+    summaries_container = MagicMock()
+    turns_container.query_items.return_value = [
         {
             "id": "turn1",
             "user_id": "u1",
@@ -50,17 +53,22 @@ def _make_extract_pipeline(llm_response: dict):
         }
     ]
     upserted, capture = _capture_upserts()
-    container.upsert_item.side_effect = capture
-    container.create_item.side_effect = capture
+    memories_container.upsert_item.side_effect = capture
+    memories_container.create_item.side_effect = capture
 
     embeddings = MagicMock()
     embeddings.generate_batch.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
 
-    store = MemoryStore(container, embeddings_client=embeddings)
-    pipeline = PipelineService(store, MagicMock(), embeddings)
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    store = MemoryStore(containers=containers, embeddings_client=embeddings)
+    pipeline = PipelineService(store, MagicMock(), embeddings, containers=containers)
     pipeline._run_prompty = MagicMock(return_value=json.dumps(llm_response))
     pipeline._load_existing_memories = MagicMock(return_value=[])
-    return pipeline, container, upserted
+    return pipeline, memories_container, upserted
 
 
 def _fact_doc(
@@ -151,27 +159,49 @@ def _make_synthesis_pipeline(
     name_docs: list[dict] | None = None,
     llm_output: str = "Follow the user's preferences.",
 ):
-    container = MagicMock()
-    container.query_items.side_effect = [
+    turns_container = MagicMock()
+    memories_container = MagicMock()
+    summaries_container = MagicMock()
+    memories_container.query_items.side_effect = [
         list(prior_docs or []),
         list(fact_docs or []),
         list(episodic_docs or []),
         list(name_docs or []),
     ]
     upserted, capture = _capture_upserts()
-    container.upsert_item.side_effect = capture
-    container.create_item.side_effect = capture
+    memories_container.upsert_item.side_effect = capture
+    memories_container.create_item.side_effect = capture
 
     mock_embeddings = MagicMock()
-    store = MemoryStore(container, embeddings_client=mock_embeddings)
-    pipeline = PipelineService(store, MagicMock(), mock_embeddings)
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    store = MemoryStore(containers=containers, embeddings_client=mock_embeddings)
+    pipeline = PipelineService(store, MagicMock(), mock_embeddings, containers=containers)
     pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": llm_output}))
-    return pipeline, container, upserted
+    return pipeline, memories_container, upserted
 
 
 def _make_client(*, processor=None) -> CosmosMemoryClient:
-    client = CosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()
+    client = CosmosMemoryClient.__new__(CosmosMemoryClient)
+    memories_container = MagicMock()
+    turns_container = MagicMock()
+    summaries_container = MagicMock()
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    client._memories_container_client = memories_container
+    client._turns_container_client = turns_container
+    client._summaries_container_client = summaries_container
+    client._embeddings_client = MagicMock()
+    client._store = MemoryStore(containers=containers, embeddings_client=client._embeddings_client)
+    client._pipeline = None
+    client._processor = processor
+    client._processor_explicit = processor is not None
     return client
 
 
@@ -265,6 +295,37 @@ def test_synthesize_procedural_first_synthesis_from_empty_prior():
     assert doc["supersedes_ids"] == []
     assert upserted == [doc]
     container.replace_item.assert_not_called()
+
+
+def test_synthesize_procedural_only_touches_memories_container():
+    turns_container = MagicMock()
+    memories_container = MagicMock()
+    summaries_container = MagicMock()
+    memories_container.query_items.side_effect = [
+        [],
+        [_fact_doc("f1", "Always use bullet points.", category="preference", salience=0.95)],
+        [_episodic_doc("e1", lesson="Keep examples small.")],
+        [],
+    ]
+    memories_container.create_item.side_effect = lambda body: body
+    containers = {
+        ContainerKey.TURNS: turns_container,
+        ContainerKey.MEMORIES: memories_container,
+        ContainerKey.SUMMARIES: summaries_container,
+    }
+    embeddings = MagicMock()
+    store = MemoryStore(containers=containers, embeddings_client=embeddings)
+    pipeline = PipelineService(store, MagicMock(), embeddings, containers=containers)
+    pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": "Use concise bullets."}))
+
+    result = pipeline.synthesize_procedural("u1")
+
+    assert result["status"] == "synthesized"
+    assert memories_container.query_items.call_count == 4
+    memories_container.create_item.assert_called_once()
+    turns_container.method_calls == []
+    summaries_container.method_calls == []
+
 
 
 def test_synthesize_procedural_resynthesis_supersedes_prior_with_update_reason():
@@ -428,7 +489,7 @@ def test_synthesize_procedural_short_circuits_on_second_call_with_tied_salience(
 
 def test_get_procedural_prompt_returns_none_when_missing():
     client = _make_client()
-    client._container_client.query_items.return_value = []
+    client._memories_container_client.query_items.return_value = []
 
     assert client.get_procedural_prompt("u1") is None
 
@@ -460,7 +521,7 @@ def test_get_procedural_prompt_returns_active_content():
             return [doc for doc in docs if not doc.get("superseded_by")]
         return list(docs)
 
-    client._container_client.query_items.side_effect = _query_items
+    client._memories_container_client.query_items.side_effect = _query_items
 
     assert client.get_procedural_prompt("u1") == "Active prompt"
 
@@ -493,7 +554,7 @@ def test_get_procedural_history_returns_active_first_then_newest_versions():
         ts=3,
     )
     client = _make_client()
-    client._container_client.query_items.return_value = [v1, v3, v2]
+    client._memories_container_client.query_items.return_value = [v1, v3, v2]
 
     history = client.get_procedural_history("u1", limit=10)
 
@@ -528,7 +589,7 @@ def test_get_procedural_history_respects_limit():
         ts=3,
     )
     client = _make_client()
-    client._container_client.query_items.return_value = [v1, v2, v3]
+    client._memories_container_client.query_items.return_value = [v1, v2, v3]
 
     history = client.get_procedural_history("u1", limit=2)
 
@@ -602,8 +663,13 @@ def test_synthesize_procedural_retries_with_fresh_llm_call_when_winner_has_parti
     container.create_item.side_effect = _create
 
     mock_embeddings = MagicMock()
-    store = MemoryStore(container, embeddings_client=mock_embeddings)
-    pipeline = PipelineService(store, MagicMock(), mock_embeddings)
+    containers = {
+        ContainerKey.TURNS: MagicMock(),
+        ContainerKey.MEMORIES: container,
+        ContainerKey.SUMMARIES: MagicMock(),
+    }
+    store = MemoryStore(containers=containers, embeddings_client=mock_embeddings)
+    pipeline = PipelineService(store, MagicMock(), mock_embeddings, containers=containers)
     # Two LLM calls expected: once against v1, once against v2-winner after 409.
     pipeline._run_prompty = MagicMock(
         side_effect=[
@@ -676,8 +742,13 @@ def test_synthesize_procedural_short_circuits_when_race_winner_covers_loser_sour
     container.create_item.side_effect = _create
 
     mock_embeddings = MagicMock()
-    store = MemoryStore(container, embeddings_client=mock_embeddings)
-    pipeline = PipelineService(store, MagicMock(), mock_embeddings)
+    containers = {
+        ContainerKey.TURNS: MagicMock(),
+        ContainerKey.MEMORIES: container,
+        ContainerKey.SUMMARIES: MagicMock(),
+    }
+    store = MemoryStore(containers=containers, embeddings_client=mock_embeddings)
+    pipeline = PipelineService(store, MagicMock(), mock_embeddings, containers=containers)
     pipeline._run_prompty = MagicMock(return_value=json.dumps({"system_prompt": "stale v2 by us"}))
 
     result = pipeline.synthesize_procedural("u1", force=False)

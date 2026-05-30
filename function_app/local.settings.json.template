@@ -8,7 +8,9 @@
     "COSMOS_DB__accountEndpoint": "https://<cosmos-account>.documents.azure.com:443/",
     "COSMOS_DB_ENDPOINT": "https://<cosmos-account>.documents.azure.com:443/",
     "COSMOS_DB_DATABASE": "ai_memory",
-    "COSMOS_DB_CONTAINER": "memories",
+    "COSMOS_DB_MEMORIES_CONTAINER": "memories",
+    "COSMOS_DB_TURNS_CONTAINER": "memories_turns",
+    "COSMOS_DB_SUMMARIES_CONTAINER": "memories_summaries",
     "COSMOS_DB_LEASE_CONTAINER": "leases",
     "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 
@@ -22,7 +24,7 @@
     "FACT_EXTRACTION_EVERY_N": "1",
     "USER_SUMMARY_EVERY_N": "20",
 
-    "// --- Processor ownership: 'durable' (FA owns) or 'sdk' (in-process owns). FA hard-fails if unset to avoid silent default-deny. ---": "",
+    "// --- Processor ownership: 'durable' (FA owns) or 'inprocess' (SDK owns). FA hard-fails if unset to avoid silent default-deny. ---": "",
     "MEMORY_PROCESSOR_OWNER": "durable",
 
     "// --- Batch knob ---": "",

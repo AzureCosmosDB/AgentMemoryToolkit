@@ -9,7 +9,7 @@ from agent_memory_toolkit.processors import InProcessProcessor, ProcessThreadRes
 
 def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline = MagicMock()
-    pipeline.generate_thread_summary.return_value = {"id": "summary_u_t", "type": "summary"}
+    pipeline.generate_thread_summary.return_value = {"id": "summary_u_t", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 2, "episodic": 1, "procedural": 0}
     pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 1, "kept": 5}
 
@@ -28,7 +28,7 @@ def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline.reconcile_memories.assert_called_once_with("u1", 50)
 
     assert isinstance(result, ProcessThreadResult)
-    assert result.thread_summary == {"id": "summary_u_t", "type": "summary"}
+    assert result.thread_summary == {"id": "summary_u_t", "type": "thread_summary"}
     assert result.reconciled_count == 3
     assert result.elapsed_ms >= 0
 
@@ -72,12 +72,38 @@ def test_close_is_noop():
 
 def test_constructor_builds_pipeline_from_components():
     container = MagicMock()
+    turns_container = MagicMock()
+    summaries_container = MagicMock()
     chat = MagicMock()
     embeddings = MagicMock()
 
-    proc = InProcessProcessor(cosmos_container=container, chat_client=chat, embeddings_client=embeddings)
+    proc = InProcessProcessor(
+        cosmos_container=container,
+        turns_container=turns_container,
+        summaries_container=summaries_container,
+        chat_client=chat,
+        embeddings_client=embeddings,
+    )
     # The processor should build a PipelineService bound to those components.
     assert proc._pipeline is not None
     assert proc._pipeline._store.container is container
+    assert proc._pipeline._store._turns_container is turns_container
+    assert proc._pipeline._store._summaries_container is summaries_container
     assert proc._pipeline._chat_client is chat
     assert proc._pipeline._embeddings is embeddings
+
+
+def test_constructor_requires_all_three_containers_when_no_pipeline():
+    """Each of the three split containers is a required positional injection
+    when no pre-built pipeline is supplied."""
+    import pytest
+
+    chat = MagicMock()
+    embeddings = MagicMock()
+    with pytest.raises(ValueError, match="summaries_container"):
+        InProcessProcessor(
+            cosmos_container=MagicMock(),
+            turns_container=MagicMock(),
+            chat_client=chat,
+            embeddings_client=embeddings,
+        )

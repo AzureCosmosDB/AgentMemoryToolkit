@@ -114,7 +114,7 @@ def cosmos_database():
 @pytest.fixture(scope="session")
 def cosmos_container():
     """Cosmos DB container name for integration tests."""
-    return os.environ.get("COSMOS_DB_CONTAINER", "memories_integration_test")
+    return os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories_integration_test")
 
 
 @pytest.fixture(scope="session")

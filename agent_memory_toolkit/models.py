@@ -46,7 +46,7 @@ class MemoryType(str, Enum):
     """Allowed memory types stored in Cosmos DB."""
 
     turn = "turn"
-    summary = "summary"
+    thread_summary = "thread_summary"
     fact = "fact"
     user_summary = "user_summary"
     procedural = "procedural"
@@ -355,8 +355,8 @@ class TurnRecord(MemoryRecordBase):
 class ThreadSummaryRecord(MemoryRecordBase):
     """LLM-generated summary of a single thread's turns."""
 
-    memory_type: Literal[MemoryType.summary] = Field(  # type: ignore[assignment]
-        alias="type", default=MemoryType.summary
+    memory_type: Literal[MemoryType.thread_summary] = Field(  # type: ignore[assignment]
+        alias="type", default=MemoryType.thread_summary
     )
     content_hash: Optional[str] = None
     salience: float = 1.0
@@ -506,7 +506,7 @@ class ProceduralRecord(MemoryRecordBase):
 
 _TYPE_TO_CLASS: dict[str, type[MemoryRecordBase]] = {
     MemoryType.turn.value: TurnRecord,
-    MemoryType.summary.value: ThreadSummaryRecord,
+    MemoryType.thread_summary.value: ThreadSummaryRecord,
     MemoryType.user_summary.value: UserSummaryRecord,
     MemoryType.fact.value: FactRecord,
     MemoryType.episodic.value: EpisodicRecord,

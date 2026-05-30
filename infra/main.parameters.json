@@ -33,7 +33,10 @@
       "value": "${COSMOS_DB_DATABASE=ai_memory}"
     },
     "turnsContainerName": {
-      "value": "${COSMOS_TURNS_CONTAINER=memories_turns}"
+      "value": "${COSMOS_DB_TURNS_CONTAINER=memories_turns}"
+    },
+    "summariesContainerName": {
+      "value": "${COSMOS_DB_SUMMARIES_CONTAINER=memories_summaries}"
     },
     "memoriesTurnsDefaultTtl": {
       "value": "${MEMORIES_TURNS_DEFAULT_TTL=2592000}"

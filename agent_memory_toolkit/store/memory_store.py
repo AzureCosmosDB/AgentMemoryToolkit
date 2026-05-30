@@ -46,18 +46,13 @@ def _validated_memories_types(memory_types: Optional[list[str]]) -> list[str]:
     types = list(memory_types) if memory_types else list(_MEMORIES_TYPES)
     invalid = [t for t in types if t not in _MEMORIES_TYPES]
     if invalid:
-        raise ValueError(
-            f"memory_types must be a subset of {list(_MEMORIES_TYPES)}; got {invalid}"
-        )
+        raise ValueError(f"memory_types must be a subset of {list(_MEMORIES_TYPES)}; got {invalid}")
     return types
 
 
 def _validate_taggable_type(memory_type: str) -> None:
     if memory_type not in _MEMORIES_TYPES:
-        raise ValueError(
-            f"memory_type for tag mutation must be one of {list(_MEMORIES_TYPES)}; "
-            f"got {memory_type!r}"
-        )
+        raise ValueError(f"memory_type for tag mutation must be one of {list(_MEMORIES_TYPES)}; got {memory_type!r}")
 
 
 def _wrap_cosmos_exception(exc: BaseException, *, message: str) -> CosmosOperationError:

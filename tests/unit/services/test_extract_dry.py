@@ -134,7 +134,8 @@ def _async_containers_for_store(
     }
 
 
-def _turn(i: int) -> dict[str, Any]:    return {
+def _turn(i: int) -> dict[str, Any]:
+    return {
         "id": f"turn-{i}",
         "user_id": "u1",
         "thread_id": "t1",

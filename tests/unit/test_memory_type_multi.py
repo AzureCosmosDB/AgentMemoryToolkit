@@ -102,6 +102,7 @@ def test_get_memories_passes_list_to_in_clause():
 
 def test_get_thread_does_not_accept_memory_types():
     import pytest
+
     client, _ = _connected_client()
     with pytest.raises(TypeError):
         client.get_thread(thread_id="t1", memory_types=["turn", "thread_summary"])

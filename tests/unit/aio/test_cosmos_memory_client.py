@@ -455,9 +455,7 @@ class TestValidateTopology:
         mem._summaries_container_client = MagicMock(id="memories_summaries")
         mem._memories_container_client.read = AsyncMock()
         mem._turns_container_client.read = AsyncMock()
-        mem._summaries_container_client.read = AsyncMock(
-            side_effect=CosmosResourceNotFoundError(message="missing")
-        )
+        mem._summaries_container_client.read = AsyncMock(side_effect=CosmosResourceNotFoundError(message="missing"))
 
         with pytest.raises(RuntimeError, match="memories_summaries"):
             await mem.validate_topology()

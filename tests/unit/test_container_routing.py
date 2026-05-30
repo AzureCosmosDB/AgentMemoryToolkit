@@ -58,9 +58,7 @@ class TestContainerForTypeMapping:
             ("user_summary", ContainerKey.SUMMARIES),
         ],
     )
-    def test_each_type_routes_to_expected_container(
-        self, memory_type: str, expected_key: ContainerKey
-    ) -> None:
+    def test_each_type_routes_to_expected_container(self, memory_type: str, expected_key: ContainerKey) -> None:
         assert container_key_for_type(memory_type) is expected_key
 
 

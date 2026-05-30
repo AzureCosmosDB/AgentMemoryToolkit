@@ -153,7 +153,8 @@ def _pipeline(
     )
 
 
-def _turn(content: str = "I prefer dark mode.") -> dict[str, Any]:    return {
+def _turn(content: str = "I prefer dark mode.") -> dict[str, Any]:
+    return {
         "id": "turn1",
         "user_id": "u1",
         "thread_id": "t1",
@@ -378,7 +379,6 @@ def test_thread_summary_persists_to_summaries_container() -> None:
     assert summaries_container.upsert_item.call_args.kwargs["body"]["id"] == "summary_u1_t1"
     memories_container.method_calls == []
     turns_container.method_calls == []
-
 
 
 def test_generate_thread_and_user_summary_basic_shape() -> None:

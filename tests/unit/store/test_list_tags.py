@@ -106,9 +106,9 @@ async def test_async_list_tags_prefix_and_include_sys():
     turns = MagicMock()
     memories = MagicMock()
     summaries = MagicMock()
-    memories.query_items.side_effect = lambda **_: AsyncIterator([
-        ["topic:travel", "topic:cooking", "sys:summary", "project:alpha"]
-    ])
+    memories.query_items.side_effect = lambda **_: AsyncIterator(
+        [["topic:travel", "topic:cooking", "sys:summary", "project:alpha"]]
+    )
     store = AsyncMemoryStore(containers=_containers(turns=turns, memories=memories, summaries=summaries))
 
     assert await store.list_tags("u1", prefix="topic:") == ["topic:cooking", "topic:travel"]

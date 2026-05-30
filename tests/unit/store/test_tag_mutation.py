@@ -37,6 +37,7 @@ def _containers(*, turns=None, memories=None, summaries=None):
         ContainerKey.SUMMARIES: summaries if summaries is not None else MagicMock(),
     }
 
+
 def test_add_tags_retries_once_after_etag_conflict_and_wins():
     container = MagicMock()
     container.read_item.side_effect = [_doc("v1", ["old"]), _doc("v2", ["old", "other"])]

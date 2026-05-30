@@ -370,10 +370,7 @@ class AsyncPipelineService:
                 type(exc).__name__,
             )
         try:
-            q = (
-                "SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid "
-                f"AND {_ACTIVE_DOC_FILTER}"
-            )
+            q = f"SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid AND {_ACTIVE_DOC_FILTER}"
             results = await self._query_items(
                 self._memories_container,
                 query=q,
@@ -1138,14 +1135,8 @@ class AsyncPipelineService:
             query_predicate += " AND c.created_at > @since"
             parameters.append({"name": "@since", "value": since})
 
-        memories_query = (
-            f"SELECT * FROM c WHERE {query_predicate} "
-            "AND c.type IN ('fact', 'episodic', 'procedural')"
-        )
-        summaries_query = (
-            f"SELECT * FROM c WHERE {query_predicate} "
-            "AND c.type = 'thread_summary'"
-        )
+        memories_query = f"SELECT * FROM c WHERE {query_predicate} AND c.type IN ('fact', 'episodic', 'procedural')"
+        summaries_query = f"SELECT * FROM c WHERE {query_predicate} AND c.type = 'thread_summary'"
 
         items = await self._query_items(
             self._memories_container,

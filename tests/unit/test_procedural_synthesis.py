@@ -327,7 +327,6 @@ def test_synthesize_procedural_only_touches_memories_container():
     summaries_container.method_calls == []
 
 
-
 def test_synthesize_procedural_resynthesis_supersedes_prior_with_update_reason():
     prior_doc = _procedural_doc(
         "proc_u1_1",

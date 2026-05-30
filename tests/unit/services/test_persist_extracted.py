@@ -178,7 +178,6 @@ def test_persist_extracted_memories_routes_facts_to_memories_container() -> None
     summaries_container.method_calls == []
 
 
-
 def test_persist_extracted_memories_409_skip_continues_to_next_doc() -> None:
     first = _fact_doc("The user prefers dark mode.")
     second = _fact_doc("The user prefers concise answers.")

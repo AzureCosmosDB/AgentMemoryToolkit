@@ -80,9 +80,7 @@ def _delete_if_present(
     client: CosmosMemoryClient, memory_id: str, user_id: str, thread_id: str, memory_type: str
 ) -> None:
     try:
-        client.delete_cosmos(
-            memory_id=memory_id, user_id=user_id, thread_id=thread_id, memory_type=memory_type
-        )
+        client.delete_cosmos(memory_id=memory_id, user_id=user_id, thread_id=thread_id, memory_type=memory_type)
     except Exception:
         pass
 

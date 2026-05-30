@@ -36,10 +36,7 @@ def container_key_for_type(memory_type: str) -> ContainerKey:
     try:
         return _CONTAINER_FOR_TYPE[memory_type]
     except KeyError as exc:
-        raise ValueError(
-            f"Unknown memory type {memory_type!r}; valid types: "
-            f"{sorted(_CONTAINER_FOR_TYPE)}"
-        ) from exc
+        raise ValueError(f"Unknown memory type {memory_type!r}; valid types: {sorted(_CONTAINER_FOR_TYPE)}") from exc
 
 
 def container_keys_for_types(memory_types: Iterable[str]) -> list[ContainerKey]:

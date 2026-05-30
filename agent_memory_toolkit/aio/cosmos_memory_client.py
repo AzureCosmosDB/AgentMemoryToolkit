@@ -34,14 +34,28 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
 
 logger = get_logger(__name__)
 
-_SUMMARIES_INDEXING_POLICY = {
-    "includedPaths": [
-        {"path": "/user_id/?"},
-        {"path": "/thread_id/?"},
-        {"path": "/type/?"},
-        {"path": "/version/?"},
+_TURNS_INDEXING_POLICY = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [
+        {"path": "/embedding/?"},
+        {"path": "/source_memory_ids/*"},
+        {"path": "/supersedes_ids/*"},
+        {"path": '/"_etag"/?'},
     ],
-    "excludedPaths": [{"path": "/*"}],
+}
+
+_SUMMARIES_INDEXING_POLICY = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [
+        {"path": "/embedding/?"},
+        {"path": "/source_memory_ids/*"},
+        {"path": "/supersedes_ids/*"},
+        {"path": '/"_etag"/?'},
+    ],
     "compositeIndexes": [
         [
             {"path": "/user_id", "order": "ascending"},
@@ -310,9 +324,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     partition_key=partition_key,
                     offer_throughput=offer,
                     default_ttl=DEFAULT_TTL_BY_TYPE["turn"],
-                    indexing_policy=idx_policy,
-                    vector_embedding_policy=vec_policy,
-                    full_text_policy=ft_policy,
+                    indexing_policy=_TURNS_INDEXING_POLICY,
                 )
             )
             logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)

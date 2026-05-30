@@ -90,8 +90,6 @@ async def process_changefeed_batch(
         counter_container: Optional counter container for testing. When omitted
             the cached async container client is used.
     """
-    await _ensure_topology()
-
     # Owner exclusivity (default-deny on the FA side):
     #
     #   * SDK-only deployments: leave ``MEMORY_PROCESSOR_OWNER`` unset →

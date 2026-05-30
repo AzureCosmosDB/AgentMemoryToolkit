@@ -613,6 +613,7 @@ class TestUpdateCosmos:
 class TestDeleteCosmos:
     async def test_success(self):
         mem, container = _connected_client()
+        container.read_item = AsyncMock(return_value=_make_doc(id="m1", type="fact"))
         container.delete_item = AsyncMock()
 
         await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
@@ -623,10 +624,13 @@ class TestDeleteCosmos:
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         mem, container = _connected_client()
-        container.delete_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
+        container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
+        container.delete_item = AsyncMock()
 
         with pytest.raises(MemoryNotFoundError):
             await mem.delete_cosmos(memory_id="x", user_id="u1", thread_id="t1", memory_type="fact")
+
+        container.delete_item.assert_not_awaited()
 
 
 class TestGetUserSummary:

@@ -120,7 +120,7 @@ az functionapp config appsettings set \
     MEMORY_PROCESSOR_OWNER="durable"
 ```
 
-`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
+`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
 
 `MEMORY_PROCESSOR_OWNER=durable` tells the SDK that the deployed Function App owns processing, so any `CosmosMemoryClient` pointed at the same container will skip its in-process auto-trigger and avoid double-extraction. See the README's processor-ownership table for details.
 
@@ -258,7 +258,7 @@ await memory.connect_cosmos()
 await memory.create_memory_store()
 ```
 
-This provisions the `memories`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all three containers.
+This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers.
 
 ---
 

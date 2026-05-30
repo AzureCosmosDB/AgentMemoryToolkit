@@ -266,4 +266,4 @@ output AZURE_USER_ASSIGNED_IDENTITY_ID string = identity.outputs.id
 output FUNCTION_APP_NAME string = deployFunctionApp ? functions!.outputs.functionAppName : ''
 output FUNCTION_APP_URL string = deployFunctionApp ? functions!.outputs.functionAppUrl : ''
 
-output MEMORY_PROCESSOR_OWNER string = memoryProcessorOwner
+output MEMORY_PROCESSOR_OWNER string = deployFunctionApp ? memoryProcessorOwner : 'inprocess'

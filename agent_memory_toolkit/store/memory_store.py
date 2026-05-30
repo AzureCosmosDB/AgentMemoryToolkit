@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from agent_memory_toolkit._container_routing import (
+    _CONTAINER_FOR_TYPE,
     ContainerKey,
     container_key_for_type,
 )
@@ -22,6 +23,7 @@ from agent_memory_toolkit.exceptions import (
     CosmosOperationError,
     MemoryConflictError,
     MemoryNotFoundError,
+    MemoryTypeMismatchError,
 )
 from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.models import MemoryRecord
@@ -148,7 +150,13 @@ class MemoryStore:
     def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
         """Upsert a pre-built Cosmos memory document and return the stored body."""
         body = self._prepare_doc(record)
-        container = self._container_for_type(body.get("type"))
+        memory_type = body.get("type")
+        if memory_type not in _CONTAINER_FOR_TYPE:
+            raise ValueError(
+                f"add_cosmos: record id={body.get('id')!r} has invalid type={memory_type!r}. "
+                f"Set 'type' to one of {sorted(_CONTAINER_FOR_TYPE)} before calling add_cosmos."
+            )
+        container = self._container_for_type(memory_type)
         try:
             response = container.upsert_item(body=body)
         except Exception as exc:
@@ -265,7 +273,14 @@ class MemoryStore:
 
             bodies = [self._prepare_doc(body) for body in bodies]
             for record, body in zip(batch, bodies):
-                container = self._container_for_type(body.get("type"))
+                memory_type = body.get("type")
+                if memory_type not in _CONTAINER_FOR_TYPE:
+                    raise ValueError(
+                        f"push: record id={body.get('id')!r} has invalid type={memory_type!r}. "
+                        f"Set 'type' to one of {sorted(_CONTAINER_FOR_TYPE)} on every local "
+                        f"memory before calling push_to_cosmos."
+                    )
+                container = self._container_for_type(memory_type)
                 try:
                     container.upsert_item(body=body)
                 except Exception as exc:
@@ -370,6 +385,10 @@ class MemoryStore:
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"update read failed for {memory_id}: {exc}") from exc
 
+        actual_type = doc.get("type")
+        if actual_type != memory_type:
+            raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
+
         if content is not None:
             doc["content"] = content
         if role is not None:
@@ -393,10 +412,26 @@ class MemoryStore:
         thread_id: str,
         memory_type: str,
     ) -> None:
-        """Delete a memory document from the container for ``memory_type``."""
+        """Delete a memory document from the container for ``memory_type``.
+
+        Reads the doc first to verify its ``type`` matches ``memory_type`` so a
+        wrong routing key cannot silently delete the wrong document (within
+        MEMORIES, fact/episodic/procedural share the same partition key).
+        """
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         container = self._container_for_type(memory_type)
+        try:
+            doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+        except CosmosResourceNotFoundError as exc:
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+        except Exception as exc:
+            raise _wrap_cosmos_exception(exc, message=f"delete read failed for {memory_id}: {exc}") from exc
+
+        actual_type = doc.get("type")
+        if actual_type != memory_type:
+            raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
+
         try:
             container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
         except CosmosResourceNotFoundError as exc:
@@ -612,7 +647,10 @@ class MemoryStore:
     ) -> bool:
         """Set supersession audit fields using ETag protection when available."""
         from azure.core import MatchConditions
-        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+        from azure.cosmos.exceptions import (
+            CosmosAccessConditionFailedError,
+            CosmosHttpResponseError,
+        )
 
         etag = old_doc.get("_etag")
         new_doc = {
@@ -642,8 +680,12 @@ class MemoryStore:
             )
             del exc
             return False
-        except Exception:
-            logger.exception("supersede failed id=%s superseder=%s", old_doc.get("id"), superseder_id)
+        except CosmosHttpResponseError:
+            logger.exception(
+                "supersede transient failure id=%s superseder=%s",
+                old_doc.get("id"),
+                superseder_id,
+            )
             return False
 
     def get_procedural_prompt(self, user_id: str) -> Optional[str]:

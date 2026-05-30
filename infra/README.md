@@ -78,6 +78,12 @@ azd provision   # skips Function app, Storage, App Insights, Log Analytics, stor
 
 > Use **`azd provision`** (not `azd up`) for SDK-only. `azd up` always invokes `azd deploy --all`, which looks for a resource tagged `azd-service-name: function_app`. With the Function app turned off there is no such resource and the deploy step fails. `azd provision` runs Bicep without the deploy step.
 
+When `DEPLOY_FUNCTION_APP=false`, the Bicep template automatically sets `MEMORY_PROCESSOR_OWNER=inprocess` in the generated `.env` so the in-process processor's auto-trigger fires. If you previously deployed with `DEPLOY_FUNCTION_APP=true` and are switching to SDK-only mode, also clear the override explicitly:
+
+```bash
+azd env set MEMORY_PROCESSOR_OWNER inprocess
+```
+
 ## Model / deployment names
 
 Two concepts kept separate:

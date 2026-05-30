@@ -649,3 +649,22 @@ def test_dedup_every_n_zero_keeps_reconcile_flag_false():
     extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
     assert extract_calls, "extract should still fire when n_facts > 0"
     assert all(_extract_payload(c).get("reconcile") is False for c in extract_calls)
+
+
+@patch.dict(os.environ, {"MEMORY_PROCESSOR_OWNER": "inprocess"}, clear=False)
+def test_topology_probe_skipped_when_owner_gate_closed(monkeypatch):
+    """Owner gate must close BEFORE topology probe; otherwise SDK-only
+    deployments pay 3 container reads + risk transient-error spinloops on
+    every cold start."""
+    change_feed_module._topology_validated = False
+
+    async def _fail(*_a, **_kw):
+        raise AssertionError("topology probe must not run when owner gate is closed")
+
+    monkeypatch.setattr("shared.cosmos_clients.get_cosmos_database_async", _fail)
+
+    starter = _make_starter()
+    asyncio.run(process_changefeed_batch([_turn()], starter))
+
+    starter.start_new.assert_not_awaited()
+    assert change_feed_module._topology_validated is False

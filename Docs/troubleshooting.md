@@ -94,7 +94,7 @@ RBAC changes can take several minutes to propagate.
 
 ## 3. Cosmos DB Store Creation
 
-Run `create_memory_store()` before relying on cloud operations. It creates the database plus the `memories`, `counter`, and `leases` containers.
+Run `create_memory_store()` before relying on cloud operations. It creates the database plus the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers.
 
 The memories container is created with:
 

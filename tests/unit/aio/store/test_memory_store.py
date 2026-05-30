@@ -7,7 +7,7 @@ import pytest
 
 from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit.aio.store import AsyncMemoryStore
-from agent_memory_toolkit.exceptions import MemoryNotFoundError
+from agent_memory_toolkit.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
 
 
 class AsyncIterator:
@@ -153,20 +153,21 @@ async def test_update_raises_when_missing():
         await store.update("missing", user_id="u1", thread_id="t1", memory_type="fact")
 
 
-async def test_update_does_not_mutate_type_field():
+async def test_update_raises_on_type_mismatch():
     memories = MagicMock()
     memories.read_item = AsyncMock(return_value=_doc(id="m1", type="fact"))
     memories.replace_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    await store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
+    with pytest.raises(MemoryTypeMismatchError):
+        await store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
 
-    body = memories.replace_item.call_args.kwargs["body"]
-    assert body["type"] == "fact"
+    memories.replace_item.assert_not_awaited()
 
 
 async def test_delete_calls_delete_item_directly():
     memories = MagicMock()
+    memories.read_item = AsyncMock(return_value=_doc(id="m1", type="fact"))
     memories.delete_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
@@ -179,11 +180,26 @@ async def test_delete_raises_when_missing():
     from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
     memories = MagicMock()
-    memories.delete_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
+    memories.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
+    memories.delete_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryNotFoundError):
         await store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+
+    memories.delete_item.assert_not_awaited()
+
+
+async def test_delete_raises_on_type_mismatch():
+    memories = MagicMock()
+    memories.read_item = AsyncMock(return_value=_doc(id="m1", type="fact"))
+    memories.delete_item = AsyncMock()
+    store = AsyncMemoryStore(containers=_containers(memories=memories))
+
+    with pytest.raises(MemoryTypeMismatchError):
+        await store.delete("m1", user_id="u1", thread_id="t1", memory_type="episodic")
+
+    memories.delete_item.assert_not_awaited()
 
 
 async def test_read_and_tag_mutation_use_point_reads():

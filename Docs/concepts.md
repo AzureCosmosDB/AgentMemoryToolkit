@@ -187,8 +187,8 @@ Set any value to `0` to disable that processing type. For example, setting `THRE
 
 The toolkit provisions all required Cosmos containers under one shared throughput mode:
 
-- `serverless` is the default. The toolkit creates the `memories`, `counter`, and `leases` containers without specifying RU/s.
-- `autoscale` applies the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all three containers.
+- `serverless` is the default. The toolkit creates the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers without specifying RU/s.
+- `autoscale` applies the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all five containers.
 
 This keeps the change feed dependencies aligned with the main memory store instead of letting the Functions trigger create the lease container independently.
 

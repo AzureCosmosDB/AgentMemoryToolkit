@@ -11,6 +11,7 @@ from agent_memory_toolkit.exceptions import (
     LLMError,
     MemoryConflictError,
     MemoryNotFoundError,
+    MemoryTypeMismatchError,
     ValidationError,
 )
 from agent_memory_toolkit.models import MemoryRecord, MemoryRole, MemoryType, SearchResult
@@ -53,6 +54,7 @@ __all__ = [
     "LLMError",
     "MemoryConflictError",
     "MemoryNotFoundError",
+    "MemoryTypeMismatchError",
     "ValidationError",
     "DEFAULT_FACT_EXTRACTION_EVERY_N",
     "DEFAULT_THREAD_SUMMARY_EVERY_N",

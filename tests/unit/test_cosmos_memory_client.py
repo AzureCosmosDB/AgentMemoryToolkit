@@ -684,6 +684,7 @@ class TestUpdateCosmos:
 class TestDeleteCosmos:
     def test_success(self):
         mem, container = _connected_client()
+        container.read_item = MagicMock(return_value=_make_doc(id="m1", type="fact"))
         container.delete_item = MagicMock()
 
         mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
@@ -694,10 +695,13 @@ class TestDeleteCosmos:
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         mem, container = _connected_client()
-        container.delete_item = MagicMock(side_effect=CosmosResourceNotFoundError(message="404"))
+        container.read_item = MagicMock(side_effect=CosmosResourceNotFoundError(message="404"))
+        container.delete_item = MagicMock()
 
         with pytest.raises(MemoryNotFoundError):
             mem.delete_cosmos(memory_id="nope", user_id="u1", thread_id="t1", memory_type="fact")
+
+        container.delete_item.assert_not_called()
 
 
 class TestGetUserSummary:

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.exceptions import MemoryNotFoundError
+from agent_memory_toolkit.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
 from agent_memory_toolkit.store import MemoryStore
 
 
@@ -136,19 +136,20 @@ def test_update_raises_when_missing():
         store.update("missing", user_id="u1", thread_id="t1", memory_type="fact")
 
 
-def test_update_does_not_mutate_type_field():
+def test_update_raises_on_type_mismatch():
     memories = MagicMock()
     memories.read_item.return_value = _doc(id="m1", type="fact")
     store = MemoryStore(containers=_containers(memories=memories))
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
+    with pytest.raises(MemoryTypeMismatchError):
+        store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
 
-    body = memories.replace_item.call_args.kwargs["body"]
-    assert body["type"] == "fact"
+    memories.replace_item.assert_not_called()
 
 
 def test_delete_calls_delete_item_directly():
     memories = MagicMock()
+    memories.read_item.return_value = _doc(id="m1", type="fact")
     store = MemoryStore(containers=_containers(memories=memories))
 
     store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
@@ -160,11 +161,24 @@ def test_delete_raises_when_missing():
     from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
     memories = MagicMock()
-    memories.delete_item.side_effect = CosmosResourceNotFoundError(message="404")
+    memories.read_item.side_effect = CosmosResourceNotFoundError(message="404")
     store = MemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryNotFoundError):
         store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+
+    memories.delete_item.assert_not_called()
+
+
+def test_delete_raises_on_type_mismatch():
+    memories = MagicMock()
+    memories.read_item.return_value = _doc(id="m1", type="fact")
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    with pytest.raises(MemoryTypeMismatchError):
+        store.delete("m1", user_id="u1", thread_id="t1", memory_type="episodic")
+
+    memories.delete_item.assert_not_called()
 
 
 def test_read_and_tag_mutation_use_point_reads():

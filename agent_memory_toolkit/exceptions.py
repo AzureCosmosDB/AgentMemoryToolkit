@@ -103,6 +103,33 @@ class MemoryNotFoundError(AgentMemoryError):
         return "Memory not found"
 
 
+class MemoryTypeMismatchError(AgentMemoryError):
+    """Raised when an operation's ``memory_type`` argument does not match the
+    actual type of the stored document. Prevents silent cross-type mutation
+    or deletion when callers pass the wrong routing key.
+    """
+
+    error_code = "memory_type_mismatch"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        memory_id: str | None = None,
+        expected: str | None = None,
+        actual: str | None = None,
+    ):
+        self.memory_id = memory_id
+        self.expected = expected
+        self.actual = actual
+        if message is None:
+            message = (
+                f"Memory type mismatch for memory_id={memory_id!r}: "
+                f"caller passed memory_type={expected!r}, actual stored type is {actual!r}."
+            )
+        super().__init__(message)
+
+
 class LLMError(AgentMemoryError):
     """Raised when the LLM returns a response shape the SDK does not surface
     as an exception (no choices, empty content, invalid JSON)."""

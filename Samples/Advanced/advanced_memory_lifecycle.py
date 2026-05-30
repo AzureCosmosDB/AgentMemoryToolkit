@@ -92,8 +92,8 @@ def main() -> None:
 
     _header(5, "Archive: delete raw turns, keep derived memories")
     deleted = 0
-    for m in mem.get_memories(user_id=user_id, thread_id=thread_id, memory_types=["turn"]):
-        mem.delete_cosmos(memory_id=m["id"], thread_id=thread_id, user_id=user_id)
+    for m in mem.get_thread(thread_id=thread_id, user_id=user_id):
+        mem.delete_cosmos(memory_id=m["id"], user_id=user_id, thread_id=thread_id, memory_type="turn")
         deleted += 1
     print(f"  deleted {deleted} raw turn(s)")
 

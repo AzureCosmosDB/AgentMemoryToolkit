@@ -163,8 +163,9 @@ def main() -> None:
                 try:
                     mem.delete_cosmos(
                         memory_id=rec["id"],
-                        thread_id=rec.get("thread_id", unique_thread_id),
                         user_id=unique_user_id,
+                        thread_id=rec.get("thread_id", unique_thread_id),
+                        memory_type=rec["type"],
                     )
                     deleted += 1
                 except Exception as exc:  # pragma: no cover - best effort cleanup

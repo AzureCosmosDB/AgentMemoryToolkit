@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 import os
 
+from dotenv import load_dotenv
+
 from agent_memory_toolkit.aio import (
     AsyncCosmosMemoryClient,
     AsyncDurableFunctionProcessor,
 )
-from dotenv import load_dotenv
 
 load_dotenv()
 

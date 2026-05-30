@@ -16,7 +16,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
+from azure.cosmos.exceptions import (
+    CosmosHttpResponseError,
+    CosmosResourceExistsError,
+    CosmosResourceNotFoundError,
+)
 
 from agent_memory_toolkit._container_routing import ContainerKey
 from agent_memory_toolkit._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
@@ -341,7 +345,7 @@ class PipelineService:
             )
             if results and not results[0].get("superseded_by"):
                 return self._mark_superseded(results[0], superseder_id, reason=reason)
-        except Exception as exc:
+        except CosmosHttpResponseError as exc:
             logger.warning("Failed to mark superseded memory %s: %s", supersedes_id, exc)
         return False
 
@@ -353,18 +357,10 @@ class PipelineService:
         reason: Literal["duplicate", "contradict", "update"],
     ) -> bool:
         """Atomically set ``superseded_by`` on ``old_doc`` via the memory store."""
-        try:
-            store = getattr(self, "_store", None)
-            if store is not None:
-                return store.mark_superseded(old_doc, superseder_id, reason=reason)
-            return self._mark_superseded_via_container(old_doc, superseder_id, reason=reason)
-        except Exception:
-            logger.exception(
-                "supersede failed id=%s superseder=%s",
-                old_doc.get("id"),
-                superseder_id,
-            )
-            return False
+        store = getattr(self, "_store", None)
+        if store is not None:
+            return store.mark_superseded(old_doc, superseder_id, reason=reason)
+        return self._mark_superseded_via_container(old_doc, superseder_id, reason=reason)
 
     def _mark_superseded_via_container(
         self,

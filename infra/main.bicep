@@ -36,6 +36,9 @@ param deployFunctionApp bool = true
 @description('Cosmos database name.')
 param cosmosDatabaseName string = 'ai_memory'
 
+@description('Memories container name.')
+param memoriesContainerName string = 'memories'
+
 @description('Turns container name.')
 param turnsContainerName string = 'memories_turns'
 
@@ -135,6 +138,7 @@ module cosmos 'modules/cosmos.bicep' = {
     location: location
     tags: commonTags
     databaseName: cosmosDatabaseName
+    memoriesContainerName: memoriesContainerName
     turnsContainerName: turnsContainerName
     summariesContainerName: summariesContainerName
     memoriesTurnsDefaultTtl: memoriesTurnsDefaultTtl
@@ -261,3 +265,5 @@ output AZURE_USER_ASSIGNED_IDENTITY_ID string = identity.outputs.id
 
 output FUNCTION_APP_NAME string = deployFunctionApp ? functions!.outputs.functionAppName : ''
 output FUNCTION_APP_URL string = deployFunctionApp ? functions!.outputs.functionAppUrl : ''
+
+output MEMORY_PROCESSOR_OWNER string = memoryProcessorOwner

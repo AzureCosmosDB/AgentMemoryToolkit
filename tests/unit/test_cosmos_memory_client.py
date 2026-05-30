@@ -593,19 +593,18 @@ class TestGetMemories:
 
     def test_with_filters(self):
         mem, container = _connected_client()
-        doc = _make_doc()
-        turns = mem._turns_container_client
-        turns.query_items.return_value = [doc]
+        doc = _make_doc(type="fact")
+        container.query_items.return_value = [doc]
 
         mem.get_memories(
             memory_id="m1",
             user_id="u1",
             thread_id="t1",
             role="user",
-            memory_types=["turn"],
+            memory_types=["fact"],
         )
 
-        call_kwargs = turns.query_items.call_args.kwargs
+        call_kwargs = container.query_items.call_args.kwargs
         query = call_kwargs["query"]
         assert "WHERE" in query
         params = call_kwargs["parameters"]
@@ -659,39 +658,45 @@ class TestUpdateCosmos:
     def test_success(self):
         mem, container = _connected_client()
         doc = _make_doc(id="m1", type="fact")
-        container.query_items.return_value = [doc.copy()]
+        container.read_item = MagicMock(return_value=doc.copy())
+        container.replace_item = MagicMock()
 
-        mem.update_cosmos(memory_id="m1", content="updated")
+        mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
+        container.read_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
         container.replace_item.assert_called_once()
         body = container.replace_item.call_args.kwargs["body"]
         assert body["content"] == "updated"
+        assert body["type"] == "fact"
         assert "updated_at" in body
 
     def test_not_found(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
         mem, container = _connected_client()
-        container.query_items.return_value = []
+        container.read_item = MagicMock(side_effect=CosmosResourceNotFoundError(message="404"))
 
         with pytest.raises(MemoryNotFoundError):
-            mem.update_cosmos(memory_id="no-such-id", content="x")
+            mem.update_cosmos(memory_id="no-such-id", user_id="u1", thread_id="t1", memory_type="fact", content="x")
 
 
 class TestDeleteCosmos:
     def test_success(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1", user_id="u1", thread_id="t1", type="fact")
-        container.query_items.return_value = [doc]
+        container.delete_item = MagicMock()
 
-        mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
+        mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
         container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
 
     def test_not_found(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
         mem, container = _connected_client()
-        container.query_items.return_value = []
+        container.delete_item = MagicMock(side_effect=CosmosResourceNotFoundError(message="404"))
 
         with pytest.raises(MemoryNotFoundError):
-            mem.delete_cosmos(memory_id="nope", user_id="u1", thread_id="t1")
+            mem.delete_cosmos(memory_id="nope", user_id="u1", thread_id="t1", memory_type="fact")
 
 
 class TestGetUserSummary:
@@ -814,9 +819,9 @@ class TestCosmosGuard:
         with pytest.raises(CosmosNotConnectedError):
             mem.get_thread(thread_id="t1")
         with pytest.raises(CosmosNotConnectedError):
-            mem.update_cosmos(memory_id="m1")
+            mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
         with pytest.raises(CosmosNotConnectedError):
-            mem.delete_cosmos(memory_id="m1", thread_id="t1", user_id="u1")
+            mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
 
 # ===================================================================

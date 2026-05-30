@@ -42,9 +42,9 @@ import os
 import time
 import uuid
 
-from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
-
 from dotenv import load_dotenv
+
+from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
 
@@ -111,10 +111,9 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Inspect what the function app produced.
     # ------------------------------------------------------------------
-    summaries = client.get_memories(
+    summaries = client.get_thread_summary(
         user_id=user_id,
         thread_id=thread_id,
-        memory_types=["thread_summary"],
     )
     print(f"\n  thread summaries persisted: {len(summaries)}")
     for s in summaries[:3]:

@@ -32,6 +32,9 @@
     "cosmosDatabaseName": {
       "value": "${COSMOS_DB_DATABASE=ai_memory}"
     },
+    "memoriesContainerName": {
+      "value": "${COSMOS_DB_MEMORIES_CONTAINER=memories}"
+    },
     "turnsContainerName": {
       "value": "${COSMOS_DB_TURNS_CONTAINER=memories_turns}"
     },

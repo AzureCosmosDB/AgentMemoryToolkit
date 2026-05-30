@@ -10,12 +10,13 @@ Required environment variables:
 """
 
 import os
-
-from dotenv import load_dotenv
-load_dotenv()
 import uuid
 
+from dotenv import load_dotenv
+
 from agent_memory_toolkit import CosmosMemoryClient
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -8,7 +8,6 @@ from typing import Any, Optional
 from agent_memory_toolkit._container_routing import (
     ContainerKey,
     container_key_for_type,
-    container_keys_for_types,
 )
 from agent_memory_toolkit._query_builder import _QueryBuilder
 from agent_memory_toolkit._utils import (
@@ -39,6 +38,26 @@ from agent_memory_toolkit.store._search_helpers import (
 from agent_memory_toolkit.thresholds import default_ttl_for
 
 logger = get_logger(__name__)
+
+_MEMORIES_TYPES: tuple[str, ...] = ("fact", "episodic", "procedural")
+
+
+def _validated_memories_types(memory_types: Optional[list[str]]) -> list[str]:
+    types = list(memory_types) if memory_types else list(_MEMORIES_TYPES)
+    invalid = [t for t in types if t not in _MEMORIES_TYPES]
+    if invalid:
+        raise ValueError(
+            f"memory_types must be a subset of {list(_MEMORIES_TYPES)}; got {invalid}"
+        )
+    return types
+
+
+def _validate_taggable_type(memory_type: str) -> None:
+    if memory_type not in _MEMORIES_TYPES:
+        raise ValueError(
+            f"memory_type for tag mutation must be one of {list(_MEMORIES_TYPES)}; "
+            f"got {memory_type!r}"
+        )
 
 
 def _wrap_cosmos_exception(exc: BaseException, *, message: str) -> CosmosOperationError:
@@ -79,12 +98,6 @@ class MemoryStore:
     def _container_for_type(self, memory_type: str) -> Any:
         """Return the container that owns documents of ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
-
-    def _containers_for_query(self, memory_types: Optional[list[str]] = None) -> list[Any]:
-        """All containers that need to be queried for complete results."""
-        if not memory_types:
-            return [self._containers[k] for k in ContainerKey]
-        return [self._containers[k] for k in container_keys_for_types(memory_types)]
 
     def read_item(self, item_id: str, partition_key: Any, *, container_key: ContainerKey) -> dict[str, Any]:
         """Point-read a document from the explicitly selected split container."""
@@ -282,14 +295,15 @@ class MemoryStore:
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve memories from Cosmos DB with optional filters."""
+        """Retrieve memories from the MEMORIES container with optional filters."""
+        types = _validated_memories_types(memory_types)
         logger.debug(
             "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s types=%s recent_k=%s",
             memory_id,
             user_id,
             thread_id,
             role,
-            memory_types,
+            types,
             recent_k,
         )
 
@@ -298,7 +312,7 @@ class MemoryStore:
             user_id=user_id,
             thread_id=thread_id,
             role=role,
-            memory_types=memory_types,
+            memory_types=types,
             min_confidence=min_confidence,
         )
 
@@ -323,23 +337,15 @@ class MemoryStore:
             query = f"SELECT * FROM c{where}"
 
         logger.debug("get_memories query: %s", query)
-        items: list[dict] = []
-        for container in self._containers_for_query(memory_types):
-            items.extend(
-                self._query_items(
-                    query=query,
-                    parameters=parameters or None,
-                    cross_partition=True,
-                    operation="get_memories query",
-                    container=container,
-                )
-            )
+        items = self._query_items(
+            query=query,
+            parameters=parameters or None,
+            cross_partition=True,
+            operation="get_memories query",
+            container=self._memories_container,
+        )
 
         if recent_k is not None:
-            # SQL ORDER BY c._ts DESC is per-container; re-rank globally so the
-            # mixed-container case still returns the most-recent N across both.
-            items.sort(key=lambda i: i.get("_ts") or 0, reverse=True)
-            items = items[:recent_k]
             items.reverse()
         if min_salience is not None:
             items = [i for i in items if (i.get("salience") or 0.0) >= min_salience]
@@ -350,72 +356,56 @@ class MemoryStore:
     def update(
         self,
         memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
         content: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Update a memory document in Cosmos DB."""
-        target_container = None
-        results: list[dict[str, Any]] = []
-        for container in self._containers_for_query(None):
-            results = self._query_items(
-                query="SELECT * FROM c WHERE c.id = @id",
-                parameters=[{"name": "@id", "value": memory_id}],
-                cross_partition=True,
-                operation="update query",
-                container=container,
-            )
-            if results:
-                target_container = container
-                break
-        if not results or target_container is None:
-            raise MemoryNotFoundError(memory_id=memory_id)
+        """Update a memory document via point read in the container for ``memory_type``."""
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-        doc = results[0]
+        container = self._container_for_type(memory_type)
+        try:
+            doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+        except CosmosResourceNotFoundError as exc:
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+        except Exception as exc:
+            raise _wrap_cosmos_exception(exc, message=f"update read failed for {memory_id}: {exc}") from exc
+
         if content is not None:
             doc["content"] = content
         if role is not None:
             doc["role"] = role
-        if memory_type is not None:
-            doc["type"] = memory_type
         if metadata is not None:
             doc["metadata"] = metadata
         doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
         try:
-            target_container.replace_item(item=doc["id"], body=doc)
+            container.replace_item(item=doc["id"], body=doc)
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"update replace failed for {memory_id}: {exc}") from exc
 
         logger.info("Updated record %s", memory_id)
 
-    def delete(self, memory_id: str, thread_id: str, user_id: str) -> None:
-        """Delete a memory document from Cosmos DB."""
-        lookup_query = "SELECT TOP 1 c.id FROM c WHERE c.id = @id AND c.thread_id = @thread_id AND c.user_id = @user_id"
-        lookup_parameters = [
-            {"name": "@id", "value": memory_id},
-            {"name": "@thread_id", "value": thread_id},
-            {"name": "@user_id", "value": user_id},
-        ]
-        target_container = None
-        results: list[dict[str, Any]] = []
-        for container in self._containers_for_query(None):
-            results = self._query_items(
-                query=lookup_query,
-                parameters=lookup_parameters,
-                cross_partition=True,
-                operation="delete lookup",
-                container=container,
-            )
-            if results:
-                target_container = container
-                break
-        if not results or target_container is None:
-            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
+    def delete(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+    ) -> None:
+        """Delete a memory document from the container for ``memory_type``."""
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
+        container = self._container_for_type(memory_type)
         try:
-            target_container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
+            container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
+        except CosmosResourceNotFoundError as exc:
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"delete failed for {memory_id}: {exc}") from exc
 
@@ -425,7 +415,6 @@ class MemoryStore:
         self,
         thread_id: str,
         user_id: Optional[str] = None,
-        memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -434,12 +423,10 @@ class MemoryStore:
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve an entire thread sorted oldest first."""
+        """Retrieve an entire thread (turns) sorted oldest first."""
         qb = _QueryBuilder()
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         qb.add_filter("c.user_id", "@user_id", user_id)
-        if memory_types:
-            qb.add_in_filter("c.type", "@memory_type_", list(memory_types))
         add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
         qb.add_time_range(
             "c.created_at",
@@ -453,26 +440,43 @@ class MemoryStore:
 
         query = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
         logger.debug("get_thread query: %s", query)
-        # Fan out across the containers the requested types live in. Post-split,
-        # a thread is a logical view — turns live in TURNS, fact/episodic/procedural
-        # in MEMORIES, thread_summary in SUMMARIES. Without memory_types we sweep all.
-        items: list[dict[str, Any]] = []
-        for container in self._containers_for_query(memory_types):
-            items.extend(
-                self._query_items(
-                    query=query,
-                    parameters=qb.get_parameters(),
-                    cross_partition=True,
-                    operation="get_thread query",
-                    container=container,
-                )
-            )
-        # Per-container ORDER BY does not guarantee global order; re-rank.
-        items.sort(key=lambda i: i.get("created_at") or "", reverse=True)
+        items = self._query_items(
+            query=query,
+            parameters=qb.get_parameters(),
+            cross_partition=True,
+            operation="get_thread query",
+            container=self._turns_container,
+        )
         if recent_k is not None:
             items = items[:recent_k]
         items.reverse()
         return items
+
+    def get_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active thread summaries for ``(user_id, thread_id)``, newest first."""
+        qb = _QueryBuilder()
+        qb.add_filter("c.type", "@type", "thread_summary")
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_is_null_or_undefined("c.superseded_by")
+        parameters = qb.get_parameters()
+        if recent_k is not None:
+            parameters.append({"name": "@recent_k", "value": recent_k})
+            sql = f"SELECT TOP @recent_k * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+        else:
+            sql = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+        return self._query_items(
+            query=sql,
+            parameters=parameters,
+            partition_key=[user_id, thread_id],
+            operation="get_thread_summary query",
+            container=self._summaries_container,
+        )
 
     def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
         """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
@@ -497,7 +501,7 @@ class MemoryStore:
         include_sys: bool = False,
         include_superseded: bool = False,
     ) -> list[str]:
-        """Return sorted distinct tags for a user, optionally scoped to one thread."""
+        """Return sorted distinct tags for a user from the MEMORIES container."""
         query = "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
         parameters = [{"name": "@user_id", "value": user_id}]
         if thread_id is not None:
@@ -508,30 +512,38 @@ class MemoryStore:
 
         prefix_norm = prefix.strip().lower() if prefix else None
         partition_key, cross_partition = query_scope(user_id, thread_id)
+        rows = self._query_items(
+            query=query,
+            parameters=parameters,
+            partition_key=partition_key,
+            cross_partition=cross_partition,
+            operation="list_tags query",
+            container=self._memories_container,
+        )
         tags: set[str] = set()
-        for container in self._containers_for_query(None):
-            rows = self._query_items(
-                query=query,
-                parameters=parameters,
-                partition_key=partition_key,
-                cross_partition=cross_partition,
-                operation="list_tags query",
-                container=container,
-            )
-            for row in rows:
-                values = row.get("tags", []) if isinstance(row, dict) else row
-                for tag in values or []:
-                    tag_value = str(tag).strip().lower()
-                    if not tag_value:
-                        continue
-                    if not include_sys and tag_value.startswith("sys:"):
-                        continue
-                    if prefix_norm is not None and not tag_value.startswith(prefix_norm):
-                        continue
-                    tags.add(tag_value)
+        for row in rows:
+            values = row.get("tags", []) if isinstance(row, dict) else row
+            for tag in values or []:
+                tag_value = str(tag).strip().lower()
+                if not tag_value:
+                    continue
+                if not include_sys and tag_value.startswith("sys:"):
+                    continue
+                if prefix_norm is not None and not tag_value.startswith(prefix_norm):
+                    continue
+                tags.add(tag_value)
         return sorted(tags)
 
-    def _mutate_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str], *, add: bool) -> None:
+    def _mutate_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+        *,
+        add: bool,
+    ) -> None:
         import random
         import time
 
@@ -541,22 +553,16 @@ class MemoryStore:
             CosmosResourceNotFoundError,
         )
 
+        _validate_taggable_type(memory_type)
+        container = self._container_for_type(memory_type)
         normalized = {t.strip().lower() for t in tags if t and t.strip()}
         max_attempts = 5
         attempts = 0
         while True:
-            doc = None
-            target_container = None
-            not_found_exc = None
-            for container in self._containers_for_query(None):
-                try:
-                    doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
-                    target_container = container
-                    break
-                except CosmosResourceNotFoundError as exc:
-                    not_found_exc = exc
-            if doc is None or target_container is None:
-                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from not_found_exc
+            try:
+                doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+            except CosmosResourceNotFoundError as exc:
+                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
             existing_tags = set(doc.get("tags", []))
             if add:
                 existing_tags.update(normalized)
@@ -569,7 +575,7 @@ class MemoryStore:
             if etag := doc.get("_etag"):
                 kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
             try:
-                target_container.replace_item(**kwargs)
+                container.replace_item(**kwargs)
                 return
             except CosmosAccessConditionFailedError as exc:
                 attempts += 1
@@ -577,17 +583,30 @@ class MemoryStore:
                     raise MemoryConflictError(
                         f"Tag update conflicted after {max_attempts} attempts for memory_id={memory_id!r}"
                     ) from exc
-                # Exponential backoff with jitter: 0.02-0.06s, 0.04-0.12s, 0.08-0.24s, ...
                 base = 0.02 * (2 ** (attempts - 1))
                 time.sleep(base + random.uniform(0, base))
 
-    def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
+    def add_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
         """Add tags to an existing memory document."""
-        self._mutate_tags(memory_id, user_id, thread_id, tags, add=True)
+        self._mutate_tags(memory_id, user_id, thread_id, memory_type, tags, add=True)
 
-    def remove_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
+    def remove_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
         """Remove tags from an existing memory document."""
-        self._mutate_tags(memory_id, user_id, thread_id, tags, add=False)
+        self._mutate_tags(memory_id, user_id, thread_id, memory_type, tags, add=False)
 
     def mark_superseded(
         self,

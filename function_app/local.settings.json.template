@@ -24,7 +24,7 @@
     "FACT_EXTRACTION_EVERY_N": "1",
     "USER_SUMMARY_EVERY_N": "20",
 
-    "// --- Processor ownership: 'durable' (FA owns) or 'inprocess' (SDK owns). FA hard-fails if unset to avoid silent default-deny. ---": "",
+    "// --- Processor ownership: 'durable' (FA owns) or 'inprocess' (SDK owns). FA skips processing if not set to 'durable' to avoid double-fire when an SDK install runs against the same Cosmos. ---": "",
     "MEMORY_PROCESSOR_OWNER": "durable",
 
     "// --- Batch knob ---": "",

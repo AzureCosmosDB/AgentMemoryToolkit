@@ -26,9 +26,9 @@ import uuid
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 from agent_memory_toolkit import CosmosMemoryClient
+
+load_dotenv()
 
 
 def print_section(title: str) -> None:

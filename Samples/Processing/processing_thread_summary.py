@@ -73,7 +73,8 @@ def main() -> None:
     _banner("STEP 3 – more turns (incremental update path)")
     follow_up = [
         ("user", "What about food? I'm a vegetarian."),
-        ("agent", "Japan has wonderful vegetarian options — try shojin-ryori (Buddhist temple cuisine), tofu specialties, and tempura vegetables."),
+        ("agent", "Japan has wonderful vegetarian options — try shojin-ryori (Buddhist temple cuisine), "
+                  "tofu specialties, and tempura vegetables."),
         ("user", "Are there any vegetarian restaurants you'd recommend in Kyoto?"),
         ("agent", "Shigetsu inside Tenryu-ji temple is famous for its shojin-ryori meals."),
     ]
@@ -87,7 +88,7 @@ def main() -> None:
     print(f"incremental_update flag: {doc2.get('metadata', {}).get('incremental_update')}")
 
     _banner("STEP 4 – read summaries from Cosmos")
-    for s in mem.get_memories(user_id=user_id, thread_id=thread_id, memory_types=["thread_summary"]):
+    for s in mem.get_thread_summary(user_id=user_id, thread_id=thread_id):
         print(f"  • {s['id']} :: {s['content'][:120]}…")
 
     print("\nDone.")

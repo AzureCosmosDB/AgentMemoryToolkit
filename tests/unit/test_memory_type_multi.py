@@ -100,11 +100,11 @@ def test_get_memories_passes_list_to_in_clause():
     assert type_params == ["episodic", "fact", "procedural"]
 
 
-def test_get_thread_accepts_list():
-    client, container = _connected_client()
-    client.get_thread(thread_id="t1", memory_types=["turn", "thread_summary"])
-    query = _captured_query(container)
-    assert "c.type IN (@memory_type_0, @memory_type_1)" in query
+def test_get_thread_does_not_accept_memory_types():
+    import pytest
+    client, _ = _connected_client()
+    with pytest.raises(TypeError):
+        client.get_thread(thread_id="t1", memory_types=["turn", "thread_summary"])
 
 
 def test_search_cosmos_accepts_list():
@@ -133,11 +133,11 @@ def test_search_cosmos_empty_list_disables_type_filter():
     assert all(not p["name"].startswith("@memory_type") for p in _captured_params(container))
 
 
-def test_get_memories_default_no_type_filter():
-    """When ``memory_types`` is omitted, the query has no type filter."""
+def test_get_memories_default_uses_all_memories_types():
+    """When ``memory_types`` is omitted, the query filters to all 3 MEMORIES types."""
     client, container = _connected_client()
     client.get_memories(user_id="u1")
     query = _captured_query(container)
-    where_clause = query.split("FROM c", 1)[1]
-    assert "c.type =" not in where_clause
-    assert "c.type IN" not in where_clause
+    assert "c.type IN (@memory_type_0, @memory_type_1, @memory_type_2)" in query
+    type_params = sorted(p["value"] for p in _captured_params(container) if p["name"].startswith("@memory_type_"))
+    assert type_params == ["episodic", "fact", "procedural"]

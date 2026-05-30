@@ -40,17 +40,19 @@ def main() -> None:
     mem.add_cosmos(user_id="u1", role="user", content="Hello from quickstart!", thread_id="t1")
     print("Added memory to Cosmos")
 
-    # Retrieve all memories for the user
-    results = mem.get_memories(user_id="u1")
-    print(f"Retrieved {len(results)} memories for user 'u1'")
-
-    # Get a specific thread
-    thread = mem.get_thread(thread_id="t1")
+    # Retrieve the thread we just wrote to
+    thread = mem.get_thread(thread_id="t1", user_id="u1")
     print(f"Thread 't1' has {len(thread)} messages")
 
-    # Update the first memory
-    memory_id = results[0]["id"]
-    mem.update_cosmos(memory_id=memory_id, content="Updated via quickstart")
+    # Update the first turn
+    memory_id = thread[0]["id"]
+    mem.update_cosmos(
+        memory_id=memory_id,
+        user_id="u1",
+        thread_id="t1",
+        memory_type="turn",
+        content="Updated via quickstart",
+    )
     print(f"Updated memory {memory_id}")
 
     # Push a local memory to Cosmos in batch
@@ -59,7 +61,7 @@ def main() -> None:
     print("Pushed local memories to Cosmos")
 
     # Clean up – delete the memories we created
-    mem.delete_cosmos(memory_id=memory_id, thread_id="t1", user_id="u1")
+    mem.delete_cosmos(memory_id=memory_id, user_id="u1", thread_id="t1", memory_type="turn")
     print(f"Deleted memory {memory_id}")
 
     print("\nQuickstart complete!")

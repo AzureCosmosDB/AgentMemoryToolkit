@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from agent_memory_toolkit.logging import get_logger
 
 from ._base import _BaseMemoryClient
-from ._container_routing import ContainerKey, container_key_for_type, container_keys_for_types
+from ._container_routing import container_key_for_type
 from ._utils import (
     _build_container_kwargs,
     _container_policies,
@@ -459,11 +459,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Return the Cosmos container client that owns ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
 
-    def _containers_for_query(self, memory_types: Optional[list[str]] = None) -> list[Any]:
-        """Return the distinct container clients needed for ``memory_types``."""
-        keys = container_keys_for_types(memory_types) if memory_types else list(ContainerKey)
-        return [self._containers[key] for key in keys]
-
     def add_cosmos(
         self,
         user_id: str,
@@ -540,17 +535,40 @@ class CosmosMemoryClient(_BaseMemoryClient):
     def update_cosmos(
         self,
         memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
         content: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Update a memory in Cosmos DB."""
-        return self._get_store().update(memory_id, content, role, memory_type, metadata)
+        return self._get_store().update(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+            content=content,
+            role=role,
+            metadata=metadata,
+        )
 
-    def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
+    def delete_cosmos(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+    ) -> None:
         """Delete a memory from Cosmos DB."""
-        return self._get_store().delete(memory_id=memory_id, thread_id=thread_id, user_id=user_id)
+        return self._get_store().delete(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+        )
 
     def search_cosmos(
         self,
@@ -595,7 +613,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         self,
         thread_id: str,
         user_id: Optional[str] = None,
-        memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -604,11 +621,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve an entire thread from Cosmos DB."""
+        """Retrieve an entire thread (turns) from Cosmos DB."""
         return self._get_store().get_thread(
             thread_id=thread_id,
             user_id=user_id,
-            memory_types=memory_types,
             recent_k=recent_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -616,6 +632,19 @@ class CosmosMemoryClient(_BaseMemoryClient):
             include_superseded=include_superseded,
             created_after=created_after,
             created_before=created_before,
+        )
+
+    def get_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active thread summaries for ``(user_id, thread_id)``, newest first."""
+        return self._get_store().get_thread_summary(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
         )
 
     def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
@@ -638,13 +667,27 @@ class CosmosMemoryClient(_BaseMemoryClient):
             include_sys=include_sys,
         )
 
-    def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
+    def add_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
         """Add tags to an existing memory document."""
-        return self._get_store().add_tags(memory_id, user_id, thread_id, tags)
+        return self._get_store().add_tags(memory_id, user_id, thread_id, memory_type, tags)
 
-    def remove_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
+    def remove_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
         """Remove tags from an existing memory document."""
-        return self._get_store().remove_tags(memory_id, user_id, thread_id, tags)
+        return self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
 
     def get_procedural_prompt(self, user_id: str) -> Optional[str]:
         """Return the active synthesized procedural prompt for a user."""
@@ -733,7 +776,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
     def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         """Force the processor to run summarize/extract/dedup right now."""
         self._require_cosmos()
-        turns = self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"]) or []
+        turns = self.get_thread(thread_id=thread_id, user_id=user_id) or []
         return self._get_processor().process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
 
     def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:
@@ -742,7 +785,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
 
         self._require_cosmos()
         processor = self._get_processor()
-        turns = self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"]) or []
+        turns = self.get_thread(thread_id=thread_id, user_id=user_id) or []
         processor.process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
         if isinstance(processor, InProcessProcessor):
             return True
@@ -755,12 +798,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
 
     def _summary_exists(self, *, user_id: str, thread_id: str) -> bool:
         try:
-            results = self.get_memories(
-                user_id=user_id,
-                thread_id=thread_id,
-                memory_types=["thread_summary"],
-                recent_k=1,
-            )
+            results = self.get_thread_summary(user_id=user_id, thread_id=thread_id, recent_k=1)
         except Exception:
             return False
         return bool(results)

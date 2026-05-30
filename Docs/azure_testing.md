@@ -314,9 +314,9 @@ for i in range(10):
 
 # Wait for the change-feed processor to catch up, then read derived memories.
 import time; time.sleep(15)
-print(memory.get_memories(user_id="user-1", thread_id="thread-1", memory_types=["summary"]))
+print(memory.get_thread_summary(user_id="user-1", thread_id="thread-1"))
 print(memory.get_memories(user_id="user-1", memory_types=["fact"]))
-print(memory.get_memories(user_id="user-1", memory_types=["user_summary"]))
+print(memory.get_user_summary(user_id="user-1"))
 ```
 
 ### Change feed auto-processing
@@ -339,7 +339,7 @@ for i in range(3):
 # Wait a few seconds for the change feed to trigger, then check:
 import time
 time.sleep(10)
-results = memory.get_memories(user_id="user-1", thread_id=thread_id, memory_types=["summary"])
+results = memory.get_thread_summary(user_id="user-1", thread_id=thread_id)
 print(results)  # Should contain an auto-generated summary
 ```
 
@@ -348,9 +348,9 @@ Check the Function App logs to confirm the `on_memory_change` trigger fired and 
 ### Verify stored results
 
 ```python
-print(memory.get_memories(user_id="user-1", memory_types=["summary"]))
+print(memory.get_thread_summary(user_id="user-1", thread_id="thread-1"))
 print(memory.get_memories(user_id="user-1", memory_types=["fact"]))
-print(memory.get_memories(user_id="user-1", memory_types=["user_summary"]))
+print(memory.get_user_summary(user_id="user-1"))
 ```
 
 ---

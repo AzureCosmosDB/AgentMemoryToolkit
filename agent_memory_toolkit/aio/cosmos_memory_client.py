@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from agent_memory_toolkit._base import _BaseMemoryClient
-from agent_memory_toolkit._container_routing import ContainerKey, container_key_for_type, container_keys_for_types
+from agent_memory_toolkit._container_routing import container_key_for_type
 from agent_memory_toolkit._utils import (
     _build_container_kwargs,
     _container_policies,
@@ -501,11 +501,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         """Return the Cosmos container client that owns ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
 
-    def _containers_for_query(self, memory_types: Optional[list[str]] = None) -> list[Any]:
-        """Return the distinct container clients needed for ``memory_types``."""
-        keys = container_keys_for_types(memory_types) if memory_types else list(ContainerKey)
-        return [self._containers[key] for key in keys]
-
     async def add_cosmos(
         self,
         user_id: str,
@@ -581,15 +576,38 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def update_cosmos(
         self,
         memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
         content: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        return await self._get_store().update(memory_id, content, role, memory_type, metadata)
+        return await self._get_store().update(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+            content=content,
+            role=role,
+            metadata=metadata,
+        )
 
-    async def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
-        return await self._get_store().delete(memory_id=memory_id, thread_id=thread_id, user_id=user_id)
+    async def delete_cosmos(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+    ) -> None:
+        return await self._get_store().delete(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+        )
 
     async def search_cosmos(
         self,
@@ -633,7 +651,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self,
         thread_id: str,
         user_id: Optional[str] = None,
-        memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -645,7 +662,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_store().get_thread(
             thread_id=thread_id,
             user_id=user_id,
-            memory_types=memory_types,
             recent_k=recent_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -653,6 +669,19 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             include_superseded=include_superseded,
             created_after=created_after,
             created_before=created_before,
+        )
+
+    async def get_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active thread summaries for ``(user_id, thread_id)``, newest first."""
+        return await self._get_store().get_thread_summary(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
         )
 
     async def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
@@ -674,11 +703,25 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             include_sys=include_sys,
         )
 
-    async def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
-        return await self._get_store().add_tags(memory_id, user_id, thread_id, tags)
+    async def add_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        return await self._get_store().add_tags(memory_id, user_id, thread_id, memory_type, tags)
 
-    async def remove_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
-        return await self._get_store().remove_tags(memory_id, user_id, thread_id, tags)
+    async def remove_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        return await self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
 
     async def get_procedural_prompt(self, user_id: str) -> Optional[str]:
         return await self._get_store().get_procedural_prompt(user_id=user_id)
@@ -757,13 +800,13 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
     async def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         _BaseMemoryClient._require_cosmos(self)
-        turns = await self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"]) or []
+        turns = await self.get_thread(thread_id=thread_id, user_id=user_id) or []
         return await self._get_processor().process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
 
     async def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:
         _BaseMemoryClient._require_cosmos(self)
         processor = self._get_processor()
-        turns = await self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"]) or []
+        turns = await self.get_thread(thread_id=thread_id, user_id=user_id) or []
         await processor.process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
         if isinstance(processor, AsyncInProcessProcessor):
             return True
@@ -777,12 +820,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
     async def _summary_exists(self, *, user_id: str, thread_id: str) -> bool:
         try:
-            results = await self.get_memories(
-                user_id=user_id,
-                thread_id=thread_id,
-                memory_types=["thread_summary"],
-                recent_k=1,
-            )
+            results = await self.get_thread_summary(user_id=user_id, thread_id=thread_id, recent_k=1)
         except Exception:
             return False
         return bool(results)

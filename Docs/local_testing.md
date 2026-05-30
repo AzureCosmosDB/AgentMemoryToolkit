@@ -115,9 +115,9 @@ No Azure resources are required for local in-memory operations.
 
 ```python
 import uuid
-from agent_memory_toolkit import AgentMemory
+from agent_memory_toolkit import CosmosMemoryClient
 
-memory = AgentMemory(use_default_credential=False)
+memory = CosmosMemoryClient(use_default_credential=False)
 
 THREAD_ID = str(uuid.uuid4())
 
@@ -133,7 +133,7 @@ memory.delete_local(mem_id)
 print(f"Remaining: {len(memory.get_local())}")
 ```
 
-`AsyncAgentMemory` works the same way for local operations (local methods are synchronous).
+`AsyncCosmosMemoryClient` works the same way for local operations (local methods are synchronous).
 
 ---
 
@@ -153,11 +153,11 @@ Then run a minimal smoke test:
 import os, uuid
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
-from agent_memory_toolkit import AgentMemory
+from agent_memory_toolkit import CosmosMemoryClient
 
 load_dotenv()
 
-memory = AgentMemory(
+memory = CosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER"),
@@ -196,11 +196,11 @@ for r in results:
 import os, uuid
 from dotenv import load_dotenv
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit.aio import AsyncAgentMemory
+from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
 
 load_dotenv()
 
-memory = AsyncAgentMemory(
+memory = AsyncCosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE"),
     cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER"),

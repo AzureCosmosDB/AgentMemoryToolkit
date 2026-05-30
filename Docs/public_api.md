@@ -28,10 +28,11 @@
 - `delete_local(memory_id) -> None` — remove a local buffered memory.
 - `add_cosmos(user_id, role, content, memory_type='turn', metadata=None, thread_id=None, tags=None, ttl=None, salience=None, embedding=None, embed=None) -> str` — upsert one memory to Cosmos and return its id.
 - `push_to_cosmos(batch_size=25) -> None` — flush local buffered memories to Cosmos.
-- `get_memories(memory_id=None, user_id=None, thread_id=None, role=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — retrieve memories with filters.
-- `update_cosmos(memory_id, content=None, role=None, memory_type=None, metadata=None) -> None` — update a Cosmos memory.
-- `delete_cosmos(memory_id, thread_id, user_id) -> None` — delete a Cosmos memory.
-- `get_thread(thread_id, user_id=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, created_after=None, created_before=None) -> list[dict]` — retrieve a thread oldest-first.
+- `get_memories(memory_id=None, user_id=None, thread_id=None, role=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — retrieve memories from the MEMORIES container. `memory_types` defaults to `["fact", "episodic", "procedural"]` and must be a subset of those three.
+- `update_cosmos(memory_id, *, user_id, thread_id, memory_type, content=None, role=None, metadata=None) -> None` — point-update a memory in the container that holds `memory_type`. The `type` field itself is never mutated.
+- `delete_cosmos(memory_id, *, user_id, thread_id, memory_type) -> None` — delete a memory from the container that holds `memory_type`.
+- `get_thread(thread_id, user_id=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, created_after=None, created_before=None) -> list[dict]` — retrieve turns from the TURNS container oldest-first.
+- `get_thread_summary(user_id, thread_id, recent_k=None) -> list[dict]` — retrieve thread summary documents from the SUMMARIES container for a single `(user_id, thread_id)` partition.
 - `get_user_summary(user_id) -> Optional[dict]` — retrieve the active user-summary document.
 
 ### Retrieval
@@ -56,8 +57,8 @@
 
 ### Tagging
 
-- `add_tags(memory_id, user_id, thread_id, tags) -> None` — add tags to a memory.
-- `remove_tags(memory_id, user_id, thread_id, tags) -> None` — remove tags from a memory.
+- `add_tags(memory_id, user_id, thread_id, memory_type, tags) -> None` — add tags to a memory. `memory_type` must be one of `fact`, `episodic`, `procedural`.
+- `remove_tags(memory_id, user_id, thread_id, memory_type, tags) -> None` — remove tags from a memory. `memory_type` must be one of `fact`, `episodic`, `procedural`.
 - `list_tags(user_id, *, thread_id=None, prefix=None, include_sys=False) -> list[str]` — list sorted, deduped tags for a user; omits `sys:*` by default.
 
 ## AsyncCosmosMemoryClient
@@ -80,10 +81,11 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 - `delete_local(memory_id) -> None` — remove a local buffered memory.
 - `async add_cosmos(user_id, role, content, memory_type='turn', metadata=None, thread_id=None, tags=None, ttl=None, salience=None, embedding=None, embed=None) -> str` — upsert one memory to Cosmos and return its id.
 - `async push_to_cosmos(batch_size=25) -> None` — flush local buffered memories to Cosmos.
-- `async get_memories(memory_id=None, user_id=None, thread_id=None, role=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — retrieve memories with filters.
-- `async update_cosmos(memory_id, content=None, role=None, memory_type=None, metadata=None) -> None` — update a Cosmos memory.
-- `async delete_cosmos(memory_id, thread_id, user_id) -> None` — delete a Cosmos memory.
-- `async get_thread(thread_id, user_id=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, created_after=None, created_before=None) -> list[dict]` — retrieve a thread oldest-first.
+- `async get_memories(memory_id=None, user_id=None, thread_id=None, role=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — retrieve memories from the MEMORIES container. `memory_types` defaults to `["fact", "episodic", "procedural"]` and must be a subset of those three.
+- `async update_cosmos(memory_id, *, user_id, thread_id, memory_type, content=None, role=None, metadata=None) -> None` — point-update a memory in the container that holds `memory_type`. The `type` field itself is never mutated.
+- `async delete_cosmos(memory_id, *, user_id, thread_id, memory_type) -> None` — delete a memory from the container that holds `memory_type`.
+- `async get_thread(thread_id, user_id=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, created_after=None, created_before=None) -> list[dict]` — retrieve turns from the TURNS container oldest-first.
+- `async get_thread_summary(user_id, thread_id, recent_k=None) -> list[dict]` — retrieve thread summary documents from the SUMMARIES container for a single `(user_id, thread_id)` partition.
 - `async get_user_summary(user_id) -> Optional[dict]` — retrieve the active user-summary document.
 
 ### Retrieval
@@ -108,8 +110,8 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 
 ### Tagging
 
-- `async add_tags(memory_id, user_id, thread_id, tags) -> None` — add tags to a memory.
-- `async remove_tags(memory_id, user_id, thread_id, tags) -> None` — remove tags from a memory.
+- `async add_tags(memory_id, user_id, thread_id, memory_type, tags) -> None` — add tags to a memory. `memory_type` must be one of `fact`, `episodic`, `procedural`.
+- `async remove_tags(memory_id, user_id, thread_id, memory_type, tags) -> None` — remove tags from a memory. `memory_type` must be one of `fact`, `episodic`, `procedural`.
 - `async list_tags(user_id, *, thread_id=None, prefix=None, include_sys=False) -> list[str]` — list sorted, deduped tags for a user; omits `sys:*` by default.
 
 ## Topology validation

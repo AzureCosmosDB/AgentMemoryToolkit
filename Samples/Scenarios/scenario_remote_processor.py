@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import os
 
-from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
-
 from dotenv import load_dotenv
+
+from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
 

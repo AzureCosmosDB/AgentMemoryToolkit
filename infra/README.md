@@ -107,13 +107,13 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | `azd env` variable | Bicep param | Default | Effect |
 |---|---|---|---|
 | `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. `0` disables it. |
-| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `5` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
+| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `1` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
 | `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run fact dedup every Nth fact-extraction (so dedup actually fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns). |
 | `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
 | `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Maximum number of change-feed items processed per orchestration batch. |
 | `MEMORY_PROCESSOR_OWNER` | `memoryProcessorOwner` | `durable` | Backend that owns processing. `durable` = this function-app fleet owns it; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing instead. |
 
-The defaults are **deliberately higher than the SDK in-process defaults** (the in-process backend uses `FACT_EXTRACTION_EVERY_N=1` for prototype/demo UX). The Function-app fleet pays real per-turn LLM cost on every orchestrator invocation; amortizing keeps it affordable for production traffic. Override either layer to match your workload.
+The Function-app defaults match the SDK in-process defaults so behavior is consistent across backends. The Function-app fleet pays real per-turn LLM cost on every orchestrator invocation; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive production traffic.
 
 Set any value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:
 
@@ -180,7 +180,7 @@ infra/
 ├── abbreviations.json                # standard Azure name prefixes
 └── modules/
     ├── identity.bicep                # User-assigned managed identity
-    ├── cosmos.bicep                  # Cosmos DB NoSQL serverless account + database + 4 containers
+    ├── cosmos.bicep                  # Cosmos DB NoSQL serverless account + database + 5 containers
     ├── cosmos-rbac.bicep             # Cosmos data-plane role assignments
     ├── ai-foundry.bicep              # Cognitive Services AIServices account + chat + embedding deployments
     ├── ai-foundry-rbac.bicep         # Cognitive Services OpenAI User role assignments

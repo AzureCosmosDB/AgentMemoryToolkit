@@ -89,16 +89,21 @@ def _add_turns(
 
 def _cleanup(mem: CosmosMemoryClient, user_id: str) -> None:
     """Best-effort delete of every memory belonging to *user_id*."""
+
+    def _delete(doc: dict) -> None:
+        try:
+            mem.delete_cosmos(
+                memory_id=doc["id"],
+                user_id=user_id,
+                thread_id=doc.get("thread_id", ""),
+                memory_type=doc.get("type", ""),
+            )
+        except Exception:
+            pass
+
     try:
         for m in mem.get_memories(user_id=user_id, include_superseded=True):
-            try:
-                mem.delete_cosmos(
-                    memory_id=m["id"],
-                    thread_id=m.get("thread_id", ""),
-                    user_id=user_id,
-                )
-            except Exception:
-                pass
+            _delete(m)
     except Exception:
         pass
 
@@ -132,10 +137,9 @@ class TestThreadSummary:
             assert doc.get("type") == "thread_summary"
             assert doc.get("content"), "Summary content must not be empty"
 
-            summaries = agent_memory.get_memories(
+            summaries = agent_memory.get_thread_summary(
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
-                memory_types=["thread_summary"],
             )
             assert len(summaries) >= 1
         finally:
@@ -284,12 +288,14 @@ class TestTaggingAndSalience:
                 memory_id=mid,
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
+                memory_type="fact",
                 tags=["ui"],
             )
             agent_memory.remove_tags(
                 memory_id=mid,
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
+                memory_type="fact",
                 tags=["ide"],
             )
 

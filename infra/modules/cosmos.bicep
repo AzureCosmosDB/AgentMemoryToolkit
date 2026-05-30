@@ -14,6 +14,9 @@ param tags object = {}
 @description('Database name. Created if missing.')
 param databaseName string = 'ai_memory'
 
+@description('Memories container name.')
+param memoriesContainerName string = 'memories'
+
 @description('Turns container name.')
 param turnsContainerName string = 'memories_turns'
 
@@ -80,10 +83,10 @@ resource database 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-11-15
 
 resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
   parent: database
-  name: 'memories'
+  name: memoriesContainerName
   properties: {
     resource: {
-      id: 'memories'
+      id: memoriesContainerName
       defaultTtl: -1
       partitionKey: {
         kind: 'MultiHash'
@@ -120,6 +123,27 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
             path: '/embedding'
             type: 'diskANN'
           }
+        ]
+        fullTextIndexes: [
+          {
+            path: '/content'
+          }
+        ]
+        compositeIndexes: [
+          [
+            {
+              path: '/salience'
+              order: 'descending'
+            }
+            {
+              path: '/created_at'
+              order: 'ascending'
+            }
+            {
+              path: '/id'
+              order: 'ascending'
+            }
+          ]
         ]
       }
       vectorEmbeddingPolicy: {
@@ -286,7 +310,7 @@ output accountName string = account.name
 output accountResourceId string = account.id
 output endpoint string = account.properties.documentEndpoint
 output databaseName string = databaseName
-output memoriesContainerName string = 'memories'
+output memoriesContainerName string = memoriesContainerName
 output turnsContainerName string = turnsContainerName
 output summariesContainerName string = memoriesSummariesContainer.name
 output leasesContainerName string = 'leases'

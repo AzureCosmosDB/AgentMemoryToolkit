@@ -67,7 +67,7 @@ class TestInProcessProcessNowEndToEnd:
             "episodic_count": 0,
             "updated_count": 0,
         }
-        client.get_thread.assert_called_once_with(thread_id="thread-paris", user_id="u-paris", memory_types=["turn"])
+        client.get_thread.assert_called_once_with(thread_id="thread-paris", user_id="u-paris")
         pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
         pipeline.reconcile_memories.assert_called_once_with("u-paris", 50)
@@ -115,8 +115,7 @@ class TestDurableProcessNowAndWaitPolling:
         client = _build_client(processor=DurableFunctionProcessor())
         client.get_thread = MagicMock(return_value=[])
 
-        # First two polls return empty; third returns a summary doc.
-        client.get_memories = MagicMock(
+        client.get_thread_summary = MagicMock(
             side_effect=[
                 [],
                 [],
@@ -124,19 +123,16 @@ class TestDurableProcessNowAndWaitPolling:
             ]
         )
 
-        # Make sleep a no-op so the test stays fast.
         monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
         ok = client.process_now_and_wait(user_id="u-poll", thread_id="th-poll", timeout=10.0)
 
         assert ok is True
-        assert client.get_memories.call_count == 3
-        # Each poll should query the same (user_id, thread_id) for summaries.
-        for call in client.get_memories.call_args_list:
+        assert client.get_thread_summary.call_count == 3
+        for call in client.get_thread_summary.call_args_list:
             kwargs = call.kwargs
             assert kwargs["user_id"] == "u-poll"
             assert kwargs["thread_id"] == "th-poll"
-            assert kwargs["memory_types"] == ["thread_summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +144,8 @@ class TestDurableProcessNowAndWaitTimeout:
     def test_returns_false_after_timeout(self, monkeypatch):
         client = _build_client(processor=DurableFunctionProcessor())
         client.get_thread = MagicMock(return_value=[])
-        client.get_memories = MagicMock(return_value=[])
+        client.get_thread_summary = MagicMock(return_value=[])
 
-        # Simulate a fast clock — each call to monotonic advances by 1s,
-        # so a timeout of 0.5s expires after the first iteration.
         ticks = iter([0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
 
         def _fake_monotonic():
@@ -166,13 +160,12 @@ class TestDurableProcessNowAndWaitTimeout:
         ok = client.process_now_and_wait(user_id="u-to", thread_id="th-to", timeout=0.5)
 
         assert ok is False
-        # get_memories was tried at least once before the deadline expired.
-        assert client.get_memories.call_count >= 1
+        assert client.get_thread_summary.call_count >= 1
 
     def test_timeout_swallows_search_errors(self, monkeypatch):
         client = _build_client(processor=DurableFunctionProcessor())
         client.get_thread = MagicMock(return_value=[])
-        client.get_memories = MagicMock(side_effect=RuntimeError("transient"))
+        client.get_thread_summary = MagicMock(side_effect=RuntimeError("transient"))
 
         monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
 

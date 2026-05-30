@@ -232,11 +232,8 @@ def step5_review_shared_thread(
     print_thread(planner_only, label=f"Filtered — {PLANNER} only")
     print_thread(researcher_only, label=f"Filtered — {RESEARCHER} only")
 
-    # You can also filter by memory_types (e.g. only "turn" or "thread_summary")
-    turns = mem.get_thread(
-        thread_id=thread_id, user_id=user_id, memory_types=["turn"],
-    )
-    print_thread(turns, label="Filtered by memory_types=['turn']")
+    turns = mem.get_thread(thread_id=thread_id, user_id=user_id)
+    print_thread(turns, label="Thread turns")
 
 
 # ---------------------------------------------------------------------------

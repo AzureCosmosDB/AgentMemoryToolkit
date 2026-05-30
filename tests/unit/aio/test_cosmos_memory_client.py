@@ -554,26 +554,16 @@ class TestGetMemories:
 class TestGetThread:
     async def test_basic(self):
         mem, _ = _connected_client()
-        # Simulate Cosmos returning DESC order (newest first). Explicit timestamps
-        # so the global re-rank in get_thread is deterministic.
-        docs = [
-            _make_doc(content="second", created_at="2026-01-02T00:00:00+00:00"),
-            _make_doc(content="first", created_at="2026-01-01T00:00:00+00:00"),
-        ]
+        docs = [_make_doc(content="second"), _make_doc(content="first")]
         mem._turns_container_client.query_items = MagicMock(return_value=AsyncIterator(docs))
 
         result = await mem.get_thread(thread_id="t1")
-        # Reversed to chronological (oldest first)
         assert result[0]["content"] == "first"
         assert result[1]["content"] == "second"
 
     async def test_with_recent_k(self):
         mem, _ = _connected_client()
-        docs = [
-            _make_doc(content="c", created_at="2026-01-03T00:00:00+00:00"),
-            _make_doc(content="b", created_at="2026-01-02T00:00:00+00:00"),
-            _make_doc(content="a", created_at="2026-01-01T00:00:00+00:00"),
-        ]
+        docs = [_make_doc(content="c"), _make_doc(content="b"), _make_doc(content="a")]
         mem._turns_container_client.query_items = MagicMock(return_value=AsyncIterator(docs))
 
         result = await mem.get_thread(thread_id="t1", recent_k=2)
@@ -584,28 +574,36 @@ class TestUpdateCosmos:
     async def test_success(self):
         mem, container = _connected_client()
         doc = _make_doc(id="m1", type="fact")
-        container.query_items = MagicMock(return_value=AsyncIterator([doc]))
+        container.read_item = AsyncMock(return_value=doc)
+        container.replace_item = AsyncMock()
 
-        await mem.update_cosmos(memory_id="m1", content="updated")
+        await mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
+        container.read_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
         container.replace_item.assert_awaited_once()
         body = container.replace_item.call_args.kwargs["body"]
         assert body["content"] == "updated"
+        assert body["type"] == "fact"
         assert "updated_at" in body
 
     async def test_not_found(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
         mem, container = _connected_client()
-        container.query_items = MagicMock(return_value=AsyncIterator([]))
+        container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
 
         with pytest.raises(MemoryNotFoundError):
-            await mem.update_cosmos(memory_id="missing")
+            await mem.update_cosmos(memory_id="missing", user_id="u1", thread_id="t1", memory_type="fact")
 
     async def test_partial_fields(self):
         mem, container = _connected_client()
         doc = _make_doc(id="m1", role="user", content="old", type="fact")
-        container.query_items = MagicMock(return_value=AsyncIterator([doc]))
+        container.read_item = AsyncMock(return_value=doc)
+        container.replace_item = AsyncMock()
 
-        await mem.update_cosmos(memory_id="m1", role="agent", metadata={"key": "val"})
+        await mem.update_cosmos(
+            memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact", role="agent", metadata={"key": "val"}
+        )
         body = container.replace_item.call_args.kwargs["body"]
         assert body["role"] == "agent"
         assert body["metadata"] == {"key": "val"}
@@ -616,19 +614,20 @@ class TestUpdateCosmos:
 class TestDeleteCosmos:
     async def test_success(self):
         mem, container = _connected_client()
-        doc = _make_doc(id="m1", user_id="u1", thread_id="t1", type="fact")
-        container.query_items = MagicMock(return_value=AsyncIterator([doc]))
+        container.delete_item = AsyncMock()
 
-        await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1")
+        await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
         container.delete_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
 
     async def test_not_found(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
         mem, container = _connected_client()
-        container.query_items = MagicMock(return_value=AsyncIterator([]))
+        container.delete_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
 
         with pytest.raises(MemoryNotFoundError):
-            await mem.delete_cosmos(memory_id="x", user_id="u1", thread_id="t1")
+            await mem.delete_cosmos(memory_id="x", user_id="u1", thread_id="t1", memory_type="fact")
 
 
 class TestGetUserSummary:
@@ -670,9 +669,9 @@ class TestCosmosGuard:
         with pytest.raises(CosmosNotConnectedError):
             await mem.get_thread(thread_id="t1")
         with pytest.raises(CosmosNotConnectedError):
-            await mem.update_cosmos(memory_id="m1")
+            await mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
         with pytest.raises(CosmosNotConnectedError):
-            await mem.delete_cosmos(memory_id="m1", thread_id="t1", user_id="u1")
+            await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
 
 # ===================================================================

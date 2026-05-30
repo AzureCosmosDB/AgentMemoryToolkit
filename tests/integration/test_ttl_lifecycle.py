@@ -51,10 +51,23 @@ def ttl_client(
     )
 
 
-def _find_doc(client: CosmosMemoryClient, user_id: str, thread_id: str, memory_id: str, memory_types: list[str]):
-    for doc in client.get_thread(
-        thread_id=thread_id,
+def _find_turn(client: CosmosMemoryClient, user_id: str, thread_id: str, memory_id: str):
+    for doc in client.get_thread(thread_id=thread_id, user_id=user_id, include_superseded=True):
+        if doc.get("id") == memory_id:
+            return doc
+    return None
+
+
+def _find_memory(
+    client: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
+    memory_id: str,
+    memory_types: list[str],
+):
+    for doc in client.get_memories(
         user_id=user_id,
+        thread_id=thread_id,
         memory_types=memory_types,
         include_superseded=True,
     ):
@@ -63,9 +76,13 @@ def _find_doc(client: CosmosMemoryClient, user_id: str, thread_id: str, memory_i
     return None
 
 
-def _delete_if_present(client: CosmosMemoryClient, memory_id: str, user_id: str, thread_id: str) -> None:
+def _delete_if_present(
+    client: CosmosMemoryClient, memory_id: str, user_id: str, thread_id: str, memory_type: str
+) -> None:
     try:
-        client.delete_cosmos(memory_id=memory_id, user_id=user_id, thread_id=thread_id)
+        client.delete_cosmos(
+            memory_id=memory_id, user_id=user_id, thread_id=thread_id, memory_type=memory_type
+        )
     except Exception:
         pass
 
@@ -94,12 +111,12 @@ def test_turn_ttl_expires_while_episodic_persists(ttl_client: CosmosMemoryClient
         )
 
         time.sleep(90)
-        assert _find_doc(ttl_client, user_id, thread_id, turn_id, ["turn"]) is None
+        assert _find_turn(ttl_client, user_id, thread_id, turn_id) is None
 
         time.sleep(30)
-        assert _find_doc(ttl_client, user_id, thread_id, episodic_id, ["episodic"]) is not None
+        assert _find_memory(ttl_client, user_id, thread_id, episodic_id, ["episodic"]) is not None
     finally:
         if turn_id:
-            _delete_if_present(ttl_client, turn_id, user_id, thread_id)
+            _delete_if_present(ttl_client, turn_id, user_id, thread_id, "turn")
         if episodic_id:
-            _delete_if_present(ttl_client, episodic_id, user_id, thread_id)
+            _delete_if_present(ttl_client, episodic_id, user_id, thread_id, "episodic")

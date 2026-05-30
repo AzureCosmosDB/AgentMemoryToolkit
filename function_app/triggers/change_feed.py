@@ -120,6 +120,8 @@ async def process_changefeed_batch(
             logger.debug("Change-feed batch skipped: MEMORY_PROCESSOR_OWNER=%r (need 'durable')", owner)
         return
 
+    await _ensure_topology()
+
     n_thread = config.get_thread_summary_every_n()
     n_facts = config.get_fact_extraction_every_n()
     n_user = config.get_user_summary_every_n()

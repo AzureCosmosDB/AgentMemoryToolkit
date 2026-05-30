@@ -88,7 +88,7 @@ async def test_process_now_and_wait_inprocess_returns_true():
 async def test_process_now_and_wait_durable_polls_until_summary_appears():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_memories = AsyncMock(side_effect=[[], [], [{"id": "summary"}]])
+    client.get_thread_summary = AsyncMock(side_effect=[[], [], [{"id": "summary"}]])
 
     async def _no_sleep(_):
         return None
@@ -97,14 +97,14 @@ async def test_process_now_and_wait_durable_polls_until_summary_appears():
         ok = await client.process_now_and_wait(user_id="u", thread_id="t", timeout=5.0)
 
     assert ok is True
-    assert client.get_memories.await_count == 3
+    assert client.get_thread_summary.await_count == 3
 
 
 @pytest.mark.asyncio
 async def test_process_now_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_memories = AsyncMock(return_value=[])
+    client.get_thread_summary = AsyncMock(return_value=[])
 
     async def _no_sleep(_):
         return None
@@ -113,7 +113,7 @@ async def test_process_now_and_wait_durable_returns_false_on_timeout():
         ok = await client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
-    assert client.get_memories.await_count >= 1
+    assert client.get_thread_summary.await_count >= 1
 
 
 def test_constructor_accepts_processor_kwarg():

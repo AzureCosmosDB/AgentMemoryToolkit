@@ -150,8 +150,11 @@ Automatic processing requires these settings in the Functions app or `local.sett
 "COSMOS_DB_ENDPOINT": "https://<account>.documents.azure.com:443/",
 "COSMOS_DB_DATABASE": "ai_memory",
 "COSMOS_DB_MEMORIES_CONTAINER": "memories",
+"COSMOS_DB_TURNS_CONTAINER": "memories_turns",
+"COSMOS_DB_SUMMARIES_CONTAINER": "memories_summaries",
 "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 "COSMOS_DB_LEASE_CONTAINER": "leases",
+"MEMORY_PROCESSOR_OWNER": "durable",
 "AI_FOUNDRY_ENDPOINT": "https://<account>.openai.azure.com/",
 "AI_FOUNDRY_CHAT_DEPLOYMENT_NAME": "gpt-4o-mini",
 "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME": "text-embedding-3-large",
@@ -160,17 +163,18 @@ Automatic processing requires these settings in the Functions app or `local.sett
 "USER_SUMMARY_EVERY_N": "10"
 ```
 
-Set a threshold to `"0"` to disable that processing type.
+Set a threshold to `"0"` to disable that processing type. `MEMORY_PROCESSOR_OWNER` must be `"durable"` for the Function App's change-feed trigger to actually fire — leave it unset (or set to `"inprocess"`) for SDK-only deployments.
 
-Cosmos DB memory documents store their category in the JSON `type` field. Only documents with `type: "turn"` increment counters. Derived memories with `type: "summary"`, `type: "fact"`, or `type: "user_summary"` do not trigger threshold counts.
+Cosmos DB memory documents store their category in the JSON `type` field. Only documents with `type: "turn"` increment counters. Derived memories with `type: "thread_summary"`, `type: "fact"`, `type: "episodic"`, `type: "procedural"`, or `type: "user_summary"` do not trigger threshold counts.
 
 If nothing fires:
 
 - verify the Functions host shows the Cosmos DB trigger
 - confirm the `leases` container exists
 - confirm the `counter` container is writable
+- confirm `MEMORY_PROCESSOR_OWNER=durable` is set on the Function App
 - insert enough new turn documents to cross the configured threshold
-- check for generated documents where the Cosmos JSON field is `type="summary"`, `type="fact"`, or `type="user_summary"`
+- check for generated documents where the Cosmos JSON field is `type="thread_summary"`, `type="fact"`, or `type="user_summary"`
 
 ---
 

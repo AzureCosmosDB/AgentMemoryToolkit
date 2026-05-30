@@ -88,24 +88,38 @@ def _add_turns(
 
 
 def _cleanup(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Best-effort delete of every memory belonging to *user_id*."""
+    """Best-effort delete of every memory belonging to *user_id* across all
+    split containers (turns, memories, summaries) so consecutive runs on the
+    same user_id do not accumulate residue."""
 
-    def _delete(doc: dict) -> None:
+    def _delete(container, doc: dict) -> None:
         try:
-            mem.delete_cosmos(
-                memory_id=doc["id"],
-                user_id=user_id,
-                thread_id=doc.get("thread_id", ""),
-                memory_type=doc.get("type", ""),
+            container.delete_item(
+                item=doc["id"],
+                partition_key=[user_id, doc.get("thread_id", "")],
             )
         except Exception:
             pass
 
-    try:
-        for m in mem.get_memories(user_id=user_id, include_superseded=True):
-            _delete(m)
-    except Exception:
-        pass
+    sql = "SELECT c.id, c.thread_id FROM c WHERE c.user_id = @uid"
+    params = [{"name": "@uid", "value": user_id}]
+    for container in (
+        mem._turns_container_client,
+        mem._memories_container_client,
+        mem._summaries_container_client,
+    ):
+        try:
+            docs = list(
+                container.query_items(
+                    query=sql,
+                    parameters=params,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except Exception:
+            continue
+        for doc in docs:
+            _delete(container, doc)
 
 
 # ---------------------------------------------------------------------------

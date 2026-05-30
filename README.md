@@ -134,7 +134,7 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 | **Procedural** | Behavioral rule / instruction the user wants followed | `extract_memories(...)` |
 | **Episodic** | Past situation → action → outcome experience (90-day TTL) | `extract_memories(...)` |
 | **User summary** | Cross-thread profile of what's known about a user | `generate_user_summary(...)`, `get_user_summary(...)` |
-| **Search** | Vector + full-text + filter; returns any of the above | `search_cosmos(...)` |
+| **Search** | Vector + full-text + filter over `fact` / `episodic` / `procedural` | `search_cosmos(...)` |
 | **Process now** | Run the full pipeline (summary → facts → user profile) for recent turns | `process_now(...)`, `process_now_and_wait(...)` |
 
 AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarchical `(user_id, thread_id)` keys:

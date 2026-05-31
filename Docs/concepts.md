@@ -179,7 +179,9 @@ Set any value to `0` to disable that processing type. For example, setting `THRE
 
 | Container | Partition Key | Purpose |
 |-----------|---------------|---------|
-| `memories` | `/user_id`, `/thread_id` (hierarchical) | Existing memory store |
+| `memories` | `/user_id`, `/thread_id` (hierarchical) | Durable derived memories (`fact`, `episodic`, `procedural`) |
+| `memories_turns` | `/user_id`, `/thread_id` (hierarchical) | Raw conversation turns (`turn`) — append-only, TTL-pruned |
+| `memories_summaries` | `/user_id`, `/thread_id` (hierarchical) | Thread + user summaries (`thread_summary`, `user_summary`) |
 | `counter` | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing |
 | `leases` | `/id` | Change feed checkpointing container created by `create_memory_store()` |
 

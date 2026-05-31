@@ -654,17 +654,13 @@ def test_dedup_every_n_zero_keeps_reconcile_flag_false():
 @patch.dict(os.environ, {"MEMORY_PROCESSOR_OWNER": "inprocess"}, clear=False)
 def test_topology_probe_skipped_when_owner_gate_closed(monkeypatch):
     """Owner gate must close BEFORE topology probe; otherwise SDK-only
-    deployments pay 3 container reads + risk transient-error spinloops on
+    deployments pay container reads + risk transient-error spinloops on
     every cold start."""
-    change_feed_module._topology_validated = False
-
-    async def _fail(*_a, **_kw):
-        raise AssertionError("topology probe must not run when owner gate is closed")
-
-    monkeypatch.setattr("shared.cosmos_clients.get_cosmos_database_async", _fail)
+    probe = AsyncMock()
+    monkeypatch.setattr(change_feed_module, "_ensure_topology", probe)
 
     starter = _make_starter()
     asyncio.run(process_changefeed_batch([_turn()], starter))
 
+    probe.assert_not_awaited()
     starter.start_new.assert_not_awaited()
-    assert change_feed_module._topology_validated is False

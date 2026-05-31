@@ -163,9 +163,13 @@ class TestDurableProcessNowAndWaitTimeout:
         assert client.get_thread_summary.call_count >= 1
 
     def test_timeout_swallows_search_errors(self, monkeypatch):
+        from azure.cosmos.exceptions import CosmosHttpResponseError
+
         client = _build_client(processor=DurableFunctionProcessor())
         client.get_thread = MagicMock(return_value=[])
-        client.get_thread_summary = MagicMock(side_effect=RuntimeError("transient"))
+        client.get_thread_summary = MagicMock(
+            side_effect=CosmosHttpResponseError(message="429 throttled", status_code=429)
+        )
 
         monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
 

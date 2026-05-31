@@ -165,9 +165,13 @@ class TestAsyncDurableProcessNowAndWaitTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_swallows_search_errors(self, monkeypatch):
+        from azure.cosmos.exceptions import CosmosHttpResponseError
+
         client = _build_client(processor=AsyncDurableFunctionProcessor())
         client.get_thread = AsyncMock(return_value=[])
-        client.get_thread_summary = AsyncMock(side_effect=RuntimeError("transient"))
+        client.get_thread_summary = AsyncMock(
+            side_effect=CosmosHttpResponseError(message="429 throttled", status_code=429)
+        )
 
         async def _no_sleep(*_a, **_k):
             return None

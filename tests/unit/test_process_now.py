@@ -110,15 +110,28 @@ def test_process_now_and_wait_durable_returns_false_on_timeout():
 
 
 def test_process_now_and_wait_durable_swallows_search_errors_until_timeout():
+    from azure.cosmos.exceptions import CosmosHttpResponseError
+
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_thread_summary = MagicMock(side_effect=RuntimeError("transient"))
+    client.get_thread_summary = MagicMock(side_effect=CosmosHttpResponseError(message="429 throttled", status_code=429))
 
     with patch("time.sleep"):
         ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
     assert client.get_thread_summary.call_count >= 1
+
+
+def test_process_now_and_wait_durable_propagates_non_cosmos_errors():
+    """Non-Cosmos errors must NOT be silently swallowed in the polling loop —
+    operators would otherwise wait the full timeout with no signal."""
+    client = _connected(processor=DurableFunctionProcessor())
+    _patch_get_thread(client, [])
+    client.get_thread_summary = MagicMock(side_effect=RuntimeError("bug"))
+
+    with patch("time.sleep"), pytest.raises(RuntimeError, match="bug"):
+        client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
 
 def test_constructor_accepts_processor_kwarg():

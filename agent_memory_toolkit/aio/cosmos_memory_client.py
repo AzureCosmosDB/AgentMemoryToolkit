@@ -831,8 +831,22 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return False
 
     async def _summary_exists(self, *, user_id: str, thread_id: str) -> bool:
+        from azure.cosmos.exceptions import (
+            CosmosHttpResponseError,
+            CosmosResourceNotFoundError,
+        )
+
         try:
             results = await self.get_thread_summary(user_id=user_id, thread_id=thread_id, recent_k=1)
-        except Exception:
+        except CosmosResourceNotFoundError:
+            return False
+        except CosmosHttpResponseError as exc:
+            logger.warning(
+                "_summary_exists: Cosmos error user_id=%s thread_id=%s status=%s: %s",
+                user_id,
+                thread_id,
+                getattr(exc, "status_code", None),
+                exc,
+            )
             return False
         return bool(results)

@@ -361,34 +361,56 @@ class AsyncMemoryStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Update a memory document via point read in the container for ``memory_type``."""
-        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+        import random
+
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import (
+            CosmosAccessConditionFailedError,
+            CosmosResourceNotFoundError,
+        )
 
         container = self._container_for_type(memory_type)
-        try:
-            doc = await container.read_item(item=memory_id, partition_key=[user_id, thread_id])
-        except CosmosResourceNotFoundError as exc:
-            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
-        except Exception as exc:
-            raise _wrap_cosmos_exception(exc, message=f"async update read failed for {memory_id}: {exc}") from exc
+        max_attempts = 5
+        attempts = 0
+        while True:
+            try:
+                doc = await container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+            except CosmosResourceNotFoundError as exc:
+                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+            except Exception as exc:
+                raise _wrap_cosmos_exception(exc, message=f"async update read failed for {memory_id}: {exc}") from exc
 
-        actual_type = doc.get("type")
-        if actual_type != memory_type:
-            raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
+            actual_type = doc.get("type")
+            if actual_type != memory_type:
+                raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
 
-        if content is not None:
-            doc["content"] = content
-        if role is not None:
-            doc["role"] = role
-        if metadata is not None:
-            doc["metadata"] = metadata
-        doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if content is not None:
+                doc["content"] = content
+            if role is not None:
+                doc["role"] = role
+            if metadata is not None:
+                doc["metadata"] = metadata
+            doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        try:
-            await container.replace_item(item=doc["id"], body=doc)
-        except Exception as exc:
-            raise _wrap_cosmos_exception(exc, message=f"async update replace failed for {memory_id}: {exc}") from exc
-
-        logger.info("Async updated record %s", memory_id)
+            kwargs: dict[str, Any] = {"item": doc["id"], "body": doc}
+            if etag := doc.get("_etag"):
+                kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
+            try:
+                await container.replace_item(**kwargs)
+                logger.info("Async updated record %s", memory_id)
+                return
+            except CosmosAccessConditionFailedError as exc:
+                attempts += 1
+                if attempts >= max_attempts:
+                    raise MemoryConflictError(
+                        f"update conflicted after {max_attempts} attempts for memory_id={memory_id!r}"
+                    ) from exc
+                base = 0.02 * (2 ** (attempts - 1))
+                await asyncio.sleep(base + random.uniform(0, base))
+            except Exception as exc:
+                raise _wrap_cosmos_exception(
+                    exc, message=f"async update replace failed for {memory_id}: {exc}"
+                ) from exc
 
     async def delete(
         self,
@@ -400,11 +422,16 @@ class AsyncMemoryStore:
     ) -> None:
         """Delete a memory document from the container for ``memory_type``.
 
-        Reads the doc first to verify its ``type`` matches ``memory_type`` so a
-        wrong routing key cannot silently delete the wrong document (within
-        MEMORIES, fact/episodic/procedural share the same partition key).
+        Reads the doc first to verify its ``type`` matches ``memory_type`` and
+        then issues the delete with ``If-Match`` on the read ETag, so a
+        concurrent type mutation between read and delete is rejected (412)
+        rather than silently dropping the wrong document.
         """
-        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import (
+            CosmosAccessConditionFailedError,
+            CosmosResourceNotFoundError,
+        )
 
         container = self._container_for_type(memory_type)
         try:
@@ -418,10 +445,17 @@ class AsyncMemoryStore:
         if actual_type != memory_type:
             raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
 
+        kwargs: dict[str, Any] = {"item": memory_id, "partition_key": [user_id, thread_id]}
+        if etag := doc.get("_etag"):
+            kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
         try:
-            await container.delete_item(item=memory_id, partition_key=[user_id, thread_id])
+            await container.delete_item(**kwargs)
         except CosmosResourceNotFoundError as exc:
             raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+        except CosmosAccessConditionFailedError as exc:
+            raise MemoryConflictError(
+                f"delete conflicted for memory_id={memory_id!r} — document was modified after the type check"
+            ) from exc
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"async delete failed for {memory_id}: {exc}") from exc
 
@@ -664,11 +698,13 @@ class AsyncMemoryStore:
             )
             del exc
             return False
-        except CosmosHttpResponseError:
-            logger.exception(
-                "supersede transient failure id=%s superseder=%s",
+        except CosmosHttpResponseError as exc:
+            logger.warning(
+                "supersede failed id=%s superseder=%s status=%s: %s",
                 old_doc.get("id"),
                 superseder_id,
+                getattr(exc, "status_code", None),
+                exc,
             )
             return False
 

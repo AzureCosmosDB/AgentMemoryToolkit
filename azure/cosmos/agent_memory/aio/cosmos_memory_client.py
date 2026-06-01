@@ -27,6 +27,7 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, CosmosOperationError
 from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.services._pipeline_helpers import _normalize_metadata_keys
 from azure.cosmos.agent_memory.thresholds import DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -136,9 +137,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._pipeline: Optional[AsyncPipelineService] = None
         self._processor: Optional[AsyncMemoryProcessor] = processor
         self._processor_explicit = processor is not None
-        self._transcript_metadata_keys: Optional[tuple[str, ...]] = (
-            tuple(transcript_metadata_keys) if transcript_metadata_keys else None
-        )
+        self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
         logger.info("AsyncCosmosMemoryClient initialized")
 
     async def __aenter__(self) -> "AsyncCosmosMemoryClient":

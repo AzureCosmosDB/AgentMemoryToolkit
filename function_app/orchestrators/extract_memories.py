@@ -56,9 +56,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         )
         if config.get_procedural_synthesis_auto():
             count = payload.get("count")
-            instance_id = (
-                f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
-            )
+            instance_id = f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
             try:
                 procedural = yield context.call_sub_orchestrator_with_retry(
                     "SynthesizeProceduralOrchestrator",

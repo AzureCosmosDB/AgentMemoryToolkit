@@ -25,6 +25,7 @@ from .chat import ChatClient
 from .embeddings import EmbeddingsClient
 from .exceptions import CosmosOperationError
 from .processors import InProcessProcessor, MemoryProcessor
+from .services._pipeline_helpers import _normalize_metadata_keys
 from .services.pipeline import PipelineService
 from .store import MemoryStore
 from .thresholds import DEFAULT_TTL_BY_TYPE
@@ -128,9 +129,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         self._pipeline: Optional[PipelineService] = None
         self._processor: Optional[MemoryProcessor] = processor
         self._processor_explicit = processor is not None
-        self._transcript_metadata_keys: Optional[tuple[str, ...]] = (
-            tuple(transcript_metadata_keys) if transcript_metadata_keys else None
-        )
+        self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
         if self._cosmos_endpoint:
             self.create_memory_store()
         logger.info("CosmosMemoryClient initialized")

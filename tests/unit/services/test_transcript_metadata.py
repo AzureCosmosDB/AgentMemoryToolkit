@@ -150,3 +150,180 @@ class TestPipelineServicePlumbing:
         out = service._build_transcript(items)
         assert "agent_id" in out
         assert "raw" not in out
+
+
+class TestStringInputRejected:
+    """A bare ``str`` is iterable char-by-char — passing it would silently
+    produce a per-character allow-list. Reject with a clear ``TypeError``."""
+
+    def test_build_transcript_rejects_str(self) -> None:
+        with pytest.raises(TypeError, match="not a single str"):
+            build_transcript([_turn("user", "Hi", agent_id="x")], metadata_keys="agent_id")
+
+    def test_pipeline_service_ctor_rejects_str(self) -> None:
+        from unittest.mock import MagicMock
+
+        from azure.cosmos.agent_memory._container_routing import ContainerKey
+        from azure.cosmos.agent_memory.services.pipeline import PipelineService
+
+        containers = {
+            ContainerKey.MEMORIES: MagicMock(),
+            ContainerKey.TURNS: MagicMock(),
+            ContainerKey.SUMMARIES: MagicMock(),
+        }
+        with pytest.raises(TypeError, match="not a single str"):
+            PipelineService(
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                containers=containers,
+                transcript_metadata_keys="agent_id",
+            )
+
+    def test_async_pipeline_service_ctor_rejects_str(self) -> None:
+        from unittest.mock import MagicMock
+
+        from azure.cosmos.agent_memory._container_routing import ContainerKey
+        from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
+
+        containers = {
+            ContainerKey.MEMORIES: MagicMock(),
+            ContainerKey.TURNS: MagicMock(),
+            ContainerKey.SUMMARIES: MagicMock(),
+        }
+        with pytest.raises(TypeError, match="not a single str"):
+            AsyncPipelineService(
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                containers=containers,
+                transcript_metadata_keys="agent_id",
+            )
+
+    def test_client_ctor_rejects_str(self) -> None:
+        from azure.cosmos.agent_memory import CosmosMemoryClient
+
+        with pytest.raises(TypeError, match="not a single str"):
+            CosmosMemoryClient(
+                cosmos_endpoint="",
+                transcript_metadata_keys="agent_id",
+            )
+
+
+class TestCompactJsonSerialization:
+    """Token-reduction is the whole point — emit compact JSON, not pretty."""
+
+    def test_no_whitespace_between_separators(self) -> None:
+        items = [_turn("user", "Hi", a=1, b=2)]
+        out = build_transcript(items, metadata_keys=["a", "b"])
+        # Default json.dumps would produce ``{"a": 1, "b": 2}`` (spaces
+        # after `:` and `,`). Compact form drops both.
+        assert '{"a":1,"b":2}' in out
+        assert '"a": 1' not in out
+        assert '"b": 2' not in out
+
+    def test_non_ascii_preserved(self) -> None:
+        items = [_turn("user", "Hi", note="café")]
+        out = build_transcript(items, metadata_keys=["note"])
+        # ensure_ascii=False keeps human-readable utf-8 in the prompt.
+        assert "café" in out
+        assert "\\u00e9" not in out
+
+
+class TestNonSerializableMetadataCoerced:
+    """Real-world metadata carries datetimes, UUIDs, etc. — ``default=str``
+    keeps a single bad value from blowing up the entire extraction."""
+
+    def test_datetime_value_does_not_crash(self) -> None:
+        from datetime import datetime, timezone
+
+        items = [_turn("user", "Hi", timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))]
+        out = build_transcript(items, metadata_keys=["timestamp"])
+        assert "timestamp" in out
+        assert "2026-01-01" in out
+
+    def test_uuid_value_does_not_crash(self) -> None:
+        import uuid
+
+        u = uuid.uuid4()
+        items = [_turn("user", "Hi", agent_id=u)]
+        out = build_transcript(items, metadata_keys=["agent_id"])
+        assert str(u) in out
+
+
+class TestGeneratorCoercion:
+    """A generator passed for ``metadata_keys`` would be exhausted after the
+    first turn; ``build_transcript`` must coerce it to a sequence up front."""
+
+    def test_generator_works_across_multiple_turns(self) -> None:
+        items = [
+            _turn("user", "T1", agent_id="x"),
+            _turn("user", "T2", agent_id="y"),
+            _turn("user", "T3", agent_id="z"),
+        ]
+        out = build_transcript(items, metadata_keys=(k for k in ["agent_id"]))
+        assert out.count("agent_id") == 3
+
+
+class TestClientToPipelineWiring:
+    """A typo in ``_build_pipeline`` (e.g. ``_transcript_metadata_key`` vs
+    ``_keys``) must fail a test, not silently disarm the kwarg."""
+
+    def test_sync_client_threads_kwarg_into_pipeline(self) -> None:
+        from unittest.mock import MagicMock
+
+        from azure.cosmos.agent_memory import CosmosMemoryClient
+
+        client = CosmosMemoryClient.__new__(CosmosMemoryClient)
+        client._transcript_metadata_keys = ("agent_id", "timestamp")
+        client._turns_container_client = MagicMock()
+        client._memories_container_client = MagicMock()
+        client._summaries_container_client = MagicMock()
+        client._chat_client = MagicMock()
+        client._embeddings_client = MagicMock()
+        captured: dict[str, object] = {}
+
+        from azure.cosmos.agent_memory import cosmos_memory_client as mod
+
+        original = mod.PipelineService
+
+        def fake_pipeline(*args: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return MagicMock()
+
+        mod.PipelineService = fake_pipeline  # type: ignore[assignment]
+        try:
+            client._build_pipeline(MagicMock())
+        finally:
+            mod.PipelineService = original
+
+        assert captured.get("transcript_metadata_keys") == ("agent_id", "timestamp")
+
+    def test_async_client_threads_kwarg_into_pipeline(self) -> None:
+        from unittest.mock import MagicMock
+
+        from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
+        from azure.cosmos.agent_memory.aio import cosmos_memory_client as mod
+
+        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
+        client._transcript_metadata_keys = ("agent_id",)
+        client._turns_container_client = MagicMock()
+        client._memories_container_client = MagicMock()
+        client._summaries_container_client = MagicMock()
+        client._chat_client = MagicMock()
+        client._embeddings_client = MagicMock()
+        captured: dict[str, object] = {}
+
+        original = mod.AsyncPipelineService
+
+        def fake_pipeline(*args: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return MagicMock()
+
+        mod.AsyncPipelineService = fake_pipeline  # type: ignore[assignment]
+        try:
+            client._build_pipeline(MagicMock())
+        finally:
+            mod.AsyncPipelineService = original
+
+        assert captured.get("transcript_metadata_keys") == ("agent_id",)

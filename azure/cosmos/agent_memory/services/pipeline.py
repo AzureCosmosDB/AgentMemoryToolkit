@@ -14,7 +14,7 @@ import json
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from azure.cosmos.exceptions import (
     CosmosHttpResponseError,
@@ -46,6 +46,7 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     VALID_VALENCES,
     PromptyLoader,
+    _normalize_metadata_keys,
     build_topic_tags,
     build_transcript,
     cap_structured_summary,
@@ -161,7 +162,7 @@ class PipelineService:
         prompts_dir: str | None = None,
         *,
         containers: dict[ContainerKey, Any],
-        transcript_metadata_keys: Optional[tuple[str, ...]] = None,
+        transcript_metadata_keys: Optional[Iterable[str]] = None,
     ) -> None:
         self._store = store
         self._containers = containers
@@ -172,9 +173,7 @@ class PipelineService:
         self._chat_client = chat_client
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
-        self._transcript_metadata_keys: Optional[tuple[str, ...]] = (
-            tuple(transcript_metadata_keys) if transcript_metadata_keys else None
-        )
+        self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
 
     def _run_prompty(
         self,
@@ -224,6 +223,8 @@ class PipelineService:
         *,
         group_by_thread: bool = False,
     ) -> str:
+        # getattr fallback covers unit tests that build PipelineService via
+        # __new__ to bypass __init__ (and therefore the metadata-keys stash).
         return build_transcript(
             items,
             group_by_thread=group_by_thread,

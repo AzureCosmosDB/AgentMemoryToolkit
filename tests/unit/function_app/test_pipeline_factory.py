@@ -107,6 +107,7 @@ def test_builds_pipeline_from_complete_env(mocks):
         mocks.chat_instance,
         mocks.embed_instance,
         containers=expected_containers,
+        transcript_metadata_keys=None,
     )
 
 
@@ -142,6 +143,31 @@ def test_passes_credential_to_both_clients(mocks):
 
     assert mocks.chat_ctor.call_args.kwargs["credential"] is mocks.credential
     assert mocks.embed_ctor.call_args.kwargs["credential"] is mocks.credential
+
+
+def test_transcript_metadata_keys_env_threads_into_pipeline(monkeypatch, mocks):
+    monkeypatch.setenv(
+        "AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS",
+        " agent_id , timestamp ,  , model_id",
+    )
+    pipeline_factory.get_pipeline()
+
+    kwargs = mocks.pipeline_ctor.call_args.kwargs
+    assert kwargs["transcript_metadata_keys"] == ("agent_id", "timestamp", "model_id")
+
+
+def test_transcript_metadata_keys_env_unset_yields_none(monkeypatch, mocks):
+    monkeypatch.delenv("AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS", raising=False)
+    pipeline_factory.get_pipeline()
+
+    assert mocks.pipeline_ctor.call_args.kwargs["transcript_metadata_keys"] is None
+
+
+def test_transcript_metadata_keys_env_empty_string_yields_none(monkeypatch, mocks):
+    monkeypatch.setenv("AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS", "   ")
+    pipeline_factory.get_pipeline()
+
+    assert mocks.pipeline_ctor.call_args.kwargs["transcript_metadata_keys"] is None
 
 
 # ---------------------------------------------------------------------------

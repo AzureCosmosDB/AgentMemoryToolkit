@@ -6,6 +6,7 @@ verbatim — no business logic is duplicated in the function app.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from . import config
@@ -16,6 +17,20 @@ from .cosmos_clients import (
 )
 
 _pipeline: Any | None = None
+
+
+def _read_transcript_metadata_keys() -> tuple[str, ...] | None:
+    """Parse ``AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS`` (comma-separated allow-list).
+
+    Mirrors the ``transcript_metadata_keys`` ctor kwarg on
+    :class:`CosmosMemoryClient` so the Durable-Functions backend produces
+    the same prompt content as the in-process backend.
+    """
+    raw = os.environ.get("AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS", "").strip()
+    if not raw:
+        return None
+    keys = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return keys or None
 
 
 def get_pipeline():
@@ -59,5 +74,11 @@ def get_pipeline():
         ContainerKey.SUMMARIES: summaries_container,
     }
     store = MemoryStore(containers=containers, embeddings_client=embeddings)
-    _pipeline = PipelineService(store, chat, embeddings, containers=containers)
+    _pipeline = PipelineService(
+        store,
+        chat,
+        embeddings,
+        containers=containers,
+        transcript_metadata_keys=_read_transcript_metadata_keys(),
+    )
     return _pipeline

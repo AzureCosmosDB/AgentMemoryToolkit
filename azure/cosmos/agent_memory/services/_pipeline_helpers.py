@@ -181,13 +181,34 @@ def extract_prompty_params(p: Any) -> dict[str, Any]:
     return params
 
 
+def _normalize_metadata_keys(
+    value: Optional[Iterable[str]],
+) -> Optional[tuple[str, ...]]:
+    """Validate + coerce a ``transcript_metadata_keys`` argument to a tuple.
+
+    Rejects ``str`` outright (a bare string is iterable char-by-char, which
+    would silently produce a one-letter allow-list). Returns ``None`` for
+    empty or missing input.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raise TypeError(
+            "transcript_metadata_keys must be a sequence of keys "
+            "(list/tuple/set), not a single str. "
+            f"Got: {value!r}. Did you mean [{value!r}]?"
+        )
+    keys = tuple(str(k) for k in value if str(k))
+    return keys or None
+
+
 def _format_metadata_segment(
     metadata: Any,
-    metadata_keys: Optional[Iterable[str]],
+    metadata_keys: Optional[tuple[str, ...]],
 ) -> str:
     """Render the trailing ``[metadata: {...}]`` segment for a transcript line.
 
-    Returns an empty string unless ``metadata_keys`` is a non-empty iterable
+    Returns an empty string unless ``metadata_keys`` is a non-empty tuple
     AND at least one of those keys is present in ``metadata``. Only the
     explicitly allow-listed keys are serialized, in the iteration order of
     ``metadata_keys``.
@@ -197,7 +218,8 @@ def _format_metadata_segment(
     filtered = {k: metadata[k] for k in metadata_keys if k in metadata}
     if not filtered:
         return ""
-    return f" [metadata: {json.dumps(filtered)}]"
+    payload = json.dumps(filtered, separators=(",", ":"), ensure_ascii=False, default=str)
+    return f" [metadata: {payload}]"
 
 
 def build_transcript(
@@ -227,13 +249,18 @@ def build_transcript(
         metadata blobs (raw tool calls, IDE schema, etc.) out of every
         prompt — they're often 10-100x larger than the dialog itself and
         dilute extraction quality.
+
+        Accepts any iterable of strings except ``str`` itself (which would
+        be interpreted char-by-char). Generators are coerced to a tuple so
+        the allow-list is reusable across turns.
     """
+    keys = _normalize_metadata_keys(metadata_keys)
     if not group_by_thread:
         lines: list[str] = []
         for m in items:
             role = m.get("role", "unknown")
             content = m.get("content", "")
-            meta_str = _format_metadata_segment(m.get("metadata", {}), metadata_keys)
+            meta_str = _format_metadata_segment(m.get("metadata", {}), keys)
             lines.append(f"[{role}]: {content}{meta_str}")
         return "\n".join(lines)
 
@@ -247,7 +274,7 @@ def build_transcript(
         for m in thread_items:
             role = m.get("role", "unknown")
             content = m.get("content", "")
-            meta_str = _format_metadata_segment(m.get("metadata", {}), metadata_keys)
+            meta_str = _format_metadata_segment(m.get("metadata", {}), keys)
             parts.append(f"[{role}]: {content}{meta_str}")
         parts.append("")
     return "\n".join(parts)

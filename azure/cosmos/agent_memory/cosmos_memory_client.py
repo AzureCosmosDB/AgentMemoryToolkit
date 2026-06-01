@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from azure.cosmos.agent_memory.logging import get_logger
 
@@ -90,6 +90,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
         processor: Optional[MemoryProcessor] = None,
+        transcript_metadata_keys: Optional[Iterable[str]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -127,6 +128,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
         self._pipeline: Optional[PipelineService] = None
         self._processor: Optional[MemoryProcessor] = processor
         self._processor_explicit = processor is not None
+        self._transcript_metadata_keys: Optional[tuple[str, ...]] = (
+            tuple(transcript_metadata_keys) if transcript_metadata_keys else None
+        )
         if self._cosmos_endpoint:
             self.create_memory_store()
         logger.info("CosmosMemoryClient initialized")
@@ -372,6 +376,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             self._chat_client,
             self._embeddings_client,
             containers=self._containers,
+            transcript_metadata_keys=self._transcript_metadata_keys,
         )
 
     def _store_uses_current_clients(self) -> bool:

@@ -14,7 +14,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from azure.cosmos.agent_memory.exceptions import LLMError
 
@@ -181,10 +181,30 @@ def extract_prompty_params(p: Any) -> dict[str, Any]:
     return params
 
 
+def _format_metadata_segment(
+    metadata: Any,
+    metadata_keys: Optional[Iterable[str]],
+) -> str:
+    """Render the trailing ``[metadata: {...}]`` segment for a transcript line.
+
+    Returns an empty string unless ``metadata_keys`` is a non-empty iterable
+    AND at least one of those keys is present in ``metadata``. Only the
+    explicitly allow-listed keys are serialized, in the iteration order of
+    ``metadata_keys``.
+    """
+    if not metadata_keys or not isinstance(metadata, dict):
+        return ""
+    filtered = {k: metadata[k] for k in metadata_keys if k in metadata}
+    if not filtered:
+        return ""
+    return f" [metadata: {json.dumps(filtered)}]"
+
+
 def build_transcript(
     items: list[dict[str, Any]],
     *,
     group_by_thread: bool = False,
+    metadata_keys: Optional[Iterable[str]] = None,
 ) -> str:
     """Build a formatted transcript from memory documents.
 
@@ -194,14 +214,26 @@ def build_transcript(
         Memory dicts with ``role``, ``content``, and optional ``metadata``.
     group_by_thread:
         If *True*, group messages under ``=== Thread <id> ===`` headers.
+    metadata_keys:
+        Allow-list of metadata keys to surface in each transcript line.
+        Defaults to ``None`` (no metadata serialized — only ``[role]:
+        content`` lines). When provided, only the listed keys are emitted,
+        in iteration order. Keys absent from a given turn's metadata are
+        silently skipped.
+
+        Set this when callers stash semantically useful breadcrumbs in
+        ``TurnRecord.metadata`` that the extraction LLM should see
+        (e.g. ``["agent_id", "timestamp"]``). Leaving it unset keeps free-form
+        metadata blobs (raw tool calls, IDE schema, etc.) out of every
+        prompt — they're often 10-100x larger than the dialog itself and
+        dilute extraction quality.
     """
     if not group_by_thread:
         lines: list[str] = []
         for m in items:
             role = m.get("role", "unknown")
             content = m.get("content", "")
-            metadata = m.get("metadata", {})
-            meta_str = f" [metadata: {json.dumps(metadata)}]" if metadata else ""
+            meta_str = _format_metadata_segment(m.get("metadata", {}), metadata_keys)
             lines.append(f"[{role}]: {content}{meta_str}")
         return "\n".join(lines)
 
@@ -215,8 +247,7 @@ def build_transcript(
         for m in thread_items:
             role = m.get("role", "unknown")
             content = m.get("content", "")
-            metadata = m.get("metadata", {})
-            meta_str = f" [metadata: {json.dumps(metadata)}]" if metadata else ""
+            meta_str = _format_metadata_segment(m.get("metadata", {}), metadata_keys)
             parts.append(f"[{role}]: {content}{meta_str}")
         parts.append("")
     return "\n".join(parts)

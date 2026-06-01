@@ -1,0 +1,152 @@
+"""Transcript-building behavior: default + metadata allow-list."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from azure.cosmos.agent_memory.services._pipeline_helpers import build_transcript
+
+
+def _turn(role: str, content: str, **meta: object) -> dict[str, object]:
+    return {"role": role, "content": content, "metadata": dict(meta)}
+
+
+class TestDefaultExcludesMetadata:
+    """Default behavior must NEVER serialize metadata into the transcript.
+
+    Coding-agent frameworks routinely stash full tool-call payloads, IDE
+    schema fragments, and raw model responses under ``TurnRecord.metadata``.
+    Dumping that blob into every extraction/summarization prompt was
+    drowning out the actual dialogue (issue: user reported 24-turn session
+    where metadata was 20-25x the size of the conversation content).
+    """
+
+    def test_metadata_omitted_by_default_flat(self) -> None:
+        items = [
+            _turn("user", "Hello", raw_response={"huge": "blob"}, tool_calls=[1, 2, 3]),
+            _turn("assistant", "Hi", model_id="gpt-4o", token_count=42),
+        ]
+        out = build_transcript(items)
+        assert out == "[user]: Hello\n[assistant]: Hi"
+        assert "metadata" not in out
+        assert "raw_response" not in out
+        assert "tool_calls" not in out
+
+    def test_metadata_omitted_by_default_grouped(self) -> None:
+        items = [
+            {"role": "user", "content": "Q", "metadata": {"raw_response": "..."}, "thread_id": "t1"},
+            {"role": "assistant", "content": "A", "metadata": {"raw_response": "..."}, "thread_id": "t1"},
+        ]
+        out = build_transcript(items, group_by_thread=True)
+        assert "raw_response" not in out
+        assert "metadata" not in out
+        assert "=== Thread t1 ===" in out
+        assert "[user]: Q" in out
+        assert "[assistant]: A" in out
+
+    def test_empty_allowlist_is_same_as_default(self) -> None:
+        items = [_turn("user", "x", a=1, b=2)]
+        assert build_transcript(items, metadata_keys=[]) == "[user]: x"
+        assert build_transcript(items, metadata_keys=None) == "[user]: x"
+
+    def test_no_metadata_field_does_not_crash(self) -> None:
+        items = [{"role": "user", "content": "no meta key here"}]
+        assert build_transcript(items) == "[user]: no meta key here"
+
+
+class TestAllowlist:
+    """``metadata_keys`` is an opt-in allow-list, not a denylist."""
+
+    def test_only_allowed_keys_surface(self) -> None:
+        items = [_turn("user", "Hi", agent_id="copilot", raw_response={"huge": "blob"}, timestamp="2026-01-01")]
+        out = build_transcript(items, metadata_keys=["agent_id", "timestamp"])
+        # The line still includes the metadata segment, but only the
+        # allow-listed keys made it through.
+        assert "[user]: Hi" in out
+        assert "agent_id" in out
+        assert "timestamp" in out
+        assert "raw_response" not in out
+        assert "huge" not in out
+
+    def test_allowlist_ordering_is_iteration_order(self) -> None:
+        items = [_turn("user", "Hi", agent_id="copilot", timestamp="2026-01-01")]
+        out_a = build_transcript(items, metadata_keys=["agent_id", "timestamp"])
+        out_b = build_transcript(items, metadata_keys=["timestamp", "agent_id"])
+        # JSON serialization must reflect the iteration order of the
+        # allow-list so callers can pin ordering for deterministic prompts.
+        assert out_a.index("agent_id") < out_a.index("timestamp")
+        assert out_b.index("timestamp") < out_b.index("agent_id")
+
+    def test_missing_allowed_keys_silently_skipped(self) -> None:
+        items = [_turn("user", "Hi", agent_id="copilot")]
+        out = build_transcript(items, metadata_keys=["agent_id", "model_id", "not_present"])
+        assert "agent_id" in out
+        # Absent keys do not appear as ``null`` or empty entries.
+        assert "model_id" not in out
+        assert "not_present" not in out
+        assert "null" not in out
+
+    def test_segment_dropped_when_no_allowed_key_present(self) -> None:
+        items = [_turn("user", "Hi", raw_response="big")]
+        out = build_transcript(items, metadata_keys=["agent_id"])
+        # None of the allow-listed keys exist on this turn's metadata,
+        # so the ``[metadata: ...]`` segment is suppressed entirely.
+        assert out == "[user]: Hi"
+
+    def test_works_with_grouped_layout(self) -> None:
+        items = [
+            {"role": "user", "content": "Q", "metadata": {"agent_id": "x", "raw": "big"}, "thread_id": "t1"},
+            {"role": "assistant", "content": "A", "metadata": {"agent_id": "x", "raw": "big"}, "thread_id": "t1"},
+        ]
+        out = build_transcript(items, group_by_thread=True, metadata_keys=["agent_id"])
+        assert "agent_id" in out
+        assert "raw" not in out
+
+    def test_non_dict_metadata_is_safe(self) -> None:
+        items = [{"role": "user", "content": "x", "metadata": "not a dict"}]
+        # Should not crash and should not invent metadata content.
+        assert build_transcript(items, metadata_keys=["agent_id"]) == "[user]: x"
+
+    def test_serialized_json_is_valid(self) -> None:
+        items = [_turn("user", "Hi", agent_id="copilot", count=7)]
+        out = build_transcript(items, metadata_keys=["agent_id", "count"])
+        start = out.index("{")
+        end = out.rindex("}") + 1
+        parsed = json.loads(out[start:end])
+        assert parsed == {"agent_id": "copilot", "count": 7}
+
+
+class TestPipelineServicePlumbing:
+    """``PipelineService.__init__`` must accept the allow-list and thread it
+    through ``_build_transcript``."""
+
+    def test_sync_pipeline_propagates_allowlist(self) -> None:
+        from azure.cosmos.agent_memory.services.pipeline import PipelineService
+
+        service = PipelineService.__new__(PipelineService)
+        service._transcript_metadata_keys = ("agent_id",)
+        items = [_turn("user", "Hi", agent_id="copilot", raw="big")]
+        out = service._build_transcript(items)
+        assert "agent_id" in out
+        assert "raw" not in out
+
+    def test_sync_pipeline_default_empty(self) -> None:
+        from azure.cosmos.agent_memory.services.pipeline import PipelineService
+
+        service = PipelineService.__new__(PipelineService)
+        service._transcript_metadata_keys = None
+        items = [_turn("user", "Hi", agent_id="copilot")]
+        assert service._build_transcript(items) == "[user]: Hi"
+
+    @pytest.mark.asyncio
+    async def test_async_pipeline_propagates_allowlist(self) -> None:
+        from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
+
+        service = AsyncPipelineService.__new__(AsyncPipelineService)
+        service._transcript_metadata_keys = ("agent_id",)
+        items = [_turn("user", "Hi", agent_id="copilot", raw="big")]
+        out = service._build_transcript(items)
+        assert "agent_id" in out
+        assert "raw" not in out

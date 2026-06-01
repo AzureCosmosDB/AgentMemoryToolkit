@@ -43,7 +43,6 @@ Pin a specific version when integrating.
 ### Package layout
 
 - Distribution name: **`azure-cosmos-agent-memory`** (PyPI)
-- Import path: **`azure.cosmos.agent_memory`** (Azure SDK namespace
-  convention, coexists side-by-side with `azure-cosmos`)
+- Import path: **`azure.cosmos.agent_memory`** 
 
 [0.1.0b1]: https://github.com/AzureCosmosDB/AgentMemoryToolkit/releases/tag/v0.1.0b1

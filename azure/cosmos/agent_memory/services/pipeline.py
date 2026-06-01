@@ -161,6 +161,7 @@ class PipelineService:
         prompts_dir: str | None = None,
         *,
         containers: dict[ContainerKey, Any],
+        transcript_metadata_keys: Optional[tuple[str, ...]] = None,
     ) -> None:
         self._store = store
         self._containers = containers
@@ -171,6 +172,9 @@ class PipelineService:
         self._chat_client = chat_client
         self._embeddings = embeddings_client
         self._prompty = PromptyLoader(prompts_dir)
+        self._transcript_metadata_keys: Optional[tuple[str, ...]] = (
+            tuple(transcript_metadata_keys) if transcript_metadata_keys else None
+        )
 
     def _run_prompty(
         self,
@@ -214,13 +218,17 @@ class PipelineService:
     def _chat_text(response: Any) -> str:
         return chat_text(response)
 
-    @staticmethod
     def _build_transcript(
+        self,
         items: list[dict[str, Any]],
         *,
         group_by_thread: bool = False,
     ) -> str:
-        return build_transcript(items, group_by_thread=group_by_thread)
+        return build_transcript(
+            items,
+            group_by_thread=group_by_thread,
+            metadata_keys=getattr(self, "_transcript_metadata_keys", None),
+        )
 
     def _load_existing_memories(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from azure.cosmos.agent_memory._base import _BaseMemoryClient
 from azure.cosmos.agent_memory._container_routing import container_key_for_type
@@ -95,6 +95,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
         processor: Optional[AsyncMemoryProcessor] = None,
+        transcript_metadata_keys: Optional[Iterable[str]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -135,6 +136,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._pipeline: Optional[AsyncPipelineService] = None
         self._processor: Optional[AsyncMemoryProcessor] = processor
         self._processor_explicit = processor is not None
+        self._transcript_metadata_keys: Optional[tuple[str, ...]] = (
+            tuple(transcript_metadata_keys) if transcript_metadata_keys else None
+        )
         logger.info("AsyncCosmosMemoryClient initialized")
 
     async def __aenter__(self) -> "AsyncCosmosMemoryClient":
@@ -401,6 +405,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             self._chat_client,
             self._embeddings_client,
             containers=self._containers,
+            transcript_metadata_keys=self._transcript_metadata_keys,
         )
 
     def _store_uses_current_clients(self) -> bool:

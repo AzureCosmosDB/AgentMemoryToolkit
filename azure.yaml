@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
 
-name: agent-memory-toolkit
+name: azure-cosmos-agent-memory
 metadata:
-  template: agent-memory-toolkit@0.1.0
+  template: azure-cosmos-agent-memory@0.1.0b1
 
 infra:
   provider: bicep

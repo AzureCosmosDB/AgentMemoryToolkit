@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_memory_toolkit.aio.processors import (
+from azure.cosmos.agent_memory.aio.processors import (
     AsyncDurableFunctionProcessor,
     ProcessThreadResult,
     UserSummaryResult,

@@ -56,10 +56,10 @@ def mocks(monkeypatch):
 
     patches = [
         patch("azure.identity.DefaultAzureCredential", credential_ctor),
-        patch("agent_memory_toolkit.chat.ChatClient", chat_ctor),
-        patch("agent_memory_toolkit.embeddings.EmbeddingsClient", embed_ctor),
-        patch("agent_memory_toolkit.store.MemoryStore", store_ctor),
-        patch("agent_memory_toolkit.services.pipeline.PipelineService", pipeline_ctor),
+        patch("azure.cosmos.agent_memory.chat.ChatClient", chat_ctor),
+        patch("azure.cosmos.agent_memory.embeddings.EmbeddingsClient", embed_ctor),
+        patch("azure.cosmos.agent_memory.store.MemoryStore", store_ctor),
+        patch("azure.cosmos.agent_memory.services.pipeline.PipelineService", pipeline_ctor),
     ]
     for p in patches:
         p.start()
@@ -91,7 +91,7 @@ def test_builds_pipeline_from_complete_env(mocks):
     result = pipeline_factory.get_pipeline()
 
     assert result is mocks.pipeline_instance
-    from agent_memory_toolkit._container_routing import ContainerKey
+    from azure.cosmos.agent_memory._container_routing import ContainerKey
 
     expected_containers = {
         ContainerKey.TURNS: mocks.turns_container,

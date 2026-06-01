@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor, ProcessThreadResult
+from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor, ProcessThreadResult
 
 
 @pytest.mark.asyncio

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
-from agent_memory_toolkit.processors import (
+from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
+from azure.cosmos.agent_memory.processors import (
     DurableFunctionProcessor,
     InProcessProcessor,
     ProcessThreadResult,
@@ -89,7 +89,7 @@ class TestDurableProcessNowEndToEnd:
 
         import logging
 
-        with caplog.at_level(logging.DEBUG, logger="agent_memory_toolkit.processors.durable"):
+        with caplog.at_level(logging.DEBUG, logger="azure.cosmos.agent_memory.processors.durable"):
             result = client.process_now(user_id="u-1", thread_id="th-1")
 
         assert isinstance(result, ProcessThreadResult)

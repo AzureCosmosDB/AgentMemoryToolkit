@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.services.pipeline import PipelineService
-from agent_memory_toolkit.store import MemoryStore
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.services.pipeline import PipelineService
+from azure.cosmos.agent_memory.store import MemoryStore
 
 
 def _make_pipeline(llm_response: dict):
@@ -164,7 +164,7 @@ class TestMarkSupersededDoesNotMutate:
     def test_input_dict_unchanged_on_success(self):
         from azure.core import MatchConditions
 
-        from agent_memory_toolkit.services.pipeline import PipelineService
+        from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
         pipeline = PipelineService.__new__(PipelineService)
         pipeline._store = None
@@ -189,7 +189,7 @@ class TestMarkSupersededDoesNotMutate:
     def test_input_dict_unchanged_on_failure(self):
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
-        from agent_memory_toolkit.services.pipeline import PipelineService
+        from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
         pipeline = PipelineService.__new__(PipelineService)
         pipeline._store = None
@@ -221,7 +221,7 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
     """
 
     def _build_pipeline(self):
-        from agent_memory_toolkit.services.pipeline import PipelineService
+        from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
         pipeline = PipelineService.__new__(PipelineService)
         pipeline._embeddings = MagicMock()
@@ -304,7 +304,7 @@ def test_extract_scoped_intent_without_outcome_stores_correctly(caplog):
         }
     )
 
-    with caplog.at_level("WARNING", logger="agent_memory_toolkit.pipeline"):
+    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
         pipeline.extract_memories("u1", "t1")
 
     eps = [d for d in upserted if d["type"] == "episodic"]
@@ -403,7 +403,7 @@ def test_extract_drops_episodic_missing_scope_type(caplog):
         }
     )
 
-    with caplog.at_level("WARNING", logger="agent_memory_toolkit.pipeline"):
+    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
         pipeline.extract_memories("u1", "t1")
 
     assert not any(d["type"] == "episodic" for d in upserted)
@@ -424,7 +424,7 @@ def test_extract_drops_episodic_missing_scope_value(caplog):
         }
     )
 
-    with caplog.at_level("WARNING", logger="agent_memory_toolkit.pipeline"):
+    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
         pipeline.extract_memories("u1", "t1")
 
     assert not any(d["type"] == "episodic" for d in upserted)
@@ -456,7 +456,7 @@ def test_extract_drops_episodic_with_blank_or_invalid_scope(scope_type, scope_va
         }
     )
 
-    with caplog.at_level("WARNING", logger="agent_memory_toolkit.pipeline"):
+    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
         pipeline.extract_memories("u1", "t1")
 
     assert not any(d["type"] == "episodic" for d in upserted)

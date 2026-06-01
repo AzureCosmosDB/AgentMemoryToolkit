@@ -13,7 +13,7 @@ import os
 
 from dotenv import load_dotenv
 
-from agent_memory_toolkit import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient
 
 load_dotenv()
 

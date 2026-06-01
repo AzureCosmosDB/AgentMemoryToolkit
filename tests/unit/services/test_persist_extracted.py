@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 from azure.cosmos.exceptions import CosmosResourceExistsError
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit._utils import compute_content_hash
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
-from agent_memory_toolkit.services._pipeline_helpers import ID_SEED_SEP
-from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._utils import compute_content_hash
+from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
+from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP
+from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class _Container:

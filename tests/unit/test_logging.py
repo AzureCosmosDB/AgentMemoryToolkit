@@ -8,8 +8,8 @@ import logging
 
 import pytest
 
-from agent_memory_toolkit.exceptions import MemoryNotFoundError, ValidationError
-from agent_memory_toolkit.logging import (
+from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, ValidationError
+from azure.cosmos.agent_memory.logging import (
     JsonFormatter,
     configure_logging,
     get_logger,
@@ -18,7 +18,7 @@ from agent_memory_toolkit.logging import (
 
 @pytest.fixture(autouse=True)
 def _reset_root_logger():
-    root = logging.getLogger("agent_memory_toolkit")
+    root = logging.getLogger("azure.cosmos.agent_memory")
     saved_handlers = list(root.handlers)
     saved_level = root.level
     for h in list(root.handlers):
@@ -39,7 +39,7 @@ def _render(record: logging.LogRecord) -> dict:
 class TestJsonFormatter:
     def _make_record(self, **extra) -> logging.LogRecord:
         record = logging.LogRecord(
-            name="agent_memory_toolkit.test",
+            name="azure.cosmos.agent_memory.test",
             level=logging.INFO,
             pathname=__file__,
             lineno=1,
@@ -54,7 +54,7 @@ class TestJsonFormatter:
     def test_minimal_payload_shape(self):
         payload = _render(self._make_record())
         assert payload["level"] == "INFO"
-        assert payload["logger"] == "agent_memory_toolkit.test"
+        assert payload["logger"] == "azure.cosmos.agent_memory.test"
         assert payload["msg"] == "hello world"
         assert "ts" in payload
         # No correlation_id in the payload at all.
@@ -92,7 +92,7 @@ class TestJsonFormatter:
             import sys
 
             record = logging.LogRecord(
-                name="agent_memory_toolkit.test",
+                name="azure.cosmos.agent_memory.test",
                 level=logging.ERROR,
                 pathname=__file__,
                 lineno=1,
@@ -112,7 +112,7 @@ class TestJsonFormatter:
             import sys
 
             record = logging.LogRecord(
-                name="agent_memory_toolkit.test",
+                name="azure.cosmos.agent_memory.test",
                 level=logging.ERROR,
                 pathname=__file__,
                 lineno=1,
@@ -132,7 +132,7 @@ class TestJsonFormatter:
 class TestConfigureLogging:
     def test_attaches_single_handler(self):
         configure_logging(force_json=True)
-        root = logging.getLogger("agent_memory_toolkit")
+        root = logging.getLogger("azure.cosmos.agent_memory")
         managed = [h for h in root.handlers if getattr(h, "_amt_managed", False)]
         assert len(managed) == 1
 
@@ -140,23 +140,23 @@ class TestConfigureLogging:
         configure_logging(force_json=True)
         configure_logging(force_json=True)
         configure_logging(force_json=True)
-        root = logging.getLogger("agent_memory_toolkit")
+        root = logging.getLogger("azure.cosmos.agent_memory")
         managed = [h for h in root.handlers if getattr(h, "_amt_managed", False)]
         assert len(managed) == 1
 
     def test_force_json_uses_json_formatter(self):
         configure_logging(force_json=True)
-        root = logging.getLogger("agent_memory_toolkit")
+        root = logging.getLogger("azure.cosmos.agent_memory")
         managed = [h for h in root.handlers if getattr(h, "_amt_managed", False)]
         assert isinstance(managed[0].formatter, JsonFormatter)
 
     def test_get_logger_participates_in_root(self):
-        logger = get_logger("agent_memory_toolkit.some.submodule")
+        logger = get_logger("azure.cosmos.agent_memory.some.submodule")
         buf = io.StringIO()
         capture = logging.StreamHandler(buf)
         capture.setFormatter(JsonFormatter())
         capture._amt_managed = True  # type: ignore[attr-defined]
-        root = logging.getLogger("agent_memory_toolkit")
+        root = logging.getLogger("azure.cosmos.agent_memory")
         for h in list(root.handlers):
             root.removeHandler(h)
         root.addHandler(capture)
@@ -166,4 +166,4 @@ class TestConfigureLogging:
         assert payload["msg"] == "ping"
         assert payload["operation"] == "test_op"
         assert payload["user_id"] == "u9"
-        assert payload["logger"] == "agent_memory_toolkit.some.submodule"
+        assert payload["logger"] == "azure.cosmos.agent_memory.some.submodule"

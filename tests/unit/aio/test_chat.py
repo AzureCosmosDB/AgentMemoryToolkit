@@ -1,4 +1,4 @@
-"""Unit tests for agent_memory_toolkit.aio.chat.AsyncChatClient."""
+"""Unit tests for azure.cosmos.agent_memory.aio.chat.AsyncChatClient."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_memory_toolkit.aio.chat import (
+from azure.cosmos.agent_memory.aio.chat import (
     AsyncChatClient,
     _is_async_credential,
     _make_sync_token_provider_for_async,

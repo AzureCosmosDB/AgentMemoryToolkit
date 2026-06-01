@@ -60,7 +60,7 @@ USER_COUNTER_THREAD_ID = "__counters__"
 # Defaults documented in local.settings.json.template
 # ---------------------------------------------------------------------------
 
-from agent_memory_toolkit.thresholds import (  # noqa: E402
+from azure.cosmos.agent_memory.thresholds import (  # noqa: E402
     DEFAULT_DEDUP_EVERY_N,
     DEFAULT_FACT_EXTRACTION_EVERY_N,
     DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,

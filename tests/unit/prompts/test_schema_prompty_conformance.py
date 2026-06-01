@@ -1,6 +1,6 @@
 """Conformance tests: every strict JSON schema must match its prompty body.
 
-The strict ``response_format`` schemas in ``agent_memory_toolkit.prompts._schemas``
+The strict ``response_format`` schemas in ``azure.cosmos.agent_memory.prompts._schemas``
 are paired with prompty files that describe the expected output shape in
 markdown JSON code-fences. If the two drift apart:
 
@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory_toolkit.prompts._schemas import PROMPTY_SCHEMAS
+from azure.cosmos.agent_memory.prompts._schemas import PROMPTY_SCHEMAS
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_PROMPTS_DIR = _REPO_ROOT / "agent_memory_toolkit" / "prompts"
+_PROMPTS_DIR = _REPO_ROOT / "azure" / "cosmos" / "agent_memory" / "prompts"
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*\n(.*?)```", re.DOTALL)
 
@@ -131,7 +131,7 @@ def test_prompty_describes_schema_shape(filename: str, schema_entry: tuple[str, 
             f"  prompty top-level keys per block: {diagnostic_blocks}\n"
             f"\nFix one of:\n"
             f"  - Add or update an example so required keys appear at the top\n"
-            f"  - Update the schema in agent_memory_toolkit/prompts/_schemas.py\n"
+            f"  - Update the schema in azure/cosmos/agent_memory/prompts/_schemas.py\n"
             f"    if the prompty's intent has changed."
         )
 

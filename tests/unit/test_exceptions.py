@@ -1,8 +1,8 @@
-"""Unit tests for agent_memory_toolkit.exceptions."""
+"""Unit tests for azure.cosmos.agent_memory.exceptions."""
 
 import pytest
 
-from agent_memory_toolkit.exceptions import (
+from azure.cosmos.agent_memory.exceptions import (
     AgentMemoryError,
     ConfigurationError,
     CosmosNotConnectedError,

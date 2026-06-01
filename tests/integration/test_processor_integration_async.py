@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryClient
-from agent_memory_toolkit.aio.processors import (
+from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio.processors import (
     AsyncDurableFunctionProcessor,
     AsyncInProcessProcessor,
     ProcessThreadResult,
@@ -91,7 +91,7 @@ class TestAsyncDurableProcessNowEndToEnd:
 
         import logging
 
-        with caplog.at_level(logging.DEBUG, logger="agent_memory_toolkit.aio.processors.durable"):
+        with caplog.at_level(logging.DEBUG, logger="azure.cosmos.agent_memory.aio.processors.durable"):
             result = await client.process_now(user_id="u-1", thread_id="th-1")
 
         assert isinstance(result, ProcessThreadResult)

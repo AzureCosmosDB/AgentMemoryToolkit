@@ -9,7 +9,7 @@ azure-functions-durable
 azure-cosmos>=4.16.0
 azure-identity>=1.20
 
-# LLM + prompty (used transitively by agent_memory_toolkit.services.pipeline)
+# LLM + prompty (used transitively by azure.cosmos.agent_memory.services.pipeline)
 openai>=1.60
 prompty>=2.0.0a9
 jinja2>=3.1.4
@@ -19,4 +19,4 @@ typing_extensions>=4.10
 # truth for prompts + business logic). The SDK wheel is vendored under
 # ``_vendor/`` so the Function app builds without a private package feed.
 # Rebuild with: ``python -m build --wheel && cp dist/*.whl function_app/_vendor/``
-./_vendor/agent_memory_toolkit-0.1.0-py3-none-any.whl
+./_vendor/azure_cosmos_agent_memory-0.1.0b1-py3-none-any.whl

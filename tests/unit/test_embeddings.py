@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.embeddings import AOAI_EMBEDDING_BATCH_SIZE, EmbeddingsClient
-from agent_memory_toolkit.exceptions import ConfigurationError
+from azure.cosmos.agent_memory.embeddings import AOAI_EMBEDDING_BATCH_SIZE, EmbeddingsClient
+from azure.cosmos.agent_memory.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Helpers

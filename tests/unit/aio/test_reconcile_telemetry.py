@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
+from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 
-ASYNC_LOGGER_NAME = "agent_memory_toolkit.pipeline.aio"
+ASYNC_LOGGER_NAME = "azure.cosmos.agent_memory.pipeline.aio"
 
 
 def _make_async_pipeline() -> AsyncPipelineService:

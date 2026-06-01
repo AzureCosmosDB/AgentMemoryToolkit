@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.aio.store import AsyncMemoryStore
-from agent_memory_toolkit.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
 
 
 class AsyncIterator:

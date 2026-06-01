@@ -206,7 +206,7 @@ Run once if the database and container do not already exist:
 import os
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
-from agent_memory_toolkit import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient
 
 load_dotenv()
 
@@ -235,7 +235,7 @@ memory.connect_cosmos()
 import os
 from dotenv import load_dotenv
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
-from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 
 load_dotenv()
 

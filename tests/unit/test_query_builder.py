@@ -1,6 +1,6 @@
-"""Unit tests for agent_memory_toolkit._query_builder._QueryBuilder."""
+"""Unit tests for azure.cosmos.agent_memory._query_builder._QueryBuilder."""
 
-from agent_memory_toolkit._query_builder import _QueryBuilder
+from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 
 # ---------------------------------------------------------------------------
 # build_where

@@ -6,10 +6,10 @@ import pytest
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.aio.store import AsyncMemoryStore
-from agent_memory_toolkit.exceptions import MemoryConflictError
-from agent_memory_toolkit.store import MemoryStore
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+from azure.cosmos.agent_memory.exceptions import MemoryConflictError
+from azure.cosmos.agent_memory.store import MemoryStore
 
 
 def _doc(etag: str, tags: list[str]) -> dict:

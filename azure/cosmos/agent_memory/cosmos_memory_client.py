@@ -1,0 +1,830 @@
+"""Thin synchronous Cosmos memory client orchestrator."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Optional
+
+from azure.cosmos.agent_memory.logging import get_logger
+
+from ._base import _BaseMemoryClient
+from ._container_routing import container_key_for_type
+from ._utils import (
+    _build_container_kwargs,
+    _container_policies,
+    _cosmos_container_offer_throughput,
+    _resolve_cosmos_provisioning_autoscale_max_ru,
+    _resolve_cosmos_throughput_mode,
+    _resolve_distance_function,
+    _resolve_embedding_data_type,
+    _resolve_full_text_language,
+    _validate_connection,
+)
+from .auto_trigger import maybe_trigger_steps
+from .chat import ChatClient
+from .embeddings import EmbeddingsClient
+from .exceptions import CosmosOperationError
+from .processors import InProcessProcessor, MemoryProcessor
+from .services.pipeline import PipelineService
+from .store import MemoryStore
+from .thresholds import DEFAULT_TTL_BY_TYPE
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only import
+    from .processors import ProcessThreadResult, UserSummaryResult  # noqa: F401
+
+logger = get_logger(__name__)
+
+_TURNS_INDEXING_POLICY = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [
+        {"path": "/embedding/?"},
+        {"path": "/source_memory_ids/*"},
+        {"path": "/supersedes_ids/*"},
+        {"path": '/"_etag"/?'},
+    ],
+}
+
+_SUMMARIES_INDEXING_POLICY = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [
+        {"path": "/embedding/?"},
+        {"path": "/source_memory_ids/*"},
+        {"path": "/supersedes_ids/*"},
+        {"path": '/"_etag"/?'},
+    ],
+    "compositeIndexes": [
+        [
+            {"path": "/user_id", "order": "ascending"},
+            {"path": "/thread_id", "order": "ascending"},
+            {"path": "/version", "order": "descending"},
+        ]
+    ],
+}
+
+
+class CosmosMemoryClient(_BaseMemoryClient):
+    """Manages local and Cosmos-backed memories via store and service layers."""
+
+    def __init__(
+        self,
+        cosmos_endpoint: Optional[str] = None,
+        cosmos_credential: Optional[Any] = None,
+        cosmos_key: Optional[str] = None,
+        cosmos_database: Optional[str] = None,
+        cosmos_container: Optional[str] = None,
+        cosmos_turns_container: str = "memories_turns",
+        cosmos_summaries_container: str = "memories_summaries",
+        cosmos_counter_container: Optional[str] = None,
+        cosmos_lease_container: Optional[str] = None,
+        cosmos_throughput_mode: Optional[str] = None,
+        cosmos_autoscale_max_ru: Optional[int] = None,
+        ai_foundry_endpoint: Optional[str] = None,
+        ai_foundry_credential: Optional[Any] = None,
+        ai_foundry_api_key: Optional[str] = None,
+        embedding_deployment_name: str = "text-embedding-3-large",
+        embedding_dimensions: Optional[int] = None,
+        chat_deployment_name: str = "gpt-4o-mini",
+        use_default_credential: bool = True,
+        processor: Optional[MemoryProcessor] = None,
+    ) -> None:
+        self._init_base_config(
+            cosmos_endpoint=cosmos_endpoint,
+            cosmos_credential=cosmos_credential,
+            cosmos_key=cosmos_key,
+            cosmos_database=cosmos_database,
+            cosmos_container=cosmos_container,
+            cosmos_turns_container=cosmos_turns_container,
+            cosmos_summaries_container=cosmos_summaries_container,
+            cosmos_counter_container=cosmos_counter_container,
+            cosmos_lease_container=cosmos_lease_container,
+            cosmos_throughput_mode=cosmos_throughput_mode,
+            cosmos_autoscale_max_ru=cosmos_autoscale_max_ru,
+            ai_foundry_endpoint=ai_foundry_endpoint,
+            ai_foundry_credential=ai_foundry_credential,
+            ai_foundry_api_key=ai_foundry_api_key,
+            embedding_deployment_name=embedding_deployment_name,
+            embedding_dimensions=embedding_dimensions,
+            chat_deployment_name=chat_deployment_name,
+            use_default_credential=use_default_credential,
+        )
+        self._embeddings_client = EmbeddingsClient(
+            endpoint=self._ai_foundry_endpoint,
+            credential=self._ai_foundry_credential,
+            api_key=self._ai_foundry_api_key,
+            model=self._embedding_deployment_name,
+            dimensions=self._embedding_dimensions,
+        )
+        self._chat_client = ChatClient(
+            endpoint=self._ai_foundry_endpoint,
+            credential=self._ai_foundry_credential,
+            api_key=self._ai_foundry_api_key,
+            model=self._chat_deployment_name,
+        )
+        self._pipeline: Optional[PipelineService] = None
+        self._processor: Optional[MemoryProcessor] = processor
+        self._processor_explicit = processor is not None
+        if self._cosmos_endpoint:
+            self.create_memory_store()
+        logger.info("CosmosMemoryClient initialized")
+
+    def __enter__(self) -> CosmosMemoryClient:
+        return super().__enter__()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def close(self) -> None:
+        """Close Cosmos, model clients, and owned credentials."""
+        if self._cosmos_client is not None:
+            self._cosmos_client.close()
+            self._cosmos_client = None
+            self._memories_container_client = None
+            self._turns_container_client = None
+            self._summaries_container_client = None
+            self._counter_container_client = None
+            self._store = None
+            self._pipeline = None
+        if self._processor is not None and not self._processor_explicit:
+            self._close_sync_closeable(self._processor)
+            self._processor = None
+        self._close_sync_closeable(self._chat_client)
+        self._close_sync_closeable(self._embeddings_client)
+        for owns, cred in (
+            (self._owns_cosmos_credential, self._cosmos_credential),
+            (self._owns_ai_foundry_credential, self._ai_foundry_credential),
+        ):
+            if owns and cred is not None:
+                self._close_sync_closeable(cred)
+
+    def connect_cosmos(
+        self,
+        endpoint: Optional[str] = None,
+        credential: Optional[Any] = None,
+        key: Optional[str] = None,
+        database: Optional[str] = None,
+        container: Optional[str] = None,
+        turns_container: Optional[str] = None,
+        summaries_container: Optional[str] = None,
+    ) -> None:
+        """Establish a connection to the Cosmos DB memory containers.
+
+        If container overrides are provided, they override the constructor's
+        settings for this connection.
+        """
+        self._cosmos_endpoint = endpoint or self._cosmos_endpoint
+        if credential is not None:
+            self._cosmos_credential = credential
+        elif key is not None:
+            self._cosmos_credential = key
+            self._cosmos_key = key
+        self._cosmos_database = database or self._cosmos_database
+        self._cosmos_container = container or self._cosmos_container
+        if turns_container is not None:
+            self._cosmos_turns_container = turns_container
+        if summaries_container is not None:
+            self._cosmos_summaries_container = summaries_container
+        _validate_connection(
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
+        )
+        try:
+            from azure.cosmos import CosmosClient
+
+            self._drain_cosmos_client()
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            db = client.get_database_client(self._cosmos_database)
+            self._cosmos_client = client
+            self._memories_container_client = db.get_container_client(self._cosmos_container)
+            self._turns_container_client = db.get_container_client(self._cosmos_turns_container)
+            self._summaries_container_client = db.get_container_client(self._cosmos_summaries_container)
+            logger.info("Connected turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
+            logger.info(
+                "Connected summaries container: %s/%s",
+                self._cosmos_database,
+                self._cosmos_summaries_container,
+            )
+            self._init_services()
+        except Exception as exc:
+            raise CosmosOperationError(f"Failed to connect to Cosmos DB: {exc}") from exc
+        logger.info("Connected to Cosmos DB %s/%s", self._cosmos_database, self._cosmos_container)
+
+    def create_memory_store(
+        self,
+        database: Optional[str] = None,
+        container: Optional[str] = None,
+        turns_container: Optional[str] = None,
+        summaries_container: Optional[str] = None,
+        counter_container: Optional[str] = None,
+        lease_container: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        credential: Optional[Any] = None,
+        key: Optional[str] = None,
+        embedding_dimensions: Optional[int] = None,
+        embedding_data_type: Optional[str] = None,
+        distance_function: Optional[str] = None,
+        full_text_language: Optional[str] = None,
+        throughput_mode: Optional[str] = None,
+        autoscale_max_ru: Optional[int] = None,
+    ) -> None:
+        """Create the Cosmos DB database and memory/counter/lease containers."""
+        self._cosmos_endpoint = endpoint or self._cosmos_endpoint
+        if credential is not None:
+            self._cosmos_credential = credential
+        elif key is not None:
+            self._cosmos_credential = key
+            self._cosmos_key = key
+        self._cosmos_database = database or self._cosmos_database
+        self._cosmos_container = container or self._cosmos_container
+        if turns_container is not None:
+            self._cosmos_turns_container = turns_container
+        if summaries_container is not None:
+            self._cosmos_summaries_container = summaries_container
+        self._cosmos_counter_container = counter_container or self._cosmos_counter_container
+        self._cosmos_lease_container = lease_container or self._cosmos_lease_container
+        self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(
+            throughput_mode if throughput_mode is not None else self._cosmos_throughput_mode
+        )
+        self._cosmos_autoscale_max_ru = _resolve_cosmos_provisioning_autoscale_max_ru(
+            throughput_mode=self._cosmos_throughput_mode,
+            autoscale_max_ru=autoscale_max_ru if autoscale_max_ru is not None else self._cosmos_autoscale_max_ru,
+        )
+        _validate_connection(
+            self._cosmos_endpoint,
+            self._cosmos_credential,
+            self._cosmos_database,
+            self._cosmos_container,
+        )
+        try:
+            from azure.cosmos import CosmosClient, PartitionKey, ThroughputProperties
+
+            self._drain_cosmos_client()
+            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            db = client.create_database_if_not_exists(id=self._cosmos_database)
+            partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
+            offer = _cosmos_container_offer_throughput(
+                throughput_mode=self._cosmos_throughput_mode,
+                autoscale_max_ru=self._cosmos_autoscale_max_ru,
+                throughput_properties_cls=ThroughputProperties,
+            )
+            vec_policy, idx_policy, ft_policy = _container_policies(
+                embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
+                embedding_data_type=_resolve_embedding_data_type(embedding_data_type),
+                distance_function=_resolve_distance_function(distance_function),
+                full_text_language=_resolve_full_text_language(full_text_language),
+            )
+            self._memories_container_client = db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                    default_ttl=-1,
+                    indexing_policy=idx_policy,
+                    vector_embedding_policy=vec_policy,
+                    full_text_policy=ft_policy,
+                )
+            )
+            self._turns_container_client = db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_turns_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                    default_ttl=DEFAULT_TTL_BY_TYPE["turn"],
+                    indexing_policy=_TURNS_INDEXING_POLICY,
+                )
+            )
+            logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
+            self._summaries_container_client = db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_summaries_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                    default_ttl=-1,
+                    indexing_policy=_SUMMARIES_INDEXING_POLICY,
+                )
+            )
+            logger.info(
+                "Created summaries container: %s/%s",
+                self._cosmos_database,
+                self._cosmos_summaries_container,
+            )
+            db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_counter_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                )
+            )
+            db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_lease_container,
+                    partition_key=PartitionKey(path="/id"),
+                    offer_throughput=offer,
+                )
+            )
+            self._cosmos_client = client
+            self._init_services()
+        except Exception as exc:
+            raise CosmosOperationError(f"Failed to create memory store: {exc}") from exc
+        logger.info("Created memory store %s/%s", self._cosmos_database, self._cosmos_container)
+
+    def validate_topology(self) -> None:
+        """Verify all three Cosmos containers exist and are reachable.
+
+        Reads container metadata for memories / memories_turns / memories_summaries.
+        Raises ``RuntimeError`` on the first failure with a clear message
+        instructing the customer to redeploy the infrastructure.
+
+        Call this after ``connect_cosmos`` or ``create_memory_store`` to
+        diagnose topology mismatches before any data is written.
+        """
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        if self._memories_container_client is None:
+            raise RuntimeError("validate_topology: Cosmos client is not connected; call connect_cosmos() first")
+        for key, client in self._containers.items():
+            if client is None:
+                raise RuntimeError(f"validate_topology: container for {key.value!r} is not connected")
+            container_id = getattr(client, "id", key.value)
+            try:
+                client.read()
+            except CosmosResourceNotFoundError as exc:
+                raise RuntimeError(
+                    f"validate_topology: container {container_id!r} does not exist; "
+                    f"redeploy infrastructure (azd up) and ensure the SDK config matches"
+                ) from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"validate_topology: cannot read container {container_id!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+    def _build_store(self) -> MemoryStore:
+        return MemoryStore(containers=self._containers, embeddings_client=self._embeddings_client)
+
+    def _build_pipeline(self, store: MemoryStore) -> PipelineService:
+        return PipelineService(
+            store,
+            self._chat_client,
+            self._embeddings_client,
+            containers=self._containers,
+        )
+
+    def _store_uses_current_clients(self) -> bool:
+        if self._store is None:
+            return False
+        containers = getattr(self._store, "_containers", None)
+        if not isinstance(containers, dict):
+            return False
+        return all(containers.get(key) is client for key, client in self._containers.items())
+
+    def _pipeline_uses_current_clients(self) -> bool:
+        if self._pipeline is None:
+            return False
+        containers = getattr(self._pipeline, "_containers", None)
+        if not isinstance(containers, dict):
+            return False
+        return all(containers.get(key) is client for key, client in self._containers.items())
+
+    def _init_services(self) -> None:
+        self._store = self._build_store()
+        self._pipeline = self._build_pipeline(self._store)
+        self._warn_on_embedding_dim_mismatch()
+        if not self._processor_explicit:
+            self._processor = None
+
+    def _init_pipeline(self) -> None:
+        """Compatibility helper used by tests; initializes all service layers."""
+        self._init_services()
+
+    def _drain_cosmos_client(self) -> None:
+        prior = self._cosmos_client
+        if prior is not None:
+            close = getattr(prior, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.warning("Failed to close prior Cosmos client during reconnect", exc_info=True)
+        self._cosmos_client = None
+        self._memories_container_client = None
+        self._turns_container_client = None
+        self._summaries_container_client = None
+        self._counter_container_client = None
+        self._store = None
+        self._pipeline = None
+        if not self._processor_explicit:
+            self._processor = None
+
+    def _get_store(self) -> MemoryStore:
+        self._require_cosmos()
+        if (
+            self._store is None
+            or not self._store_uses_current_clients()
+            or self._store._embeddings_client is not self._embeddings_client
+        ):
+            self._store = self._build_store()
+        return self._store
+
+    def _get_pipeline(self) -> PipelineService:
+        self._require_cosmos()
+        store = self._get_store()
+        if self._pipeline is None or self._pipeline._store is not store or not self._pipeline_uses_current_clients():
+            self._pipeline = self._build_pipeline(store)
+        return self._pipeline
+
+    def _get_processor(self) -> MemoryProcessor:
+        if self._processor is None:
+            self._processor = InProcessProcessor(pipeline=self._get_pipeline())
+        return self._processor
+
+    def _get_counter_container(self) -> Any:
+        if self._counter_container_client is not None:
+            return self._counter_container_client
+        if self._cosmos_client is None:
+            return None
+        try:
+            db = self._cosmos_client.get_database_client(self._cosmos_database)
+            self._counter_container_client = db.get_container_client(self._cosmos_counter_container)
+            return self._counter_container_client
+        except Exception as exc:  # pragma: no cover - defensive
+            if not self._warned_counter_unreachable:
+                self._warned_counter_unreachable = True
+                logger.warning(
+                    "Counter container %s/%s unreachable: %s",
+                    self._cosmos_database,
+                    self._cosmos_counter_container,
+                    exc,
+                )
+            return None
+
+    def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
+        if not turn_counts:
+            return
+        maybe_trigger_steps(self._get_processor(), self._get_counter_container(), turn_counts)
+
+    def _container_for_type(self, memory_type: str) -> Any:
+        """Return the Cosmos container client that owns ``memory_type``."""
+        return self._containers[container_key_for_type(memory_type)]
+
+    def add_cosmos(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        memory_type: str = "turn",
+        metadata: Optional[dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        ttl: Optional[int] = None,
+        salience: Optional[float] = None,
+        embedding: Optional[list[float]] = None,
+        embed: Optional[bool] = None,
+    ) -> str:
+        """Add a memory to Cosmos DB."""
+        return self._get_store().add(
+            user_id,
+            role,
+            content,
+            memory_type,
+            metadata,
+            thread_id,
+            tags,
+            ttl,
+            salience,
+            embedding,
+            embed,
+        )
+
+    def push_to_cosmos(self, batch_size: int = 25) -> None:
+        """Insert all local memories into Cosmos DB."""
+        self._get_store().push(self.local_memory, batch_size=batch_size)
+        turn_counts, self._unflushed_turn_counts = self._unflushed_turn_counts, {}
+        try:
+            self._maybe_auto_trigger(turn_counts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Auto-trigger after push_to_cosmos failed: %s", exc)
+
+    def get_memories(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
+        recent_k: Optional[int] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        include_superseded: bool = False,
+        min_salience: Optional[float] = None,
+        min_confidence: Optional[float] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve memories from Cosmos DB with optional filters."""
+        return self._get_store().get_memories(
+            memory_id=memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            role=role,
+            memory_types=memory_types,
+            recent_k=recent_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            include_superseded=include_superseded,
+            min_salience=min_salience,
+            min_confidence=min_confidence,
+            created_after=created_after,
+            created_before=created_before,
+        )
+
+    def update_cosmos(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        content: Optional[str] = None,
+        role: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Update a memory in Cosmos DB."""
+        return self._get_store().update(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+            content=content,
+            role=role,
+            metadata=metadata,
+        )
+
+    def delete_cosmos(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+    ) -> None:
+        """Delete a memory from Cosmos DB."""
+        return self._get_store().delete(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+        )
+
+    def search_cosmos(
+        self,
+        search_terms: str,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        role: Optional[str] = None,
+        memory_types: Optional[list[str]] = None,
+        thread_id: Optional[str] = None,
+        hybrid_search: bool = False,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        include_superseded: bool = False,
+        min_salience: Optional[float] = None,
+        min_confidence: Optional[float] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Search memories in Cosmos DB using vector similarity."""
+        return self._get_store().search(
+            search_terms=search_terms,
+            memory_id=memory_id,
+            user_id=user_id,
+            role=role,
+            memory_types=memory_types,
+            thread_id=thread_id,
+            hybrid_search=hybrid_search,
+            top_k=top_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            include_superseded=include_superseded,
+            min_salience=min_salience,
+            min_confidence=min_confidence,
+            created_after=created_after,
+            created_before=created_before,
+        )
+
+    def get_thread(
+        self,
+        thread_id: str,
+        user_id: Optional[str] = None,
+        recent_k: Optional[int] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        include_superseded: bool = False,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve an entire thread (turns) from Cosmos DB."""
+        return self._get_store().get_thread(
+            thread_id=thread_id,
+            user_id=user_id,
+            recent_k=recent_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            include_superseded=include_superseded,
+            created_after=created_after,
+            created_before=created_before,
+        )
+
+    def get_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active thread summaries for ``(user_id, thread_id)``, newest first."""
+        return self._get_store().get_thread_summary(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+        )
+
+    def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
+        return self._get_store().get_user_summary(user_id=user_id)
+
+    def list_tags(
+        self,
+        user_id: str,
+        *,
+        thread_id: Optional[str] = None,
+        prefix: Optional[str] = None,
+        include_sys: bool = False,
+    ) -> list[str]:
+        """Return sorted distinct tags for a user."""
+        return self._get_store().list_tags(
+            user_id,
+            thread_id=thread_id,
+            prefix=prefix,
+            include_sys=include_sys,
+        )
+
+    def add_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        """Add tags to an existing memory document."""
+        return self._get_store().add_tags(memory_id, user_id, thread_id, memory_type, tags)
+
+    def remove_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        """Remove tags from an existing memory document."""
+        return self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
+
+    def get_procedural_prompt(self, user_id: str) -> Optional[str]:
+        """Return the active synthesized procedural prompt for a user."""
+        return self._get_store().get_procedural_prompt(user_id=user_id)
+
+    def get_procedural_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Return synthesized procedural docs for a user, newest first."""
+        return self._get_store().get_procedural_history(user_id=user_id, limit=limit)
+
+    def get_procedural_memories(
+        self,
+        user_id: str,
+        priority: Optional[str] = None,
+        category: Optional[str] = None,
+        min_salience: Optional[float] = None,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active procedural memories for a user."""
+        return self._get_store().get_procedural_memories(user_id, priority, category, min_salience, include_superseded)
+
+    def search_episodic_memories(
+        self,
+        user_id: str,
+        search_terms: str,
+        top_k: int = 5,
+        min_salience: Optional[float] = None,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Semantic search across episodic memories for a user."""
+        return self._get_store().search_episodic(user_id, search_terms, top_k, min_salience, include_superseded)
+
+    def build_procedural_context(self, user_id: str) -> str:
+        """Build formatted procedural context for prompt injection."""
+        return self._get_pipeline().build_procedural_context(user_id)
+
+    def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
+        """Build formatted context of relevant past experiences."""
+        return self._get_store().build_episodic_context(user_id, query, top_k)
+
+    def extract_memories(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> dict[str, int]:
+        """Extract facts and episodic memories from a thread."""
+        return self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
+
+    def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:
+        processor = self._get_processor()
+        if not isinstance(processor, InProcessProcessor):
+            raise NotImplementedError(
+                "Procedural synthesis runs automatically after reconcile in durable mode; "
+                "manual invocation via the SDK is not supported when the Durable Function "
+                "app is the active processor. Use get_procedural_prompt() to read the "
+                "latest synthesized prompt."
+            )
+        return processor.synthesize_procedural(user_id=user_id, force=force)
+
+    def generate_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Generate a thread summary."""
+        return self._get_pipeline().generate_thread_summary(user_id, thread_id, recent_k)
+
+    def generate_user_summary(
+        self,
+        user_id: str,
+        thread_ids: Optional[list[str]] = None,
+        recent_k: Optional[int] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Generate a cross-thread user summary."""
+        return self._get_pipeline().generate_user_summary(user_id, thread_ids, recent_k)
+
+    def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
+        """Reconcile a user's facts via the contradiction-aware dedup pass."""
+        from .thresholds import get_dedup_pool_size
+
+        return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
+
+    def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
+        """Force the processor to run summarize/extract/dedup right now."""
+        self._require_cosmos()
+        turns = self.get_thread(thread_id=thread_id, user_id=user_id) or []
+        return self._get_processor().process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
+
+    def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:
+        """Force processing and block until a thread summary exists (or timeout)."""
+        import time
+
+        self._require_cosmos()
+        processor = self._get_processor()
+        turns = self.get_thread(thread_id=thread_id, user_id=user_id) or []
+        processor.process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
+        if isinstance(processor, InProcessProcessor):
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._summary_exists(user_id=user_id, thread_id=thread_id):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _summary_exists(self, *, user_id: str, thread_id: str) -> bool:
+        from azure.cosmos.exceptions import (
+            CosmosHttpResponseError,
+            CosmosResourceNotFoundError,
+        )
+
+        try:
+            results = self.get_thread_summary(user_id=user_id, thread_id=thread_id, recent_k=1)
+        except CosmosResourceNotFoundError:
+            return False
+        except CosmosHttpResponseError as exc:
+            logger.warning(
+                "_summary_exists: Cosmos error user_id=%s thread_id=%s status=%s: %s",
+                user_id,
+                thread_id,
+                getattr(exc, "status_code", None),
+                exc,
+            )
+            return False
+        return bool(results)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_memory_toolkit.processors import (
+from azure.cosmos.agent_memory.processors import (
     DurableFunctionProcessor,
     ProcessThreadResult,
     UserSummaryResult,

@@ -123,6 +123,6 @@ def em_ReconcileMemories(payload: dict) -> dict:
     # operations are larger/more coupled than the extract→persist split handled here.
     user_id = payload["user_id"]
     pipeline = get_pipeline()
-    from agent_memory_toolkit.thresholds import get_dedup_pool_size
+    from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     return pipeline.reconcile_memories(user_id=user_id, n=get_dedup_pool_size()) or {}

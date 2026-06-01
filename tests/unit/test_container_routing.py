@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from agent_memory_toolkit._container_routing import (
+from azure.cosmos.agent_memory._container_routing import (
     _CONTAINER_FOR_TYPE,
     ContainerKey,
     container_key_for_type,
     container_keys_for_types,
 )
-from agent_memory_toolkit._utils import VALID_TYPES
+from azure.cosmos.agent_memory._utils import VALID_TYPES
 
 
 class TestContainerKey:

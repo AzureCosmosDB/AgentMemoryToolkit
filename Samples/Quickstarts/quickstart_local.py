@@ -4,7 +4,7 @@ Run with:
     python Samples/Quickstarts/quickstart_local.py
 """
 
-from agent_memory_toolkit import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient
 
 
 def main():

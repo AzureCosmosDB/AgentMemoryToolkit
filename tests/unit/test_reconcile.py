@@ -24,9 +24,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit._utils import _normalize_for_hash, compute_content_hash
-from agent_memory_toolkit.exceptions import ValidationError
-from agent_memory_toolkit.services.pipeline import PipelineService
+from azure.cosmos.agent_memory._utils import _normalize_for_hash, compute_content_hash
+from azure.cosmos.agent_memory.exceptions import ValidationError
+from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 
 def _make_pipeline() -> PipelineService:
@@ -489,7 +489,7 @@ class TestExactDedupShortCircuit:
         return p
 
     def test_extract_skips_when_content_hash_matches_existing(self):
-        from agent_memory_toolkit._utils import compute_content_hash
+        from azure.cosmos.agent_memory._utils import compute_content_hash
 
         p = self._build()
         existing_text = "User likes coffee"
@@ -542,7 +542,7 @@ class TestExactDedupShortCircuit:
         assert all(call.args[0].get("type") != "fact" for call in p._upsert_memory.call_args_list)
 
     def test_extract_writes_content_hash_on_new_facts(self):
-        from agent_memory_toolkit._utils import compute_content_hash
+        from azure.cosmos.agent_memory._utils import compute_content_hash
 
         p = self._build()
         p._load_existing_memories = MagicMock(return_value=[])
@@ -923,25 +923,25 @@ class TestReconcileFactsTextEscapesContent:
 
 class TestDedupPoolSizeThreshold:
     def test_pool_size_default(self, monkeypatch):
-        from agent_memory_toolkit.thresholds import DEFAULT_DEDUP_POOL_SIZE, get_dedup_pool_size
+        from azure.cosmos.agent_memory.thresholds import DEFAULT_DEDUP_POOL_SIZE, get_dedup_pool_size
 
         monkeypatch.delenv("DEDUP_POOL_SIZE", raising=False)
         assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE
 
     def test_pool_size_override(self, monkeypatch):
-        from agent_memory_toolkit.thresholds import get_dedup_pool_size
+        from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
         monkeypatch.setenv("DEDUP_POOL_SIZE", "100")
         assert get_dedup_pool_size() == 100
 
     def test_pool_size_clamped_to_500(self, monkeypatch):
-        from agent_memory_toolkit.thresholds import get_dedup_pool_size
+        from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
         monkeypatch.setenv("DEDUP_POOL_SIZE", "9999")
         assert get_dedup_pool_size() == 500
 
     def test_pool_size_zero_falls_back_to_default(self, monkeypatch):
-        from agent_memory_toolkit.thresholds import DEFAULT_DEDUP_POOL_SIZE, get_dedup_pool_size
+        from azure.cosmos.agent_memory.thresholds import DEFAULT_DEDUP_POOL_SIZE, get_dedup_pool_size
 
         monkeypatch.setenv("DEDUP_POOL_SIZE", "0")
         assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE
@@ -978,7 +978,7 @@ class TestReconcileMergedIdDeterministic:
         first_id = upserts[0]["id"]
         # Predict id from public formula:
         ch = compute_content_hash("User likes coffee")
-        from agent_memory_toolkit.services.pipeline import _ID_SEED_SEP
+        from azure.cosmos.agent_memory.services.pipeline import _ID_SEED_SEP
 
         seed = _ID_SEED_SEP.join(("u1", "merged", ch))
         expected = "fact_" + hashlib.sha256(seed.encode()).hexdigest()[:32]
@@ -1140,7 +1140,7 @@ class TestReconcileContradictionWinnerNotInKeptIds:
                 }
             )
         )
-        with caplog.at_level(logging.WARNING, logger="agent_memory_toolkit.pipeline"):
+        with caplog.at_level(logging.WARNING, logger="azure.cosmos.agent_memory.pipeline"):
             result = p.reconcile_memories("u1")
         assert result["contradicted"] == 1
         # No "kept_ids mismatch" warnings on a clean LLM response.
@@ -1413,8 +1413,8 @@ class TestExtractUpdateSelfCollapseGuard:
         return p
 
     def test_fact_update_with_self_referential_id_is_skipped(self):
-        from agent_memory_toolkit._utils import compute_content_hash
-        from agent_memory_toolkit.services.pipeline import _ID_SEED_SEP
+        from azure.cosmos.agent_memory._utils import compute_content_hash
+        from azure.cosmos.agent_memory.services.pipeline import _ID_SEED_SEP
 
         p = self._build()
         text = "User likes tea"
@@ -1459,8 +1459,8 @@ class TestExtractUpdateSelfCollapseGuard:
         assert out["fact_count"] == 0
 
     def test_procedural_update_with_self_referential_id_is_skipped(self):
-        from agent_memory_toolkit._utils import compute_content_hash
-        from agent_memory_toolkit.services.pipeline import _ID_SEED_SEP
+        from azure.cosmos.agent_memory._utils import compute_content_hash
+        from azure.cosmos.agent_memory.services.pipeline import _ID_SEED_SEP
 
         p = self._build()
         text = "Greet the user casually"
@@ -1514,7 +1514,7 @@ class TestReconcileOutcomeTelemetry:
         return [
             r
             for r in caplog.records
-            if r.name == "agent_memory_toolkit.pipeline" and r.getMessage() == "reconcile.outcome"
+            if r.name == "azure.cosmos.agent_memory.pipeline" and r.getMessage() == "reconcile.outcome"
         ]
 
     def test_reconcile_emits_outcome_log_line_on_success(self, caplog):
@@ -1543,7 +1543,7 @@ class TestReconcileOutcomeTelemetry:
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
         p._mark_superseded = MagicMock(return_value=True)
 
-        with caplog.at_level(logging.INFO, logger="agent_memory_toolkit.pipeline"):
+        with caplog.at_level(logging.INFO, logger="azure.cosmos.agent_memory.pipeline"):
             result = p.reconcile_memories("u1")
 
         records = self._outcome_records(caplog)
@@ -1568,7 +1568,7 @@ class TestReconcileOutcomeTelemetry:
         p._container.query_items.return_value = iter([])
         p._run_prompty = MagicMock()
 
-        with caplog.at_level(logging.INFO, logger="agent_memory_toolkit.pipeline"):
+        with caplog.at_level(logging.INFO, logger="azure.cosmos.agent_memory.pipeline"):
             result = p.reconcile_memories("u1")
 
         p._run_prompty.assert_not_called()
@@ -1594,7 +1594,7 @@ class TestReconcileOutcomeTelemetry:
         p._container.query_items.return_value = iter(facts)
         p._run_prompty = MagicMock()
 
-        with caplog.at_level(logging.INFO, logger="agent_memory_toolkit.pipeline"):
+        with caplog.at_level(logging.INFO, logger="azure.cosmos.agent_memory.pipeline"):
             p.reconcile_memories("u1")
 
         records = self._outcome_records(caplog)

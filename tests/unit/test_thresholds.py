@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_memory_toolkit.thresholds import DEFAULT_TTL_BY_TYPE, default_ttl_for
+from azure.cosmos.agent_memory.thresholds import DEFAULT_TTL_BY_TYPE, default_ttl_for
 
 
 def test_default_ttl_table_values() -> None:

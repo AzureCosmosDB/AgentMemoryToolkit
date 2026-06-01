@@ -105,7 +105,7 @@ var planName = '${abbrs.appServicePlan}${resourceToken}'
 
 var commonTags = {
   'azd-env-name': environmentName
-  workload: 'agent-memory-toolkit'
+  workload: 'azure-cosmos-agent-memory'
 }
 
 // --- Resource group -------------------------------------------------------

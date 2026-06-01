@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryClient
-from agent_memory_toolkit.aio.processors import (
+from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio.processors import (
     AsyncDurableFunctionProcessor,
     AsyncInProcessProcessor,
     ProcessThreadResult,
 )
-from agent_memory_toolkit.exceptions import CosmosNotConnectedError
+from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError
 
 
 def _connected(processor=None) -> AsyncCosmosMemoryClient:

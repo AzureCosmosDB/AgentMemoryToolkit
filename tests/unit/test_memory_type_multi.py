@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agent_memory_toolkit._utils import _build_memory_query_builder
-from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
+from azure.cosmos.agent_memory._utils import _build_memory_query_builder
+from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 
 # ---------------------------------------------------------------------------
 # Helpers — a small replica of the patterns used in test_cosmos_memory_client.

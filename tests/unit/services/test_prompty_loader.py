@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_memory_toolkit.services._pipeline_helpers import (
+from azure.cosmos.agent_memory.services._pipeline_helpers import (
     DEFAULT_PROMPT_VERSION,
     PromptyLoader,
     _read_prompty_version,

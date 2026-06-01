@@ -1,4 +1,4 @@
-"""Unit tests for agent_memory_toolkit.chat.ChatClient (sync)."""
+"""Unit tests for azure.cosmos.agent_memory.chat.ChatClient (sync)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit.chat import ChatClient
-from agent_memory_toolkit.exceptions import ConfigurationError
+from azure.cosmos.agent_memory.chat import ChatClient
+from azure.cosmos.agent_memory.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Initialization

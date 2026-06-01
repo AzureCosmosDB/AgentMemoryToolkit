@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
-from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
+from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class _SyncChat:

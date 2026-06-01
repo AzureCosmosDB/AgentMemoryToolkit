@@ -1,6 +1,6 @@
 """Lazy PipelineService factory (MI auth, sync clients).
 
-The activities reuse :class:`agent_memory_toolkit.services.pipeline.PipelineService`
+The activities reuse :class:`azure.cosmos.agent_memory.services.pipeline.PipelineService`
 verbatim — no business logic is duplicated in the function app.
 """
 
@@ -26,12 +26,12 @@ def get_pipeline():
 
     from azure.identity import DefaultAzureCredential
 
-    from agent_memory_toolkit._container_routing import ContainerKey
-    from agent_memory_toolkit._utils import _resolve_embedding_dimensions
-    from agent_memory_toolkit.chat import ChatClient
-    from agent_memory_toolkit.embeddings import EmbeddingsClient
-    from agent_memory_toolkit.services.pipeline import PipelineService
-    from agent_memory_toolkit.store import MemoryStore
+    from azure.cosmos.agent_memory._container_routing import ContainerKey
+    from azure.cosmos.agent_memory._utils import _resolve_embedding_dimensions
+    from azure.cosmos.agent_memory.chat import ChatClient
+    from azure.cosmos.agent_memory.embeddings import EmbeddingsClient
+    from azure.cosmos.agent_memory.services.pipeline import PipelineService
+    from azure.cosmos.agent_memory.store import MemoryStore
 
     credential = DefaultAzureCredential()
     memories_container = get_memories_container()

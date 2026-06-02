@@ -5,7 +5,7 @@ All notable changes to `azure-cosmos-agent-memory` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [PEP 440](https://peps.python.org/pep-0440/) versioning.
 
-## [0.1.0b1] — 2026-05-31
+## [0.1.0b1] — 2026-06-01
 
 Initial public preview release.
 

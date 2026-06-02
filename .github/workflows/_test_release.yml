@@ -1,0 +1,93 @@
+name: test-release
+
+# Builds the wheel + sdist, uploads to TestPyPI (sanity check only).
+# Called by release.yml before the real PyPI publish.
+
+on:
+  workflow_call:
+    outputs:
+      pkg-name:
+        description: "Distribution name from pyproject.toml"
+        value: ${{ jobs.build.outputs.pkg-name }}
+      version:
+        description: "Version from pyproject.toml"
+        value: ${{ jobs.build.outputs.version }}
+
+permissions: {}
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      pkg-name: ${{ steps.check-version.outputs.pkg-name }}
+      version: ${{ steps.check-version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build tooling
+        run: pip install build
+
+      # We keep the build job *separate* from the publish job so a compromised
+      # build-time dependency cannot reach the trusted-publishing OIDC token.
+      # https://github.com/pypa/gh-action-pypi-publish#non-goals
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-dist
+          path: dist/
+
+      - name: Extract pkg-name + version
+        id: check-version
+        run: |
+          python -m pip install --quiet tomli
+          PKG=$(python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['name'])")
+          VER=$(python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "pkg-name=$PKG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for PyPI trusted publishing (OIDC token).
+      # Configure the trusted publisher at:
+      # https://test.pypi.org/manage/account/publishing/
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          verbose: true
+          print-hash: true
+          repository-url: https://test.pypi.org/legacy/
+          # CI-only — overwrites a same-version file if a re-run is needed.
+          # https://github.com/pypa/gh-action-pypi-publish#tolerating-release-package-file-duplicates
+          skip-existing: true
+          # Attestations default-on in v1.11.0+ and require additional
+          # trusted-publisher config; disable until we opt in deliberately.
+          attestations: false

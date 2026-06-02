@@ -2,10 +2,7 @@
 azure-functions
 azure-functions-durable
 
-# Cosmos DB + auth (sync + async clients used).
-# Pin >=4.16.0 — 4.15.x async ContainerProxy.query_items had a kwarg-leak bug
-# where enable_cross_partition_query was forwarded into aiohttp. We dropped
-# the kwarg from our async paths in 4.16.0; older 4.15.x is fine for sync.
+azure-cosmos-agent-memory==0.1.0b1
 azure-cosmos>=4.16.0
 azure-identity>=1.20
 
@@ -14,9 +11,3 @@ openai>=1.60
 prompty>=2.0.0a9
 jinja2>=3.1.4
 typing_extensions>=4.10
-
-# Agent Memory Toolkit SDK — provides PipelineService (single source of
-# truth for prompts + business logic). The SDK wheel is vendored under
-# ``_vendor/`` so the Function app builds without a private package feed.
-# Rebuild with: ``python -m build --wheel && cp dist/*.whl function_app/_vendor/``
-./_vendor/azure_cosmos_agent_memory-0.1.0b1-py3-none-any.whl

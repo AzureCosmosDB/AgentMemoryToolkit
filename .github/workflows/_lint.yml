@@ -1,0 +1,80 @@
+name: lint
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # Inline annotations on PR diffs when ruff complains.
+  RUFF_OUTPUT_FORMAT: github
+
+jobs:
+  ruff:
+    name: "ruff #${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Min + max supported Pythons only; intermediates almost never surface
+        # a lint issue that doesn't show up on the boundaries.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ruff
+        run: pip install 'ruff>=0.15,<0.16'
+
+      - name: ruff check
+        run: ruff check azure/ tests/ function_app/
+
+      - name: ruff format --check
+        run: ruff format --check azure/ tests/ function_app/
+
+  wheel-namespace-guard:
+    name: "wheel namespace guard"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build
+        run: pip install build
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Assert wheel does NOT ship azure/ or azure/cosmos/ __init__.py
+        # azure.cosmos.* is a PEP 420 implicit namespace package owned by the
+        # official azure-cosmos SDK. Shipping azure/__init__.py or
+        # azure/cosmos/__init__.py from this wheel would shadow the SDK and
+        # break every consumer of azure-cosmos at import time.
+        run: |
+          set -eo pipefail
+          BAD=$(python -m zipfile -l dist/*.whl | awk '{print $1}' | \
+                grep -E '^(azure/__init__\.py|azure/cosmos/__init__\.py)$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Wheel contains forbidden namespace __init__.py files:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "✓ Wheel does not ship azure/ or azure/cosmos/ __init__.py"
+
+      - name: Assert wheel DOES ship azure/cosmos/agent_memory/__init__.py
+        run: |
+          set -eo pipefail
+          python -m zipfile -l dist/*.whl | awk '{print $1}' | \
+            grep -qE '^azure/cosmos/agent_memory/__init__\.py$'
+          echo "✓ Wheel ships azure/cosmos/agent_memory/__init__.py"

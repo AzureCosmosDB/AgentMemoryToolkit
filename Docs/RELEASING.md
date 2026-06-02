@@ -46,56 +46,52 @@ Before cutting a release:
 2. **Update `CHANGELOG.md`** — add a new section with the version, the
    date, and a summary of changes. Move entries from the unreleased
    section if you keep one.
-3. **Rebuild the vendored wheel** for the Function app (the FA installs
-   the SDK from `function_app/_vendor/` rather than PyPI):
-   ```bash
-   rm -rf dist/ build/
-   python -m build --wheel
-   rm function_app/_vendor/azure_cosmos_agent_memory-*.whl
-   cp dist/azure_cosmos_agent_memory-<NEW_VERSION>-py3-none-any.whl function_app/_vendor/
-   ```
-   And update the wheel filename in `function_app/requirements.txt`.
-4. **Commit** the version bump + CHANGELOG + rebuilt vendor wheel +
-   updated `requirements.txt` together. Suggested message:
-   `Release v<NEW_VERSION>`.
-5. **Tag** the commit:
-   ```bash
-   git tag -a v<NEW_VERSION> -m "Release v<NEW_VERSION>"
-   git push origin main v<NEW_VERSION>
-   ```
-6. **Build the release artifacts**:
-   ```bash
-   rm -rf dist/ build/
-   python -m build
-   twine check dist/*
-   ```
-7. **Smoke-test the wheel in a fresh venv**:
-   ```bash
-   python -m venv /tmp/release-smoke
-   source /tmp/release-smoke/bin/activate
-   pip install dist/azure_cosmos_agent_memory-<NEW_VERSION>-py3-none-any.whl
-   python -c "from azure.cosmos.agent_memory import CosmosMemoryClient; print(CosmosMemoryClient)"
-   python -c "from azure.cosmos import CosmosClient; print(CosmosClient)"  # side-by-side check
-   ```
-8. **Upload to TestPyPI** (sanity check before pushing to the real index):
-   ```bash
-   twine upload --repository testpypi dist/*
-   ```
-   Verify the package page renders correctly at
-   <https://test.pypi.org/project/azure-cosmos-agent-memory/>.
-9. **Upload to PyPI**:
-   ```bash
-   twine upload dist/*
-   ```
-10. **Create a GitHub Release** from the tag with the changelog entry as
-    the body.
+3. **Bump the Function app's SDK pin** in `function_app/requirements.txt`
+   to match — `azure-cosmos-agent-memory==<NEW_VERSION>`. The FA installs
+   the SDK from PyPI, so the pin must move in lockstep with the SDK
+   release. (If the release workflow fails after merge, the FA will be
+   pinned to a non-existent version until you cut a follow-up patch —
+   coordinate the merge + release-workflow run together.)
+4. **Open a PR** with the version bump + CHANGELOG + updated FA pin.
+   Suggested title: `Release v<NEW_VERSION>`. Get it reviewed and merged
+   to `main`.
+5. **Trigger the release workflow**:
+   - Navigate to **Actions → release → Run workflow**
+   - Pick the `main` branch
+   - Click **Run workflow**
+6. **The workflow does the rest** — see `.github/workflows/release.yml`:
+   - Builds `dist/*.whl` + `dist/*.tar.gz`
+   - Asserts no namespace `__init__.py` shadows are in the wheel
+   - Publishes to **TestPyPI** via trusted publishing
+   - Installs from TestPyPI into a clean env and runs the unit suite
+   - Publishes to **PyPI** via trusted publishing
+   - Creates a **GitHub Release** with tag `v<NEW_VERSION>` and the
+     wheel + sdist attached
+7. **Verify** on <https://pypi.org/project/azure-cosmos-agent-memory/>
+   that the new version landed and the README + classifiers render.
 
-## Trusted Publishing (recommended)
+## Trusted Publishing setup (one-time, per environment)
 
-Configure [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
-so the GitHub Actions workflow uploads with a short-lived OIDC token
-instead of a long-lived API token. See `.github/workflows/release.yml`
-(once added) for the tag-triggered build → TestPyPI → PyPI flow.
+Trusted publishing replaces long-lived PyPI API tokens with short-lived
+OIDC tokens minted by GitHub Actions on each run. Configure once on both
+TestPyPI and PyPI:
+
+- **TestPyPI** — <https://test.pypi.org/manage/account/publishing/>
+- **PyPI** — <https://pypi.org/manage/account/publishing/>
+
+For each, register a pending publisher with:
+
+| Field | Value |
+|------|-------|
+| PyPI project name | `azure-cosmos-agent-memory` |
+| Owner | `AzureCosmosDB` |
+| Repository | `AgentMemoryToolkit` |
+| Workflow filename | `release.yml` (for **both** TestPyPI and PyPI — the test-release job is invoked via `workflow_call` so PyPI sees the calling workflow's filename, not `_test_release.yml`) |
+| Environment name | _(leave blank)_ |
+
+Until the first release is published, both registrations sit in the
+"pending publishers" state. They activate automatically on the first
+successful upload.
 
 ## Namespace package note
 

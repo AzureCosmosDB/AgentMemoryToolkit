@@ -3,18 +3,54 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["agent_memory_toolkit*"]
+where = ["."]
+include = ["azure.cosmos.agent_memory*"]
+namespaces = true
 
 [tool.setuptools.package-data]
-"agent_memory_toolkit" = ["prompts/*.prompty"]
+"azure.cosmos.agent_memory" = ["prompts/*.prompty"]
 
 [project]
-name = "agent-memory-toolkit"
-version = "0.1.0"
-description = "A Python library for storing, retrieving, and transforming AI agent memories backed by Azure Cosmos DB"
+name = "azure-cosmos-agent-memory"
+version = "0.1.0b1"
+description = "Store, retrieve, and transform AI agent memories backed by Azure Cosmos DB"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
+authors = [
+    {name = "Microsoft Corporation", email = "azurecosmosdb@microsoft.com"},
+]
+maintainers = [
+    {name = "Microsoft Corporation", email = "azurecosmosdb@microsoft.com"},
+]
+keywords = [
+    "azure",
+    "cosmos",
+    "cosmosdb",
+    "agent",
+    "memory",
+    "llm",
+    "ai",
+    "openai",
+    "rag",
+    "vector-search",
+    "semantic-memory",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "azure-cosmos>=4.16.0",
     "azure-identity>=1.20",
@@ -25,6 +61,13 @@ dependencies = [
     "jinja2>=3.1.4",
     "typing_extensions>=4.10",
 ]
+
+[project.urls]
+Homepage = "https://github.com/AzureCosmosDB/AgentMemoryToolkit"
+Repository = "https://github.com/AzureCosmosDB/AgentMemoryToolkit"
+Issues = "https://github.com/AzureCosmosDB/AgentMemoryToolkit/issues"
+Documentation = "https://github.com/AzureCosmosDB/AgentMemoryToolkit/tree/main/Docs"
+Changelog = "https://github.com/AzureCosmosDB/AgentMemoryToolkit/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -56,8 +99,8 @@ select = ["E", "F", "I", "W"]
 "Samples/Notebooks/*.ipynb" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent_memory_toolkit", "activities", "function_app"]
+known-first-party = ["azure.cosmos.agent_memory", "activities", "function_app"]
 known-third-party = ["azure", "openai", "pydantic"]
 
 [tool.coverage.run]
-source = ["agent_memory_toolkit"]
+source = ["azure.cosmos.agent_memory"]

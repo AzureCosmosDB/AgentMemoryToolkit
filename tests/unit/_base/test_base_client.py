@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit._base import _BaseMemoryClient
-from agent_memory_toolkit.exceptions import ConfigurationError, CosmosNotConnectedError
+from azure.cosmos.agent_memory._base import _BaseMemoryClient
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, CosmosNotConnectedError
 
 
 class DummyClient(_BaseMemoryClient):

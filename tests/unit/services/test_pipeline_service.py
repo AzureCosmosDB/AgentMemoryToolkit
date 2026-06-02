@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.services.pipeline import PipelineService, _StoreContainerAdapter
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
 class FakeLLMService:

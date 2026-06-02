@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 
 # One-shot mismatch-warn dedup. Mirrors the SDK-side pattern in
-# ``agent_memory_toolkit/_counters.py`` so the FA also surfaces double-write
+# ``azure/cosmos/agent_memory/_counters.py`` so the FA also surfaces double-write
 # misconfigurations without spamming logs (key = (counter_id, my_owner)).
 _warned_owner_mismatch: set[tuple[str, str]] = set()
 

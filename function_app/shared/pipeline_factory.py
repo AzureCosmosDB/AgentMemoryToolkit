@@ -1,11 +1,12 @@
 """Lazy PipelineService factory (MI auth, sync clients).
 
-The activities reuse :class:`agent_memory_toolkit.services.pipeline.PipelineService`
+The activities reuse :class:`azure.cosmos.agent_memory.services.pipeline.PipelineService`
 verbatim — no business logic is duplicated in the function app.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from . import config
@@ -18,6 +19,20 @@ from .cosmos_clients import (
 _pipeline: Any | None = None
 
 
+def _read_transcript_metadata_keys() -> tuple[str, ...] | None:
+    """Parse ``AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS`` (comma-separated allow-list).
+
+    Mirrors the ``transcript_metadata_keys`` ctor kwarg on
+    :class:`CosmosMemoryClient` so the Durable-Functions backend produces
+    the same prompt content as the in-process backend.
+    """
+    raw = os.environ.get("AGENT_MEMORY_TRANSCRIPT_METADATA_KEYS", "").strip()
+    if not raw:
+        return None
+    keys = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return keys or None
+
+
 def get_pipeline():
     """Return the cached :class:`PipelineService` for this worker."""
     global _pipeline
@@ -26,12 +41,12 @@ def get_pipeline():
 
     from azure.identity import DefaultAzureCredential
 
-    from agent_memory_toolkit._container_routing import ContainerKey
-    from agent_memory_toolkit._utils import _resolve_embedding_dimensions
-    from agent_memory_toolkit.chat import ChatClient
-    from agent_memory_toolkit.embeddings import EmbeddingsClient
-    from agent_memory_toolkit.services.pipeline import PipelineService
-    from agent_memory_toolkit.store import MemoryStore
+    from azure.cosmos.agent_memory._container_routing import ContainerKey
+    from azure.cosmos.agent_memory._utils import _resolve_embedding_dimensions
+    from azure.cosmos.agent_memory.chat import ChatClient
+    from azure.cosmos.agent_memory.embeddings import EmbeddingsClient
+    from azure.cosmos.agent_memory.services.pipeline import PipelineService
+    from azure.cosmos.agent_memory.store import MemoryStore
 
     credential = DefaultAzureCredential()
     memories_container = get_memories_container()
@@ -59,5 +74,11 @@ def get_pipeline():
         ContainerKey.SUMMARIES: summaries_container,
     }
     store = MemoryStore(containers=containers, embeddings_client=embeddings)
-    _pipeline = PipelineService(store, chat, embeddings, containers=containers)
+    _pipeline = PipelineService(
+        store,
+        chat,
+        embeddings,
+        containers=containers,
+        transcript_metadata_keys=_read_transcript_metadata_keys(),
+    )
     return _pipeline

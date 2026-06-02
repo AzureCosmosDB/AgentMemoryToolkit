@@ -98,7 +98,7 @@ async def process_changefeed_batch(
     #     explicitly to enable the change-feed trigger. Without that opt-in
     #     both backends would double-extract / double-dedup against the same
     #     writes — exactly the customer-day-one footgun this guard prevents.
-    from agent_memory_toolkit.thresholds import (
+    from azure.cosmos.agent_memory.thresholds import (
         PROCESSOR_OWNER_DURABLE,
         get_processor_owner,
     )

@@ -56,9 +56,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         )
         if config.get_procedural_synthesis_auto():
             count = payload.get("count")
-            instance_id = (
-                f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
-            )
+            instance_id = f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
             try:
                 procedural = yield context.call_sub_orchestrator_with_retry(
                     "SynthesizeProceduralOrchestrator",
@@ -123,6 +121,6 @@ def em_ReconcileMemories(payload: dict) -> dict:
     # operations are larger/more coupled than the extract→persist split handled here.
     user_id = payload["user_id"]
     pipeline = get_pipeline()
-    from agent_memory_toolkit.thresholds import get_dedup_pool_size
+    from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     return pipeline.reconcile_memories(user_id=user_id, n=get_dedup_pool_size()) or {}

@@ -13,7 +13,7 @@ import os
 
 from dotenv import load_dotenv
 
-from agent_memory_toolkit.aio import (
+from azure.cosmos.agent_memory.aio import (
     AsyncCosmosMemoryClient,
     AsyncDurableFunctionProcessor,
 )

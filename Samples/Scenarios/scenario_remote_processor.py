@@ -25,7 +25,7 @@ import os
 
 from dotenv import load_dotenv
 
-from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
+from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
 

@@ -5,9 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
-from agent_memory_toolkit.store import MemoryStore
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
+from azure.cosmos.agent_memory.store import MemoryStore
 
 
 def _doc(**overrides):

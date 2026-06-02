@@ -21,9 +21,9 @@ Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming a
 ### 1. Install
 
 ```bash
-pip install .
+pip install azure-cosmos-agent-memory
 
-# With dev/test dependencies
+# With dev/test dependencies (from a checkout)
 pip install ".[dev]"
 ```
 
@@ -75,7 +75,7 @@ cp .env.template .env
 ```python
 import os, uuid
 from dotenv import load_dotenv
-from agent_memory_toolkit import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient
 
 load_dotenv()
 
@@ -111,7 +111,7 @@ print(memory.get_user_summary(user_id=USER))
 
 > Async API is identical — just `await` each call:
 > ```python
-> from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
+> from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 > ```
 
 ### 4. Run a sample
@@ -231,7 +231,7 @@ Pick at construction time via the `processor=` kwarg.
 | `process_now_and_wait()` | Returns immediately after flush | Polls until summary visible (RU-costly; tests/demos) |
 
 ```python
-from agent_memory_toolkit import CosmosMemoryClient, DurableFunctionProcessor
+from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
 
 memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 ```
@@ -267,16 +267,16 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 
 | Symbol | Module | Purpose |
 |---|---|---|
-| `CosmosMemoryClient` | `agent_memory_toolkit` | Sync client — local CRUD, Cosmos DB I/O, processing |
-| `AsyncCosmosMemoryClient` | `agent_memory_toolkit.aio` | Async mirror |
-| `MemoryProcessor` | `agent_memory_toolkit` | Protocol that any processor backend implements |
-| `InProcessProcessor` | `agent_memory_toolkit` | Default backend — runs the pipeline in-process |
-| `DurableFunctionProcessor` | `agent_memory_toolkit` | Marker backend — work runs in sibling Function app via change feed |
+| `CosmosMemoryClient` | `azure.cosmos.agent_memory` | Sync client — local CRUD, Cosmos DB I/O, processing |
+| `AsyncCosmosMemoryClient` | `azure.cosmos.agent_memory.aio` | Async mirror |
+| `MemoryProcessor` | `azure.cosmos.agent_memory` | Protocol that any processor backend implements |
+| `InProcessProcessor` | `azure.cosmos.agent_memory` | Default backend — runs the pipeline in-process |
+| `DurableFunctionProcessor` | `azure.cosmos.agent_memory` | Marker backend — work runs in sibling Function app via change feed |
 | `client.process_now()` | — | Run the pipeline for recent turns (in-process) or no-op (remote) |
 | `client.process_now_and_wait()` | — | Opt-in poll until processing completes; useful for tests/demos with the remote backend |
-| `MemoryRecord`, `MemoryType`, `Role` | `agent_memory_toolkit` | Pydantic models / enums |
+| `MemoryRecord`, `MemoryType`, `Role` | `azure.cosmos.agent_memory` | Pydantic models / enums |
 
-Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) live in `agent_memory_toolkit.aio`.
+Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) live in `azure.cosmos.agent_memory.aio`.
 
 ---
 
@@ -294,7 +294,7 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 ## Project structure
 
 ```
-agent_memory_toolkit/   Python SDK (sync + aio mirror)
+azure/cosmos/agent_memory/   Python SDK (sync + aio mirror)
   processors/           MemoryProcessor Protocol + InProcess/Durable backends
 function_app/           Sibling Azure Durable Function app
 infra/                  Bicep modules + main.bicep for `azd up`
@@ -308,7 +308,7 @@ tests/                  Unit + integration tests (pytest)
 
 ## Migration notes
 
-- **`agent_memory_toolkit.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
+- **`azure.cosmos.agent_memory.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
 - **New `processor=` kwarg.** Defaults to `InProcessProcessor()` — existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.
 

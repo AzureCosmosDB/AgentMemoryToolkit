@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
-from agent_memory_toolkit.exceptions import CosmosNotConnectedError
-from agent_memory_toolkit.processors import (
+from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
+from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError
+from azure.cosmos.agent_memory.processors import (
     DurableFunctionProcessor,
     InProcessProcessor,
     ProcessThreadResult,

@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryClient
-from agent_memory_toolkit.aio.processors import AsyncDurableFunctionProcessor
+from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio.processors import AsyncDurableFunctionProcessor
 
 
 class AsyncIterator:

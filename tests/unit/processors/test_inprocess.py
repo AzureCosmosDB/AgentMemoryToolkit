@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agent_memory_toolkit.processors import InProcessProcessor, ProcessThreadResult
+from azure.cosmos.agent_memory.processors import InProcessProcessor, ProcessThreadResult
 
 
 def test_process_thread_calls_summarize_extract_reconcile_in_order():

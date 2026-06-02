@@ -1,4 +1,4 @@
-"""Tests for ``agent_memory_toolkit._counters``.
+"""Tests for ``azure.cosmos.agent_memory._counters``.
 
 Covers counter-doc construction (LSN preservation, failure breadcrumbs)
 and ``stamp_failure_sync`` — the helpers that let SDK and FA share a
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agent_memory_toolkit._counters import _build_counter_doc, stamp_failure_sync
+from azure.cosmos.agent_memory._counters import _build_counter_doc, stamp_failure_sync
 
 
 class TestBuildCounterDoc:

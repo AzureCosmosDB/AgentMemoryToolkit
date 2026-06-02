@@ -11,7 +11,7 @@ This guide shows when and how to use the toolkit's main operations in real appli
 Write a turn memory every time a user or agent message is produced. If the application runs locally first and syncs later, use the local + bulk-upload pattern.
 
 ```python
-from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 
 mem = AsyncCosmosMemoryClient(
     cosmos_endpoint=COSMOS_DB_ENDPOINT,

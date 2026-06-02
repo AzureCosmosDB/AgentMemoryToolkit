@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from agent_memory_toolkit.cosmos_memory_client import CosmosMemoryClient
-from agent_memory_toolkit.processors import DurableFunctionProcessor, InProcessProcessor
+from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
+from azure.cosmos.agent_memory.processors import DurableFunctionProcessor, InProcessProcessor
 
 
 def _connected(processor=None) -> CosmosMemoryClient:
@@ -37,7 +37,7 @@ def test_push_to_cosmos_fires_inprocess_trigger_per_turn(monkeypatch):
     client._processor._pipeline = pipeline
 
     with patch(
-        "agent_memory_toolkit._counters.increment_counter_sync",
+        "azure.cosmos.agent_memory._counters.increment_counter_sync",
         return_value=(0, 1),
     ):
         client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -52,7 +52,7 @@ def test_push_to_cosmos_durable_does_not_fire_trigger(monkeypatch):
     client._counter_container_client = MagicMock()
 
     with patch(
-        "agent_memory_toolkit._counters.increment_counter_sync",
+        "azure.cosmos.agent_memory._counters.increment_counter_sync",
         return_value=(0, 1),
     ) as inc:
         client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -70,7 +70,7 @@ def test_push_to_cosmos_skips_trigger_when_thresholds_zero(monkeypatch):
     client._counter_container_client = MagicMock()
 
     with patch(
-        "agent_memory_toolkit._counters.increment_counter_sync",
+        "azure.cosmos.agent_memory._counters.increment_counter_sync",
         return_value=(0, 1),
     ) as inc:
         client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -89,7 +89,7 @@ def test_push_to_cosmos_swallows_trigger_failures(monkeypatch):
     client._counter_container_client = MagicMock()
 
     with patch(
-        "agent_memory_toolkit._counters.increment_counter_sync",
+        "azure.cosmos.agent_memory._counters.increment_counter_sync",
         return_value=(0, 1),
     ):
         client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -137,7 +137,7 @@ class TestPerStepAutoTrigger:
         client._counter_container_client = MagicMock()
 
         with patch(
-            "agent_memory_toolkit._counters.increment_counter_sync",
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
             return_value=(0, 1),  # crosses 1 only
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -161,7 +161,7 @@ class TestPerStepAutoTrigger:
         client._counter_container_client = MagicMock()
 
         with patch(
-            "agent_memory_toolkit._counters.increment_counter_sync",
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
             return_value=(9, 10),  # crosses 10 only
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -184,7 +184,7 @@ class TestPerStepAutoTrigger:
 
         # Thread counter: (0,1) then (1,2); user counter: (1,2) crosses 2.
         with patch(
-            "agent_memory_toolkit._counters.increment_counter_sync",
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
             side_effect=[(0, 1), (1, 2), (1, 2)],
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -213,7 +213,7 @@ class TestProcessorOwner:
         client._counter_container_client = MagicMock()
 
         with patch(
-            "agent_memory_toolkit._counters.increment_counter_sync",
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
             return_value=(0, 1),
         ) as inc:
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
@@ -235,7 +235,7 @@ class TestProcessorOwner:
         client._counter_container_client = MagicMock()
 
         with patch(
-            "agent_memory_toolkit._counters.increment_counter_sync",
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
             return_value=(0, 1),
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")

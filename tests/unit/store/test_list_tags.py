@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agent_memory_toolkit._container_routing import ContainerKey
-from agent_memory_toolkit.aio.store import AsyncMemoryStore
-from agent_memory_toolkit.store import MemoryStore
+from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+from azure.cosmos.agent_memory.store import MemoryStore
 
 
 class AsyncIterator:

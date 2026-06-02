@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
-from agent_memory_toolkit.processors import (
+from azure.cosmos.agent_memory.processors import (
     DurableFunctionProcessor,
     InProcessProcessor,
     MemoryProcessor,

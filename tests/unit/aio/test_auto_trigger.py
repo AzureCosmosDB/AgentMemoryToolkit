@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryClient
-from agent_memory_toolkit.aio.processors import AsyncInProcessProcessor
+from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor
 
 
 class TestAsyncAutoTriggerNonBlocking:
@@ -45,7 +45,7 @@ class TestAsyncAutoTriggerNonBlocking:
         client._counter_container_client = MagicMock()
 
         with patch(
-            "agent_memory_toolkit._counters.increment_counter_async",
+            "azure.cosmos.agent_memory._counters.increment_counter_async",
             return_value=(0, 1),
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")

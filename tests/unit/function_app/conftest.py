@@ -1,7 +1,7 @@
 """Path bootstrap for function-app unit tests.
 
 The function-app source lives in ``function_app/`` (a sibling of the SDK
-``agent_memory_toolkit/``) and is *not* a package — Azure Functions discovers
+``azure/cosmos/agent_memory/``) and is *not* a package — Azure Functions discovers
 modules by file name.  We add the directory to ``sys.path`` here so tests
 can ``import shared.counters``, ``import triggers.change_feed`` etc. without
 each test file having to repeat the ``sys.path`` dance.

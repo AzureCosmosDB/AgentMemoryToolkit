@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from agent_memory_toolkit.aio.services.pipeline import AsyncPipelineService
-from agent_memory_toolkit.services.pipeline import PipelineService
+from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
+from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 
 def _user_summary_doc() -> dict:

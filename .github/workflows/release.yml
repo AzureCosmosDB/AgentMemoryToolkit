@@ -1,0 +1,196 @@
+name: release
+run-name: Release azure-cosmos-agent-memory by @${{ github.actor }}
+
+# Triggered manually from the Actions tab after `pyproject.toml` version
+# has been bumped and committed to `main`. Pipeline:
+#
+#   1. build wheel + sdist
+#   2. TestPyPI publish (sanity check, isolated permissions)
+#   3. install from TestPyPI in a clean env, run unit + integration tests
+#   4. publish to real PyPI via trusted publishing
+#   5. create GitHub Release tag v<version> with artifacts attached
+#
+# Trusted publishing must be configured for THIS workflow on both:
+#   - https://test.pypi.org/manage/account/publishing/
+#   - https://pypi.org/manage/account/publishing/
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      pkg-name: ${{ steps.check-version.outputs.pkg-name }}
+      version: ${{ steps.check-version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build tooling
+        run: pip install build tomli
+
+      # See _test_release.yml for the security rationale on splitting build
+      # from publish.
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract pkg-name + version
+        id: check-version
+        run: |
+          PKG=$(python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['name'])")
+          VER=$(python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "pkg-name=$PKG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Assert wheel does NOT ship namespace __init__.py shadows
+        run: |
+          set -eo pipefail
+          BAD=$(python -m zipfile -l dist/*.whl | awk '{print $1}' | \
+                grep -E '^(azure/__init__\.py|azure/cosmos/__init__\.py)$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Wheel contains forbidden namespace __init__.py files:"
+            echo "$BAD"
+            exit 1
+          fi
+
+  test-pypi-publish:
+    needs: build
+    uses: ./.github/workflows/_test_release.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+
+  pre-release-checks:
+    needs:
+      - build
+      - test-pypi-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately NO pip cache here. A cache hit would mask the case
+      # where a transitive dependency was dropped from pyproject.toml but
+      # tests still pass because the cached venv carries the old dep.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the just-published TestPyPI wheel
+        env:
+          PKG_NAME: ${{ needs.build.outputs.pkg-name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        # Two-pass retry — TestPyPI mirror propagation can lag by a few seconds.
+        # Primary index is real PyPI so all the dependencies resolve normally;
+        # the just-published preview only lives on TestPyPI.
+        run: |
+          set -e
+          install_cmd() {
+            pip install \
+              --extra-index-url https://test.pypi.org/simple/ \
+              "${PKG_NAME}==${VERSION}"
+          }
+          install_cmd || ( sleep 10 && install_cmd ) || ( sleep 20 && install_cmd )
+
+      - name: Smoke-test import path
+        run: |
+          python -c "from azure.cosmos.agent_memory import CosmosMemoryClient; print(CosmosMemoryClient)"
+          python -c "from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient; print(AsyncCosmosMemoryClient)"
+
+      - name: Install test extras
+        # The published wheel does NOT carry the [dev] extra's pytest, ruff,
+        # etc. Install them separately so the unit suite can run against the
+        # installed wheel.
+        run: pip install -e ".[dev]"
+
+      - name: Re-install the TestPyPI wheel to overwrite the editable install
+        env:
+          PKG_NAME: ${{ needs.build.outputs.pkg-name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          pip install --force-reinstall --no-deps \
+            --extra-index-url https://test.pypi.org/simple/ \
+            "${PKG_NAME}==${VERSION}"
+
+      - name: Run unit tests against the installed wheel
+        run: pytest tests/unit -q
+
+  publish:
+    needs:
+      - build
+      - test-pypi-publish
+      - pre-release-checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for PyPI trusted publishing (OIDC token).
+      # Configure at https://pypi.org/manage/account/publishing/
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          verbose: true
+          print-hash: true
+          # Attestations default-on in v1.11.0+ — opt out until configured.
+          attestations: false
+
+  mark-release:
+    needs:
+      - build
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      # ncipollo/release-action needs contents:write to create the tag + release.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "dist/*"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          generateReleaseNotes: true
+          tag: v${{ needs.build.outputs.version }}
+          commit: ${{ github.sha }}
+          name: v${{ needs.build.outputs.version }}

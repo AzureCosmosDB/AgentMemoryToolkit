@@ -30,8 +30,8 @@ pip install -r function_app/requirements.txt
 The public clients are:
 
 ```python
-from agent_memory_toolkit import CosmosMemoryClient
-from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient
+from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 ```
 
 If notebooks cannot import the package, run them from the repo root with paths such as `Samples/Notebooks/Demo.ipynb`, or add the repository root to `sys.path`.
@@ -184,7 +184,7 @@ Use async Azure credentials with the async client:
 
 ```python
 from azure.identity.aio import DefaultAzureCredential
-from agent_memory_toolkit.aio import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 ```
 
 Always `await` cloud operations and close the client when done:

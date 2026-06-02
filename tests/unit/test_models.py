@@ -1,4 +1,4 @@
-"""Unit tests for agent_memory_toolkit.models.
+"""Unit tests for azure.cosmos.agent_memory.models.
 
 Each typed subclass (TurnRecord / ThreadSummaryRecord / UserSummaryRecord /
 FactRecord / EpisodicRecord / ProceduralRecord) gets its own focused class
@@ -16,7 +16,7 @@ from typing import Any
 import pydantic
 import pytest
 
-from agent_memory_toolkit.models import (
+from azure.cosmos.agent_memory.models import (
     EpisodicRecord,
     FactRecord,
     MemoryRecord,

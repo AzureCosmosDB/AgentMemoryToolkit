@@ -8,7 +8,7 @@ import uuid
 
 import pytest
 
-from agent_memory_toolkit import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient
 from tests.conftest import INTEGRATION_ENABLED
 
 pytestmark = [

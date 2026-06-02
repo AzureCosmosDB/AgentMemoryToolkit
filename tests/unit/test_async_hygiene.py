@@ -1,4 +1,4 @@
-"""Async hygiene regression guards for ``agent_memory_toolkit/aio/``.
+"""Async hygiene regression guards for ``azure/cosmos/agent_memory/aio/``.
 
 These tests programmatically inspect the async subpackage to catch
 regressions where contributors might inadvertently re-introduce sync I/O on
@@ -17,7 +17,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import agent_memory_toolkit.aio as _aio_pkg
+import azure.cosmos.agent_memory.aio as _aio_pkg
 
 # Each entry is ``(relative_path_under_aio, name_of_an_enclosing_function)``.
 # A call site matches if *any* function in its enclosing chain has the
@@ -102,7 +102,7 @@ def test_asyncio_to_thread_only_in_allowed_call_sites() -> None:
     unexpected = [(rel, lineno, chain) for (rel, lineno, chain) in hits if not _is_allowed(rel, chain)]
     assert not unexpected, (
         "Unexpected asyncio.to_thread call site(s) found in "
-        "agent_memory_toolkit/aio/. Each new to_thread reintroduces sync "
+        "azure/cosmos/agent_memory/aio/. Each new to_thread reintroduces sync "
         "I/O onto the event loop and must be either removed or explicitly "
         "added to ALLOWED_CALL_SITES in this test with justification.\n"
         f"  Unexpected sites: {unexpected}\n"
@@ -111,7 +111,7 @@ def test_asyncio_to_thread_only_in_allowed_call_sites() -> None:
 
     assert len(hits) == EXPECTED_TOTAL_CALL_SITES, (
         f"Expected exactly {EXPECTED_TOTAL_CALL_SITES} asyncio.to_thread call "
-        f"sites in agent_memory_toolkit/aio/; found {len(hits)}.\n"
+        f"sites in azure/cosmos/agent_memory/aio/; found {len(hits)}.\n"
         f"  All sites: {hits}\n"
         "If an allowed site was intentionally removed, drop the corresponding "
         "entry from ALLOWED_CALL_SITES and update EXPECTED_TOTAL_CALL_SITES."

@@ -1,8 +1,8 @@
-"""Unit tests for shared helpers in agent_memory_toolkit._utils."""
+"""Unit tests for shared helpers in azure.cosmos.agent_memory._utils."""
 
 import pytest
 
-from agent_memory_toolkit._utils import (
+from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     _build_container_kwargs,
     _make_memory,
@@ -11,7 +11,7 @@ from agent_memory_toolkit._utils import (
     _resolve_full_text_language,
     compute_content_hash,
 )
-from agent_memory_toolkit.exceptions import ConfigurationError, ValidationError
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
 
 def test_build_container_kwargs_includes_required_fields_and_extras():

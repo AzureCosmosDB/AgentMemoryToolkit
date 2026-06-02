@@ -26,6 +26,13 @@ build/
 venv/
 .pytest_cache/
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+
 # Jupyter Notebook
 .ipynb_checkpoints/
 

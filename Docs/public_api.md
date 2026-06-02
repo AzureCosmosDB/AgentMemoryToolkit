@@ -120,12 +120,12 @@ Use `validate_topology()` (sync) or `await validate_topology()` (async) after `c
 
 ## Extension Points
 
-Sync extension protocols live in `agent_memory_toolkit.services`; async variants live in `agent_memory_toolkit.aio.services`.
+Sync extension protocols live in `azure.cosmos.agent_memory.services`; async variants live in `azure.cosmos.agent_memory.aio.services`.
 
-- `MemoryStoreProtocol` (`agent_memory_toolkit.services`): persistence primitives (`query`, `read_item`, `add_cosmos`, `mark_superseded`) consumed by the pipeline.
+- `MemoryStoreProtocol` (`azure.cosmos.agent_memory.services`): persistence primitives (`query`, `read_item`, `add_cosmos`, `mark_superseded`) consumed by the pipeline.
 
 Concrete service classes are exported from their respective packages:
 
-- Sync: `RetrievalService`, `PipelineService` from `agent_memory_toolkit.services` (sub-modules `retrieval`, `pipeline`).
-- Async: `AsyncRetrievalService` and `AsyncPipelineService` from `agent_memory_toolkit.aio.services` (sub-modules `retrieval`, `pipeline`). The async pipeline is a fully-native asyncio implementation — not an `asyncio.to_thread` shim over the sync pipeline.
-- Threshold-driven auto-trigger: `maybe_trigger_steps` from `agent_memory_toolkit.auto_trigger` (sync) and `agent_memory_toolkit.aio.auto_trigger` (async).
+- Sync: `RetrievalService`, `PipelineService` from `azure.cosmos.agent_memory.services` (sub-modules `retrieval`, `pipeline`).
+- Async: `AsyncRetrievalService` and `AsyncPipelineService` from `azure.cosmos.agent_memory.aio.services` (sub-modules `retrieval`, `pipeline`). The async pipeline is a fully-native asyncio implementation — not an `asyncio.to_thread` shim over the sync pipeline.
+- Threshold-driven auto-trigger: `maybe_trigger_steps` from `azure.cosmos.agent_memory.auto_trigger` (sync) and `azure.cosmos.agent_memory.aio.auto_trigger` (async).

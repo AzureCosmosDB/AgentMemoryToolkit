@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_memory_toolkit._utils import _build_memory_query_builder
+from azure.cosmos.agent_memory._utils import _build_memory_query_builder
 
 
 def test_min_confidence_adds_predicate_when_set():

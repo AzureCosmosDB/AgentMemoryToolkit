@@ -490,7 +490,10 @@ class TestCreateMemoryStore:
 class TestAddCosmos:
     def test_add_cosmos(self):
         mem, container = _connected_client()
-        mem.add_cosmos(user_id="u1", role="user", content="hello")
+        # Suppress cadence work — the trigger path is exercised in
+        # tests/unit/test_auto_trigger.py; this test just asserts the CRUD write.
+        mem._maybe_auto_trigger = MagicMock()
+        mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
 
         turns = mem._turns_container_client
         turns.upsert_item.assert_called_once()
@@ -502,7 +505,47 @@ class TestAddCosmos:
     def test_add_cosmos_not_connected(self):
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
-            mem.add_cosmos(user_id="u1", role="user", content="hi")
+            mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
+
+    def test_add_cosmos_turn_requires_thread_id(self):
+        """Turn writes must declare a thread_id so the auto-trigger counter can group them."""
+        mem, _ = _connected_client()
+        with pytest.raises(ValidationError, match="thread_id is required"):
+            mem.add_cosmos(user_id="u1", role="user", content="hi")  # memory_type='turn' default
+
+    def test_add_cosmos_non_turn_does_not_require_thread_id(self):
+        """Non-turn writes (facts, episodics, etc.) work without thread_id and skip cadence."""
+        mem, container = _connected_client()
+        trigger = MagicMock()
+        mem._maybe_auto_trigger = trigger
+
+        mem.add_cosmos(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
+
+        container.upsert_item.assert_called_once()
+        trigger.assert_not_called()
+
+    def test_add_cosmos_turn_triggers_cadence(self):
+        """A turn write must bump the auto-trigger counter so cadence env vars apply
+        whether the caller uses the local buffer or writes through directly."""
+        mem, _ = _connected_client()
+        trigger = MagicMock()
+        mem._maybe_auto_trigger = trigger
+
+        mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+
+        trigger.assert_called_once_with({("u1", "t1"): 1})
+
+    def test_add_cosmos_swallows_cadence_failure(self):
+        """If the cadence trigger raises, the add_cosmos call must still succeed —
+        the user's turn was written; cadence is best-effort telemetry."""
+        mem, _ = _connected_client()
+        mem._maybe_auto_trigger = MagicMock(side_effect=RuntimeError("boom"))
+
+        # Should NOT raise — the write succeeded.
+        result_id = mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
+
+        assert isinstance(result_id, str)
+        mem._turns_container_client.upsert_item.assert_called_once()
 
 
 class TestPushToCosmos:

@@ -25,7 +25,7 @@ from azure.cosmos.agent_memory.aio.embeddings import AsyncEmbeddingsClient
 from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor, AsyncMemoryProcessor
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
-from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, CosmosOperationError
+from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, CosmosOperationError, ValidationError
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.services._pipeline_helpers import _normalize_metadata_keys
 from azure.cosmos.agent_memory.thresholds import DEFAULT_TTL_BY_TYPE
@@ -531,7 +531,21 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         embedding: Optional[list[float]] = None,
         embed: Optional[bool] = None,
     ) -> str:
-        return await self._get_store().add(
+        """Add a memory directly to Cosmos DB, bypassing the local buffer.
+
+        For ``memory_type='turn'`` this also bumps the auto-trigger counter and
+        schedules cadence-aware processing (extract / reconcile / procedural /
+        thread_summary / user_summary) as a background ``asyncio.Task`` — the
+        same pattern :meth:`push_to_cosmos` uses for buffered turns. The await
+        returns after the Cosmos write completes; cadence runs out-of-band so
+        it does not block the caller.
+        """
+        if memory_type == "turn" and not thread_id:
+            raise ValidationError(
+                "thread_id is required for memory_type='turn' so the auto-trigger "
+                "counter can group turns per conversation. Set thread_id explicitly."
+            )
+        memory_id = await self._get_store().add(
             user_id,
             role,
             content,
@@ -544,6 +558,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             embedding,
             embed,
         )
+        if memory_type == "turn" and thread_id:
+            task = asyncio.create_task(self._maybe_auto_trigger({(user_id, thread_id): 1}))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(_log_auto_trigger_task_failure)
+        return memory_id
 
     async def push_to_cosmos(self, batch_size: int = 25) -> None:
         """Insert all local memories into Cosmos DB and schedule processing."""
@@ -815,9 +835,34 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
 
     async def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
+        """Force the processor to run the full pipeline RIGHT NOW for one thread.
+
+        For the in-process processor this fires all five steps:
+        ``thread_summary → extract → reconcile → procedural → user_summary``.
+        For the durable processor this remains a no-op (the sibling Function
+        app drives the pipeline off the Cosmos DB change feed).
+
+        ``procedural`` and ``user_summary`` failures are caught and logged as
+        warnings rather than re-raised, so a transient pipeline error in the
+        tail steps does not erase the work already persisted by the per-thread
+        steps.
+        """
         _BaseMemoryClient._require_cosmos(self)
+        processor = self._get_processor()
         turns = await self.get_thread(thread_id=thread_id, user_id=user_id) or []
-        return await self._get_processor().process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
+        result = await processor.process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
+        if isinstance(processor, AsyncInProcessProcessor):
+            try:
+                result.procedural = await processor.synthesize_procedural(user_id=user_id)
+            except Exception as exc:
+                logger.warning("process_now: synthesize_procedural failed for user_id=%s: %s", user_id, exc)
+            try:
+                user_summary_result = await processor.process_user_summary(user_id=user_id)
+                if user_summary_result is not None and user_summary_result.summary:
+                    result.user_summary = user_summary_result.summary
+            except Exception as exc:
+                logger.warning("process_now: process_user_summary failed for user_id=%s: %s", user_id, exc)
+        return result
 
     async def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:
         _BaseMemoryClient._require_cosmos(self)

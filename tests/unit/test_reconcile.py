@@ -649,6 +649,202 @@ class TestExactDedupCrossTypeIsolation:
         assert fact_docs[0]["content"] == text
 
 
+class TestEpisodicReconciliation:
+    """Episodic memories use scope as identity: the deterministic ID is
+    seeded only on ``(user_id, scope_type, scope_value)``. Any re-emission
+    for the same scope (paraphrased intent, added detail, reversed intent)
+    collides on upsert and replaces the prior record. The LLM does NOT
+    make ADD/UPDATE/CONTRADICT decisions for episodics — the scope IS the
+    identity. Distinct events under the same umbrella belong under
+    distinct ``scope_value`` strings (e.g. "Tokyo trip" vs
+    "Tokyo lost-wallet incident").
+    """
+
+    def _build(self) -> PipelineService:
+        p = PipelineService.__new__(PipelineService)
+        p._embeddings = MagicMock()
+        p._embeddings.generate.return_value = [0.1] * 8
+        p._embeddings.generate_batch.return_value = [[0.1] * 8]
+        p._container = MagicMock()
+        p._memories_container = p._container
+        p._turns_container = p._container
+        p._summaries_container = p._container
+        p._chat = MagicMock()
+        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
+        p._create_memory = MagicMock(side_effect=lambda doc: doc)
+        p._mark_superseded = MagicMock(return_value=True)
+        return p
+
+    def _turns(self) -> list[dict]:
+        return [
+            {
+                "id": "turn-1",
+                "role": "user",
+                "content": "x",
+                "type": "turn",
+                "created_at": "2024-01-01T00:00:00+00:00",
+            }
+        ]
+
+    def _episodic_payload(self, **overrides) -> dict:
+        payload = {
+            "scope_type": "trip",
+            "scope_value": "Tokyo",
+            "text": "Planning a Tokyo trip with a luxury hotel preference.",
+            "situation": None,
+            "action_taken": None,
+            "outcome": None,
+            "outcome_valence": None,
+            "reasoning": None,
+            "lesson": None,
+            "domain": "travel",
+            "confidence": 0.95,
+            "salience": 0.8,
+            "tags": ["topic:travel"],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_existing_episodics_are_rendered_into_prompt_inputs(self):
+        """The extractor must pass ``existing_episodics`` to the LLM, grouped
+        by ``(scope_type, scope_value)``. Without this, the model has no
+        context for refining or reversing the existing intent for that
+        scope when it emits the merged text."""
+        p = self._build()
+        existing_text = "Planning a Tokyo trip with a luxury hotel preference."
+        existing = [
+            {
+                "id": "ep_existing",
+                "type": "episodic",
+                "content": existing_text,
+                "content_hash": compute_content_hash(existing_text),
+                "thread_id": "t1",
+                "salience": 0.8,
+                "metadata": {"scope_type": "trip", "scope_value": "Tokyo"},
+            }
+        ]
+        p._container.query_items.return_value = iter(self._turns())
+        p._load_existing_memories = MagicMock(return_value=existing)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps({"facts": [], "episodic": [], "unclassified": []})
+        )
+
+        p.extract_memories("u1", "t1")
+
+        p._load_existing_memories.assert_called_once_with("u1", ["fact", "episodic"])
+        call_kwargs = p._run_prompty.call_args.kwargs
+        inputs = call_kwargs["inputs"]
+        assert "existing_episodics" in inputs
+        rendered = inputs["existing_episodics"]
+        assert "trip = Tokyo" in rendered
+        assert "ep_existing" in rendered
+        assert existing_text in rendered
+
+    def test_same_scope_episodics_collide_on_deterministic_id(self):
+        """Two episodics with the same (scope_type, scope_value) but
+        different ``text`` MUST produce the same deterministic ID so that
+        the second write overwrites the first via upsert. This is the
+        core mechanism that prevents near-duplicate episodic storage when
+        a recent-turn re-extraction window paraphrases the same intent.
+        """
+        p = self._build()
+        p._container.query_items.return_value = iter(self._turns())
+        p._load_existing_memories = MagicMock(return_value=[])
+        # LLM emits two episodics under the SAME scope but with paraphrased
+        # text — this is the exact failure mode the user reported.
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [],
+                    "episodic": [
+                        self._episodic_payload(text="Planning a Tokyo trip with a luxury hotel preference."),
+                        self._episodic_payload(text="Planning a Tokyo trip with a preference for luxury hotels."),
+                    ],
+                    "unclassified": [],
+                }
+            )
+        )
+
+        p.extract_memories("u1", "t1")
+
+        upsert_calls = [
+            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
+        ]
+        # Both episodics flow through upsert (the persist path branches on
+        # type=episodic) and they MUST share the same det_id — that's what
+        # makes the second a Cosmos upsert that replaces the first.
+        assert len(upsert_calls) == 2
+        assert upsert_calls[0]["id"] == upsert_calls[1]["id"]
+        # And neither went through create_item (which would 409 on the
+        # second write and silently lose the new richer text).
+        episodic_creates = [
+            c for c in p._create_memory.call_args_list if c.args[0].get("type") == "episodic"
+        ]
+        assert episodic_creates == []
+
+    def test_different_scope_values_produce_different_ids(self):
+        """Two episodics with the same scope_type but different
+        scope_value (e.g. distinct trips, or distinct incidents within a
+        trip) MUST produce different deterministic IDs so they coexist.
+        """
+        p = self._build()
+        p._container.query_items.return_value = iter(self._turns())
+        p._load_existing_memories = MagicMock(return_value=[])
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {
+                    "facts": [],
+                    "episodic": [
+                        self._episodic_payload(scope_value="Tokyo", text="Trip A."),
+                        self._episodic_payload(scope_value="Paris", text="Trip B."),
+                    ],
+                    "unclassified": [],
+                }
+            )
+        )
+
+        p.extract_memories("u1", "t1")
+
+        upsert_calls = [
+            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
+        ]
+        assert len(upsert_calls) == 2
+        assert upsert_calls[0]["id"] != upsert_calls[1]["id"]
+
+    def test_episodic_and_fact_with_same_content_do_not_collide(self):
+        """An episodic's deterministic ID is seeded on scope; a fact's is
+        seeded on content_hash. Even if their content text matches
+        verbatim, the IDs live in disjoint namespaces (ep_ vs fact_ prefix
+        plus different seeds) so both records persist."""
+        p = self._build()
+        text = "Planning a Tokyo trip with a luxury hotel preference."
+        existing = [
+            {
+                "id": "fact_existing",
+                "type": "fact",
+                "content": text,
+                "content_hash": compute_content_hash(text),
+                "thread_id": "t1",
+                "tags": ["sys:fact"],
+            }
+        ]
+        p._container.query_items.return_value = iter(self._turns())
+        p._load_existing_memories = MagicMock(return_value=existing)
+        p._run_prompty = MagicMock(
+            return_value=json.dumps(
+                {"facts": [], "episodic": [self._episodic_payload(text=text)], "unclassified": []}
+            )
+        )
+
+        out = p.extract_memories("u1", "t1")
+
+        assert out["episodic_count"] == 1
+        upsert_calls = [
+            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
+        ]
+        assert len(upsert_calls) == 1
+
+
 class TestExtractEarlyReturnShape:
     """The no-memories early-return must include every key the success
     path returns; otherwise callers using ``result["exact_dedup_skipped"]``
@@ -668,6 +864,7 @@ class TestExtractEarlyReturnShape:
             "unclassified_count",
             "updated_count",
             "exact_dedup_skipped",
+            "dropped_episodic_count",
         ):
             assert key in out, f"missing key: {key}"
             assert out[key] == 0

@@ -28,12 +28,17 @@ def _patch_get_thread(client, turns):
 
 
 @pytest.mark.asyncio
-async def test_process_now_with_inprocess_invokes_pipeline():
+async def test_process_now_with_inprocess_invokes_full_pipeline():
+    """process_now must fire ALL FIVE steps for AsyncInProcess: thread_summary, extract,
+    reconcile, procedural, user_summary. Pre-fix this was only the first 3, so
+    procedural + user_summary never ran when callers used add_cosmos + process_now."""
     client = _connected()
     pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+    pipeline.synthesize_procedural.return_value = {"id": "proc1", "type": "procedural"}
+    pipeline.generate_user_summary.return_value = {"id": "us1", "type": "user_summary"}
     pipeline._store = client._get_store()
     pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
@@ -46,10 +51,62 @@ async def test_process_now_with_inprocess_invokes_pipeline():
     pipeline.generate_thread_summary.assert_awaited_once_with("u", "t")
     pipeline.extract_memories.assert_awaited_once_with("u", "t")
     pipeline.reconcile_memories.assert_awaited_once_with("u", 50)
+    pipeline.synthesize_procedural.assert_awaited_once_with("u", force=False)
+    pipeline.generate_user_summary.assert_awaited_once_with("u", None)
+    assert result.procedural == {"id": "proc1", "type": "procedural"}
+    assert result.user_summary == {"id": "us1", "type": "user_summary"}
 
 
 @pytest.mark.asyncio
-async def test_process_now_with_durable_is_noop():
+async def test_process_now_swallows_procedural_failure():
+    """A transient LLM failure in synthesize_procedural must NOT erase the work
+    already persisted by the per-thread steps. WARNING-log + continue."""
+    client = _connected()
+    pipeline = AsyncMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.side_effect = RuntimeError("LLM rate-limited")
+    pipeline.generate_user_summary.return_value = {"id": "us1"}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user"}])
+
+    result = await client.process_now(user_id="u", thread_id="t")
+
+    assert result.procedural is None
+    assert result.user_summary == {"id": "us1"}
+    pipeline.synthesize_procedural.assert_awaited_once()
+    pipeline.generate_user_summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_now_swallows_user_summary_failure():
+    """A transient LLM failure in generate_user_summary must NOT erase the work
+    already persisted by the per-thread + procedural steps."""
+    client = _connected()
+    pipeline = AsyncMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.return_value = {"id": "proc1"}
+    pipeline.generate_user_summary.side_effect = RuntimeError("LLM timeout")
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user"}])
+
+    result = await client.process_now(user_id="u", thread_id="t")
+
+    assert result.procedural == {"id": "proc1"}
+    assert result.user_summary is None
+
+
+@pytest.mark.asyncio
+async def test_process_now_with_durable_skips_tail_steps():
+    """Durable mode must NOT call synthesize_procedural or generate_user_summary —
+    those are driven by the change-feed-fed sibling Function app."""
     client = _connected(processor=AsyncDurableFunctionProcessor())
     pipeline = AsyncMock()
     client._pipeline = pipeline
@@ -59,7 +116,11 @@ async def test_process_now_with_durable_is_noop():
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary is None
+    assert result.procedural is None
+    assert result.user_summary is None
     pipeline.generate_thread_summary.assert_not_called()
+    pipeline.synthesize_procedural.assert_not_called()
+    pipeline.generate_user_summary.assert_not_called()
 
 
 @pytest.mark.asyncio

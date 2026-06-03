@@ -12,7 +12,7 @@ namespaces = true
 
 [project]
 name = "azure-cosmos-agent-memory"
-version = "0.1.0b1"
+version = "0.1.0b2"
 description = "Store, retrieve, and transform AI agent memories backed by Azure Cosmos DB"
 readme = "README.md"
 license = {file = "LICENSE"}

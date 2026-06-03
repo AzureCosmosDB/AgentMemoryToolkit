@@ -24,12 +24,21 @@ class ProcessThreadResult:
     The actual extracted memory documents are persisted to Cosmos DB by the
     pipeline; query them back via the SDK's ``get_memories`` if you need the
     raw docs.
+
+    ``procedural`` and ``user_summary`` are populated by
+    :meth:`CosmosMemoryClient.process_now` only when the in-process processor
+    is active and only after the per-thread steps complete. They are ``None``
+    for the durable processor (which runs them async out-of-band) and for the
+    auto-trigger cadence path (which records them via the counter container,
+    not on this dataclass).
     """
 
     thread_summary: Optional[dict[str, Any]] = None
     extracted_counts: dict[str, int] = field(default_factory=dict)
     reconciled_count: int = 0
     elapsed_ms: int = 0
+    procedural: Optional[dict[str, Any]] = None
+    user_summary: Optional[dict[str, Any]] = None
 
 
 @dataclass

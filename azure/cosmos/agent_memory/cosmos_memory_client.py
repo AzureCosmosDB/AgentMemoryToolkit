@@ -23,7 +23,7 @@ from ._utils import (
 from .auto_trigger import maybe_trigger_steps
 from .chat import ChatClient
 from .embeddings import EmbeddingsClient
-from .exceptions import CosmosOperationError
+from .exceptions import CosmosOperationError, ValidationError
 from .processors import InProcessProcessor, MemoryProcessor
 from .services._pipeline_helpers import _normalize_metadata_keys
 from .services.pipeline import PipelineService
@@ -489,8 +489,22 @@ class CosmosMemoryClient(_BaseMemoryClient):
         embedding: Optional[list[float]] = None,
         embed: Optional[bool] = None,
     ) -> str:
-        """Add a memory to Cosmos DB."""
-        return self._get_store().add(
+        """Add a memory directly to Cosmos DB, bypassing the local buffer.
+
+        For ``memory_type='turn'`` this also bumps the auto-trigger counter and
+        schedules cadence-aware processing (extract / reconcile / procedural /
+        thread_summary / user_summary) via :func:`maybe_trigger_steps`, exactly
+        like :meth:`push_to_cosmos` does for buffered turns — so the
+        ``FACT_EXTRACTION_EVERY_N`` / ``THREAD_SUMMARY_EVERY_N`` /
+        ``USER_SUMMARY_EVERY_N`` / ``DEDUP_EVERY_N`` knobs apply uniformly
+        whether the caller uses the buffer or writes through directly.
+        """
+        if memory_type == "turn" and not thread_id:
+            raise ValidationError(
+                "thread_id is required for memory_type='turn' so the auto-trigger "
+                "counter can group turns per conversation. Set thread_id explicitly."
+            )
+        memory_id = self._get_store().add(
             user_id,
             role,
             content,
@@ -503,6 +517,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
             embedding,
             embed,
         )
+        if memory_type == "turn" and thread_id:
+            try:
+                self._maybe_auto_trigger({(user_id, thread_id): 1})
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Auto-trigger after add_cosmos failed: %s", exc)
+        return memory_id
 
     def push_to_cosmos(self, batch_size: int = 25) -> None:
         """Insert all local memories into Cosmos DB."""
@@ -790,10 +810,34 @@ class CosmosMemoryClient(_BaseMemoryClient):
         return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
 
     def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
-        """Force the processor to run summarize/extract/dedup right now."""
+        """Force the processor to run the full pipeline RIGHT NOW for one thread.
+
+        For the in-process processor this fires all five steps:
+        ``thread_summary → extract → reconcile → procedural → user_summary``.
+        For the durable processor this remains a no-op (the sibling Function
+        app drives the pipeline off the Cosmos DB change feed).
+
+        ``procedural`` and ``user_summary`` failures are caught and logged as
+        warnings rather than re-raised, so a transient pipeline error in the
+        tail steps does not erase the work already persisted by the per-thread
+        steps.
+        """
         self._require_cosmos()
+        processor = self._get_processor()
         turns = self.get_thread(thread_id=thread_id, user_id=user_id) or []
-        return self._get_processor().process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
+        result = processor.process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
+        if isinstance(processor, InProcessProcessor):
+            try:
+                result.procedural = processor.synthesize_procedural(user_id=user_id)
+            except Exception as exc:
+                logger.warning("process_now: synthesize_procedural failed for user_id=%s: %s", user_id, exc)
+            try:
+                user_summary_result = processor.process_user_summary(user_id=user_id)
+                if user_summary_result is not None and user_summary_result.summary:
+                    result.user_summary = user_summary_result.summary
+            except Exception as exc:
+                logger.warning("process_now: process_user_summary failed for user_id=%s: %s", user_id, exc)
+        return result
 
     def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:
         """Force processing and block until a thread summary exists (or timeout)."""

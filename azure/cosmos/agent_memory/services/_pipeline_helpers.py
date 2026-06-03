@@ -280,6 +280,160 @@ def build_transcript(
     return "\n".join(parts)
 
 
+def format_existing_episodics(memories: list[dict[str, Any]]) -> str:
+    """Render existing episodic memories for the extract_memories prompt.
+
+    Groups by ``(scope_type, scope_value)`` so the LLM can see, per-scope,
+    which intents are already captured. This is the input that lets the
+    extractor emit ``action=UPDATE``/``CONTRADICT`` against the right
+    ``supersedes_id`` instead of silently flooding the store with
+    paraphrased near-duplicates of the same intent.
+    """
+    if not memories:
+        return "(none)"
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for mem in memories:
+        meta = mem.get("metadata") or {}
+        scope_type = (meta.get("scope_type") or "(none)").strip() or "(none)"
+        scope_value = (meta.get("scope_value") or "(none)").strip() or "(none)"
+        grouped[(scope_type, scope_value)].append(mem)
+    lines: list[str] = []
+    for (scope_type, scope_value), bucket in grouped.items():
+        lines.append(f"- {scope_type} = {scope_value} ({len(bucket)} episodic{'s' if len(bucket) != 1 else ''})")
+        for mem in bucket:
+            mem_id = mem.get("id", "(no-id)")
+            salience = mem.get("salience", "N/A")
+            content = (mem.get("content") or "").strip() or "(empty content)"
+            lines.append(f"  - [ID: {mem_id}] (salience {salience}) {content}")
+    return "\n".join(lines)
+
+
+# Stopwords stripped from grounding checks. Keep this list short and focused
+# on tokens that carry no factual content; any word a memory might legitimately
+# differ on (e.g. "not", "no") must NOT be added here.
+_GROUNDING_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "and", "or", "but", "to", "of", "for", "on", "in", "at", "by", "with",
+        "from", "as", "that", "this", "these", "those", "it", "its",
+        "user", "they", "them", "their", "he", "she", "his", "her", "him",
+        "has", "have", "had", "do", "does", "did", "will", "would", "should",
+        "can", "could", "may", "might", "must",
+    }
+)
+
+_GROUNDING_TOKEN_RE = re.compile(r"[a-zA-Z]{3,}")
+
+
+def _grounding_tokens(text: str) -> set[str]:
+    """Tokenize text into lowercased content words (>=3 chars, stopwords removed)."""
+    if not text:
+        return set()
+    return {t for t in _GROUNDING_TOKEN_RE.findall(text.lower()) if t not in _GROUNDING_STOPWORDS}
+
+
+def check_extracted_fact_grounding(
+    fact_docs: list[dict[str, Any]],
+    turn_items: list[dict[str, Any]],
+    existing_facts: list[dict[str, Any]],
+    *,
+    user_id: str,
+    thread_id: str,
+    logger: Any,
+) -> None:
+    """Warn when an extracted fact's content is not grounded in the new user turns.
+
+    Catches two known LLM failure modes that previously corrupted the fact store:
+
+    1. **Synthesis from existing facts** — the LLM emits an ADD whose content
+       paraphrase-merges two or more existing facts (e.g. existing
+       "user eats meat" + "user loves steak" → emitted "user loves steak,
+       indicating they eat meat") even though the new user turn says nothing
+       on the topic. Reconciliation later catches the resulting duplicates
+       but the visible artefact is a chain of "duplicate" supersedes that the
+       user never triggered.
+
+    2. **Phantom explicit-negation** — the LLM emits a second CONTRADICT fact
+       alongside the literal user statement (e.g. user says "I love steak and
+       seafood"; LLM emits both "user loves steak and seafood" and an invented
+       "user eats meat" CONTRADICT) when the supersedes_id on the literal fact
+       would have sufficed. Pollutes the store with claims the user didn't make.
+
+    Heuristic: tokenize each emitted fact's content into lowercased content
+    words; subtract tokens present in the new user-turn transcript; the
+    remainder is "ungrounded". If ungrounded tokens come from 2+ existing
+    facts → strong synthesis signal. If they come from a single existing
+    fact with >=50%% overlap → weaker phantom-negation signal.
+
+    Logs a WARNING for each suspected fact. Does NOT drop facts — downstream
+    reconciliation remains the dedup authority — but the WARNING is the
+    deterministic test signal that catches regressions.
+    """
+    if not fact_docs or not turn_items:
+        return
+
+    user_turn_text = " ".join(
+        str(m.get("content") or "")
+        for m in turn_items
+        if (m.get("role") or "").lower() == "user"
+    )
+    user_tokens = _grounding_tokens(user_turn_text)
+
+    existing_with_tokens: list[tuple[str, set[str]]] = []
+    for mem in existing_facts:
+        toks = _grounding_tokens(str(mem.get("content") or ""))
+        if toks:
+            existing_with_tokens.append((str(mem.get("id") or ""), toks))
+
+    for doc in fact_docs:
+        content = str(doc.get("content") or "")
+        fact_tokens = _grounding_tokens(content)
+        if not fact_tokens:
+            continue
+
+        ungrounded = fact_tokens - user_tokens
+        if not ungrounded:
+            continue
+
+        contributors: list[tuple[str, set[str]]] = [
+            (eid, ungrounded & toks) for eid, toks in existing_with_tokens if ungrounded & toks
+        ]
+
+        if len(contributors) >= 2:
+            logger.warning(
+                "extract_memories: emitted fact appears synthesized from %d existing facts "
+                "(ungrounded in user turns) — extract should ground only in this turn's [user] lines. "
+                "doc_id=%s content=%r ungrounded_tokens=%s contributor_ids=%s "
+                "user_id=%s thread_id=%s",
+                len(contributors),
+                doc.get("id"),
+                content,
+                sorted(ungrounded),
+                [eid for eid, _ in contributors],
+                user_id,
+                thread_id,
+            )
+        elif len(contributors) == 1 and len(ungrounded) >= 2:
+            eid, overlap = contributors[0]
+            overlap_ratio = len(overlap) / len(ungrounded)
+            if overlap_ratio >= 0.5:
+                logger.warning(
+                    "extract_memories: emitted fact has ungrounded tokens overlapping a single existing fact "
+                    "(possible phantom-negation/restatement) — extract should ground only in this turn's "
+                    "[user] lines. doc_id=%s content=%r ungrounded_tokens=%s overlap_existing_id=%s "
+                    "overlap_ratio=%.2f user_id=%s thread_id=%s",
+                    doc.get("id"),
+                    content,
+                    sorted(ungrounded),
+                    eid,
+                    overlap_ratio,
+                    user_id,
+                    thread_id,
+                )
+
+
+
+
 def parse_llm_json(text: str | None) -> dict[str, Any]:
     """Parse JSON from an LLM response, stripping markdown fences."""
     if text is None:

@@ -219,6 +219,7 @@ def test_extract_memories_without_procedural_bucket_returns_new_count_shape():
                 {
                     "scope_type": "task",
                     "scope_value": "refactoring tests",
+                    "text": "Refactored test suite using focused helpers to keep it readable.",
                     "situation": "Refactoring tests",
                     "action_taken": "Used focused helpers",
                     "outcome": "The suite stayed readable",

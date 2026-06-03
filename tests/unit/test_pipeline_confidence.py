@@ -139,6 +139,7 @@ def test_extract_episodic_carries_confidence():
                 {
                     "scope_type": "project",
                     "scope_value": "CI revamp",
+                    "text": "Set up CI by adding Ruff — faster lint times.",
                     "situation": "Setup CI",
                     "action_taken": "Added Ruff",
                     "outcome": "Faster lint",
@@ -285,11 +286,17 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
 # ---------------------------------------------------------------------------
 
 
-def test_extract_scoped_intent_without_outcome_stores_correctly(caplog):
-    """An episodic with only scope fields (no situation/action/outcome) is kept.
+def test_extract_drops_episodic_missing_text(caplog):
+    """An episodic with no ``text`` is dropped and surfaced via the return value.
 
-    The doc must use the deterministic fallback content string, expose the
-    scope fields at the top level, and not emit a "dropping malformed" warning.
+    Previously the pipeline synthesized boilerplate content like
+    ``"For the user's Paris trip, intent recorded."`` which was
+    semantically empty for embedding/recall. The fix is to require
+    the LLM to emit ``text`` (same field facts use) — if it doesn't,
+    drop the record so we don't poison the recall index. The drop is
+    logged at ERROR (it's data loss) and surfaced via the
+    ``dropped_episodic_count`` field on the return dict so callers
+    can monitor LLM-extraction compliance over time.
     """
     pipeline, upserted = _make_pipeline(
         {
@@ -299,36 +306,34 @@ def test_extract_scoped_intent_without_outcome_stores_correctly(caplog):
                     "scope_value": "Paris",
                     "confidence": 0.95,
                     "salience": 0.8,
+                    "tags": ["topic:travel", "topic:hotels"],
                 }
             ]
         }
     )
 
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        pipeline.extract_memories("u1", "t1")
+    with caplog.at_level("ERROR", logger="azure.cosmos.agent_memory.pipeline"):
+        result = pipeline.extract_memories("u1", "t1")
 
     eps = [d for d in upserted if d["type"] == "episodic"]
-    assert len(eps) == 1
-    ep = eps[0]
-    assert ep["scope_type"] == "trip"
-    assert ep["scope_value"] == "Paris"
-    assert ep["metadata"]["scope_type"] == "trip"
-    assert ep["metadata"]["scope_value"] == "Paris"
-    assert ep["metadata"]["situation"] is None
-    assert ep["metadata"]["action_taken"] is None
-    assert ep["metadata"]["outcome"] is None
-    assert ep["content"] == "For the user's Paris trip, intent recorded."
-    assert ep["confidence"] == pytest.approx(0.95)
-    assert not any("dropping malformed episodic" in rec.getMessage() for rec in caplog.records)
+    assert eps == []
+    assert result["episodic_count"] == 0
+    assert result["dropped_episodic_count"] == 1
+    msgs = [rec.getMessage() for rec in caplog.records]
+    assert any("empty/missing text field" in m for m in msgs)
+    assert any("reason=missing_text" in m for m in msgs)
+    # Bumped from WARNING → ERROR because dropping == data loss.
+    assert any(rec.levelname == "ERROR" and "empty/missing text field" in rec.getMessage() for rec in caplog.records)
 
 
-def test_extract_past_event_episodic_uses_arrow_form_and_keeps_scope():
+def test_extract_past_event_episodic_uses_text_and_keeps_chain_in_metadata():
     pipeline, upserted = _make_pipeline(
         {
             "episodic": [
                 {
                     "scope_type": "project",
                     "scope_value": "Acme revamp",
+                    "text": "Migrated Acme DB by running the script — all rows migrated cleanly.",
                     "situation": "Migrated DB",
                     "action_taken": "Ran the script",
                     "outcome": "All rows migrated",
@@ -347,7 +352,7 @@ def test_extract_past_event_episodic_uses_arrow_form_and_keeps_scope():
     pipeline.extract_memories("u1", "t1")
 
     [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["content"] == "Migrated DB → Ran the script → All rows migrated"
+    assert ep["content"] == "Migrated Acme DB by running the script — all rows migrated cleanly."
     assert ep["scope_type"] == "project"
     assert ep["scope_value"] == "Acme revamp"
     md = ep["metadata"]
@@ -361,12 +366,13 @@ def test_extract_past_event_episodic_uses_arrow_form_and_keeps_scope():
     assert "topic:db" in ep["tags"]
 
 
-def test_extract_episodic_falls_back_to_arrow_form_when_summary_field_present():
-    """The schema dropped ``summary``; pipeline now always uses arrow form.
+def test_extract_episodic_uses_text_directly_no_synthesis():
+    """The LLM-written ``text`` is the embedded ``content``, verbatim.
 
-    Even if a non-strict LLM smuggles a ``summary`` field through, the
-    pipeline ignores it and builds content from
-    ``situation → action_taken → outcome``.
+    The pipeline must NOT synthesize content from the s/a/o chain or
+    from scope fields — that's how we ended up with useless boilerplate
+    before the fix. Whatever the LLM emits in ``text`` is what gets
+    embedded.
     """
     pipeline, upserted = _make_pipeline(
         {
@@ -374,7 +380,7 @@ def test_extract_episodic_falls_back_to_arrow_form_when_summary_field_present():
                 {
                     "scope_type": "trip",
                     "scope_value": "Paris",
-                    "summary": "User wants luxury hotels for the Paris trip.",
+                    "text": "User wants luxury hotels for the Paris trip.",
                     "situation": "Planning Paris trip",
                     "action_taken": "Said luxury",
                     "outcome": "Pending",
@@ -386,7 +392,106 @@ def test_extract_episodic_falls_back_to_arrow_form_when_summary_field_present():
     pipeline.extract_memories("u1", "t1")
 
     [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["content"] == "Planning Paris trip → Said luxury → Pending"
+    assert ep["content"] == "User wants luxury hotels for the Paris trip."
+    assert ep["metadata"]["situation"] == "Planning Paris trip"
+    assert ep["metadata"]["action_taken"] == "Said luxury"
+    assert ep["metadata"]["outcome"] == "Pending"
+
+
+def test_extract_episodic_uses_text_alone_for_planned_intent():
+    """Planned/in-flight episodics carry their meaning entirely in ``text``.
+
+    This is the headline bug-1 scenario from the workshop: the LLM (correctly
+    following the prompt) emits only scope_type/scope_value/text for a
+    planned trip, and the pipeline must embed the text, not boilerplate.
+    """
+    pipeline, upserted = _make_pipeline(
+        {
+            "episodic": [
+                {
+                    "scope_type": "trip",
+                    "scope_value": "Tokyo",
+                    "text": ("Planning a Tokyo trip with vegetarian and wheelchair-accessible-restaurant constraints."),
+                    "confidence": 0.95,
+                    "salience": 0.85,
+                    "tags": ["topic:travel", "topic:accessibility"],
+                }
+            ]
+        }
+    )
+
+    pipeline.extract_memories("u1", "t1")
+
+    [ep] = [d for d in upserted if d["type"] == "episodic"]
+    assert ep["content"] == ("Planning a Tokyo trip with vegetarian and wheelchair-accessible-restaurant constraints.")
+    assert ep["metadata"]["situation"] is None
+    assert ep["metadata"]["action_taken"] is None
+    assert ep["metadata"]["outcome"] is None
+
+
+def test_extract_episodic_strips_whitespace_from_text():
+    pipeline, upserted = _make_pipeline(
+        {
+            "episodic": [
+                {
+                    "scope_type": "trip",
+                    "scope_value": "Paris",
+                    "text": "   Planning a Paris trip.   ",
+                }
+            ]
+        }
+    )
+    pipeline.extract_memories("u1", "t1")
+    [ep] = [d for d in upserted if d["type"] == "episodic"]
+    assert ep["content"] == "Planning a Paris trip."
+
+
+def test_extract_compound_statement_yields_facts_across_categories():
+    """Bug-2 scenario: a single user turn that combines preference + requirement
+    must produce two facts, not one merged "restaurant preferences" fact.
+
+    Drives the prompt's tightened consolidation rule. We're mocking the LLM
+    response here so this is really a regression guard on the pipeline plumbing
+    (the prompt change is what makes a real LLM produce this shape).
+    """
+    pipeline, upserted = _make_pipeline(
+        {
+            "facts": [
+                {
+                    "text": "The user does not eat meat.",
+                    "category": "preference",
+                    "subject": "user",
+                    "predicate": "dietary_restriction",
+                    "object": "no meat",
+                    "confidence": 1.0,
+                    "salience": 0.9,
+                    "tags": ["topic:diet"],
+                    "action": "ADD",
+                    "supersedes_id": None,
+                },
+                {
+                    "text": "The user requires wheelchair-accessible restaurants.",
+                    "category": "requirement",
+                    "subject": "user",
+                    "predicate": "accessibility_requirement",
+                    "object": "wheelchair-accessible restaurants",
+                    "confidence": 1.0,
+                    "salience": 0.95,
+                    "tags": ["topic:accessibility"],
+                    "action": "ADD",
+                    "supersedes_id": None,
+                },
+            ]
+        }
+    )
+    pipeline.extract_memories("u1", "t1")
+
+    facts = [d for d in upserted if d["type"] == "fact"]
+    assert len(facts) == 2
+    by_category = {f["metadata"]["category"]: f for f in facts}
+    assert set(by_category) == {"preference", "requirement"}
+    assert by_category["preference"]["content"] == "The user does not eat meat."
+    assert by_category["requirement"]["content"] == "The user requires wheelchair-accessible restaurants."
 
 
 def test_extract_drops_episodic_missing_scope_type(caplog):
@@ -404,10 +509,13 @@ def test_extract_drops_episodic_missing_scope_type(caplog):
     )
 
     with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        pipeline.extract_memories("u1", "t1")
+        result = pipeline.extract_memories("u1", "t1")
 
     assert not any(d["type"] == "episodic" for d in upserted)
     assert any("dropping malformed episodic" in rec.getMessage() for rec in caplog.records)
+    assert any("reason=malformed_scope" in rec.getMessage() for rec in caplog.records)
+    # Malformed-scope drops also count toward the dropped_episodic_count signal.
+    assert result["dropped_episodic_count"] == 1
 
 
 def test_extract_drops_episodic_missing_scope_value(caplog):
@@ -470,6 +578,7 @@ def test_extract_strips_whitespace_from_scope_fields():
                 {
                     "scope_type": "  trip  ",
                     "scope_value": "  Paris  ",
+                    "text": "Planning a Paris trip.",
                     "confidence": 0.9,
                 }
             ]
@@ -481,4 +590,4 @@ def test_extract_strips_whitespace_from_scope_fields():
     [ep] = [d for d in upserted if d["type"] == "episodic"]
     assert ep["scope_type"] == "trip"
     assert ep["scope_value"] == "Paris"
-    assert ep["content"] == "For the user's Paris trip, intent recorded."
+    assert ep["content"] == "Planning a Paris trip."

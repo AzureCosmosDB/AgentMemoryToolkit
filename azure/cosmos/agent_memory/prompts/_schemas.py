@@ -115,6 +115,7 @@ _EPISODIC_ITEM = {
     "properties": {
         "scope_type": {"type": "string"},
         "scope_value": {"type": "string"},
+        "text": {"type": "string"},
         "situation": {"type": ["string", "null"]},
         "action_taken": {"type": ["string", "null"]},
         "outcome": {"type": ["string", "null"]},
@@ -132,6 +133,7 @@ _EPISODIC_ITEM = {
     "required": [
         "scope_type",
         "scope_value",
+        "text",
         "situation",
         "action_taken",
         "outcome",

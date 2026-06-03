@@ -1,11 +1,15 @@
-# Changelog
+## Release History
 
-All notable changes to `azure-cosmos-agent-memory` are documented in this file.
+### 0.1.0b2 (2026-06-02)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-and this project adheres to [PEP 440](https://peps.python.org/pep-0440/) versioning.
+#### Bugs Fixed
+* Hardened memory extraction: stops emitting phantom/synthesized facts the user never asserted, stops extracting facts from `[assistant]:` turns, stops re-processing already-extracted turns (which previously produced reversed `CONTRADICT` decisions and meta-facts like `"X is contradicted by Y"`), and stops storing near-duplicate episodic memories for the same scope. Episodic memories also now embed the actual content instead of a boilerplate `"intent recorded"` string.
+* Fixed `add_cosmos` + `process_now` silently bypassing the cadence subsystem: cadence env vars (`THREAD_SUMMARY_EVERY_N`, `FACT_EXTRACTION_EVERY_N`, `USER_SUMMARY_EVERY_N`, etc.) had no effect, and procedural / user-summary synthesis never ran. `add_cosmos` now triggers cadence on turn writes; `process_now` now runs the full 5-step pipeline on the in-process processor.
 
-## [0.1.0b1] — 2026-05-31
+#### Other Changes
+* `add_cosmos` now validates `thread_id` on turn writes (matches `add_local`). `ProcessThreadResult` gains `procedural` and `user_summary` fields. `extract_memories` returns a `dropped_episodic_count` for monitoring LLM-extraction quality.
+
+### 0.1.0b1 (2026-05-31)
 
 Initial public preview release.
 
@@ -13,7 +17,7 @@ This is a **beta release**. The public surface may evolve in
 backward-incompatible ways before the `1.0.0` general-availability cut.
 Pin a specific version when integrating.
 
-### Added
+#### Added
 
 - Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) clients
   for storing, retrieving, and transforming agent memories backed by Azure
@@ -40,9 +44,7 @@ Pin a specific version when integrating.
 - Structured JSON logging via `azure.cosmos.agent_memory.logging`
   (`configure_logging`, `JsonFormatter`).
 
-### Package layout
+#### Package layout
 
 - Distribution name: **`azure-cosmos-agent-memory`** (PyPI)
 - Import path: **`azure.cosmos.agent_memory`** 
-
-[0.1.0b1]: https://github.com/AzureCosmosDB/AgentMemoryToolkit/releases/tag/v0.1.0b1

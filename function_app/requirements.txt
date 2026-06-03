@@ -2,7 +2,7 @@
 azure-functions
 azure-functions-durable
 
-azure-cosmos-agent-memory==0.1.0b1
+azure-cosmos-agent-memory==0.1.0b2
 azure-cosmos>=4.16.0
 azure-identity>=1.20
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -476,7 +477,11 @@ class TestValidateTopology:
 class TestAddCosmos:
     async def test_add_cosmos(self):
         mem, container = _connected_client()
-        await mem.add_cosmos(user_id="u1", role="user", content="hello")
+        # Suppress the background cadence task to keep the test focused on the CRUD write.
+        mem._maybe_auto_trigger = AsyncMock()
+        await mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+        # Drain any pending background tasks (none expected since we stubbed the trigger).
+        await asyncio.gather(*list(mem._background_tasks), return_exceptions=True)
 
         turns = mem._turns_container_client
         turns.upsert_item.assert_awaited_once()
@@ -487,7 +492,38 @@ class TestAddCosmos:
     async def test_add_cosmos_not_connected(self):
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
-            await mem.add_cosmos(user_id="u1", role="user", content="hi")
+            await mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
+
+    async def test_add_cosmos_turn_requires_thread_id(self):
+        """Turn writes must declare a thread_id so the auto-trigger counter can group them."""
+        mem, _ = _connected_client()
+        with pytest.raises(ValidationError, match="thread_id is required"):
+            await mem.add_cosmos(user_id="u1", role="user", content="hi")  # memory_type='turn' default
+
+    async def test_add_cosmos_non_turn_does_not_require_thread_id(self):
+        """Non-turn writes (facts, episodics, etc.) work without thread_id and skip cadence."""
+        mem, container = _connected_client()
+        trigger = AsyncMock()
+        mem._maybe_auto_trigger = trigger
+
+        await mem.add_cosmos(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
+        await asyncio.gather(*list(mem._background_tasks), return_exceptions=True)
+
+        container.upsert_item.assert_awaited_once()
+        trigger.assert_not_awaited()
+
+    async def test_add_cosmos_turn_schedules_cadence(self):
+        """A turn write must schedule the auto-trigger as a background task so cadence
+        env vars apply whether the caller uses the local buffer or writes through directly."""
+        mem, _ = _connected_client()
+        trigger = AsyncMock()
+        mem._maybe_auto_trigger = trigger
+
+        await mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+        # Drain the background task so the AsyncMock records the call.
+        await asyncio.gather(*list(mem._background_tasks), return_exceptions=True)
+
+        trigger.assert_awaited_once_with({("u1", "t1"): 1})
 
 
 class TestPushToCosmos:

@@ -28,15 +28,20 @@ def _patch_get_thread(client, turns):
     client.get_thread = MagicMock(return_value=turns)
 
 
-def test_process_now_with_inprocess_invokes_pipeline():
+def test_process_now_with_inprocess_invokes_full_pipeline():
+    """process_now must fire ALL FIVE steps for InProcess: thread_summary, extract,
+    reconcile, procedural, user_summary. Pre-fix this was only the first 3, so
+    procedural + user_summary never ran when callers used add_cosmos + process_now."""
     client = _connected()  # default → InProcessProcessor lazily built
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+    pipeline.synthesize_procedural.return_value = {"id": "proc1", "type": "procedural"}
+    pipeline.generate_user_summary.return_value = {"id": "us1", "type": "user_summary"}
     pipeline._store = client._get_store()
     pipeline._containers = dict(client._containers)
-    client._pipeline = pipeline  # short-circuit lazy build
+    client._pipeline = pipeline
     _patch_get_thread(client, [{"role": "user", "content": "hi"}])
 
     result = client.process_now(user_id="u1", thread_id="t1")
@@ -46,9 +51,59 @@ def test_process_now_with_inprocess_invokes_pipeline():
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
     pipeline.reconcile_memories.assert_called_once_with("u1", 50)
+    pipeline.synthesize_procedural.assert_called_once_with(user_id="u1", force=False)
+    pipeline.generate_user_summary.assert_called_once_with("u1", None)
+    assert result.procedural == {"id": "proc1", "type": "procedural"}
+    assert result.user_summary == {"id": "us1", "type": "user_summary"}
 
 
-def test_process_now_with_durable_is_noop():
+def test_process_now_swallows_procedural_failure():
+    """A transient LLM failure in synthesize_procedural must NOT erase the work
+    already persisted by the per-thread steps. WARNING-log + continue."""
+    client = _connected()
+    pipeline = MagicMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.side_effect = RuntimeError("LLM rate-limited")
+    pipeline.generate_user_summary.return_value = {"id": "us1"}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user", "content": "hi"}])
+
+    result = client.process_now(user_id="u1", thread_id="t1")
+
+    assert result.procedural is None
+    assert result.user_summary == {"id": "us1"}
+    pipeline.synthesize_procedural.assert_called_once()
+    pipeline.generate_user_summary.assert_called_once()
+
+
+def test_process_now_swallows_user_summary_failure():
+    """A transient LLM failure in generate_user_summary must NOT erase the work
+    already persisted by the per-thread + procedural steps."""
+    client = _connected()
+    pipeline = MagicMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.return_value = {"id": "proc1"}
+    pipeline.generate_user_summary.side_effect = RuntimeError("LLM timeout")
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user", "content": "hi"}])
+
+    result = client.process_now(user_id="u1", thread_id="t1")
+
+    assert result.procedural == {"id": "proc1"}
+    assert result.user_summary is None
+
+
+def test_process_now_with_durable_skips_tail_steps():
+    """Durable mode must NOT call synthesize_procedural or generate_user_summary —
+    those are driven by the change-feed-fed sibling Function app."""
     client = _connected(processor=DurableFunctionProcessor())
     pipeline = MagicMock()
     client._pipeline = pipeline
@@ -58,9 +113,13 @@ def test_process_now_with_durable_is_noop():
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary is None
+    assert result.procedural is None
+    assert result.user_summary is None
     pipeline.generate_thread_summary.assert_not_called()
     pipeline.extract_memories.assert_not_called()
     pipeline.reconcile_memories.assert_not_called()
+    pipeline.synthesize_procedural.assert_not_called()
+    pipeline.generate_user_summary.assert_not_called()
 
 
 def test_process_now_requires_cosmos():

@@ -203,6 +203,7 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
                     {
                         "scope_type": "project",
                         "scope_value": "CI",
+                        "text": "Stabilized flaky CI tests by adding retries.",
                         "situation": "CI tests flaked intermittently",
                         "action_taken": "Added retries",
                         "outcome": "Tests stabilized",
@@ -225,7 +226,7 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
     assert llm.embed_calls == [
         [
             "The user prefers dark mode.",
-            "CI tests flaked intermittently → Added retries → Tests stabilized",
+            "Stabilized flaky CI tests by adding retries.",
         ]
     ]
 

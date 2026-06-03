@@ -53,8 +53,12 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     build_transcript,
     cap_structured_summary,
     chat_text,
+    check_extracted_fact_grounding,
     coerce_valence,
     parse_llm_json,
+)
+from azure.cosmos.agent_memory.services._pipeline_helpers import (
+    format_existing_episodics as _format_existing_episodics,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
@@ -134,6 +138,12 @@ class _AsyncStoreContainerAdapter:
         container = self._target_container()
         if container is not None and hasattr(container, "upsert_item"):
             response = container.upsert_item(body=body)
+            if inspect.isawaitable(response):
+                response = await response
+            return response if isinstance(response, dict) else body
+        upsert = getattr(self._store, "upsert_item", None)
+        if upsert is not None:
+            response = upsert(body=body)
             if inspect.isawaitable(response):
                 response = await response
             return response if isinstance(response, dict) else body
@@ -333,6 +343,7 @@ class AsyncPipelineService:
             "updated_count": 0,
             "contradicted_count": 0,
             "exact_dedup_skipped": 0,
+            "dropped_episodic_count": 0,
         }
 
     @staticmethod
@@ -425,7 +436,11 @@ class AsyncPipelineService:
         logger.info("extract_memories_dry started user_id=%s thread_id=%s", user_id, thread_id)
 
         if turns is None:
-            query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
+            query = (
+                "SELECT * FROM c WHERE c.user_id = @user_id "
+                "AND c.thread_id = @thread_id AND c.type = 'turn' "
+                "AND (NOT IS_DEFINED(c.extracted_at) OR IS_NULL(c.extracted_at))"
+            )
             parameters: list[dict[str, Any]] = [
                 {"name": "@user_id", "value": user_id},
                 {"name": "@thread_id", "value": thread_id},
@@ -446,25 +461,32 @@ class AsyncPipelineService:
 
         if not items:
             logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
-            return {"facts": [], "episodic": [], "updates": []}
+            return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
-        existing = await self._load_existing_memories(user_id, ["fact"])
+        existing = await self._load_existing_memories(user_id, ["fact", "episodic"])
         existing_fact_hashes: set[str] = {
             m["content_hash"] for m in existing if m.get("type") == "fact" and m.get("content_hash")
         }
-        if existing:
+        existing_facts = [m for m in existing if m.get("type") == "fact"]
+        existing_episodics = [m for m in existing if m.get("type") == "episodic"]
+        if existing_facts:
             existing_text = "\n".join(
                 f"- [ID: {mem['id']}] {mem.get('content', '')} "
-                f"(type={mem.get('type', 'fact')}, salience={mem.get('salience', 'N/A')})"
-                for mem in existing
+                f"(type=fact, salience={mem.get('salience', 'N/A')})"
+                for mem in existing_facts
             )
         else:
             existing_text = "(none)"
+        existing_episodics_text = _format_existing_episodics(existing_episodics)
 
         transcript = self._build_transcript(items)
         response_text = await self._run_prompty(
             "extract_memories.prompty",
-            inputs={"existing_facts": existing_text, "transcript": transcript},
+            inputs={
+                "existing_facts": existing_text,
+                "existing_episodics": existing_episodics_text,
+                "transcript": transcript,
+            },
         )
         parsed = self._parse_llm_json(response_text)
         facts = parsed.get("facts", [])
@@ -476,6 +498,7 @@ class AsyncPipelineService:
         episodic_docs: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         exact_dedup_skipped = 0
+        dropped_episodic_count = 0
 
         for fact in facts:
             action = fact.get("action", "ADD").upper()
@@ -548,21 +571,37 @@ class AsyncPipelineService:
             scope_value = scope_value_raw.strip() if isinstance(scope_value_raw, str) else None
             if not scope_type or not scope_value:
                 logger.warning(
-                    "extract_memories: dropping malformed episodic (missing scope_type/scope_value): %r",
+                    "extract_memories: dropping malformed episodic (missing scope_type/scope_value) "
+                    "user_id=%s thread_id=%s reason=malformed_scope payload=%r",
+                    user_id,
+                    thread_id,
                     ep,
                 )
+                dropped_episodic_count += 1
+                continue
+
+            text_raw = ep.get("text")
+            text = text_raw.strip() if isinstance(text_raw, str) else None
+            if not text:
+                logger.error(
+                    "extract_memories: dropping episodic with empty/missing text field "
+                    "(LLM extraction did not populate the required `text` field — likely a "
+                    "weaker extraction model that needs upgrading or a prompt-compliance issue). "
+                    "scope_type=%s scope_value=%s user_id=%s thread_id=%s reason=missing_text",
+                    scope_type,
+                    scope_value,
+                    user_id,
+                    thread_id,
+                )
+                dropped_episodic_count += 1
                 continue
 
             situation = ep.get("situation")
             action_taken = ep.get("action_taken")
             outcome = ep.get("outcome")
-            if situation and action_taken and outcome:
-                text = f"{situation} → {action_taken} → {outcome}"
-            else:
-                text = f"For the user's {scope_value} {scope_type}, intent recorded."
 
             content_hash = compute_content_hash(text)
-            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
+            seed = _ID_SEED_SEP.join((user_id, scope_type, scope_value))
             det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(ep.get("tags", []))
             confidence = ep.get("confidence")
@@ -647,8 +686,24 @@ class AsyncPipelineService:
 
         if exact_dedup_skipped:
             updates.append({"op": "stats", "exact_dedup_skipped": exact_dedup_skipped})
+        if dropped_episodic_count:
+            updates.append({"op": "stats", "dropped_episodic_count": dropped_episodic_count})
 
-        result = {"facts": fact_docs, "episodic": episodic_docs, "updates": updates}
+        check_extracted_fact_grounding(
+            fact_docs,
+            items,
+            existing_facts,
+            user_id=user_id,
+            thread_id=thread_id,
+            logger=logger,
+        )
+
+        result = {
+            "facts": fact_docs,
+            "episodic": episodic_docs,
+            "updates": updates,
+            "processed_turn_docs": items,
+        }
         logger.info(
             "extract_memories_dry completed user_id=%s thread_id=%s fact_docs=%d episodic_docs=%d updates=%d",
             user_id,
@@ -684,23 +739,28 @@ class AsyncPipelineService:
 
         for doc in docs_to_create:
             validated = self._validate_extracted_doc(doc)
+            doc_type = validated.get("type")
             try:
-                await self._create_memory(validated)
+                if doc_type == "episodic":
+                    await self._upsert_memory(validated)
+                else:
+                    await self._create_memory(validated)
             except CosmosResourceExistsError:
                 logger.info("persist_extracted_memories skipped existing id=%s", validated.get("id"))
                 continue
 
             tags = validated.get("tags", [])
-            if validated.get("type") == "episodic":
+            if doc_type == "episodic":
                 result["episodic_count"] += 1
             elif "sys:unclassified" in tags:
                 result["unclassified_count"] += 1
-            elif validated.get("type") == "fact":
+            elif doc_type == "fact":
                 result["fact_count"] += 1
 
         for op in update_ops:
             if op.get("op") == "stats":
                 result["exact_dedup_skipped"] += int(op.get("exact_dedup_skipped") or 0)
+                result["dropped_episodic_count"] += int(op.get("dropped_episodic_count") or 0)
                 continue
             if op.get("op") != "supersede":
                 continue
@@ -724,7 +784,44 @@ class AsyncPipelineService:
                     result["updated_count"] += 1
 
         logger.info("persist_extracted_memories completed user_id=%s counts=%s", user_id, result)
+
+        processed_turns = extracted.get("processed_turn_docs") or []
+        if processed_turns:
+            marked = await self._mark_turns_extracted(processed_turns)
+            logger.info(
+                "persist_extracted_memories marked turns as extracted user_id=%s marked=%d/%d",
+                user_id,
+                marked,
+                len(processed_turns),
+            )
+
         return result
+
+    async def _mark_turns_extracted(self, turn_docs: list[dict[str, Any]]) -> int:
+        """Stamp ``extracted_at`` on each turn doc and upsert. Mirror of
+        the sync helper — per-turn failures are logged but never raise.
+        """
+        if not turn_docs:
+            return 0
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        marked = 0
+        for turn in turn_docs:
+            turn_id = turn.get("id")
+            if not turn_id:
+                continue
+            try:
+                doc_to_write = dict(turn)
+                doc_to_write["extracted_at"] = now_iso
+                await self._upsert_item(self._turns_container, body=doc_to_write)
+                marked += 1
+            except Exception as exc:
+                logger.warning(
+                    "_mark_turns_extracted failed for turn_id=%s err=%s "
+                    "(turn may be re-extracted on next call)",
+                    turn_id,
+                    exc,
+                )
+        return marked
 
     async def extract_memories(
         self,

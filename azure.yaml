@@ -2,7 +2,7 @@
 
 name: azure-cosmos-agent-memory
 metadata:
-  template: azure-cosmos-agent-memory@0.1.0b1
+  template: azure-cosmos-agent-memory@0.1.0b2
 
 infra:
   provider: bicep

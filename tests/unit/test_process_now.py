@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
-from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError
+from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, LLMError, ValidationError
 from azure.cosmos.agent_memory.processors import (
     DurableFunctionProcessor,
     InProcessProcessor,
@@ -65,7 +65,7 @@ def test_process_now_swallows_procedural_failure():
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0}
-    pipeline.synthesize_procedural.side_effect = RuntimeError("LLM rate-limited")
+    pipeline.synthesize_procedural.side_effect = LLMError("LLM rate-limited")
     pipeline.generate_user_summary.return_value = {"id": "us1"}
     pipeline._store = client._get_store()
     pipeline._containers = dict(client._containers)
@@ -89,7 +89,7 @@ def test_process_now_swallows_user_summary_failure():
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0}
     pipeline.synthesize_procedural.return_value = {"id": "proc1"}
-    pipeline.generate_user_summary.side_effect = RuntimeError("LLM timeout")
+    pipeline.generate_user_summary.side_effect = LLMError("LLM timeout")
     pipeline._store = client._get_store()
     pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
@@ -99,6 +99,73 @@ def test_process_now_swallows_user_summary_failure():
 
     assert result.procedural == {"id": "proc1"}
     assert result.user_summary is None
+
+
+def test_process_now_swallows_transient_http_error_by_status_code():
+    """Cosmos / HTTP exceptions with transient status codes (429, 503) must be
+    swallowed — they're infrastructure hiccups, not bugs."""
+
+    class _FakeHttpExc(Exception):
+        def __init__(self, status_code):
+            super().__init__(f"HTTP {status_code}")
+            self.status_code = status_code
+
+    client = _connected()
+    pipeline = MagicMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.side_effect = _FakeHttpExc(429)
+    pipeline.generate_user_summary.side_effect = _FakeHttpExc(503)
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user", "content": "hi"}])
+
+    result = client.process_now(user_id="u1", thread_id="t1")
+
+    assert result.procedural is None
+    assert result.user_summary is None
+
+
+def test_process_now_propagates_permanent_procedural_failure():
+    """A non-transient failure (e.g. ``KeyError`` from a schema bug) must NOT
+    be silently swallowed — it should surface to the caller so config /
+    programmer bugs do not turn into invisible ``WARNING`` lines."""
+    client = _connected()
+    pipeline = MagicMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.side_effect = KeyError("missing_required_field")
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user", "content": "hi"}])
+
+    with pytest.raises(KeyError):
+        client.process_now(user_id="u1", thread_id="t1")
+    # user_summary must NOT be attempted after a permanent procedural failure
+    pipeline.generate_user_summary.assert_not_called()
+
+
+def test_process_now_propagates_permanent_user_summary_failure():
+    """ValidationError from generate_user_summary (e.g. schema bug) must
+    surface to the caller — silencing config bugs is a bug."""
+    client = _connected()
+    pipeline = MagicMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.return_value = {"id": "proc1"}
+    pipeline.generate_user_summary.side_effect = ValidationError("bad payload")
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user", "content": "hi"}])
+
+    with pytest.raises(ValidationError):
+        client.process_now(user_id="u1", thread_id="t1")
 
 
 def test_process_now_with_durable_skips_tail_steps():

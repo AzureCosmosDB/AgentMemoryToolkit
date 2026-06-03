@@ -12,7 +12,7 @@ from azure.cosmos.agent_memory.aio.processors import (
     AsyncInProcessProcessor,
     ProcessThreadResult,
 )
-from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError
+from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, LLMError, ValidationError
 
 
 def _connected(processor=None) -> AsyncCosmosMemoryClient:
@@ -66,7 +66,7 @@ async def test_process_now_swallows_procedural_failure():
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0}
-    pipeline.synthesize_procedural.side_effect = RuntimeError("LLM rate-limited")
+    pipeline.synthesize_procedural.side_effect = LLMError("LLM rate-limited")
     pipeline.generate_user_summary.return_value = {"id": "us1"}
     pipeline._store = client._get_store()
     pipeline._containers = dict(client._containers)
@@ -91,7 +91,7 @@ async def test_process_now_swallows_user_summary_failure():
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0}
     pipeline.synthesize_procedural.return_value = {"id": "proc1"}
-    pipeline.generate_user_summary.side_effect = RuntimeError("LLM timeout")
+    pipeline.generate_user_summary.side_effect = LLMError("LLM timeout")
     pipeline._store = client._get_store()
     pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
@@ -101,6 +101,71 @@ async def test_process_now_swallows_user_summary_failure():
 
     assert result.procedural == {"id": "proc1"}
     assert result.user_summary is None
+
+
+@pytest.mark.asyncio
+async def test_process_now_swallows_transient_http_error_by_status_code():
+    """HTTP exceptions with transient status codes must be swallowed."""
+
+    class _FakeHttpExc(Exception):
+        def __init__(self, status_code):
+            super().__init__(f"HTTP {status_code}")
+            self.status_code = status_code
+
+    client = _connected()
+    pipeline = AsyncMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.side_effect = _FakeHttpExc(429)
+    pipeline.generate_user_summary.side_effect = _FakeHttpExc(503)
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user"}])
+
+    result = await client.process_now(user_id="u", thread_id="t")
+
+    assert result.procedural is None
+    assert result.user_summary is None
+
+
+@pytest.mark.asyncio
+async def test_process_now_propagates_permanent_procedural_failure():
+    """Permanent failures (e.g. KeyError from a schema bug) must propagate."""
+    client = _connected()
+    pipeline = AsyncMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.side_effect = KeyError("missing_required_field")
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user"}])
+
+    with pytest.raises(KeyError):
+        await client.process_now(user_id="u", thread_id="t")
+    pipeline.generate_user_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_now_propagates_permanent_user_summary_failure():
+    """ValidationError from generate_user_summary must propagate."""
+    client = _connected()
+    pipeline = AsyncMock()
+    pipeline.generate_thread_summary.return_value = {"id": "s"}
+    pipeline.extract_memories.return_value = {"facts": 1}
+    pipeline.reconcile_memories.return_value = {"kept": 0}
+    pipeline.synthesize_procedural.return_value = {"id": "proc1"}
+    pipeline.generate_user_summary.side_effect = ValidationError("bad payload")
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
+    client._pipeline = pipeline
+    _patch_get_thread(client, [{"role": "user"}])
+
+    with pytest.raises(ValidationError):
+        await client.process_now(user_id="u", thread_id="t")
 
 
 @pytest.mark.asyncio

@@ -253,3 +253,59 @@ class _BaseMemoryClient:
                 close()
             except Exception:
                 pass
+
+
+# Status codes that indicate transient, retry-able backend conditions.
+# Permanent codes (401/403/404/409) and client-side bugs (400) must surface.
+_TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def is_transient_tail_step_error(exc: BaseException) -> bool:
+    """Classify a tail-step exception as transient (swallow + log) or permanent (re-raise).
+
+    Used by ``process_now`` to decide whether a failure in the
+    ``synthesize_procedural`` / ``process_user_summary`` tail steps should be
+    logged as a warning (so the per-thread work already persisted is not
+    erased) or re-raised to the caller (so configuration / schema bugs do not
+    become silent ``WARNING`` lines).
+
+    Transient (swallow):
+      * ``LLMError`` — LLM-side defensive raises (no-choices, no-content).
+      * ``openai.RateLimitError`` / ``APITimeoutError`` / ``APIConnectionError``.
+      * Any exception with ``status_code`` in
+        :data:`_TRANSIENT_HTTP_STATUS_CODES` (covers ``CosmosHttpResponseError``
+        and any other ``HttpResponseError`` subclass).
+
+    Permanent (re-raise):
+      * ``ValidationError`` / ``ConfigurationError`` / ``CosmosNotConnectedError``.
+      * ``openai.AuthenticationError`` / ``PermissionDeniedError`` /
+        ``BadRequestError`` (status 400/401/403).
+      * ``CosmosHttpResponseError`` with status 400/401/403/404/409.
+      * Python builtins (``KeyError``, ``TypeError``, ``AttributeError``,
+        ``NameError`` …) — these are programmer bugs, not infra hiccups.
+    """
+    from azure.cosmos.agent_memory.exceptions import LLMError
+
+    if isinstance(exc, LLMError):
+        return True
+
+    try:
+        import openai
+    except ImportError:
+        openai = None
+    if openai is not None and isinstance(
+        exc,
+        (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError),
+    ):
+        return True
+    if openai is not None and isinstance(
+        exc,
+        (openai.AuthenticationError, openai.PermissionDeniedError, openai.BadRequestError),
+    ):
+        return False
+
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_HTTP_STATUS_CODES
+
+    return False

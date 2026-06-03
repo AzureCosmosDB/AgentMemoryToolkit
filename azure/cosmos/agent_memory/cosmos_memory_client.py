@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Optional
 from azure.cosmos.agent_memory.logging import get_logger
 
 from ._base import _BaseMemoryClient
+from ._base.base_client import is_transient_tail_step_error
 from ._container_routing import container_key_for_type
 from ._utils import (
     _build_container_kwargs,
@@ -520,7 +521,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         if memory_type == "turn" and thread_id:
             try:
                 self._maybe_auto_trigger({(user_id, thread_id): 1})
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:
                 logger.warning("Auto-trigger after add_cosmos failed: %s", exc)
         return memory_id
 
@@ -530,7 +531,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         turn_counts, self._unflushed_turn_counts = self._unflushed_turn_counts, {}
         try:
             self._maybe_auto_trigger(turn_counts)
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
             logger.warning("Auto-trigger after push_to_cosmos failed: %s", exc)
 
     def get_memories(
@@ -817,10 +818,13 @@ class CosmosMemoryClient(_BaseMemoryClient):
         For the durable processor this remains a no-op (the sibling Function
         app drives the pipeline off the Cosmos DB change feed).
 
-        ``procedural`` and ``user_summary`` failures are caught and logged as
-        warnings rather than re-raised, so a transient pipeline error in the
-        tail steps does not erase the work already persisted by the per-thread
-        steps.
+        Transient failures in ``procedural`` and ``user_summary`` (LLM
+        rate-limit / timeout, Cosmos 429 / 5xx, defensive ``LLMError``) are
+        caught and logged as warnings so the per-thread work already
+        persisted by the prior steps is not erased. Permanent failures
+        (config bugs, auth errors, 4xx Cosmos errors, Python builtins like
+        ``KeyError`` / ``TypeError``) are re-raised — silencing them turns
+        operational issues into invisible ``WARNING`` lines.
         """
         self._require_cosmos()
         processor = self._get_processor()
@@ -830,13 +834,25 @@ class CosmosMemoryClient(_BaseMemoryClient):
             try:
                 result.procedural = processor.synthesize_procedural(user_id=user_id)
             except Exception as exc:
-                logger.warning("process_now: synthesize_procedural failed for user_id=%s: %s", user_id, exc)
+                if not is_transient_tail_step_error(exc):
+                    raise
+                logger.warning(
+                    "process_now: synthesize_procedural failed (transient) for user_id=%s: %s",
+                    user_id,
+                    exc,
+                )
             try:
                 user_summary_result = processor.process_user_summary(user_id=user_id)
                 if user_summary_result is not None and user_summary_result.summary:
                     result.user_summary = user_summary_result.summary
             except Exception as exc:
-                logger.warning("process_now: process_user_summary failed for user_id=%s: %s", user_id, exc)
+                if not is_transient_tail_step_error(exc):
+                    raise
+                logger.warning(
+                    "process_now: process_user_summary failed (transient) for user_id=%s: %s",
+                    user_id,
+                    exc,
+                )
         return result
 
     def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:

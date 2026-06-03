@@ -10,6 +10,7 @@ sites differ — every Cosmos query, chat completion, and embedding call is
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -463,12 +464,15 @@ class AsyncPipelineService:
             logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
             return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
-        existing = await self._load_existing_memories(user_id, ["fact", "episodic"])
+        existing_facts, existing_episodics = await asyncio.gather(
+            self._load_existing_memories(user_id, ["fact"]),
+            self._load_existing_memories(user_id, ["episodic"]),
+        )
         existing_fact_hashes: set[str] = {
-            m["content_hash"] for m in existing if m.get("type") == "fact" and m.get("content_hash")
+            m["content_hash"]
+            for m in existing_facts
+            if m.get("type") == "fact" and m.get("content_hash")
         }
-        existing_facts = [m for m in existing if m.get("type") == "fact"]
-        existing_episodics = [m for m in existing if m.get("type") == "episodic"]
         if existing_facts:
             existing_text = "\n".join(
                 f"- [ID: {mem['id']}] {mem.get('content', '')} "
@@ -618,7 +622,7 @@ class AsyncPipelineService:
             doc = {
                 "id": det_id,
                 "user_id": user_id,
-                "thread_id": thread_id,
+                "thread_id": "__episodic__",
                 "role": "system",
                 "type": "episodic",
                 "content": text,
@@ -629,6 +633,7 @@ class AsyncPipelineService:
                 "metadata": {
                     "scope_type": scope_type,
                     "scope_value": scope_value,
+                    "originating_thread_id": thread_id,
                     "situation": situation,
                     "action_taken": action_taken,
                     "outcome": outcome,

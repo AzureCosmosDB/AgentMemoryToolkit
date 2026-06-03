@@ -462,12 +462,13 @@ class PipelineService:
             logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
             return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
-        existing = self._load_existing_memories(user_id, ["fact", "episodic"])
+        existing_facts = self._load_existing_memories(user_id, ["fact"])
+        existing_episodics = self._load_existing_memories(user_id, ["episodic"])
         existing_fact_hashes: set[str] = {
-            m["content_hash"] for m in existing if m.get("type") == "fact" and m.get("content_hash")
+            m["content_hash"]
+            for m in existing_facts
+            if m.get("type") == "fact" and m.get("content_hash")
         }
-        existing_facts = [m for m in existing if m.get("type") == "fact"]
-        existing_episodics = [m for m in existing if m.get("type") == "episodic"]
         if existing_facts:
             existing_text = "\n".join(
                 f"- [ID: {mem['id']}] {mem.get('content', '')} "
@@ -617,7 +618,7 @@ class PipelineService:
             doc = {
                 "id": det_id,
                 "user_id": user_id,
-                "thread_id": thread_id,
+                "thread_id": "__episodic__",
                 "role": "system",
                 "type": "episodic",
                 "content": text,
@@ -628,6 +629,7 @@ class PipelineService:
                 "metadata": {
                     "scope_type": scope_type,
                     "scope_value": scope_value,
+                    "originating_thread_id": thread_id,
                     "situation": situation,
                     "action_taken": action_taken,
                     "outcome": outcome,

@@ -284,10 +284,23 @@ def format_existing_episodics(memories: list[dict[str, Any]]) -> str:
     """Render existing episodic memories for the extract_memories prompt.
 
     Groups by ``(scope_type, scope_value)`` so the LLM can see, per-scope,
-    which intents are already captured. This is the input that lets the
-    extractor emit ``action=UPDATE``/``CONTRADICT`` against the right
-    ``supersedes_id`` instead of silently flooding the store with
-    paraphrased near-duplicates of the same intent.
+    which intent is already captured. Episodics use **scope-as-identity**:
+    the deterministic id is seeded from ``(user_id, scope_type, scope_value)``,
+    so any re-emission for the same scope (paraphrased intent, added detail,
+    or a reversal) collides and overwrites the prior record via upsert. The
+    LLM does NOT make ``ADD``/``UPDATE``/``CONTRADICT`` decisions on
+    episodics — that vocabulary is not in the episodic schema.
+
+    What this rendering gives the model is per-scope context so it can:
+
+    1. Emit a single coherent ``text`` that reflects the *current* intent
+       for the scope (the upsert will overwrite the prior one).
+    2. Avoid re-emitting an episodic when the new turn carries no
+       additional signal beyond what the existing one already records.
+
+    Distinct events under the same umbrella (e.g. hotel booking vs lost
+    wallet, both under a Tokyo trip) belong under distinct ``scope_value``
+    strings so they don't collide on the deterministic id.
     """
     if not memories:
         return "(none)"

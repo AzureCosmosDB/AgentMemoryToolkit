@@ -30,6 +30,8 @@ _CONTAINER_FOR_TYPE: dict[str, ContainerKey] = {
     "user_summary": ContainerKey.SUMMARIES,
 }
 
+USER_SCOPED_MEMORIES_TYPES: frozenset[str] = frozenset({"episodic", "procedural"})
+
 
 def container_key_for_type(memory_type: str) -> ContainerKey:
     """Return the ``ContainerKey`` that owns documents of ``memory_type``."""

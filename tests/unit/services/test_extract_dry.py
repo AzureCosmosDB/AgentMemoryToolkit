@@ -477,17 +477,16 @@ def test_grounding_check_warns_when_add_synthesizes_from_multiple_existing_facts
         service.extract_memories_dry("u1", "t1")
 
     synthesis_warnings = [
-        rec for rec in caplog.records
+        rec
+        for rec in caplog.records
         if "synthesized from" in rec.getMessage() and "steak and seafood, indicating they eat meat" in rec.getMessage()
     ]
     assert synthesis_warnings, (
-        "expected a WARNING flagging the synthesized fact; got: "
-        f"{[rec.getMessage() for rec in caplog.records]}"
+        f"expected a WARNING flagging the synthesized fact; got: {[rec.getMessage() for rec in caplog.records]}"
     )
     # The grounded "moderate hotels" fact must NOT trigger a warning.
     assert not any(
-        "moderate hotels" in rec.getMessage() and "synthesized from" in rec.getMessage()
-        for rec in caplog.records
+        "moderate hotels" in rec.getMessage() and "synthesized from" in rec.getMessage() for rec in caplog.records
     )
 
 
@@ -525,12 +524,12 @@ def test_grounding_check_silent_when_add_is_grounded_in_user_turn(caplog) -> Non
         service.extract_memories_dry("u1", "t1")
 
     grounding_warnings = [
-        rec for rec in caplog.records
+        rec
+        for rec in caplog.records
         if "synthesized from" in rec.getMessage() or "phantom-negation/restatement" in rec.getMessage()
     ]
     assert grounding_warnings == [], (
-        "clean output must not emit grounding warnings; got: "
-        f"{[rec.getMessage() for rec in grounding_warnings]}"
+        f"clean output must not emit grounding warnings; got: {[rec.getMessage() for rec in grounding_warnings]}"
     )
 
 
@@ -579,12 +578,10 @@ def test_grounding_check_warns_on_phantom_explicit_negation_fact(caplog) -> None
         service.extract_memories_dry("u1", "t1")
 
     phantom_warnings = [
-        rec for rec in caplog.records
-        if "phantom-negation" in rec.getMessage() and "eats meat" in rec.getMessage()
+        rec for rec in caplog.records if "phantom-negation" in rec.getMessage() and "eats meat" in rec.getMessage()
     ]
     assert phantom_warnings, (
-        "expected a WARNING flagging the phantom-negation fact; got: "
-        f"{[rec.getMessage() for rec in caplog.records]}"
+        f"expected a WARNING flagging the phantom-negation fact; got: {[rec.getMessage() for rec in caplog.records]}"
     )
     # The legitimate "loves steak and seafood" fact must NOT trigger a warning;
     # its tokens are grounded in the user turn.
@@ -627,7 +624,8 @@ def test_grounding_check_silent_on_clean_implicit_contradict(caplog) -> None:
         service.extract_memories_dry("u1", "t1")
 
     grounding_warnings = [
-        rec for rec in caplog.records
+        rec
+        for rec in caplog.records
         if "synthesized from" in rec.getMessage() or "phantom-negation/restatement" in rec.getMessage()
     ]
     assert grounding_warnings == [], (
@@ -677,10 +675,10 @@ async def test_async_grounding_check_warns_on_synthesis(caplog) -> None:
         await service.extract_memories_dry("u1", "t1")
 
     synthesis_warnings = [
-        rec for rec in caplog.records
+        rec
+        for rec in caplog.records
         if "synthesized from" in rec.getMessage() and "steak and seafood, indicating they eat meat" in rec.getMessage()
     ]
     assert synthesis_warnings, (
-        "expected an async WARNING flagging the synthesized fact; got: "
-        f"{[rec.getMessage() for rec in caplog.records]}"
+        f"expected an async WARNING flagging the synthesized fact; got: {[rec.getMessage() for rec in caplog.records]}"
     )

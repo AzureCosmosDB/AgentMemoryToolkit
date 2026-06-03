@@ -32,6 +32,28 @@ class _QueryBuilder:
         self._conditions.append(f"{field} = {param_name}")
         self._parameters.append({"name": param_name, "value": value})
 
+    def add_thread_id_or_user_scoped(
+        self,
+        thread_id: Any,
+        param_name: str,
+        user_scoped_types: list[str],
+        type_param_base: str = "@user_scoped_type_",
+    ) -> None:
+        """Match either ``c.thread_id = @thread_id`` OR ``c.type IN (...)``."""
+        if thread_id is None:
+            return
+        if not user_scoped_types:
+            self.add_filter("c.thread_id", param_name, thread_id)
+            return
+        self._parameters.append({"name": param_name, "value": thread_id})
+        type_params: list[str] = []
+        for i, t in enumerate(user_scoped_types):
+            pname = f"{type_param_base}{i}"
+            type_params.append(pname)
+            self._parameters.append({"name": pname, "value": t})
+        in_clause = f"c.type IN ({', '.join(type_params)})"
+        self._conditions.append(f"(c.thread_id = {param_name} OR {in_clause})")
+
     def add_array_contains(self, field: str, param_name: str, value: Any) -> None:
         """Add an ``ARRAY_CONTAINS`` filter."""
         self._conditions.append(f"ARRAY_CONTAINS({field}, {param_name})")

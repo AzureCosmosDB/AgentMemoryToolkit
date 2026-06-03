@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from ._container_routing import USER_SCOPED_MEMORIES_TYPES
 from ._query_builder import _QueryBuilder
 from .exceptions import ConfigurationError, ValidationError
 from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE
@@ -341,13 +342,24 @@ def _build_memory_query_builder(
     qb = _QueryBuilder()
     qb.add_filter("c.id", "@memory_id", memory_id)
     qb.add_filter("c.user_id", "@user_id", user_id)
-    qb.add_filter("c.thread_id", "@thread_id", thread_id)
+    in_scope_user_types = _resolve_user_scoped_types_in_query(memory_types)
+    if thread_id is not None and in_scope_user_types:
+        qb.add_thread_id_or_user_scoped(thread_id, "@thread_id", sorted(in_scope_user_types))
+    else:
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
     qb.add_filter("c.role", "@role", role)
     if memory_types:
         qb.add_in_filter("c.type", "@memory_type_", list(memory_types))
     if min_confidence is not None and min_confidence > 0:
         qb.add_gte("c.confidence", "@min_confidence", min_confidence)
     return qb
+
+
+def _resolve_user_scoped_types_in_query(memory_types: Optional[list[str]]) -> set[str]:
+    """Return the user-scoped types this query may match."""
+    if not memory_types:
+        return set(USER_SCOPED_MEMORIES_TYPES)
+    return set(memory_types) & USER_SCOPED_MEMORIES_TYPES
 
 
 def _container_policies(

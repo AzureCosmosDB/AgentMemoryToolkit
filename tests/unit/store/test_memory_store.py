@@ -349,3 +349,109 @@ def test_get_thread_summary_queries_summaries_with_partition_key():
     assert params["@type"] == "thread_summary"
     assert params["@user_id"] == "u1"
     assert params["@thread_id"] == "t1"
+
+
+# ---------------------------------------------------------------------------
+# F-final: read-path translation for user-scoped types (episodic / procedural)
+#
+# Episodic + procedural docs live in sentinel partitions
+# ("__episodic__" / "__procedural__") under each user, not the originating
+# thread's partition. Public read APIs that filter on c.thread_id must OR in
+# an IN (...) clause for those types so they aren't silently excluded.
+# ---------------------------------------------------------------------------
+
+
+def test_get_memories_with_episodic_and_thread_id_emits_or_clause():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.get_memories(user_id="u1", thread_id="t1", memory_types=["episodic"])
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@thread_id"] == "t1"
+    assert params["@user_scoped_type_0"] == "episodic"
+
+
+def test_get_memories_with_procedural_and_thread_id_emits_or_clause():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.get_memories(user_id="u1", thread_id="t1", memory_types=["procedural"])
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@user_scoped_type_0"] == "procedural"
+
+
+def test_get_memories_fact_only_with_thread_id_keeps_plain_filter():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.get_memories(user_id="u1", thread_id="t1", memory_types=["fact"])
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "c.thread_id = @thread_id" in call_kwargs["query"]
+    assert "@user_scoped_type_" not in call_kwargs["query"]
+
+
+def test_get_memories_no_memory_types_with_thread_id_emits_or_clause():
+    # Defaulting to "every type" means episodic + procedural are in scope and
+    # would otherwise be silently dropped by a plain c.thread_id equality.
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.get_memories(user_id="u1", thread_id="t1")
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0, @user_scoped_type_1))" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert sorted(v for k, v in params.items() if k.startswith("@user_scoped_type_")) == ["episodic", "procedural"]
+
+
+def test_search_with_episodic_and_thread_id_forces_cross_partition():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    store.search(
+        search_terms="hotels",
+        user_id="u1",
+        thread_id="t1",
+        memory_types=["episodic"],
+    )
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    # When user-scoped types are in scope, search must fan out across
+    # partitions instead of confining to [u1, t1] (where no episodic
+    # ever lives — they all use the "__episodic__" sentinel partition).
+    assert call_kwargs.get("enable_cross_partition_query") is True
+    assert "partition_key" not in call_kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
+
+
+def test_search_fact_only_with_thread_id_uses_partition_path():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    store.search(
+        search_terms="hotels",
+        user_id="u1",
+        thread_id="t1",
+        memory_types=["fact"],
+    )
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert call_kwargs.get("partition_key") == ["u1", "t1"]
+    assert "enable_cross_partition_query" not in call_kwargs

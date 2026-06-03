@@ -373,3 +373,96 @@ async def test_get_thread_summary_queries_summaries_with_partition_key():
     assert params["@type"] == "thread_summary"
     assert params["@user_id"] == "u1"
     assert params["@thread_id"] == "t1"
+
+
+# ---------------------------------------------------------------------------
+# F-final: read-path translation for user-scoped types (episodic / procedural)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_memories_with_episodic_and_thread_id_emits_or_clause():
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    store = AsyncMemoryStore(containers=_containers(memories=memories))
+
+    await store.get_memories(user_id="u1", thread_id="t1", memory_types=["episodic"])
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@thread_id"] == "t1"
+    assert params["@user_scoped_type_0"] == "episodic"
+
+
+async def test_get_memories_with_procedural_and_thread_id_emits_or_clause():
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    store = AsyncMemoryStore(containers=_containers(memories=memories))
+
+    await store.get_memories(user_id="u1", thread_id="t1", memory_types=["procedural"])
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
+
+
+async def test_get_memories_fact_only_with_thread_id_keeps_plain_filter():
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    store = AsyncMemoryStore(containers=_containers(memories=memories))
+
+    await store.get_memories(user_id="u1", thread_id="t1", memory_types=["fact"])
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "c.thread_id = @thread_id" in call_kwargs["query"]
+    assert "@user_scoped_type_" not in call_kwargs["query"]
+
+
+async def test_get_memories_no_memory_types_with_thread_id_emits_or_clause():
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    store = AsyncMemoryStore(containers=_containers(memories=memories))
+
+    await store.get_memories(user_id="u1", thread_id="t1")
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0, @user_scoped_type_1))" in call_kwargs["query"]
+
+
+async def test_search_with_episodic_and_thread_id_omits_partition_key():
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    await store.search(
+        search_terms="hotels",
+        user_id="u1",
+        thread_id="t1",
+        memory_types=["episodic"],
+    )
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    # When user-scoped types are in scope, async search must NOT confine
+    # the query to [u1, t1] (where no episodic ever lives). Async SDK
+    # treats absent partition_key as cross-partition by default.
+    assert "partition_key" not in call_kwargs
+    assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
+
+
+async def test_search_fact_only_with_thread_id_uses_partition_path():
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    await store.search(
+        search_terms="hotels",
+        user_id="u1",
+        thread_id="t1",
+        memory_types=["fact"],
+    )
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert call_kwargs.get("partition_key") == ["u1", "t1"]

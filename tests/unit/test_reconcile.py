@@ -726,13 +726,9 @@ class TestEpisodicReconciliation:
         # type gets its own 100-row budget — return [] for facts, the
         # existing episodic for the episodic call.
         p._load_existing_memories = MagicMock(
-            side_effect=lambda user_id, memory_types, **kw: (
-                [existing_ep] if memory_types == ["episodic"] else []
-            )
+            side_effect=lambda user_id, memory_types, **kw: [existing_ep] if memory_types == ["episodic"] else []
         )
-        p._run_prompty = MagicMock(
-            return_value=json.dumps({"facts": [], "episodic": [], "unclassified": []})
-        )
+        p._run_prompty = MagicMock(return_value=json.dumps({"facts": [], "episodic": [], "unclassified": []}))
 
         p.extract_memories("u1", "t1")
 
@@ -775,9 +771,7 @@ class TestEpisodicReconciliation:
 
         p.extract_memories("u1", "t1")
 
-        upsert_calls = [
-            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
-        ]
+        upsert_calls = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"]
         # Both episodics flow through upsert (the persist path branches on
         # type=episodic) and they MUST share the same det_id — that's what
         # makes the second a Cosmos upsert that replaces the first.
@@ -785,9 +779,7 @@ class TestEpisodicReconciliation:
         assert upsert_calls[0]["id"] == upsert_calls[1]["id"]
         # And neither went through create_item (which would 409 on the
         # second write and silently lose the new richer text).
-        episodic_creates = [
-            c for c in p._create_memory.call_args_list if c.args[0].get("type") == "episodic"
-        ]
+        episodic_creates = [c for c in p._create_memory.call_args_list if c.args[0].get("type") == "episodic"]
         assert episodic_creates == []
 
     def test_different_scope_values_produce_different_ids(self):
@@ -813,9 +805,7 @@ class TestEpisodicReconciliation:
 
         p.extract_memories("u1", "t1")
 
-        upsert_calls = [
-            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
-        ]
+        upsert_calls = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"]
         assert len(upsert_calls) == 2
         assert upsert_calls[0]["id"] != upsert_calls[1]["id"]
 
@@ -839,17 +829,13 @@ class TestEpisodicReconciliation:
         p._container.query_items.return_value = iter(self._turns())
         p._load_existing_memories = MagicMock(return_value=existing)
         p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {"facts": [], "episodic": [self._episodic_payload(text=text)], "unclassified": []}
-            )
+            return_value=json.dumps({"facts": [], "episodic": [self._episodic_payload(text=text)], "unclassified": []})
         )
 
         out = p.extract_memories("u1", "t1")
 
         assert out["episodic_count"] == 1
-        upsert_calls = [
-            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
-        ]
+        upsert_calls = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"]
         assert len(upsert_calls) == 1
 
     def test_episodic_uses_sentinel_thread_id_for_partition_routing(self):
@@ -879,9 +865,7 @@ class TestEpisodicReconciliation:
 
         p.extract_memories("u1", "thread-alpha")
 
-        upsert_calls = [
-            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
-        ]
+        upsert_calls = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"]
         assert len(upsert_calls) == 1
         doc = upsert_calls[0]
         assert doc["thread_id"] == "__episodic__"
@@ -916,9 +900,7 @@ class TestEpisodicReconciliation:
         p.extract_memories("u1", "thread-alpha")
         p.extract_memories("u1", "thread-beta")
 
-        upsert_calls = [
-            c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"
-        ]
+        upsert_calls = [c.args[0] for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "episodic"]
         assert len(upsert_calls) == 2
         # Same det_id — scope is identity.
         assert upsert_calls[0]["id"] == upsert_calls[1]["id"]
@@ -928,6 +910,7 @@ class TestEpisodicReconciliation:
         # Originating thread preserved on each metadata for audit.
         assert upsert_calls[0]["metadata"]["originating_thread_id"] == "thread-alpha"
         assert upsert_calls[1]["metadata"]["originating_thread_id"] == "thread-beta"
+
 
 class TestExtractEarlyReturnShape:
     """The no-memories early-return must include every key the success

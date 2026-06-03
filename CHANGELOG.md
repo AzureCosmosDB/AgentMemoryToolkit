@@ -1,6 +1,6 @@
 ## Release History
 
-### 0.1.0b2 (2026-06-02)
+### 0.1.0b2 (2026-06-03)
 
 #### Bugs Fixed
 * Hardened memory extraction: stops emitting phantom/synthesized facts the user never asserted, stops extracting facts from `[assistant]:` turns, stops re-processing already-extracted turns (which previously produced reversed `CONTRADICT` decisions and meta-facts like `"X is contradicted by Y"`), and stops storing near-duplicate episodic memories for the same scope. Episodic memories also now embed the actual content instead of a boilerplate `"intent recorded"` string. See [PR:#1](https://github.com/aayush3011/AgentMemoryToolkit/pull/1)

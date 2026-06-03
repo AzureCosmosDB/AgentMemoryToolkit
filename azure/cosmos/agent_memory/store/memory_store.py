@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from azure.cosmos.agent_memory._container_routing import (
     _CONTAINER_FOR_TYPE,
+    USER_SCOPED_MEMORIES_TYPES,
     ContainerKey,
     container_key_for_type,
 )
@@ -861,6 +862,8 @@ class MemoryStore:
             parameters.append({"name": "@key_terms", "value": terms})
 
         partition_key, cross_partition = query_scope(user_id, thread_id)
+        if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
+            partition_key, cross_partition = None, True
         logger.debug("MemoryStore.search query: %s", sql)
         return self.query(
             sql,

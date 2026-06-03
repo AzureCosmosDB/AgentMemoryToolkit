@@ -465,14 +465,11 @@ class PipelineService:
         existing_facts = self._load_existing_memories(user_id, ["fact"])
         existing_episodics = self._load_existing_memories(user_id, ["episodic"])
         existing_fact_hashes: set[str] = {
-            m["content_hash"]
-            for m in existing_facts
-            if m.get("type") == "fact" and m.get("content_hash")
+            m["content_hash"] for m in existing_facts if m.get("type") == "fact" and m.get("content_hash")
         }
         if existing_facts:
             existing_text = "\n".join(
-                f"- [ID: {mem['id']}] {mem.get('content', '')} "
-                f"(type=fact, salience={mem.get('salience', 'N/A')})"
+                f"- [ID: {mem['id']}] {mem.get('content', '')} (type=fact, salience={mem.get('salience', 'N/A')})"
                 for mem in existing_facts
             )
         else:
@@ -826,8 +823,7 @@ class PipelineService:
                 marked += 1
             except Exception as exc:
                 logger.warning(
-                    "_mark_turns_extracted failed for turn_id=%s err=%s "
-                    "(turn may be re-extracted on next call)",
+                    "_mark_turns_extracted failed for turn_id=%s err=%s (turn may be re-extracted on next call)",
                     turn_id,
                     exc,
                 )

@@ -326,12 +326,58 @@ def format_existing_episodics(memories: list[dict[str, Any]]) -> str:
 # differ on (e.g. "not", "no") must NOT be added here.
 _GROUNDING_STOPWORDS = frozenset(
     {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "and", "or", "but", "to", "of", "for", "on", "in", "at", "by", "with",
-        "from", "as", "that", "this", "these", "those", "it", "its",
-        "user", "they", "them", "their", "he", "she", "his", "her", "him",
-        "has", "have", "had", "do", "does", "did", "will", "would", "should",
-        "can", "could", "may", "might", "must",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "and",
+        "or",
+        "but",
+        "to",
+        "of",
+        "for",
+        "on",
+        "in",
+        "at",
+        "by",
+        "with",
+        "from",
+        "as",
+        "that",
+        "this",
+        "these",
+        "those",
+        "it",
+        "its",
+        "user",
+        "they",
+        "them",
+        "their",
+        "he",
+        "she",
+        "his",
+        "her",
+        "him",
+        "has",
+        "have",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "should",
+        "can",
+        "could",
+        "may",
+        "might",
+        "must",
     }
 )
 
@@ -386,9 +432,7 @@ def check_extracted_fact_grounding(
         return
 
     user_turn_text = " ".join(
-        str(m.get("content") or "")
-        for m in turn_items
-        if (m.get("role") or "").lower() == "user"
+        str(m.get("content") or "") for m in turn_items if (m.get("role") or "").lower() == "user"
     )
     user_tokens = _grounding_tokens(user_turn_text)
 
@@ -443,8 +487,6 @@ def check_extracted_fact_grounding(
                     user_id,
                     thread_id,
                 )
-
-
 
 
 def parse_llm_json(text: str | None) -> dict[str, Any]:

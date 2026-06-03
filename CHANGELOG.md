@@ -9,7 +9,9 @@
 #### Other Changes
 * `ProcessThreadResult` gains `procedural` and `user_summary` fields. `extract_memories` returns a `dropped_episodic_count` for monitoring LLM-extraction quality.See [PR:#1](https://github.com/aayush3011/AgentMemoryToolkit/pull/1)
 
-### 0.1.0b1 (2026-05-31)
+
+## [0.1.0b1] — 2026-06-01
+
 
 Initial public preview release.
 

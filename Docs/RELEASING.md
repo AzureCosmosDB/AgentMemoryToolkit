@@ -39,10 +39,6 @@ Before cutting a release:
 ## Cutting a release
 
 1. **Bump the version** in `pyproject.toml`:
-   ```toml
-   [project]
-   version = "0.1.0b2"
-   ```
 2. **Update `CHANGELOG.md`** — add a new section with the version, the
    date, and a summary of changes. Move entries from the unreleased
    section if you keep one.
@@ -69,29 +65,6 @@ Before cutting a release:
      wheel + sdist attached
 7. **Verify** on <https://pypi.org/project/azure-cosmos-agent-memory/>
    that the new version landed and the README + classifiers render.
-
-## Trusted Publishing setup (one-time, per environment)
-
-Trusted publishing replaces long-lived PyPI API tokens with short-lived
-OIDC tokens minted by GitHub Actions on each run. Configure once on both
-TestPyPI and PyPI:
-
-- **TestPyPI** — <https://test.pypi.org/manage/account/publishing/>
-- **PyPI** — <https://pypi.org/manage/account/publishing/>
-
-For each, register a pending publisher with:
-
-| Field | Value |
-|------|-------|
-| PyPI project name | `azure-cosmos-agent-memory` |
-| Owner | `AzureCosmosDB` |
-| Repository | `AgentMemoryToolkit` |
-| Workflow filename | `release.yml` (for **both** TestPyPI and PyPI — the test-release job is invoked via `workflow_call` so PyPI sees the calling workflow's filename, not `_test_release.yml`) |
-| Environment name | _(leave blank)_ |
-
-Until the first release is published, both registrations sit in the
-"pending publishers" state. They activate automatically on the first
-successful upload.
 
 ## Namespace package note
 

@@ -49,3 +49,9 @@ htmlcov/
 # Local scratch notes
 Agent Memory Toolkit.txt
 Cosmos AI Memory Service.txt
+
+# transient benchmark outputs
+behavioral.csv
+real_comparison.csv
+cosmos_levels.csv
+/eval_run/

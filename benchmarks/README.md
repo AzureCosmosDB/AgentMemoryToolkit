@@ -132,6 +132,34 @@ Each consistency row reports, for one `(level, concurrency)` cell:
 **CSV** (`combined.csv`):
 Flat per-run rows with columns: `run_id`, `agent_name`, `dataset`, `concurrency`, `primary_accuracy_metric`, `primary_accuracy_value`, `cons_level`, `cons_stale_read_rate`, `cons_delta_p95`, etc.
 
+## Cross-Framework Comparison (Real Backends)
+
+`real_comparison.py` drives the *actual* storage engines other frameworks ship
+with, scoring each through the same Golab et al. analyzer:
+
+| Framework | Backend exercised |
+|-----------|-------------------|
+| LangChain | `SQLChatMessageHistory` on SQLite (ACID) |
+| ChromaDB | local persistent vector store (metadata read) |
+| AgentMemoryToolkit | live Cosmos DB (session) via `--cosmos` |
+| Control (eventual) | in-memory register + injected visibility delay |
+
+```bash
+# Local backends only:
+python -m benchmarks.real_comparison --agents 4 --ops 40 --keys 3
+
+# Add live Cosmos DB (needs COSMOS_ENDPOINT + COSMOS_MASTER_KEY):
+python -m benchmarks.real_comparison --agents 4 --ops 40 --keys 3 --cosmos
+```
+
+The **control** is a positive control: an in-memory register with a small
+artificial visibility delay. It reports ~100% staleness, validating that the
+harness detects staleness when it exists — so a 0% result from a real backend
+means *consistent*, not *unmeasured*. A measured sample is checked in at
+[results/real_comparison_sample.csv](results/real_comparison_sample.csv); see
+[../Docs/shared_memory_consistency_research.md](../Docs/shared_memory_consistency_research.md)
+for the full analysis.
+
 ## Testing
 
 ```bash

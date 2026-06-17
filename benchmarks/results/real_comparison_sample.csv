@@ -1,0 +1,5 @@
+framework,backend,reads,writes,stale_reads,stale_read_pct,delta_max_ms,delta_mean_ms,delta_p95_ms,k_max,k_mean,ryw_violations,monotonic_reads_violations,wall_seconds
+Control(eventual),in-mem+2ms,67,93,67,100.0,1.321,0.765,1.303,39,17.134,54,0,0.002
+LangChain,sqlite,67,93,0,0.0,0.0,0.0,0.0,0,0.0,0,0,0.505
+ChromaDB,chroma-hnsw,67,93,0,0.0,0.0,0.0,0.0,0,0.0,0,0,1.092
+AgentMemoryToolkit,cosmos-session,67,93,0,0.0,0.0,0.0,0.0,0,0.0,0,0,4.319

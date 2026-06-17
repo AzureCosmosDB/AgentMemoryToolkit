@@ -209,6 +209,60 @@ python comparison_harness.py --backend lancedb
 
 ---
 
+## Real Measured Results
+
+The stub adapters above describe the architecture; for **actual measurements**
+against live storage engines, use [benchmarks/real_comparison.py](real_comparison.py),
+which drives the real backends each framework ships with.
+
+```bash
+# LangChain (SQLite) + ChromaDB locally; add --cosmos for live Cosmos DB.
+python -m benchmarks.real_comparison --agents 4 --ops 40 --keys 3 --cosmos
+```
+
+### Measured Output (4 agents, 40 ops/agent, 3 keys)
+
+| Framework | Backend | Stale % | Δ Max (ms) | Δ p95 (ms) | k Max | RYW Viol | MR Viol | Wall (s) |
+|-----------|---------|---------|------------|------------|-------|----------|---------|----------|
+| **Control (eventual)** | in-mem + 2 ms delay | **100.0** | 1.321 | 1.303 | 39 | 54 | 0 | 0.00 |
+| **LangChain** | SQLite (ACID) | 0.0 | 0.000 | 0.000 | 0 | 0 | 0 | 0.51 |
+| **ChromaDB** | Chroma HNSW (metadata read) | 0.0 | 0.000 | 0.000 | 0 | 0 | 0 | 1.09 |
+| **AgentMemoryToolkit** | Cosmos DB (session) | 0.0 | 0.000 | 0.000 | 0 | 0 | 0 | 4.32 |
+
+### How To Read This
+
+1. **The positive control validates the methodology.** An in-memory register with
+   a 2 ms artificial visibility delay yields **100% stale reads, k_max=39, 54
+   read-your-writes violations** — confirming the harness genuinely detects
+   staleness. A 0% result from a real backend therefore means *consistent*, not
+   *unmeasured*.
+
+2. **All three real backends are strongly consistent in this setting.** Under a
+   single-process, single-region workload, SQLite (ACID), ChromaDB (synchronous
+   metadata filter), and Cosmos DB (session token guarantees read-your-writes)
+   all return zero staleness and zero session anomalies.
+
+3. **The real differentiator here is latency, not consistency.** Wall-clock cost
+   tracks the storage tier: SQLite (local disk, 0.5 s) < ChromaDB (local vector
+   store, 1.1 s) < Cosmos DB (network round-trips, 4.3 s). Consistency is "free"
+   in-process; the cost is paid in latency and only converts into *staleness*
+   once replication or geo-distribution enters the picture.
+
+### When Staleness Would Appear
+
+The 0% results are specific to single-region/in-process execution. Genuine
+staleness surfaces under:
+
+- **Cosmos DB eventual/bounded-staleness across regions** — readers in a remote
+  region lag the write region (see [the simulated sweep](../benchmarks/README.md)
+  for the level-by-level progression strong → eventual).
+- **ChromaDB similarity reads** — vector queries hit the async HNSW index, which
+  lags freshly-added documents (this benchmark reads by metadata, which is
+  synchronous, so it does not exercise that path).
+- **Write-behind / cache layers** — any backend fronted by an async cache.
+
+---
+
 ## Key Takeaways
 
 ### ✅ What AgentMemoryToolkit Does Uniquely
@@ -216,6 +270,8 @@ python comparison_harness.py --backend lancedb
 2. **Real-world benchmarks** against simulated + live Cosmos DB
 3. **Reproducible, deterministic harness** (same seed across levels)
 4. **Session guarantees measured** (RYW, monotonic-reads)
+5. **Validated methodology** — a positive control proves the harness detects
+   staleness, so 0% results are trustworthy
 
 ### ⚠️ What Other Frameworks Don't Do
 1. **Don't measure staleness** — only claim "consistency"
@@ -227,6 +283,14 @@ python comparison_harness.py --backend lancedb
 - **CrewAI**: Better UX/ergonomics, but no consistency metrics
 - **LangChain**: Widest backend support, but consistency varies
 - **AgentMemoryToolkit**: Purpose-built for shared memory with **transparency**
+
+> **Honest framing:** the 0% staleness shared by SQLite, ChromaDB, and Cosmos in
+> the measured run is *not* a claim that AgentMemoryToolkit is "more consistent."
+> It reflects the reality that all three are strongly consistent in-process. The
+> value of this work is the **measurement framework** — it makes the consistency
+> vs. latency tradeoff visible and reproducible, which none of the other
+> frameworks currently provide.
+
 
 ---
 

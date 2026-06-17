@@ -101,12 +101,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--mab-agent-config",
-        required=True,
+        required=False,
         help="Path to MemoryAgentBench agent config YAML.",
     )
     parser.add_argument(
         "--mab-dataset-config",
-        required=True,
+        required=False,
         help="Path to MemoryAgentBench dataset config YAML.",
     )
     parser.add_argument(
@@ -144,6 +144,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Consistency probe agent counts (comma-separated).",
     )
     args = parser.parse_args(argv)
+
+    # Validate: MAB configs required unless consistency-only
+    if not args.consistency_only:
+        if not args.mab_agent_config or not args.mab_dataset_config:
+            parser.error("--mab-agent-config and --mab-dataset-config required unless --consistency-only is set")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -208,7 +213,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"Combine step failed: {exc}", file=sys.stderr)
                 success = False
 
-    print(f"\n{'✓ Pipeline succeeded' if success else '✗ Pipeline failed'}")
+    status = "[OK] Pipeline succeeded" if success else "[FAIL] Pipeline failed"
+    print(f"\n{status}")
     return 0 if success else 1
 
 

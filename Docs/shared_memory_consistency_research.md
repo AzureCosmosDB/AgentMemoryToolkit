@@ -6,6 +6,47 @@
 
 ---
 
+## Headline Finding: Behavioral Degradation ≠ Storage Staleness
+
+> **The metric that matters is lost agent contributions, not read staleness.**
+> Storage-consistency metrics (Δ, k) ask "does this *read* see the latest
+> *write*?" — and the answer on real backends is almost always "yes". But agents
+> **read-modify-write** shared memory (read state → reason → write updated
+> state), and that pattern **silently drops up to 70–94% of agent contributions
+> under concurrency**, even when every individual read is perfectly consistent.
+> Read-level consistency is *necessary but not sufficient* for correct shared
+> agent memory.
+
+**Measured on live Cosmos DB** (single region, Session consistency,
+[benchmarks/behavioral.py](../benchmarks/behavioral.py)):
+
+| Pattern | 1 agent | 4 agents | 8 agents |
+|---------|---------|----------|----------|
+| Naive read-modify-write (lost updates) | 0% | **50%** | **70%** |
+| ETag optimistic concurrency (lost updates) | 0% | 0% | 0% |
+
+**In-process sweep** (mutate-in-place vs. mitigations):
+
+| Pattern | 1 | 4 | 16 | 32 |
+|---------|---|---|----|----|
+| `mutable` (mutate-in-place) | 0% | 75% | 94% | 97% |
+| `locked` (serialized) | 0% | 0% | 0% | 0% |
+| `cas` (optimistic concurrency) | 0% | 0% | 0% | 0% |
+| `append` (toolkit `add_cosmos`) | 0% | 0% | 0% | 0% |
+
+**Why this matters for agents:** a lost update means an agent's work — a fact it
+learned, a profile field it updated, a line it added to a running summary —
+vanishes from shared memory. Downstream agents then reason over an incorrect
+state. This is the actual behavioral degradation of high-concurrency shared
+memory, and it is invisible to read-staleness metrics.
+
+**The good news:** the degradation is *avoidable*. Append-only memory (the
+AgentMemoryToolkit `add_cosmos` model), ETag/optimistic concurrency, or explicit
+locking each hold loss at 0%. See [the behavioral section](#behavioral-degradation-the-real-question)
+for the full analysis.
+
+---
+
 ## Executive Summary
 
 AgentMemoryToolkit is **the first and only multi-agent memory framework** to publish quantified consistency metrics using established academic frameworks (Golab et al. ICDCS 2014). Competitors (Letta, LangChain, CrewAI) rely on implicit database guarantees but do **not measure or report** staleness, version consistency, or session anomalies.
@@ -331,6 +372,89 @@ Eventual consistency, cross-region replication lag (tens–hundreds of ms) excee
 read latency, opening the staleness window. This requires adding a region to the
 account (a billable, reversible change to shared infrastructure) and is therefore
 gated on explicit approval rather than performed automatically.
+
+---
+
+## Behavioral Degradation — The Real Question
+
+The experiments above answer "does the storage return stale reads?" The more
+important question for agents is: **does high-concurrency shared memory cause
+agents to behave incorrectly?** The answer is **yes — dramatically — but for a
+reason that read-staleness metrics never capture.**
+
+Benchmark: [benchmarks/behavioral.py](../benchmarks/behavioral.py). Sample
+output: [benchmarks/results/behavioral_sample.csv](../benchmarks/results/behavioral_sample.csv).
+
+### The mechanism: lost updates in read-modify-write
+
+Agents do not just read memory; they **read it, reason, and write back an
+updated state**. When N agents do this concurrently, two agents can read the
+same value, both reason, and both write — so one agent's contribution is
+overwritten and lost. This is a classic *lost update*. It is an
+**application-level race between an agent's read and its write**, not a storage
+replication issue, so it occurs even under Strong consistency in a single region.
+
+The task models each increment as an agent recording one contribution to shared
+memory (a fact learned, a profile edit, a line appended to a running summary).
+The correct final value is `agents × contributions`; anything less is lost agent
+work.
+
+### In-process results (50 contributions/agent)
+
+| Pattern | 1 | 2 | 4 | 8 | 16 | 32 |
+|---------|---|---|---|---|----|----|
+| `mutable` (mutate-in-place, last-writer-wins) | 0% | ~50% | 75% | 88% | 94% | 97% |
+| `locked` (serialized read-modify-write) | 0% | 0% | 0% | 0% | 0% | 0% |
+| `cas` (optimistic concurrency w/ retry) | 0% | 0% | 0% | 0% | 0% | 0% |
+| `append` (append-only log) | 0% | 0% | 0% | 0% | 0% | 0% |
+
+Lost-update rate for mutate-in-place rises monotonically with concurrency and
+approaches 100%: with 32 agents, **~97% of agent contributions never make it
+into shared memory.** The final value reflects roughly a single agent's work no
+matter how many agents participated.
+
+### Live Cosmos DB results (read-modify-write of one item, Session consistency)
+
+| Pattern | 1 agent | 4 agents | 8 agents |
+|---------|---------|----------|----------|
+| `cosmos-naive` (replace, no concurrency check) — lost | 0% | **50%** | **70%** |
+| `cosmos-etag` (If-Match optimistic concurrency, retry) — lost | 0% | 0% | 0% |
+| `cosmos-etag` retries incurred | 0 | 67 | 286 |
+| `cosmos-etag` wall time | 2.1 s | 6.6 s | 10.5 s |
+
+On real infrastructure, naive concurrent read-modify-write loses **half to
+two-thirds** of agent contributions. Cosmos's native **ETag / `If-Match`
+optimistic concurrency** eliminates the loss completely — at the cost of retries
+(which grow with contention) and ~3× wall-clock latency.
+
+### Why storage-consistency metrics missed this
+
+The Δ/k probe reported **0% staleness** for these same backends, and it was
+*correct*: each individual read did observe the latest durable write. Lost
+updates happen in the gap *between* an agent's read and its subsequent write,
+which no read-level metric inspects. **Read consistency and write-atomicity are
+orthogonal**; shared agent memory needs both.
+
+### Mitigations (all measured at 0% loss)
+
+1. **Append-only memory** — the AgentMemoryToolkit `add_cosmos` pattern. Every
+   contribution is a distinct item; "latest"/aggregate is derived by query. No
+   read-modify-write, so nothing is lost. Fastest and simplest; preferred when
+   the memory model allows it.
+2. **Optimistic concurrency (ETags)** — required when an item must be mutated in
+   place. Cosmos supports it natively via `If-Match`. Correct, but pays retry +
+   latency cost under contention.
+3. **Explicit locking / serialization** — correct but throughput-limited; an
+   anti-pattern at scale.
+
+### Takeaway for shared-memory design
+
+- **Prefer append-only / event-sourced memory** for multi-agent writes. It is
+  the only pattern that is both correct *and* fast under high concurrency.
+- **If you must mutate in place, use optimistic concurrency**, and budget for
+  retries — never issue an unguarded read-modify-write to shared memory.
+- **Do not rely on read-consistency alone.** A store can be perfectly
+  read-consistent and still lose almost all concurrent agent contributions.
 
 ---
 

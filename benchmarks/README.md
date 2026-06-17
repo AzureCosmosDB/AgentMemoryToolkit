@@ -160,13 +160,41 @@ means *consistent*, not *unmeasured*. A measured sample is checked in at
 [../Docs/shared_memory_consistency_research.md](../Docs/shared_memory_consistency_research.md)
 for the full analysis.
 
+## Behavioral Degradation (Lost Updates)
+
+Read-consistency metrics (Δ, k) ask "does this read see the latest write?" But
+agents **read-modify-write** shared memory, and that pattern loses contributions
+under concurrency *even when every read is consistent*. `behavioral.py` measures
+this directly — the application-level outcome that actually degrades agents.
+
+```bash
+# In-process sweep across mutate-in-place vs. mitigations:
+python -m benchmarks.behavioral --increments 50 --concurrency 1,2,4,8,16,32
+
+# Add the live Cosmos read-modify-write demo (naive vs ETag):
+python -m benchmarks.behavioral --increments 15 --concurrency 1,4,8 --cosmos
+```
+
+| Pattern | Model | Lost updates under concurrency |
+|---------|-------|-------------------------------|
+| `mutable` | mutate-in-place (last-writer-wins) | **up to ~97%** |
+| `locked` | serialized read-modify-write | 0% (throughput-limited) |
+| `cas` | optimistic concurrency / ETag retry | 0% (retry cost) |
+| `append` | append-only (toolkit `add_cosmos`) | 0% (fast) |
+| `cosmos-naive` | live Cosmos replace, no check | **50–70%** |
+| `cosmos-etag` | live Cosmos `If-Match` retry | 0% |
+
+**Takeaway:** prefer append-only shared memory; if mutating in place, use
+optimistic concurrency. Read-consistency alone does not prevent lost agent work.
+Sample: [results/behavioral_sample.csv](results/behavioral_sample.csv).
+
 ## Testing
 
 ```bash
 python -m pytest benchmarks/tests -q
 ```
 
-Currently 24 tests covering adapter multi-agent modes, consistency analysis, probe, sweep, and report combination.
+Currently 32 tests covering adapter multi-agent modes, consistency analysis, probe, sweep, report combination, and behavioral lost-update patterns.
 
 ## Implementation Notes
 

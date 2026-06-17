@@ -89,7 +89,7 @@ class CosmosStoreAdapter:
             user_id=self._u,
             role="agent",
             content=f"{key}={version}",
-            memory_type="turn",
+            memory_type="episodic",
             thread_id=self._t,
             metadata={"key": key, "v": version, "agent_id": agent_id},
         )
@@ -99,7 +99,7 @@ class CosmosStoreAdapter:
 
     def read_latest(self, key: str, agent_id: str) -> Optional[int]:
         recs = self._c.get_memories(
-            user_id=self._u, thread_id=self._t, memory_types=["turn"]
+            user_id=self._u, thread_id=self._t, memory_types=["episodic"]
         )
         versions = [
             (r.get("metadata") or {}).get("v")

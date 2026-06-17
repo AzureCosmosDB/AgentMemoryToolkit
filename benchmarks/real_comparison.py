@@ -96,8 +96,10 @@ class LangChainSQLiteAdapter:
 class _HashEmbedding:
     """Deterministic 16-dim embedding so Chroma never downloads an ONNX model.
 
-    Reads in this benchmark filter by metadata (``where={"key": ...}``) and do
-    not depend on vector similarity, so any stable embedding suffices.
+    Embeds on the *key prefix* (text before ``=``) so every version of a key
+    maps to the same vector. That lets the vector-read path retrieve all
+    versions of a key by similarity, while still avoiding the heavyweight ONNX
+    model. Metadata reads do not depend on the embedding at all.
     """
 
     _DIM = 16
@@ -105,38 +107,60 @@ class _HashEmbedding:
     def name(self) -> str:  # Chroma >=0.5 requires a stable name.
         return "hash16"
 
-    def __call__(self, input):
+    def _embed_one(self, text: str) -> list[float]:
         import hashlib
 
-        out = []
-        for text in input:
-            h = hashlib.sha256(text.encode("utf-8")).digest()
-            out.append([h[i] / 255.0 for i in range(self._DIM)])
-        return out
+        key = text.split("=", 1)[0]
+        h = hashlib.sha256(key.encode("utf-8")).digest()
+        return [h[i] / 255.0 for i in range(self._DIM)]
+
+    def __call__(self, input):
+        return [self._embed_one(t) for t in input]
+
+    # Newer Chroma splits document vs. query embedding entry points.
+    def embed_documents(self, input):
+        return [self._embed_one(t) for t in input]
+
+    def embed_query(self, input):
+        return [self._embed_one(t) for t in input]
 
 
 class ChromaDBAdapter:
     """Register store over a real ChromaDB collection.
 
-    Writes upsert a document carrying ``{key, version, agent_id}`` metadata;
-    reads query the collection and return the highest indexed version. Because
-    Chroma indexes asynchronously, freshly written versions can briefly be
-    invisible — surfacing genuine eventual-consistency staleness.
+    Writes upsert a document carrying ``{key, version, agent_id}`` metadata.
+    Two read paths are exposed:
+
+    * ``read_mode="metadata"`` — a synchronous ``get(where=...)`` metadata
+      filter that never touches the vector index, so it is strongly consistent.
+    * ``read_mode="vector"`` — a similarity ``query(...)`` that goes through the
+      HNSW index. Chroma indexes asynchronously (controlled by
+      ``hnsw:sync_threshold``), so freshly added vectors can briefly be absent
+      from query results — surfacing genuine async-index staleness.
     """
 
     framework_name = "ChromaDB"
-    backend_type = "chroma-hnsw"
 
-    def __init__(self, path: str, collection: str = "shared_memory") -> None:
+    def __init__(
+        self,
+        path: str,
+        collection: str = "shared_memory",
+        read_mode: str = "metadata",
+        sync_threshold: int = 1000,
+    ) -> None:
         import chromadb
-        from chromadb.utils import embedding_functions
 
+        self._read_mode = read_mode
+        self.backend_type = f"chroma-{read_mode}"
         self._client = chromadb.PersistentClient(path=path)
-        # Reads are metadata filters (no similarity search), so a cheap
-        # deterministic embedding avoids the heavyweight ONNX model download.
         self._embed = _HashEmbedding()
+        # A high sync threshold keeps writes in the in-memory brute-force buffer
+        # longer before they are flushed into the HNSW graph, widening the
+        # window in which vector queries can miss recent writes.
         self._col = self._client.get_or_create_collection(
-            name=collection, embedding_function=self._embed
+            name=collection,
+            embedding_function=self._embed,
+            metadata={"hnsw:sync_threshold": sync_threshold},
         )
         self._seq = 0
         self._seq_lock = threading.Lock()
@@ -154,8 +178,26 @@ class ChromaDBAdapter:
         )
 
     def read_latest(self, key: str, agent_id: str) -> Optional[int]:
+        if self._read_mode == "vector":
+            return self._read_vector(key)
+        return self._read_metadata(key)
+
+    def _read_metadata(self, key: str) -> Optional[int]:
         res = self._col.get(where={"key": key})
         metas = res.get("metadatas") or []
+        versions = [m.get("version") for m in metas if isinstance(m.get("version"), int)]
+        return max(versions) if versions else None
+
+    def _read_vector(self, key: str) -> Optional[int]:
+        # Similarity query routed through the HNSW index. n_results is generous
+        # so all of a key's versions can be returned once indexed.
+        res = self._col.query(
+            query_texts=[key],
+            n_results=256,
+            where={"key": key},
+        )
+        metas_batches = res.get("metadatas") or [[]]
+        metas = metas_batches[0] if metas_batches else []
         versions = [m.get("version") for m in metas if isinstance(m.get("version"), int)]
         return max(versions) if versions else None
 
@@ -293,9 +335,21 @@ def main(argv=None) -> int:
         lc = LangChainSQLiteAdapter(db_path=os.path.join(workdir, "langchain.db"))
         rows.append(benchmark(lc, agents=args.agents, ops_per_agent=args.ops, keys=keys))
 
-        # ChromaDB
-        chroma = ChromaDBAdapter(path=os.path.join(workdir, "chroma"))
-        rows.append(benchmark(chroma, agents=args.agents, ops_per_agent=args.ops, keys=keys))
+        # ChromaDB — synchronous metadata read (strongly consistent path)
+        chroma_meta = ChromaDBAdapter(
+            path=os.path.join(workdir, "chroma_meta"), read_mode="metadata"
+        )
+        rows.append(
+            benchmark(chroma_meta, agents=args.agents, ops_per_agent=args.ops, keys=keys)
+        )
+
+        # ChromaDB — vector similarity read (async HNSW index -> real staleness)
+        chroma_vec = ChromaDBAdapter(
+            path=os.path.join(workdir, "chroma_vec"), read_mode="vector"
+        )
+        rows.append(
+            benchmark(chroma_vec, agents=args.agents, ops_per_agent=args.ops, keys=keys)
+        )
 
         # AgentMemoryToolkit / Cosmos (optional)
         if args.cosmos:

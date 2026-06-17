@@ -1,0 +1,4 @@
+level,concurrency,reads,writes,stale_reads,stale_read_rate,delta_max,delta_mean,delta_p95,k_max,k_mean,read_your_writes_violations,monotonic_reads_violations
+Session,6,100,140,0,0.0,0.0,0.0,0.0,0,0.0,0,0
+ConsistentPrefix,6,100,140,0,0.0,0.0,0.0,0.0,0,0.0,0,0
+Eventual,6,100,140,0,0.0,0.0,0.0,0.0,0,0.0,0,0

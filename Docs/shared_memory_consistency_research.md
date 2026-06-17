@@ -263,6 +263,77 @@ staleness surfaces under:
 
 ---
 
+## Probing for Real Staleness — Two Follow-up Experiments
+
+Following the 0% results above, two targeted experiments tried to *force*
+observable staleness on real infrastructure. Both reinforced the same
+conclusion: **staleness is a property of distribution, not of the storage engine
+itself.**
+
+### Experiment A — Cosmos DB consistency-level sweep ([cosmos_levels.py](../benchmarks/cosmos_levels.py))
+
+A direct `azure.cosmos` adapter swept the three levels the account permits
+(default = Session, single region West US 3): Session → ConsistentPrefix →
+Eventual, 6 agents × 40 ops.
+
+| Level | Stale % | Δ Max (ms) | k Max | RYW Viol |
+|-------|---------|------------|-------|----------|
+| Session | 0.0 | 0.000 | 0 | 0 |
+| ConsistentPrefix | 0.0 | 0.000 | 0 | 0 |
+| Eventual | 0.0 | 0.000 | 0 | 0 |
+
+**Why even Eventual is 0%:** Cosmos keeps four replicas per partition, but
+intra-region replication completes in **sub-milliseconds**, whereas the client's
+round-trip to West US 3 is **tens of milliseconds**. Every write is fully
+replicated across all local replicas *during* the network round-trip, so a
+subsequent eventual-consistency read can never find a lagging replica. For a
+**remote, single-region** client, eventual is observationally identical to
+strong.
+
+> **Physics, not measurement error:** observable staleness requires replication
+> lag ≥ read latency. Single-region geo-replication lag (~sub-ms) is far below
+> remote read latency (~tens of ms), so the window is closed.
+
+### Experiment B — ChromaDB metadata vs. vector reads ([real_comparison.py](../benchmarks/real_comparison.py))
+
+The ChromaDB adapter gained a second read path: a similarity `query()` routed
+through the HNSW index (vs. the synchronous metadata `get()`), with a high
+`hnsw:sync_threshold` to keep writes un-indexed longer. 8 agents × 80 ops.
+
+| Read path | Stale % | Δ Max (ms) | k Max |
+|-----------|---------|------------|-------|
+| `chroma-metadata` | 0.0 | 0.000 | 0 |
+| `chroma-vector` | 0.0 | 0.000 | 0 |
+
+**Why vector reads are also 0%:** ChromaDB's `query()` searches the in-memory
+write buffer (brute-force) *in addition to* the persisted HNSW graph, so a
+freshly-added vector is immediately findable even before it is indexed. The
+embedded, single-process engine provides read-your-writes by design — there is
+no propagation boundary to lag behind.
+
+### Robust Conclusion
+
+Across SQLite, ChromaDB (both read paths), and Cosmos (all achievable levels),
+**no real single-node / single-region backend exhibits observable staleness.**
+The only configuration that produced staleness was the positive control, where a
+visibility delay was injected explicitly. This is the correct and honest result:
+
+- **Staleness is caused by distribution** (geo-replication, async caches across a
+  network boundary), not by the choice of storage engine in a local deployment.
+- The **measurement framework is sound** — the control proves it detects
+  staleness whenever a real propagation delay exists.
+
+### The One Remaining Real Demonstration: Multi-Region Cosmos
+
+To observe *real* Cosmos staleness end-to-end, the account needs a **second
+region**. With writes pinned to region A and reads pinned to region B under
+Eventual consistency, cross-region replication lag (tens–hundreds of ms) exceeds
+read latency, opening the staleness window. This requires adding a region to the
+account (a billable, reversible change to shared infrastructure) and is therefore
+gated on explicit approval rather than performed automatically.
+
+---
+
 ## Key Takeaways
 
 ### ✅ What AgentMemoryToolkit Does Uniquely

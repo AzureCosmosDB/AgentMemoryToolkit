@@ -1,0 +1,44 @@
+# MemoryAgentBench agent config for AgentMemoryToolkit
+#
+# Place under MemoryAgentBench at:
+#   configs/agent_conf/RAG_Agents/gpt-4o-mini/AgentMemoryToolkit_gpt-4o-mini.yaml
+# or pass directly via --agent_config.
+
+# Standard MemoryAgentBench keys
+agent_name: agent_memory_toolkit
+model: gpt-4o-mini
+output_dir: ./outputs/agent_memory_toolkit
+input_length_limit: 128000
+buffer_length: 2048
+retrieve_num: 5
+agent_chunk_size: 4096
+
+# Generation
+max_tokens: 512
+temperature: 0.0
+
+# AgentMemoryToolkit-specific knobs
+# store_mode: turns_only | facts_only | summary_plus_facts | user_summary
+memory_toolkit_store_mode: turns_only
+# search_mode: vector | hybrid
+memory_toolkit_search_mode: vector
+# Comma-separated or YAML list. Example: "fact,summary"
+memory_toolkit_search_memory_types: turn
+
+# Identifies the run; used as part of the Cosmos partition prefix to keep
+# separate experiments from contaminating each other.
+memory_toolkit_run_id: smoke
+
+# Processing client (Durable Functions) timeouts. Only used when store_mode
+# is facts_only / summary_plus_facts / user_summary.
+memory_toolkit_processing_poll_interval: 2.0
+memory_toolkit_processing_timeout: 240.0
+
+# Multi-agent shared memory (optional).
+# When writer_agents has >1 entry, memorize rotates each write across these
+# agents on the SAME (user_id, thread_id) so they share one memory space.
+# query_agents (optional) restricts retrieval to a subset; empty = shared read
+# across all agents. Run once with query_agents empty (shared) and once scoped
+# to a single agent to compare shared vs. per-agent-filtered retrieval.
+# memory_toolkit_writer_agents: "researcher,planner"
+# memory_toolkit_query_agents: ""

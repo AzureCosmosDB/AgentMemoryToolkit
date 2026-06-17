@@ -1,0 +1,8 @@
+# Smoke-test list compatible with MemoryAgentBench's bash runners.
+# Place under MemoryAgentBench/bash_files/configs/ or pass directly to a
+# custom runner.
+
+###### agent_config                                                              dataset_config
+
+###baseline turns_only / vector
+AgentMemoryToolkit_gpt-4o-mini.yaml                                            Accurate_Retrieval/Ruler/QA/Ruler_qa1_197k.yaml

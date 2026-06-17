@@ -1,0 +1,5 @@
+# Local benchmark outputs and any patched MemoryAgentBench backups should
+# be ignored.
+results/
+*.bak
+__pycache__/

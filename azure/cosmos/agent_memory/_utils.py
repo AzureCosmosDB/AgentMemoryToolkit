@@ -391,7 +391,6 @@ def _container_policies(
     indexing_policy = {
         "includedPaths": [{"path": "/*"}],
         "excludedPaths": [
-            {"path": "/embedding/*"},
             {"path": "/source_memory_ids/*"},
             {"path": "/supersedes_ids/*"},
             {"path": '/"_etag"/?'},

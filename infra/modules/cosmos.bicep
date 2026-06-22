@@ -106,9 +106,6 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
         ]
         excludedPaths: [
           {
-            path: '/embedding/?'
-          }
-          {
             path: '/source_memory_ids/*'
           }
           {
@@ -193,9 +190,6 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
           }
         ]
         excludedPaths: [
-          {
-            path: '/embedding/*'
-          }
           {
             path: '/source_memory_ids/*'
           }

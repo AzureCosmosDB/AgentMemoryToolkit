@@ -64,6 +64,9 @@
     },
     "memoryProcessorOwner": {
       "value": "${MEMORY_PROCESSOR_OWNER=durable}"
+    },
+    "enableTurnEmbeddings": {
+      "value": "${ENABLE_TURN_EMBEDDINGS=false}"
     }
   }
 }

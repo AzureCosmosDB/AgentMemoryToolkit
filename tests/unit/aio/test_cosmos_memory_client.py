@@ -360,8 +360,15 @@ class TestCreateMemoryStore:
         turns_call = mock_db.create_container_if_not_exists.await_args_list[1]
         assert turns_call.kwargs["id"] == "memories_turns"
         assert turns_call.kwargs["default_ttl"] == 2_592_000
-        assert "vector_embedding_policy" not in turns_call.kwargs
-        assert "full_text_policy" not in turns_call.kwargs
+        # The turns container is always provisioned with a vector index + full-text
+        # policy so it is primed for search(target="turns") even when turn
+        # embeddings are disabled. Vector indexes use quantizedFlat.
+        assert "vector_embedding_policy" in turns_call.kwargs
+        assert "full_text_policy" in turns_call.kwargs
+        assert (
+            turns_call.kwargs["indexing_policy"]["vectorIndexes"][0]["type"]
+            == "quantizedFlat"
+        )
         assert mem._turns_container_client is mock_turns_container
 
     async def test_create_memory_store_defaults_to_serverless(self):

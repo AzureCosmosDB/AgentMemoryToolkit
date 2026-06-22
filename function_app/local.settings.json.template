@@ -28,6 +28,9 @@
     "MEMORY_PROCESSOR_OWNER": "durable",
 
     "// --- Batch knob ---": "",
-    "MAX_BATCH_SIZE": "20"
+    "MAX_BATCH_SIZE": "20",
+
+    "// --- Turn vector search: embed raw turns on write so search(target='turns') works. Turns container is always vector-indexed; default false. ---": "",
+    "ENABLE_TURN_EMBEDDINGS": "false"
   }
 }

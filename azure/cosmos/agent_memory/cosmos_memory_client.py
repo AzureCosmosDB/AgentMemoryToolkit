@@ -36,18 +36,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
 
 logger = get_logger(__name__)
 
-_TURNS_INDEXING_POLICY = {
-    "indexingMode": "consistent",
-    "automatic": True,
-    "includedPaths": [{"path": "/*"}],
-    "excludedPaths": [
-        {"path": "/embedding/?"},
-        {"path": "/source_memory_ids/*"},
-        {"path": "/supersedes_ids/*"},
-        {"path": '/"_etag"/?'},
-    ],
-}
-
 _SUMMARIES_INDEXING_POLICY = {
     "indexingMode": "consistent",
     "automatic": True,
@@ -91,6 +79,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         embedding_dimensions: Optional[int] = None,
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
+        enable_turn_embeddings: Optional[bool] = None,
         processor: Optional[MemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
     ) -> None:
@@ -113,6 +102,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             embedding_dimensions=embedding_dimensions,
             chat_deployment_name=chat_deployment_name,
             use_default_credential=use_default_credential,
+            enable_turn_embeddings=enable_turn_embeddings,
         )
         self._embeddings_client = EmbeddingsClient(
             endpoint=self._ai_foundry_endpoint,
@@ -276,11 +266,17 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 autoscale_max_ru=self._cosmos_autoscale_max_ru,
                 throughput_properties_cls=ThroughputProperties,
             )
-            vec_policy, idx_policy, ft_policy = _container_policies(
+            _policy_kwargs = dict(
                 embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
                 embedding_data_type=_resolve_embedding_data_type(embedding_data_type),
                 distance_function=_resolve_distance_function(distance_function),
                 full_text_language=_resolve_full_text_language(full_text_language),
+            )
+            vec_policy, idx_policy, ft_policy = _container_policies(**_policy_kwargs)
+            # Turns always carry the vector index (primed for search) but skip the
+            # salience composite index, which only procedural synthesis needs.
+            turns_vec_policy, turns_idx_policy, turns_ft_policy = _container_policies(
+                **_policy_kwargs, include_salience_composite=False
             )
             self._memories_container_client = db.create_container_if_not_exists(
                 **_build_container_kwargs(
@@ -299,7 +295,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     partition_key=partition_key,
                     offer_throughput=offer,
                     default_ttl=DEFAULT_TTL_BY_TYPE["turn"],
-                    indexing_policy=_TURNS_INDEXING_POLICY,
+                    indexing_policy=turns_idx_policy,
+                    vector_embedding_policy=turns_vec_policy,
+                    full_text_policy=turns_ft_policy,
                 )
             )
             logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
@@ -368,7 +366,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 ) from exc
 
     def _build_store(self) -> MemoryStore:
-        return MemoryStore(containers=self._containers, embeddings_client=self._embeddings_client)
+        return MemoryStore(
+            containers=self._containers,
+            embeddings_client=self._embeddings_client,
+            enable_turn_embeddings=self._enable_turn_embeddings,
+        )
 
     def _build_pipeline(self, store: MemoryStore) -> PipelineService:
         return PipelineService(
@@ -625,8 +627,13 @@ class CosmosMemoryClient(_BaseMemoryClient):
         min_confidence: Optional[float] = None,
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
+        target: str = "memories",
     ) -> list[dict[str, Any]]:
-        """Search memories in Cosmos DB using vector similarity."""
+        """Search memories in Cosmos DB using vector similarity.
+
+        Set ``target="turns"`` to vector-search the raw conversation log
+        instead of facts/episodic/procedural (requires turn embeddings).
+        """
         return self._get_store().search(
             search_terms=search_terms,
             memory_id=memory_id,
@@ -644,6 +651,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             min_confidence=min_confidence,
             created_after=created_after,
             created_before=created_before,
+            target=target,
         )
 
     def get_thread(

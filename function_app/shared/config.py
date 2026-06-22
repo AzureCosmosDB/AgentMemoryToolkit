@@ -62,6 +62,7 @@ USER_COUNTER_THREAD_ID = "__counters__"
 
 from azure.cosmos.agent_memory.thresholds import (  # noqa: E402
     DEFAULT_DEDUP_EVERY_N,
+    DEFAULT_ENABLE_TURN_EMBEDDINGS,
     DEFAULT_FACT_EXTRACTION_EVERY_N,
     DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
     DEFAULT_THREAD_SUMMARY_EVERY_N,
@@ -185,6 +186,18 @@ def get_procedural_synthesis_auto() -> bool:
     return _parse_bool(
         "PROCEDURAL_SYNTHESIS_AUTO",
         DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
+    )
+
+
+def get_enable_turn_embeddings() -> bool:
+    """Embed raw turns on write so they can be vector-searched.
+
+    Default ``false`` keeps turns un-embedded. The turns container always
+    carries the vector index, so enabling this never requires recreating it.
+    """
+    return _parse_bool(
+        "ENABLE_TURN_EMBEDDINGS",
+        DEFAULT_ENABLE_TURN_EMBEDDINGS,
     )
 
 

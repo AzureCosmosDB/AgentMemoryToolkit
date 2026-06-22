@@ -92,6 +92,9 @@ param maxBatchSize int
 ])
 param memoryProcessorOwner string
 
+@description('Embed raw conversation turns on write so they can be vector-searched. The turns container is always provisioned with a vector index; this only toggles embedding generation. Default false.')
+param enableTurnEmbeddings bool = false
+
 @description('Tags to apply.')
 param tags object = {}
 
@@ -328,6 +331,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'MEMORY_PROCESSOR_OWNER'
           value: memoryProcessorOwner
+        }
+        {
+          name: 'ENABLE_TURN_EMBEDDINGS'
+          value: string(enableTurnEmbeddings)
         }
       ]
     }

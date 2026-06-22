@@ -145,7 +145,8 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> int:
     """Resolve embedding dimensions from explicit value or ``AI_FOUNDRY_EMBEDDING_DIMENSIONS`` env var.
 
     Defaults to 1536 (the dimension we ship with for ``text-embedding-3-large``
-    truncated to 1536, which is the size DiskANN is tuned for in our containers).
+    truncated to 1536, which is the size our quantizedFlat vector indexes are
+    tuned for in our containers).
 
     Raises :class:`ConfigurationError` if the env var is set but cannot be
     parsed as a positive integer.
@@ -368,8 +369,14 @@ def _container_policies(
     embedding_data_type: str,
     distance_function: str,
     full_text_language: str,
+    include_salience_composite: bool = True,
 ) -> tuple[dict, dict, dict]:
-    """Build the vector, indexing, and full-text policies for container creation."""
+    """Build the vector, indexing, and full-text policies for container creation.
+
+    ``include_salience_composite`` adds the ``(salience, created_at, id)``
+    composite index required by procedural synthesis on the MEMORIES container.
+    Turns reuse this builder with it disabled (turns are never synthesized).
+    """
     vector_embedding_policy = {
         "vectorEmbeddings": [
             {
@@ -388,21 +395,23 @@ def _container_policies(
             {"path": "/source_memory_ids/*"},
             {"path": "/supersedes_ids/*"},
         ],
-        "vectorIndexes": [{"path": "/embedding", "type": "diskANN"}],
+        "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}],
         "fullTextIndexes": [{"path": "/content"}],
+    }
+
+    if include_salience_composite:
         # Procedural synthesis selects TOP N by (salience DESC, created_at ASC, id ASC).
         # Cosmos requires a composite index for multi-property ORDER BY; without it the
         # query returns a non-deterministic 50 of N when many docs share the default
         # salience (0.5), which makes the source-id short-circuit in synthesize_procedural
         # thrash and burn LLM calls on every reconcile.
-        "compositeIndexes": [
+        indexing_policy["compositeIndexes"] = [
             [
                 {"path": "/salience", "order": "descending"},
                 {"path": "/created_at", "order": "ascending"},
                 {"path": "/id", "order": "ascending"},
             ]
-        ],
-    }
+        ]
 
     full_text_policy = {
         "defaultLanguage": full_text_language,

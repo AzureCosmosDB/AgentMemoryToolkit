@@ -45,13 +45,18 @@ class AsyncInProcessProcessor:
             from azure.cosmos.agent_memory._container_routing import ContainerKey
             from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
             from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+            from azure.cosmos.agent_memory.thresholds import get_enable_turn_embeddings
 
             containers = {
                 ContainerKey.TURNS: turns_container,
                 ContainerKey.MEMORIES: cosmos_container,
                 ContainerKey.SUMMARIES: summaries_container,
             }
-            store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings_client)
+            store = AsyncMemoryStore(
+                containers=containers,
+                embeddings_client=embeddings_client,
+                enable_turn_embeddings=get_enable_turn_embeddings(),
+            )
             pipeline = AsyncPipelineService(store, chat_client, embeddings_client, containers=containers)
 
         self._pipeline = pipeline

@@ -101,6 +101,7 @@ def test_builds_pipeline_from_complete_env(mocks):
     mocks.store_ctor.assert_called_once_with(
         containers=expected_containers,
         embeddings_client=mocks.embed_instance,
+        enable_turn_embeddings=False,
     )
     mocks.pipeline_ctor.assert_called_once_with(
         mocks.store_instance,

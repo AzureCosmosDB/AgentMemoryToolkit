@@ -42,6 +42,12 @@ _FALSY = {"false", "0", "no", "off", "f", "n"}
 
 DEFAULT_PROCEDURAL_SYNTHESIS_AUTO = True
 
+# Whether raw conversation turns are embedded on write so they can be vector
+# searched. Default ``False`` preserves today's behavior (turns are stored
+# without an ``embedding`` field). The turns container always carries the
+# vector index, so this only governs whether vectors are generated/searched.
+DEFAULT_ENABLE_TURN_EMBEDDINGS = False
+
 # Owner exclusivity — declares which backend is authoritative for the shared
 # memories + counter container. When set, the *other* backend skips its
 # auto-trigger and logs a loud warning. Default unset preserves today's
@@ -143,6 +149,17 @@ def get_procedural_synthesis_auto() -> bool:
     return _parse_bool("PROCEDURAL_SYNTHESIS_AUTO", DEFAULT_PROCEDURAL_SYNTHESIS_AUTO)
 
 
+def get_enable_turn_embeddings() -> bool:
+    """Whether raw turns are embedded on write and made vector-searchable.
+
+    Set ``ENABLE_TURN_EMBEDDINGS=true`` to generate embeddings for ``turn``
+    documents (so ``search(target="turns")`` returns ranked turns). Default
+    ``False`` keeps turns un-embedded. The turns container always carries the
+    vector index, so enabling this never requires recreating the container.
+    """
+    return _parse_bool("ENABLE_TURN_EMBEDDINGS", DEFAULT_ENABLE_TURN_EMBEDDINGS)
+
+
 def get_processor_owner() -> Optional[str]:
     """Return the configured ``MEMORY_PROCESSOR_OWNER`` or ``None``.
 
@@ -188,6 +205,7 @@ __all__ = [
     "DEFAULT_DEDUP_POOL_SIZE",
     "DEFAULT_TTL_BY_TYPE",
     "DEFAULT_PROCEDURAL_SYNTHESIS_AUTO",
+    "DEFAULT_ENABLE_TURN_EMBEDDINGS",
     "PROCESSOR_OWNER_INPROCESS",
     "PROCESSOR_OWNER_DURABLE",
     "default_ttl_for",
@@ -197,5 +215,6 @@ __all__ = [
     "get_dedup_every_n",
     "get_dedup_pool_size",
     "get_procedural_synthesis_auto",
+    "get_enable_turn_embeddings",
     "get_processor_owner",
 ]

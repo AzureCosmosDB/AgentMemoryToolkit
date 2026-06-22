@@ -10,6 +10,7 @@ from azure.cosmos.agent_memory._container_routing import (
     USER_SCOPED_MEMORIES_TYPES,
     ContainerKey,
     container_key_for_type,
+    resolve_search_target,
 )
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
@@ -71,12 +72,14 @@ class MemoryStore:
         *,
         containers: dict[ContainerKey, Any],
         embeddings_client: Any = None,
+        enable_turn_embeddings: bool = False,
     ) -> None:
         self._containers = containers
         self._turns_container = containers[ContainerKey.TURNS]
         self._memories_container = containers[ContainerKey.MEMORIES]
         self._summaries_container = containers[ContainerKey.SUMMARIES]
         self._embeddings_client = embeddings_client
+        self._enable_turn_embeddings = enable_turn_embeddings
 
     @property
     def container(self) -> Any:
@@ -216,7 +219,7 @@ class MemoryStore:
         body = record.to_cosmos_dict()
 
         if embed is None:
-            embed = memory_type != "turn"
+            embed = memory_type != "turn" or self._enable_turn_embeddings
         if embedding is not None:
             body["embedding"] = embedding
         elif embed and content and self._embeddings_client is not None:
@@ -255,7 +258,8 @@ class MemoryStore:
             to_embed_idx: list[int] = []
             to_embed_text: list[str] = []
             for i, body in enumerate(bodies):
-                if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
+                embeddable_type = body.get("type") != "turn" or self._enable_turn_embeddings
+                if embeddable_type and body.get("content") and not body.get("embedding"):
                     to_embed_idx.append(i)
                     to_embed_text.append(body["content"])
             if to_embed_text and self._embeddings_client is not None:
@@ -830,8 +834,15 @@ class MemoryStore:
         created_before: Optional[str | datetime] = None,
         *,
         query: Optional[str] = None,
+        target: str = "memories",
     ) -> list[dict[str, Any]]:
-        """Search memories using vector similarity with optional full-text hybrid ranking."""
+        """Search memories using vector similarity with optional full-text hybrid ranking.
+
+        ``target`` selects the container to search: ``"memories"`` (default) for
+        facts/episodic/procedural, or ``"turns"`` for the raw conversation log
+        (requires turn embeddings to have been enabled when the turns were written).
+        """
+        container_key = resolve_search_target(target)
         terms = require_search_terms(search_terms, query)
         _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
@@ -862,13 +873,17 @@ class MemoryStore:
             parameters.append({"name": "@key_terms", "value": terms})
 
         partition_key, cross_partition = query_scope(user_id, thread_id)
-        if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
+        if (
+            container_key == ContainerKey.MEMORIES
+            and thread_id is not None
+            and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES)
+        ):
             partition_key, cross_partition = None, True
         logger.debug("MemoryStore.search query: %s", sql)
         return self.query(
             sql,
             parameters,
-            container_key=ContainerKey.MEMORIES,
+            container_key=container_key,
             partition_key=partition_key,
             cross_partition=cross_partition,
         )

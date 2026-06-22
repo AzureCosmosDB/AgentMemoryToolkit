@@ -32,6 +32,27 @@ _CONTAINER_FOR_TYPE: dict[str, ContainerKey] = {
 
 USER_SCOPED_MEMORIES_TYPES: frozenset[str] = frozenset({"episodic", "procedural"})
 
+# Containers that expose a vector index and may be targeted by ``search``.
+_SEARCH_TARGETS: dict[str, ContainerKey] = {
+    "memories": ContainerKey.MEMORIES,
+    "turns": ContainerKey.TURNS,
+}
+
+
+def resolve_search_target(target: str) -> ContainerKey:
+    """Map a public ``search(target=...)`` value to its ``ContainerKey``.
+
+    ``"memories"`` (the default) targets facts/episodic/procedural; ``"turns"``
+    targets the raw conversation log (requires turn embeddings to be enabled).
+    """
+    try:
+        return _SEARCH_TARGETS[target]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown search target {target!r}; valid targets: {sorted(_SEARCH_TARGETS)}"
+        ) from exc
+
+
 
 def container_key_for_type(memory_type: str) -> ContainerKey:
     """Return the ``ContainerKey`` that owns documents of ``memory_type``."""

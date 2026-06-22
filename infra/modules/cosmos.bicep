@@ -121,7 +121,7 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
         vectorIndexes: [
           {
             path: '/embedding'
-            type: 'diskANN'
+            type: 'quantizedFlat'
           }
         ]
         fullTextIndexes: [
@@ -194,7 +194,7 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
         ]
         excludedPaths: [
           {
-            path: '/embedding/?'
+            path: '/embedding/*'
           }
           {
             path: '/source_memory_ids/*'
@@ -204,6 +204,39 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
           }
           {
             path: '/"_etag"/?'
+          }
+        ]
+        // Turns always carry the vector index so they are primed for search
+        // even when ENABLE_TURN_EMBEDDINGS is off. Vector policy is immutable
+        // at container creation, so priming here avoids a recreate later.
+        vectorIndexes: [
+          {
+            path: '/embedding'
+            type: 'quantizedFlat'
+          }
+        ]
+        fullTextIndexes: [
+          {
+            path: '/content'
+          }
+        ]
+      }
+      vectorEmbeddingPolicy: {
+        vectorEmbeddings: [
+          {
+            path: '/embedding'
+            dataType: 'float32'
+            distanceFunction: 'cosine'
+            dimensions: embeddingDimensions
+          }
+        ]
+      }
+      fullTextPolicy: {
+        defaultLanguage: 'en-US'
+        fullTextPaths: [
+          {
+            path: '/content'
+            language: 'en-US'
           }
         ]
       }

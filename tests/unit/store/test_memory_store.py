@@ -455,3 +455,90 @@ def test_search_fact_only_with_thread_id_uses_partition_path():
     call_kwargs = memories.query_items.call_args.kwargs
     assert call_kwargs.get("partition_key") == ["u1", "t1"]
     assert "enable_cross_partition_query" not in call_kwargs
+
+
+def test_add_turn_skips_embedding_by_default():
+    turns = MagicMock()
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(turns=turns), embeddings_client=embeddings)
+
+    store.add(user_id="u1", role="user", content="hello", thread_id="t1")
+
+    embeddings.generate.assert_not_called()
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert "embedding" not in body
+
+
+def test_add_turn_embeds_when_enabled():
+    turns = MagicMock()
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+        enable_turn_embeddings=True,
+    )
+
+    store.add(user_id="u1", role="user", content="hello", thread_id="t1")
+
+    embeddings.generate.assert_called_once_with("hello")
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["embedding"] == [0.1, 0.2]
+
+
+def test_push_skips_turn_embedding_by_default():
+    turns = MagicMock()
+    embeddings = MagicMock()
+    embeddings.generate_batch.return_value = [[0.1, 0.2]]
+    local = [_doc(id="x1", type="turn", content="hello", thread_id="t1")]
+    store = MemoryStore(containers=_containers(turns=turns), embeddings_client=embeddings)
+
+    store.push(local, batch_size=10)
+
+    embeddings.generate_batch.assert_not_called()
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert "embedding" not in body
+
+
+def test_push_embeds_turns_when_enabled():
+    turns = MagicMock()
+    embeddings = MagicMock()
+    embeddings.generate_batch.return_value = [[0.1, 0.2]]
+    local = [_doc(id="x1", type="turn", content="hello", thread_id="t1")]
+    store = MemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+        enable_turn_embeddings=True,
+    )
+
+    store.push(local, batch_size=10)
+
+    embeddings.generate_batch.assert_called_once_with(["hello"])
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["embedding"] == [0.1, 0.2]
+
+
+def test_search_target_turns_queries_turns_container():
+    turns = MagicMock()
+    turns.query_items.return_value = []
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(turns=turns, memories=memories),
+        embeddings_client=embeddings,
+    )
+
+    store.search(search_terms="hello", user_id="u1", thread_id="t1", target="turns")
+
+    turns.query_items.assert_called_once()
+    memories.query_items.assert_not_called()
+
+
+def test_search_invalid_target_raises():
+    store = MemoryStore(containers=_containers())
+
+    with pytest.raises(ValueError):
+        store.search(search_terms="hello", user_id="u1", target="bogus")

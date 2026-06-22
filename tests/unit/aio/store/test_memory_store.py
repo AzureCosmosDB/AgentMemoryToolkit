@@ -466,3 +466,79 @@ async def test_search_fact_only_with_thread_id_uses_partition_path():
 
     call_kwargs = memories.query_items.call_args.kwargs
     assert call_kwargs.get("partition_key") == ["u1", "t1"]
+
+
+async def test_add_turn_skips_embedding_by_default():
+    turns = MagicMock()
+    turns.upsert_item = AsyncMock()
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(containers=_containers(turns=turns), embeddings_client=embeddings)
+
+    await store.add(user_id="u1", role="user", content="hello", thread_id="t1")
+
+    embeddings.generate.assert_not_awaited()
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert "embedding" not in body
+
+
+async def test_add_turn_embeds_when_enabled():
+    turns = MagicMock()
+    turns.upsert_item = AsyncMock()
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+        enable_turn_embeddings=True,
+    )
+
+    await store.add(user_id="u1", role="user", content="hello", thread_id="t1")
+
+    embeddings.generate.assert_awaited_once_with("hello")
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["embedding"] == [0.1, 0.2]
+
+
+async def test_push_embeds_turns_when_enabled():
+    turns = MagicMock()
+    turns.upsert_item = AsyncMock()
+    embeddings = MagicMock()
+    embeddings.generate_batch = AsyncMock(return_value=[[0.1, 0.2]])
+    local = [_doc(id="x1", type="turn", content="hello", thread_id="t1")]
+    store = AsyncMemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+        enable_turn_embeddings=True,
+    )
+
+    await store.push(local, batch_size=10)
+
+    embeddings.generate_batch.assert_awaited_once_with(["hello"])
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["embedding"] == [0.1, 0.2]
+
+
+async def test_search_target_turns_queries_turns_container():
+    turns = MagicMock()
+    turns.query_items.return_value = AsyncIterator([])
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(
+        containers=_containers(turns=turns, memories=memories),
+        embeddings_client=embeddings,
+    )
+
+    await store.search(search_terms="hello", user_id="u1", thread_id="t1", target="turns")
+
+    turns.query_items.assert_called_once()
+    memories.query_items.assert_not_called()
+
+
+async def test_search_invalid_target_raises():
+    store = AsyncMemoryStore(containers=_containers())
+
+    with pytest.raises(ValueError):
+        await store.search(search_terms="hello", user_id="u1", target="bogus")

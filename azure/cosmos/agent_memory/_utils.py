@@ -394,6 +394,7 @@ def _container_policies(
             {"path": "/embedding/*"},
             {"path": "/source_memory_ids/*"},
             {"path": "/supersedes_ids/*"},
+            {"path": '/"_etag"/?'},
         ],
         "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}],
         "fullTextIndexes": [{"path": "/content"}],

@@ -365,10 +365,7 @@ class TestCreateMemoryStore:
         # embeddings are disabled. Vector indexes use quantizedFlat.
         assert "vector_embedding_policy" in turns_call.kwargs
         assert "full_text_policy" in turns_call.kwargs
-        assert (
-            turns_call.kwargs["indexing_policy"]["vectorIndexes"][0]["type"]
-            == "quantizedFlat"
-        )
+        assert turns_call.kwargs["indexing_policy"]["vectorIndexes"][0]["type"] == "quantizedFlat"
         assert mem._turns_container_client is mock_turns_container
 
     async def test_create_memory_store_defaults_to_serverless(self):

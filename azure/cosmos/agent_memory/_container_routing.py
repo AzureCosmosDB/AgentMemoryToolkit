@@ -48,10 +48,7 @@ def resolve_search_target(target: str) -> ContainerKey:
     try:
         return _SEARCH_TARGETS[target]
     except KeyError as exc:
-        raise ValueError(
-            f"Unknown search target {target!r}; valid targets: {sorted(_SEARCH_TARGETS)}"
-        ) from exc
-
+        raise ValueError(f"Unknown search target {target!r}; valid targets: {sorted(_SEARCH_TARGETS)}") from exc
 
 
 def container_key_for_type(memory_type: str) -> ContainerKey:

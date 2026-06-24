@@ -1,5 +1,14 @@
 ## Release History
 
+### Unreleased
+
+#### Other Changes
+* `ai_foundry_endpoint` now accepts a project-scoped Azure AI Foundry URL
+  (`https://<resource>.services.ai.azure.com/api/projects/<name>`) in addition
+  to the account-level inference endpoint. The project path is automatically
+  stripped to the inference base, so callers can paste whichever form the
+  Foundry portal shows them without hitting opaque 404s.
+
 ### 0.1.0b2 (2026-06-03)
 
 #### Bugs Fixed

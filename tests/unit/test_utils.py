@@ -10,6 +10,7 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_embedding_data_type,
     _resolve_full_text_language,
     compute_content_hash,
+    normalize_ai_foundry_endpoint,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
@@ -234,3 +235,65 @@ def test_resolve_full_text_language_defaults(monkeypatch):
 def test_resolve_full_text_language_from_env(monkeypatch):
     monkeypatch.setenv("COSMOS_DB_FULL_TEXT_LANGUAGE", "fr-FR")
     assert _resolve_full_text_language(None) == "fr-FR"
+
+
+# ---------------------------------------------------------------------------
+# normalize_ai_foundry_endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_normalize_ai_foundry_endpoint_passes_through_empty(value):
+    assert normalize_ai_foundry_endpoint(value) == value
+
+
+def test_normalize_ai_foundry_endpoint_strips_project_path():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/api/projects/my-project")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_strips_project_path_with_trailing_slash():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/api/projects/my-project/")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_strips_project_path_with_extra_segments():
+    assert (
+        normalize_ai_foundry_endpoint(
+            "https://my-res.services.ai.azure.com/api/projects/my-project/deployments/x"
+        )
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_base_services_endpoint():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_openai_endpoint():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.openai.azure.com")
+        == "https://my-res.openai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_trims_whitespace_and_trailing_slash():
+    assert (
+        normalize_ai_foundry_endpoint("  https://my-res.services.ai.azure.com/  ")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_is_case_insensitive_on_project_path():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/API/Projects/my-project")
+        == "https://my-res.services.ai.azure.com"
+    )
+

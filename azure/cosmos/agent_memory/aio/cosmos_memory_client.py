@@ -18,6 +18,7 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_distance_function,
     _resolve_embedding_data_type,
     _resolve_full_text_language,
+    _resolve_vector_index_type,
     _validate_connection,
 )
 from azure.cosmos.agent_memory.aio.auto_trigger import maybe_trigger_steps
@@ -263,6 +264,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         full_text_language: Optional[str] = None,
         throughput_mode: Optional[str] = None,
         autoscale_max_ru: Optional[int] = None,
+        vector_index_type: Optional[str] = None,
     ) -> None:
         """Create the Cosmos DB database and memory/counter/lease containers."""
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
@@ -310,6 +312,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 embedding_data_type=_resolve_embedding_data_type(embedding_data_type),
                 distance_function=_resolve_distance_function(distance_function),
                 full_text_language=_resolve_full_text_language(full_text_language),
+                vector_index_type=_resolve_vector_index_type(vector_index_type),
             )
             self._memories_container_client = await db.create_container_if_not_exists(
                 **_build_container_kwargs(

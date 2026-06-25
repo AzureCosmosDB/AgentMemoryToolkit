@@ -290,3 +290,19 @@ def test_normalize_ai_foundry_endpoint_is_case_insensitive_on_project_path():
         normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/API/Projects/my-project")
         == "https://my-res.services.ai.azure.com"
     )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_non_foundry_host_with_project_path():
+    # A non-Foundry host that happens to carry /api/projects/ in its path must be
+    # left untouched (aside from trailing-slash trimming).
+    assert (
+        normalize_ai_foundry_endpoint("https://example.com/api/projects/my-project")
+        == "https://example.com/api/projects/my-project"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_openai_host_with_project_path():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.openai.azure.com/api/projects/my-project")
+        == "https://my-res.openai.azure.com/api/projects/my-project"
+    )

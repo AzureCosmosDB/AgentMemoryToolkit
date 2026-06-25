@@ -219,6 +219,7 @@ def normalize_ai_foundry_endpoint(endpoint: Optional[str]) -> Optional[str]:
 
 _ALLOWED_EMBEDDING_DATA_TYPES = ("float32", "uint8", "int8")
 _ALLOWED_DISTANCE_FUNCTIONS = ("cosine", "dotproduct", "euclidean")
+_ALLOWED_VECTOR_INDEX_TYPES = ("diskANN", "quantizedFlat", "flat")
 
 
 def _resolve_embedding_data_type(val: Optional[str]) -> str:
@@ -251,6 +252,27 @@ def _resolve_distance_function(val: Optional[str]) -> str:
                 f"{_ALLOWED_DISTANCE_FUNCTIONS}, got {raw!r}"
             ),
             parameter="distance_function",
+        )
+    return raw
+
+
+def _resolve_vector_index_type(val: Optional[str]) -> str:
+    """Resolve vector index type from explicit value or ``AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE`` env var.
+
+    Defaults to ``diskANN``. Raises :class:`ConfigurationError` for unknown values.
+
+    ``diskANN`` requires the Cosmos DB account to have the DiskANN vector index
+    capability enabled. Accounts that do not (for example the classic Cosmos DB
+    emulator) can use ``quantizedFlat`` or ``flat`` instead.
+    """
+    raw = (val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE") or "diskANN").strip()
+    if raw not in _ALLOWED_VECTOR_INDEX_TYPES:
+        raise ConfigurationError(
+            message=(
+                f"Invalid configuration for vector_index_type: must be one of "
+                f"{_ALLOWED_VECTOR_INDEX_TYPES}, got {raw!r}"
+            ),
+            parameter="vector_index_type",
         )
     return raw
 
@@ -412,6 +434,7 @@ def _container_policies(
     embedding_data_type: str,
     distance_function: str,
     full_text_language: str,
+    vector_index_type: str = "diskANN",
 ) -> tuple[dict, dict, dict]:
     """Build the vector, indexing, and full-text policies for container creation."""
     vector_embedding_policy = {
@@ -432,7 +455,7 @@ def _container_policies(
             {"path": "/source_memory_ids/*"},
             {"path": "/supersedes_ids/*"},
         ],
-        "vectorIndexes": [{"path": "/embedding", "type": "diskANN"}],
+        "vectorIndexes": [{"path": "/embedding", "type": vector_index_type}],
         "fullTextIndexes": [{"path": "/content"}],
         # Procedural synthesis selects TOP N by (salience DESC, created_at ASC, id ASC).
         # Cosmos requires a composite index for multi-property ORDER BY; without it the

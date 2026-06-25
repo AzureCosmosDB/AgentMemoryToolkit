@@ -3,6 +3,13 @@
 ### Unreleased
 
 #### Other Changes
+* The memories container's vector index type is now configurable instead of being
+  hard-coded to `diskANN`. Set it via the `vector_index_type` argument to
+  `create_memory_store(...)` or the `AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE`
+  environment variable. Allowed values are `diskANN` (default), `quantizedFlat`,
+  and `flat`. This lets the toolkit run against Cosmos DB accounts without the
+  DiskANN capability (for example the classic Cosmos DB emulator), enabling
+  emulator-backed integration test pipelines.
 * `ai_foundry_endpoint` now accepts a project-scoped Azure AI Foundry URL
   (`https://<resource>.services.ai.azure.com/api/projects/<name>`) in addition
   to the account-level inference endpoint. The project path is automatically

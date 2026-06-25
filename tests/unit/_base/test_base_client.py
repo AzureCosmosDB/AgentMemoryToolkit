@@ -67,9 +67,7 @@ def test_base_config_validates_throughput_mode():
 
 
 def test_base_config_normalizes_ai_foundry_project_endpoint():
-    client = DummyClient(
-        ai_foundry_endpoint="https://my-res.services.ai.azure.com/api/projects/my-project"
-    )
+    client = DummyClient(ai_foundry_endpoint="https://my-res.services.ai.azure.com/api/projects/my-project")
     assert client._ai_foundry_endpoint == "https://my-res.services.ai.azure.com"
 
 

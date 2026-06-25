@@ -263,25 +263,19 @@ def test_normalize_ai_foundry_endpoint_strips_project_path_with_trailing_slash()
 
 def test_normalize_ai_foundry_endpoint_strips_project_path_with_extra_segments():
     assert (
-        normalize_ai_foundry_endpoint(
-            "https://my-res.services.ai.azure.com/api/projects/my-project/deployments/x"
-        )
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/api/projects/my-project/deployments/x")
         == "https://my-res.services.ai.azure.com"
     )
 
 
 def test_normalize_ai_foundry_endpoint_leaves_base_services_endpoint():
     assert (
-        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com")
-        == "https://my-res.services.ai.azure.com"
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com") == "https://my-res.services.ai.azure.com"
     )
 
 
 def test_normalize_ai_foundry_endpoint_leaves_openai_endpoint():
-    assert (
-        normalize_ai_foundry_endpoint("https://my-res.openai.azure.com")
-        == "https://my-res.openai.azure.com"
-    )
+    assert normalize_ai_foundry_endpoint("https://my-res.openai.azure.com") == "https://my-res.openai.azure.com"
 
 
 def test_normalize_ai_foundry_endpoint_trims_whitespace_and_trailing_slash():
@@ -296,4 +290,3 @@ def test_normalize_ai_foundry_endpoint_is_case_insensitive_on_project_path():
         normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/API/Projects/my-project")
         == "https://my-res.services.ai.azure.com"
     )
-

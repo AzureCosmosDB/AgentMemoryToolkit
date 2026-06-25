@@ -427,7 +427,7 @@ class TestCreateMemoryStore:
         assert turns_call.kwargs["id"] == "memories_turns"
         assert turns_call.kwargs["default_ttl"] == 2_592_000
         # The turns container is always provisioned with a vector index + full-text
-        # policy so it is primed for search(target="turns") even when turn
+        # policy so it is primed for search_turns() even when turn
         # embeddings are disabled. Vector indexes use quantizedFlat.
         assert "vector_embedding_policy" in turns_call.kwargs
         assert "full_text_policy" in turns_call.kwargs
@@ -814,6 +814,22 @@ class TestSearchCosmos:
         query = call_kwargs["query"]
         assert "RANK RRF" in query
         assert "FullTextScore" in query
+
+    def test_search_turns(self):
+        mem, container = _connected_client()
+        turns = mem._turns_container_client
+        turns.query_items.return_value = [_make_doc()]
+
+        mem._embeddings_client = MagicMock()
+        mem._embeddings_client.generate.return_value = [0.1, 0.2, 0.3]
+
+        result = mem.search_turns(search_terms="weather", user_id="u1", thread_id="t1", top_k=3)
+
+        mem._embeddings_client.generate.assert_called_once_with("weather")
+        turns.query_items.assert_called_once()
+        container.query_items.assert_not_called()
+        assert "VectorDistance" in turns.query_items.call_args.kwargs["query"]
+        assert len(result) == 1
 
     def test_search_not_connected(self):
         mem = _make_client()

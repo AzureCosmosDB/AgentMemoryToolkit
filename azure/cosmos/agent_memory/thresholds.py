@@ -153,7 +153,7 @@ def get_enable_turn_embeddings() -> bool:
     """Whether raw turns are embedded on write and made vector-searchable.
 
     Set ``ENABLE_TURN_EMBEDDINGS=true`` to generate embeddings for ``turn``
-    documents (so ``search(target="turns")`` returns ranked turns). Default
+    documents (so ``search_turns()`` returns ranked turns). Default
     ``False`` keeps turns un-embedded. The turns container always carries the
     vector index, so enabling this never requires recreating the container.
     """

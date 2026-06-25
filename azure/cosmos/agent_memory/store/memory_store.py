@@ -10,7 +10,6 @@ from azure.cosmos.agent_memory._container_routing import (
     USER_SCOPED_MEMORIES_TYPES,
     ContainerKey,
     container_key_for_type,
-    resolve_search_target,
 )
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
@@ -834,15 +833,12 @@ class MemoryStore:
         created_before: Optional[str | datetime] = None,
         *,
         query: Optional[str] = None,
-        target: str = "memories",
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity with optional full-text hybrid ranking.
 
-        ``target`` selects the container to search: ``"memories"`` (default) for
-        facts/episodic/procedural, or ``"turns"`` for the raw conversation log
-        (requires turn embeddings to have been enabled when the turns were written).
+        Searches the derived memories container (facts/episodic/procedural). Use
+        :meth:`search_turns` to vector-search the raw conversation log instead.
         """
-        container_key = resolve_search_target(target)
         terms = require_search_terms(search_terms, query)
         _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
@@ -873,17 +869,68 @@ class MemoryStore:
             parameters.append({"name": "@key_terms", "value": terms})
 
         partition_key, cross_partition = query_scope(user_id, thread_id)
-        if (
-            container_key == ContainerKey.MEMORIES
-            and thread_id is not None
-            and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES)
-        ):
+        if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
             partition_key, cross_partition = None, True
         logger.debug("MemoryStore.search query: %s", sql)
         return self.query(
             sql,
             parameters,
-            container_key=container_key,
+            container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
+            cross_partition=cross_partition,
+        )
+
+    def search_turns(
+        self,
+        search_terms: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        role: Optional[str] = None,
+        hybrid_search: bool = False,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        *,
+        query: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Search raw conversation turns using vector similarity with optional hybrid ranking.
+
+        Turns are strictly thread-scoped and only vector-searchable when turn
+        embeddings were enabled at write time (see ``enable_turn_embeddings``).
+        """
+        terms = require_search_terms(search_terms, query)
+        _validate_hybrid_search(hybrid_search, terms)
+        top = top_literal(top_k, name="top_k")
+        query_vector = self._embed(terms)
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_filter("c.role", "@role", role)
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
+
+        sql = build_search_sql(qb=qb, top=top, hybrid_search=hybrid_search, include_superseded=False)
+        parameters = qb.get_parameters()
+        parameters.append({"name": "@embedding", "value": query_vector})
+        if hybrid_search:
+            parameters.append({"name": "@key_terms", "value": terms})
+
+        partition_key, cross_partition = query_scope(user_id, thread_id)
+        logger.debug("MemoryStore.search_turns query: %s", sql)
+        return self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.TURNS,
             partition_key=partition_key,
             cross_partition=cross_partition,
         )

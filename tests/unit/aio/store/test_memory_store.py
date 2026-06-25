@@ -519,7 +519,7 @@ async def test_push_embeds_turns_when_enabled():
     assert body["embedding"] == [0.1, 0.2]
 
 
-async def test_search_target_turns_queries_turns_container():
+async def test_search_turns_queries_turns_container():
     turns = MagicMock()
     turns.query_items.return_value = AsyncIterator([])
     memories = MagicMock()
@@ -531,14 +531,28 @@ async def test_search_target_turns_queries_turns_container():
         embeddings_client=embeddings,
     )
 
-    await store.search(search_terms="hello", user_id="u1", thread_id="t1", target="turns")
+    await store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
 
     turns.query_items.assert_called_once()
     memories.query_items.assert_not_called()
+    sql = turns.query_items.call_args.kwargs["query"]
+    assert "VectorDistance(c.embedding, @embedding)" in sql
 
 
-async def test_search_invalid_target_raises():
-    store = AsyncMemoryStore(containers=_containers())
+async def test_search_does_not_query_turns_container():
+    turns = MagicMock()
+    turns.query_items.return_value = AsyncIterator([])
+    memories = MagicMock()
+    memories.query_items.return_value = AsyncIterator([])
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(
+        containers=_containers(turns=turns, memories=memories),
+        embeddings_client=embeddings,
+    )
 
-    with pytest.raises(ValueError):
-        await store.search(search_terms="hello", user_id="u1", target="bogus")
+    await store.search(search_terms="hello", user_id="u1", thread_id="t1")
+
+    memories.query_items.assert_called_once()
+    turns.query_items.assert_not_called()
+

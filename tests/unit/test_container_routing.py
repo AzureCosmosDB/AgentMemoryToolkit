@@ -15,7 +15,6 @@ from azure.cosmos.agent_memory._container_routing import (
     ContainerKey,
     container_key_for_type,
     container_keys_for_types,
-    resolve_search_target,
 )
 from azure.cosmos.agent_memory._utils import VALID_TYPES
 
@@ -111,16 +110,3 @@ class TestContainerKeysForTypes:
         assert container_keys_for_types(["thread_summary", "user_summary"]) == [
             ContainerKey.SUMMARIES,
         ]
-
-
-class TestResolveSearchTarget:
-    def test_memories_target_routes_to_memories_container(self) -> None:
-        assert resolve_search_target("memories") is ContainerKey.MEMORIES
-
-    def test_turns_target_routes_to_turns_container(self) -> None:
-        assert resolve_search_target("turns") is ContainerKey.TURNS
-
-    def test_unknown_target_raises_value_error(self) -> None:
-        with pytest.raises(ValueError) as exc_info:
-            resolve_search_target("summaries")
-        assert "summaries" in str(exc_info.value)

@@ -666,7 +666,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         min_confidence: Optional[float] = None,
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
-        target: str = "memories",
     ) -> list[dict[str, Any]]:
         return await self._get_store().search(
             search_terms=search_terms,
@@ -685,7 +684,40 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             min_confidence=min_confidence,
             created_after=created_after,
             created_before=created_before,
-            target=target,
+        )
+
+    async def search_turns(
+        self,
+        search_terms: str,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        role: Optional[str] = None,
+        hybrid_search: bool = False,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Vector-search the raw conversation log (requires turn embeddings).
+
+        Searches the turns container directly. Turns are strictly thread-scoped
+        and only vector-searchable when ``enable_turn_embeddings`` was set when
+        the turns were written.
+        """
+        return await self._get_store().search_turns(
+            search_terms=search_terms,
+            user_id=user_id,
+            thread_id=thread_id,
+            role=role,
+            hybrid_search=hybrid_search,
+            top_k=top_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     async def get_thread(

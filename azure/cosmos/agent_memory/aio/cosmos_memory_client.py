@@ -261,10 +261,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         embedding_dimensions: Optional[int] = None,
         embedding_data_type: Optional[str] = None,
         distance_function: Optional[str] = None,
-        vector_index_type: Optional[str] = None,
         full_text_language: Optional[str] = None,
         throughput_mode: Optional[str] = None,
         autoscale_max_ru: Optional[int] = None,
+        vector_index_type: Optional[str] = None,
     ) -> None:
         """Create the Cosmos DB database and memory/counter/lease containers."""
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint

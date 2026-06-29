@@ -266,7 +266,9 @@ def _resolve_vector_index_type(val: Optional[str]) -> str:
     emulator). ``diskANN`` requires the Cosmos DB account to have the DiskANN
     vector index capability enabled; opt into it explicitly when available.
     """
-    raw = (val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE") or "quantizedFlat").strip()
+    raw = (
+        val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE") or "quantizedFlat"
+    ).strip()
     if raw not in _ALLOWED_VECTOR_INDEX_TYPES:
         raise ConfigurationError(
             message=(

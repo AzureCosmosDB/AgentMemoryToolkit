@@ -5,11 +5,14 @@ import pytest
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     _build_container_kwargs,
+    _container_policies,
     _make_memory,
     _resolve_distance_function,
     _resolve_embedding_data_type,
     _resolve_full_text_language,
+    _resolve_vector_index_type,
     compute_content_hash,
+    normalize_ai_foundry_endpoint,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
@@ -226,6 +229,48 @@ def test_resolve_distance_function_invalid_raises(monkeypatch):
         _resolve_distance_function(None)
 
 
+def test_resolve_vector_index_type_defaults(monkeypatch):
+    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", raising=False)
+    assert _resolve_vector_index_type(None) == "diskANN"
+
+
+def test_resolve_vector_index_type_from_env(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", "quantizedFlat")
+    assert _resolve_vector_index_type(None) == "quantizedFlat"
+
+
+def test_resolve_vector_index_type_explicit_overrides_env(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", "quantizedFlat")
+    assert _resolve_vector_index_type("flat") == "flat"
+
+
+def test_resolve_vector_index_type_invalid_raises(monkeypatch):
+    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", "hnsw")
+    with pytest.raises(ConfigurationError):
+        _resolve_vector_index_type(None)
+
+
+def test_container_policies_defaults_to_diskann():
+    _, indexing_policy, _ = _container_policies(
+        embedding_dimensions=1536,
+        embedding_data_type="float32",
+        distance_function="cosine",
+        full_text_language="en-US",
+    )
+    assert indexing_policy["vectorIndexes"] == [{"path": "/embedding", "type": "diskANN"}]
+
+
+def test_container_policies_uses_supplied_vector_index_type():
+    _, indexing_policy, _ = _container_policies(
+        embedding_dimensions=1536,
+        embedding_data_type="float32",
+        distance_function="cosine",
+        full_text_language="en-US",
+        vector_index_type="quantizedFlat",
+    )
+    assert indexing_policy["vectorIndexes"] == [{"path": "/embedding", "type": "quantizedFlat"}]
+
+
 def test_resolve_full_text_language_defaults(monkeypatch):
     monkeypatch.delenv("COSMOS_DB_FULL_TEXT_LANGUAGE", raising=False)
     assert _resolve_full_text_language(None) == "en-US"
@@ -234,3 +279,74 @@ def test_resolve_full_text_language_defaults(monkeypatch):
 def test_resolve_full_text_language_from_env(monkeypatch):
     monkeypatch.setenv("COSMOS_DB_FULL_TEXT_LANGUAGE", "fr-FR")
     assert _resolve_full_text_language(None) == "fr-FR"
+
+
+# ---------------------------------------------------------------------------
+# normalize_ai_foundry_endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_normalize_ai_foundry_endpoint_passes_through_empty(value):
+    assert normalize_ai_foundry_endpoint(value) == value
+
+
+def test_normalize_ai_foundry_endpoint_strips_project_path():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/api/projects/my-project")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_strips_project_path_with_trailing_slash():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/api/projects/my-project/")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_strips_project_path_with_extra_segments():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/api/projects/my-project/deployments/x")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_base_services_endpoint():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com") == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_openai_endpoint():
+    assert normalize_ai_foundry_endpoint("https://my-res.openai.azure.com") == "https://my-res.openai.azure.com"
+
+
+def test_normalize_ai_foundry_endpoint_trims_whitespace_and_trailing_slash():
+    assert (
+        normalize_ai_foundry_endpoint("  https://my-res.services.ai.azure.com/  ")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_is_case_insensitive_on_project_path():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.services.ai.azure.com/API/Projects/my-project")
+        == "https://my-res.services.ai.azure.com"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_non_foundry_host_with_project_path():
+    # A non-Foundry host that happens to carry /api/projects/ in its path must be
+    # left untouched (aside from trailing-slash trimming).
+    assert (
+        normalize_ai_foundry_endpoint("https://example.com/api/projects/my-project")
+        == "https://example.com/api/projects/my-project"
+    )
+
+
+def test_normalize_ai_foundry_endpoint_leaves_openai_host_with_project_path():
+    assert (
+        normalize_ai_foundry_endpoint("https://my-res.openai.azure.com/api/projects/my-project")
+        == "https://my-res.openai.azure.com/api/projects/my-project"
+    )

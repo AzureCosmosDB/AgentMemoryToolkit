@@ -19,6 +19,7 @@ from ._utils import (
     _resolve_distance_function,
     _resolve_embedding_data_type,
     _resolve_full_text_language,
+    _resolve_vector_index_type,
     _validate_connection,
 )
 from .auto_trigger import maybe_trigger_steps
@@ -225,6 +226,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         full_text_language: Optional[str] = None,
         throughput_mode: Optional[str] = None,
         autoscale_max_ru: Optional[int] = None,
+        vector_index_type: Optional[str] = None,
     ) -> None:
         """Create the Cosmos DB database and memory/counter/lease containers."""
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
@@ -271,6 +273,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 embedding_data_type=_resolve_embedding_data_type(embedding_data_type),
                 distance_function=_resolve_distance_function(distance_function),
                 full_text_language=_resolve_full_text_language(full_text_language),
+                vector_index_type=_resolve_vector_index_type(vector_index_type),
             )
             vec_policy, idx_policy, ft_policy = _container_policies(**_policy_kwargs)
             # Turns always carry the vector index (primed for search) but skip the

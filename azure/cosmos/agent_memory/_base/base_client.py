@@ -14,6 +14,7 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_cosmos_provisioning_autoscale_max_ru,
     _resolve_cosmos_throughput_mode,
     _resolve_embedding_dimensions,
+    normalize_ai_foundry_endpoint,
 )
 from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
 from azure.cosmos.agent_memory.logging import configure_logging, get_logger
@@ -71,7 +72,7 @@ class _BaseMemoryClient:
             autoscale_max_ru=cosmos_autoscale_max_ru,
         )
 
-        self._ai_foundry_endpoint = ai_foundry_endpoint
+        self._ai_foundry_endpoint = normalize_ai_foundry_endpoint(ai_foundry_endpoint)
         self._ai_foundry_credential = ai_foundry_credential
         self._ai_foundry_api_key = ai_foundry_api_key
         self._embedding_deployment_name = embedding_deployment_name

@@ -12,6 +12,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from ._container_routing import USER_SCOPED_MEMORIES_TYPES
 from ._query_builder import _QueryBuilder
@@ -174,8 +175,52 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> int:
     return parsed
 
 
+_AI_FOUNDRY_PROJECT_PATH_RE = re.compile(r"/api/projects/[^/]+/?.*$", re.IGNORECASE)
+_AI_FOUNDRY_HOST_SUFFIX = ".services.ai.azure.com"
+
+
+def normalize_ai_foundry_endpoint(endpoint: Optional[str]) -> Optional[str]:
+    """Normalize an AI Foundry / Azure OpenAI endpoint to the inference base URL.
+
+    The toolkit reaches the model inference API through the OpenAI SDK
+    (``AzureOpenAI(azure_endpoint=...)``), which expects the account-level
+    inference endpoint, for example::
+
+        https://<resource>.services.ai.azure.com
+        https://<resource>.openai.azure.com
+
+    The Azure AI Foundry portal, however, commonly surfaces a *project*-scoped
+    endpoint of the form::
+
+        https://<resource>.services.ai.azure.com/api/projects/<project-name>
+
+    For ``*.services.ai.azure.com`` resources the project path lives on the same
+    host that serves inference, so this helper strips a trailing
+    ``/api/projects/<name>`` segment (plus any surrounding whitespace or trailing
+    slash) to recover the base inference endpoint. Callers can therefore paste
+    either form.
+
+    The project-path stripping is applied **only** when the URL host ends with
+    ``.services.ai.azure.com``, and only to the path component, so unrelated
+    endpoints that happen to contain ``/api/projects/...`` in their path are left
+    untouched. Endpoints that don't carry a project path are returned unchanged
+    aside from whitespace/trailing-slash trimming, so non-Foundry endpoints keep
+    working. ``None``/empty values are passed through untouched.
+    """
+    if not endpoint:
+        return endpoint
+    trimmed = endpoint.strip()
+    parts = urlsplit(trimmed)
+    host = parts.hostname or ""
+    if host.lower().endswith(_AI_FOUNDRY_HOST_SUFFIX):
+        new_path = _AI_FOUNDRY_PROJECT_PATH_RE.sub("", parts.path)
+        trimmed = urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
+    return trimmed.rstrip("/")
+
+
 _ALLOWED_EMBEDDING_DATA_TYPES = ("float32", "uint8", "int8")
 _ALLOWED_DISTANCE_FUNCTIONS = ("cosine", "dotproduct", "euclidean")
+_ALLOWED_VECTOR_INDEX_TYPES = ("diskANN", "quantizedFlat", "flat")
 
 
 def _resolve_embedding_data_type(val: Optional[str]) -> str:
@@ -208,6 +253,27 @@ def _resolve_distance_function(val: Optional[str]) -> str:
                 f"{_ALLOWED_DISTANCE_FUNCTIONS}, got {raw!r}"
             ),
             parameter="distance_function",
+        )
+    return raw
+
+
+def _resolve_vector_index_type(val: Optional[str]) -> str:
+    """Resolve vector index type from explicit value or ``AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE`` env var.
+
+    Defaults to ``diskANN``. Raises :class:`ConfigurationError` for unknown values.
+
+    ``diskANN`` requires the Cosmos DB account to have the DiskANN vector index
+    capability enabled. Accounts that do not (for example the classic Cosmos DB
+    emulator) can use ``quantizedFlat`` or ``flat`` instead.
+    """
+    raw = (val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE") or "diskANN").strip()
+    if raw not in _ALLOWED_VECTOR_INDEX_TYPES:
+        raise ConfigurationError(
+            message=(
+                f"Invalid configuration for vector_index_type: must be one of "
+                f"{_ALLOWED_VECTOR_INDEX_TYPES}, got {raw!r}"
+            ),
+            parameter="vector_index_type",
         )
     return raw
 
@@ -370,6 +436,7 @@ def _container_policies(
     distance_function: str,
     full_text_language: str,
     include_salience_composite: bool = True,
+    vector_index_type: str = "diskANN",
 ) -> tuple[dict, dict, dict]:
     """Build the vector, indexing, and full-text policies for container creation.
 
@@ -395,7 +462,7 @@ def _container_policies(
             {"path": "/supersedes_ids/*"},
             {"path": '/"_etag"/?'},
         ],
-        "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}],
+        "vectorIndexes": [{"path": "/embedding", "type": vector_index_type}],
         "fullTextIndexes": [{"path": "/content"}],
     }
 

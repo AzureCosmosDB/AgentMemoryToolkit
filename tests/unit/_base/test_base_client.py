@@ -66,6 +66,16 @@ def test_base_config_validates_throughput_mode():
         DummyClient(cosmos_throughput_mode="invalid")
 
 
+def test_base_config_normalizes_ai_foundry_project_endpoint():
+    client = DummyClient(ai_foundry_endpoint="https://my-res.services.ai.azure.com/api/projects/my-project")
+    assert client._ai_foundry_endpoint == "https://my-res.services.ai.azure.com"
+
+
+def test_base_config_leaves_plain_ai_foundry_endpoint_untouched():
+    client = DummyClient(ai_foundry_endpoint="https://my-res.services.ai.azure.com")
+    assert client._ai_foundry_endpoint == "https://my-res.services.ai.azure.com"
+
+
 def test_require_cosmos_guard_and_context_manager():
     client = DummyClient()
 

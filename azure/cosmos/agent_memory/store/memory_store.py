@@ -922,7 +922,7 @@ class MemoryStore:
         filters the results. When ``thread_id`` is also supplied the query
         targets a single partition; when it is omitted the query fans out
         across partitions and is filtered by ``user_id`` in the WHERE clause.
-        
+
         """
         if not user_id:
             raise ValidationError("user_id is required for search_turns")

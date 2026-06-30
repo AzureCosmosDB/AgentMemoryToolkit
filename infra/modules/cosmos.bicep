@@ -263,9 +263,6 @@ resource memoriesSummariesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDa
         ]
         excludedPaths: [
           {
-            path: '/embedding/?'
-          }
-          {
             path: '/source_memory_ids/*'
           }
           {

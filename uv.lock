@@ -3,50 +3,6 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "agent-memory-toolkit"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "azure-cosmos" },
-    { name = "azure-identity" },
-    { name = "jinja2" },
-    { name = "openai" },
-    { name = "prompty" },
-    { name = "pydantic" },
-    { name = "typing-extensions" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-mock" },
-    { name = "python-dotenv" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.10" },
-    { name = "azure-cosmos", specifier = ">=4.16.0" },
-    { name = "azure-identity", specifier = ">=1.20" },
-    { name = "jinja2", specifier = ">=3.1.4" },
-    { name = "openai", specifier = ">=1.60" },
-    { name = "prompty", specifier = ">=2.0.0a9" },
-    { name = "pydantic", specifier = ">=2.10" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
-    { name = "python-dotenv", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "typing-extensions", specifier = ">=4.10" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -235,6 +191,50 @@ sdist = { url = "https://files.pythonhosted.org/packages/ad/98/bf5ed6dddef8e0938
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/11/1af403b5a1d18a4fca2d720239632c46d7dfbd7597711fbd84dd2a6e6872/azure_cosmos-4.16.0-py3-none-any.whl", hash = "sha256:09227ff057c83344798f6faba8b649a13f71582d4acf6e2f5a3ada9c06e2923c", size = 494932, upload-time = "2026-05-29T17:44:16.036Z" },
 ]
+
+[[package]]
+name = "azure-cosmos-agent-memory"
+version = "0.2.0b1"
+source = { editable = "." }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "azure-cosmos" },
+    { name = "azure-identity" },
+    { name = "jinja2" },
+    { name = "openai" },
+    { name = "prompty" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-mock" },
+    { name = "python-dotenv" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10" },
+    { name = "azure-cosmos", specifier = ">=4.16.0" },
+    { name = "azure-identity", specifier = ">=1.20" },
+    { name = "jinja2", specifier = ">=3.1.4" },
+    { name = "openai", specifier = ">=1.60" },
+    { name = "prompty", specifier = ">=2.0.0a9" },
+    { name = "pydantic", specifier = ">=2.10" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
+    { name = "python-dotenv", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "typing-extensions", specifier = ">=4.10" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "azure-identity"

@@ -25,6 +25,7 @@ from azure.cosmos.agent_memory.exceptions import (
     MemoryConflictError,
     MemoryNotFoundError,
     MemoryTypeMismatchError,
+    ValidationError,
 )
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.models import MemoryRecord
@@ -901,6 +902,7 @@ class MemoryStore:
     def search_turns(
         self,
         search_terms: Optional[str] = None,
+        user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
         hybrid_search: bool = False,
@@ -911,16 +913,19 @@ class MemoryStore:
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
         *,
-        user_id: str,
         query: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Search raw conversation turns using vector similarity with optional hybrid ranking.
 
-        Turns are strictly thread-scoped and only vector-searchable when turn
-        embeddings were enabled at write time (see ``enable_turn_embeddings``).
-        ``user_id`` is required so the query is scoped to a single partition
-        instead of a cross-partition scan over every user's raw turns.
+        Only vector-searchable when turn embeddings were enabled at write time
+        (see ``enable_turn_embeddings``). ``user_id`` is required and always
+        filters the results. When ``thread_id`` is also supplied the query
+        targets a single partition; when it is omitted the query fans out
+        across partitions and is filtered by ``user_id`` in the WHERE clause.
+        
         """
+        if not user_id:
+            raise ValidationError("user_id is required for search_turns")
         terms = require_search_terms(search_terms, query)
         _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")

@@ -709,11 +709,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     ) -> list[dict[str, Any]]:
         """Vector-search the raw conversation log (requires turn embeddings).
 
-        Searches the turns container directly. Turns are strictly thread-scoped
-        and only vector-searchable when ``enable_turn_embeddings`` was set when
-        the turns were written. ``user_id`` is required so the search stays
-        within a single partition rather than fanning out across every user's
-        raw turns.
+        Searches the turns container directly. Only vector-searchable when
+        ``enable_turn_embeddings`` was set when the turns were written.
+        ``user_id`` is required and always filters the results. Passing
+        ``thread_id`` as well scopes the search to a single partition; omitting
+        it fans out across partitions, filtered by ``user_id`` in the WHERE
+        clause.
         """
         return await self._get_store().search_turns(
             search_terms=search_terms,

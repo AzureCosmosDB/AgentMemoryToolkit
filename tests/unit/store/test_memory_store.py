@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
-from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
+from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, MemoryTypeMismatchError, ValidationError
 from azure.cosmos.agent_memory.store import MemoryStore
 
 
@@ -537,6 +537,54 @@ def test_search_turns_queries_turns_container():
     memories.query_items.assert_not_called()
     sql = turns.query_items.call_args.kwargs["query"]
     assert "VectorDistance(c.embedding, @embedding)" in sql
+
+
+def test_search_turns_scopes_to_single_partition_with_thread_id():
+    turns = MagicMock()
+    turns.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+    )
+
+    store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
+
+    kwargs = turns.query_items.call_args.kwargs
+    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert "enable_cross_partition_query" not in kwargs
+
+
+def test_search_turns_fans_out_across_partitions_without_thread_id():
+    turns = MagicMock()
+    turns.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+    )
+
+    store.search_turns(search_terms="hello", user_id="u1")
+
+    kwargs = turns.query_items.call_args.kwargs
+    assert "partition_key" not in kwargs
+    assert kwargs["enable_cross_partition_query"] is True
+
+
+def test_search_turns_requires_user_id():
+    turns = MagicMock()
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+    )
+
+    with pytest.raises(ValidationError):
+        store.search_turns(search_terms="hello", user_id=None)
+    turns.query_items.assert_not_called()
 
 
 def test_search_does_not_query_turns_container():

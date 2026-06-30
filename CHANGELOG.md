@@ -1,22 +1,24 @@
 ## Release History
 
-### Unreleased
+## [0.2.0b1] (2026-06-30)
+
+#### Features Added
+* Raw conversation turns can now be embedded and vector-searched. Set
+  `enable_turn_embeddings=True` (env `ENABLE_TURN_EMBEDDINGS`) to generate an
+  embedding when each turn is written, then call `search_turns()` (sync and
+  async, on both the client and store) to semantically search the raw turn
+  log. See [PR:#22](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/22/)
 
 #### Other Changes
 * The memories container's vector index type is now configurable instead of being
   hard-coded to `diskANN`. Set it via the `vector_index_type` argument to
   `create_memory_store(...)` or the `AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE`
-  environment variable. Allowed values are `diskANN` (default), `quantizedFlat`,
-  and `flat`. This lets the toolkit run against Cosmos DB accounts without the
-  DiskANN capability (for example the classic Cosmos DB emulator), enabling
-  emulator-backed integration test pipelines.
+  environment variable. See [PR:#24](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/24)
 * `ai_foundry_endpoint` now accepts a project-scoped Azure AI Foundry URL
   (`https://<resource>.services.ai.azure.com/api/projects/<name>`) in addition
-  to the account-level inference endpoint. The project path is automatically
-  stripped to the inference base, so callers can paste whichever form the
-  Foundry portal shows them without hitting opaque 404s.
+  to the account-level inference endpoint. See [PR:#23](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/23)
 
-### 0.1.0b2 (2026-06-03)
+## [0.1.0b2] (2026-06-03)
 
 #### Bugs Fixed
 * Hardened memory extraction: stops emitting phantom/synthesized facts the user never asserted, stops extracting facts from `[assistant]:` turns, stops re-processing already-extracted turns (which previously produced reversed `CONTRADICT` decisions and meta-facts like `"X is contradicted by Y"`), and stops storing near-duplicate episodic memories for the same scope. Episodic memories also now embed the actual content instead of a boilerplate `"intent recorded"` string. See [PR:#20](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/20/)

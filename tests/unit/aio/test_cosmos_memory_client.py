@@ -106,6 +106,70 @@ class TestConstructor:
 
 
 # ===================================================================
+# Injected embeddings / chat clients
+# ===================================================================
+
+
+class _FakeEmbeddings:
+    """Minimal stand-in for AsyncEmbeddingsClient used to verify injection."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeChat:
+    """Minimal stand-in for AsyncChatClient used to verify injection."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class TestInjectedModelClients:
+    def test_injected_clients_are_used_and_not_owned(self):
+        emb = _FakeEmbeddings()
+        chat = _FakeChat()
+        mem = _make_client(embeddings_client=emb, chat_client=chat)
+
+        assert mem._embeddings_client is emb
+        assert mem._chat_client is chat
+        assert mem._owns_embeddings_client is False
+        assert mem._owns_chat_client is False
+
+    def test_default_clients_are_built_and_owned(self):
+        mem = _make_client()
+
+        assert mem._embeddings_client is not None
+        assert mem._chat_client is not None
+        assert mem._owns_embeddings_client is True
+        assert mem._owns_chat_client is True
+
+    def test_clients_can_be_injected_independently(self):
+        emb = _FakeEmbeddings()
+        mem = _make_client(embeddings_client=emb)
+
+        assert mem._embeddings_client is emb
+        assert mem._owns_embeddings_client is False
+        # Chat client was not injected, so the toolkit builds and owns it.
+        assert mem._owns_chat_client is True
+
+    async def test_close_does_not_close_injected_clients(self):
+        emb = _FakeEmbeddings()
+        chat = _FakeChat()
+        mem = _make_client(embeddings_client=emb, chat_client=chat)
+
+        await mem.close()
+
+        assert emb.closed is False
+        assert chat.closed is False
+
+
+# ===================================================================
 # Local CRUD (synchronous)
 # ===================================================================
 

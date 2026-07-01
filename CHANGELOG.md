@@ -24,6 +24,13 @@
   queries. The `hybrid_search` flag has been removed — hybrid ranking is the
   default and requires no opt-in. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
+## [0.2.0b2] (2026-07-01)
+
+#### Features Added
+* Embeddings and chat clients can now be injected via the new `embeddings_client`
+  and `chat_client` constructor arguments on `CosmosMemoryClient` and
+  `AsyncCosmosMemoryClient`. See [PR:#27](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/27)
+
 ## [0.2.0b1] (2026-06-30)
 
 #### Features Added

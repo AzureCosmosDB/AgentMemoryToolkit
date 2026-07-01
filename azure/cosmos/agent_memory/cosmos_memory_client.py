@@ -81,6 +81,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
         enable_turn_embeddings: Optional[bool] = None,
+        embeddings_client: Optional[Any] = None,
+        chat_client: Optional[Any] = None,
         processor: Optional[MemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
     ) -> None:
@@ -105,19 +107,33 @@ class CosmosMemoryClient(_BaseMemoryClient):
             use_default_credential=use_default_credential,
             enable_turn_embeddings=enable_turn_embeddings,
         )
-        self._embeddings_client = EmbeddingsClient(
-            endpoint=self._ai_foundry_endpoint,
-            credential=self._ai_foundry_credential,
-            api_key=self._ai_foundry_api_key,
-            model=self._embedding_deployment_name,
-            dimensions=self._embedding_dimensions,
-        )
-        self._chat_client = ChatClient(
-            endpoint=self._ai_foundry_endpoint,
-            credential=self._ai_foundry_credential,
-            api_key=self._ai_foundry_api_key,
-            model=self._chat_deployment_name,
-        )
+        # Embeddings/chat clients may be injected (e.g. an OpenAI-compatible backend, a
+        # caller-configured client, or a deterministic fake for offline tests). When a client
+        # is injected the caller owns its lifecycle, so the toolkit does not close it; otherwise
+        # the toolkit builds the Azure-backed client and closes it in ``close()``.
+        if embeddings_client is not None:
+            self._embeddings_client = embeddings_client
+            self._owns_embeddings_client = False
+        else:
+            self._embeddings_client = EmbeddingsClient(
+                endpoint=self._ai_foundry_endpoint,
+                credential=self._ai_foundry_credential,
+                api_key=self._ai_foundry_api_key,
+                model=self._embedding_deployment_name,
+                dimensions=self._embedding_dimensions,
+            )
+            self._owns_embeddings_client = True
+        if chat_client is not None:
+            self._chat_client = chat_client
+            self._owns_chat_client = False
+        else:
+            self._chat_client = ChatClient(
+                endpoint=self._ai_foundry_endpoint,
+                credential=self._ai_foundry_credential,
+                api_key=self._ai_foundry_api_key,
+                model=self._chat_deployment_name,
+            )
+            self._owns_chat_client = True
         self._pipeline: Optional[PipelineService] = None
         self._processor: Optional[MemoryProcessor] = processor
         self._processor_explicit = processor is not None
@@ -146,8 +162,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
         if self._processor is not None and not self._processor_explicit:
             self._close_sync_closeable(self._processor)
             self._processor = None
-        self._close_sync_closeable(self._chat_client)
-        self._close_sync_closeable(self._embeddings_client)
+        if self._owns_chat_client:
+            self._close_sync_closeable(self._chat_client)
+        if self._owns_embeddings_client:
+            self._close_sync_closeable(self._embeddings_client)
         for owns, cred in (
             (self._owns_cosmos_credential, self._cosmos_credential),
             (self._owns_ai_foundry_credential, self._ai_foundry_credential),

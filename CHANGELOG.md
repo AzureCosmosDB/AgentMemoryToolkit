@@ -1,5 +1,17 @@
 ## Release History
 
+## [Unreleased]
+
+#### Features Added
+* Embeddings and chat clients can now be injected via the new `embeddings_client`
+  and `chat_client` constructor arguments on `CosmosMemoryClient` and
+  `AsyncCosmosMemoryClient`. When supplied, the toolkit uses the provided client
+  instead of building an Azure-backed one, and does not close it (the caller owns
+  its lifecycle, mirroring the existing credential-ownership behavior). This enables
+  OpenAI-compatible / self-hosted embedding and chat backends, reuse of a
+  caller-configured client, and deterministic offline testing (for example against
+  the Cosmos DB emulator).
+
 ## [0.2.0b1] (2026-06-30)
 
 #### Features Added

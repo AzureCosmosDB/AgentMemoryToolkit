@@ -127,10 +127,13 @@ def em_Extract(payload: dict) -> dict:
 @bp.activity_trigger(input_name="payload")
 def em_Dedup(payload: dict) -> dict:
     """vector-floor dedup ladder (gated; passthrough when disabled)."""
-    return get_pipeline().dedup_extracted_memories(
-        user_id=payload["user_id"],
-        extracted=payload["extracted"],
-    ) or payload["extracted"]
+    return (
+        get_pipeline().dedup_extracted_memories(
+            user_id=payload["user_id"],
+            extracted=payload["extracted"],
+        )
+        or payload["extracted"]
+    )
 
 
 @bp.activity_trigger(input_name="payload")

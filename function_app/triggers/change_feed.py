@@ -220,9 +220,7 @@ async def process_changefeed_batch(
                 # Persisted-counter backstop: every n_full_turns turns, force a
                 # full-pool reconcile so dissimilar-embedding contradictions are
                 # caught reliably on FA (not gated by the in-memory sweep counter).
-                should_full_reconcile = bool(
-                    n_full_turns > 0 and crosses_threshold(old_count, new_count, n_full_turns)
-                )
+                should_full_reconcile = bool(n_full_turns > 0 and crosses_threshold(old_count, new_count, n_full_turns))
                 watermark = await read_extract_watermark(counter_container, cid, user_id, thread_id)
                 # Not capped: new_count - watermark is exactly the unextracted backlog
                 # and the orchestrator advances the watermark to new_count, so capping

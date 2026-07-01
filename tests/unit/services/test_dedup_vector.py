@@ -24,12 +24,17 @@ def _make_pipeline() -> PipelineService:
 
 def _doc(mid: str, content: str, memory_type: str = "fact", **extra: Any) -> dict[str, Any]:
     tags = extra.pop("tags", [f"sys:{memory_type}"])
-    metadata = extra.pop("metadata", {"category": "preference"} if memory_type == "fact" else {
-        "scope_type": "project",
-        "scope_value": "demo",
-        "lesson": content,
-        "outcome_valence": "neutral",
-    })
+    metadata = extra.pop(
+        "metadata",
+        {"category": "preference"}
+        if memory_type == "fact"
+        else {
+            "scope_type": "project",
+            "scope_value": "demo",
+            "lesson": content,
+            "outcome_valence": "neutral",
+        },
+    )
     return {
         "id": mid,
         "user_id": "u1",
@@ -101,9 +106,7 @@ def test_vector_candidates_orders_nearest_first_by_distance_function() -> None:
     p._memories_container.query_items.side_effect = query_items
 
     p._distance_function_cache = "cosine"
-    out = p._vector_candidates(
-        user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set()
-    )
+    out = p._vector_candidates(user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set())
     # Cosmos rejects an explicit ASC/DESC on ORDER BY VectorDistance(); it orders
     # most-similar-first server-side. Direction-awareness lives in the Python sort.
     assert "ORDER BY VectorDistance(c.embedding, @vec)" in captured["query"]
@@ -112,9 +115,7 @@ def test_vector_candidates_orders_nearest_first_by_distance_function() -> None:
     assert [c["id"] for c in out] == ["near", "far"]
 
     p._distance_function_cache = "euclidean"
-    out = p._vector_candidates(
-        user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set()
-    )
+    out = p._vector_candidates(user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set())
     assert "VectorDistance(c.embedding, @vec) ASC" not in captured["query"]
     # euclidean: lower distance = more similar, so 0.10 ("far" label) sorts first.
     assert [c["id"] for c in out] == ["far", "near"]

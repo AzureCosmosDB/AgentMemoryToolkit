@@ -131,10 +131,7 @@ async def _async_seed_fact_with_embedding(
     sync helper). Retries through transient embedding-service blips so the
     extract-time vector floor always has a neighbour; skips honestly if the
     embedding service is genuinely unavailable."""
-    check = (
-        "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content "
-        "AND IS_DEFINED(c.embedding)"
-    )
+    check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
     params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
     for _ in range(retries):
         await mem.add_cosmos(
@@ -145,9 +142,7 @@ async def _async_seed_fact_with_embedding(
             thread_id=thread_id,
             salience=0.7,
         )
-        embedded = [
-            doc async for doc in mem._memories_container_client.query_items(query=check, parameters=params)
-        ]
+        embedded = [doc async for doc in mem._memories_container_client.query_items(query=check, parameters=params)]
         if embedded:
             return
         await asyncio.sleep(1)

@@ -52,7 +52,6 @@ class _AsyncFakeCounterContainer:
         return dict(doc)
 
 
-
 class TestAsyncAutoTriggerNonBlocking:
     @pytest.mark.asyncio
     async def test_push_to_cosmos_does_not_await_auto_trigger(self, monkeypatch):
@@ -155,15 +154,13 @@ class TestAsyncExtractRecentK:
     @pytest.mark.parametrize(
         ("counter_result", "watermark", "expected_recent_k"),
         [
-            ((5, 10), 5, 5),       # backlog = new - watermark
-            ((0, 1), 1, 1),        # new == watermark -> floored to 1
-            ((98, 100), 0, 100),   # large backlog is NOT capped
+            ((5, 10), 5, 5),  # backlog = new - watermark
+            ((0, 1), 1, 1),  # new == watermark -> floored to 1
+            ((98, 100), 0, 100),  # large backlog is NOT capped
             ((20, 30), None, 30),  # BOOTSTRAP: no watermark -> base=0 -> recent_k = new_count
         ],
     )
-    async def test_extract_recent_k_uses_watermark(
-        self, monkeypatch, counter_result, watermark, expected_recent_k
-    ):
+    async def test_extract_recent_k_uses_watermark(self, monkeypatch, counter_result, watermark, expected_recent_k):
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
@@ -177,16 +174,20 @@ class TestAsyncExtractRecentK:
         client._summaries_container_client = client._memories_container_client
         client._counter_container_client = MagicMock()
 
-        with patch(
-            "azure.cosmos.agent_memory._counters.increment_counter_async",
-            return_value=counter_result,
-        ), patch(
-            "azure.cosmos.agent_memory._counters.read_extract_watermark_async",
-            new=AsyncMock(return_value=watermark),
-        ), patch(
-            "azure.cosmos.agent_memory._counters.advance_extract_watermark_async",
-            new=AsyncMock(),
-        ) as advance:
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_async",
+                return_value=counter_result,
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.read_extract_watermark_async",
+                new=AsyncMock(return_value=watermark),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.advance_extract_watermark_async",
+                new=AsyncMock(),
+            ) as advance,
+        ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
             await client.push_to_cosmos()
             await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
@@ -211,19 +212,24 @@ class TestAsyncExtractRecentK:
         client._summaries_container_client = client._memories_container_client
         client._counter_container_client = MagicMock()
 
-        with patch(
-            "azure.cosmos.agent_memory._counters.increment_counter_async",
-            return_value=(0, 1),
-        ), patch(
-            "azure.cosmos.agent_memory._counters.read_extract_watermark_async",
-            new=AsyncMock(return_value=None),
-        ), patch(
-            "azure.cosmos.agent_memory._counters.advance_extract_watermark_async",
-            new=AsyncMock(),
-        ) as advance, patch(
-            "azure.cosmos.agent_memory._counters.stamp_failure_async",
-            new=AsyncMock(),
-        ) as stamp:
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_async",
+                return_value=(0, 1),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.read_extract_watermark_async",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.advance_extract_watermark_async",
+                new=AsyncMock(),
+            ) as advance,
+            patch(
+                "azure.cosmos.agent_memory._counters.stamp_failure_async",
+                new=AsyncMock(),
+            ) as stamp,
+        ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
             await client.push_to_cosmos()
             await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
@@ -280,9 +286,7 @@ class TestAsyncExtractRecentK:
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("DEDUP_EVERY_N", "1")
-        monkeypatch.setattr(
-            "azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n", lambda: 2
-        )
+        monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n", lambda: 2)
 
         rebuilds: list[bool] = []
         processor = AsyncInProcessProcessor(pipeline=MagicMock())
@@ -298,15 +302,19 @@ class TestAsyncExtractRecentK:
         client._summaries_container_client = client._memories_container_client
         client._counter_container_client = MagicMock()
 
-        with patch(
-            "azure.cosmos.agent_memory._counters.increment_counter_async",
-            new=AsyncMock(side_effect=[(0, 1), (1, 2)]),
-        ), patch(
-            "azure.cosmos.agent_memory._counters.read_extract_watermark_async",
-            new=AsyncMock(return_value=None),
-        ), patch(
-            "azure.cosmos.agent_memory._counters.advance_extract_watermark_async",
-            new=AsyncMock(),
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_async",
+                new=AsyncMock(side_effect=[(0, 1), (1, 2)]),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.read_extract_watermark_async",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.advance_extract_watermark_async",
+                new=AsyncMock(),
+            ),
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="a")
             await client.push_to_cosmos()

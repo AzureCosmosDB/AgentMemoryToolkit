@@ -35,15 +35,15 @@ DEFAULT_DEDUP_POOL_SIZE = 50
 # needs to become operator-facing we add the env plumbing back deliberately.
 # The dedup + hybrid-search features ship ON via these values.
 # ---------------------------------------------------------------------------
-DEDUP_CONTEXT_VECTOR_ENABLED = True   # Stage-1 relevance-ranked extraction context
+DEDUP_CONTEXT_VECTOR_ENABLED = True  # Stage-1 relevance-ranked extraction context
 DEDUP_CONTEXT_TOPK = 10
-DEDUP_VECTOR_ENABLED = True            # Stage-3 vector near-dup ladder
-DEDUP_SIM_HIGH = 0.97                  # >= -> auto-skip near-exact
-DEDUP_SIM_LOW = 0.80                   # < -> novel; between -> tag candidate
+DEDUP_VECTOR_ENABLED = True  # Stage-3 vector near-dup ladder
+DEDUP_SIM_HIGH = 0.97  # >= -> auto-skip near-exact
+DEDUP_SIM_LOW = 0.80  # < -> novel; between -> tag candidate
 DEDUP_CANDIDATE_TOPK = 10
-DEDUP_RECONCILE_MODE = "candidate"     # clustered candidate reconcile (vs legacy full_pool)
-DEDUP_CLUSTER_SIM = 0.60               # Stage-5 clustering edge threshold
-DEDUP_FULL_RECLUSTER_EVERY_N = 12      # full re-cluster safety net cadence
+DEDUP_RECONCILE_MODE = "candidate"  # clustered candidate reconcile (vs legacy full_pool)
+DEDUP_CLUSTER_SIM = 0.60  # Stage-5 clustering edge threshold
+DEDUP_FULL_RECLUSTER_EVERY_N = 12  # full re-cluster safety net cadence
 
 DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "turn": 2_592_000,

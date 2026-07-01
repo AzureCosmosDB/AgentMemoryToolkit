@@ -94,9 +94,7 @@ async def test_vector_candidates_orders_nearest_first_by_distance_function():
     p._query_items = AsyncMock(side_effect=fake_query_items)
 
     p._distance_function_cache = "cosine"
-    out = await p._vector_candidates(
-        user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set()
-    )
+    out = await p._vector_candidates(user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set())
     # Cosmos rejects an explicit ASC/DESC on ORDER BY VectorDistance(); it orders
     # most-similar-first server-side. Direction-awareness lives in the Python sort.
     assert "ORDER BY VectorDistance(c.embedding, @vec)" in captured["query"]
@@ -105,9 +103,7 @@ async def test_vector_candidates_orders_nearest_first_by_distance_function():
     assert [c["id"] for c in out] == ["near", "far"]
 
     p._distance_function_cache = "euclidean"
-    out = await p._vector_candidates(
-        user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set()
-    )
+    out = await p._vector_candidates(user_id="u1", embedding=[1.0, 0.0], memory_type="fact", top_k=2, exclude_ids=set())
     assert "VectorDistance(c.embedding, @vec) ASC" not in captured["query"]
     # euclidean: lower distance = more similar, so 0.10 ("far" label) sorts first.
     # euclidean: lower distance = more similar, so 0.10 ("far" label) sorts first.
@@ -202,9 +198,7 @@ async def test_sweep_survives_one_cluster_failure():
 @pytest.mark.asyncio
 async def test_full_rebuild_clears_survivor_tags(monkeypatch):
     # Async mirror: full_rebuild full-pool path clears survivor dup-candidate tags.
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_reconcile_mode", lambda: "candidate"
-    )
+    monkeypatch.setattr("azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_reconcile_mode", lambda: "candidate")
     p = _service()
     pool = [
         _fact("f1", "a", tags=["sys:fact", "sys:dup-candidate"]),
@@ -333,9 +327,7 @@ async def test_dedup_skips_underspecified_doc_verbatim():
     # Parity with sync: a doc with no/unknown type is passed through untouched
     # and never runs vector dedup (async previously defaulted type to the bucket).
     p = _service()
-    p._vector_candidates = AsyncMock(
-        return_value=[{"id": "x", "content": "c", "type": "fact", "score": 0.99}]
-    )
+    p._vector_candidates = AsyncMock(return_value=[{"id": "x", "content": "c", "type": "fact", "score": 0.99}])
     doc = _fact("f1", "content")
     doc.pop("type")
     doc.pop("embedding", None)

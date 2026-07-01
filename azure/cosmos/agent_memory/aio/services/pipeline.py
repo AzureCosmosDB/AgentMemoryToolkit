@@ -530,9 +530,7 @@ class AsyncPipelineService:
             m["content_hash"] for m in existing_for_hash if m.get("type") == "fact" and m.get("content_hash")
         }
         if get_dedup_context_vector_enabled():
-            user_turns_text = "\n".join(
-                str(it.get("content", "")) for it in items if it.get("role") == "user"
-            ).strip()
+            user_turns_text = "\n".join(str(it.get("content", "")) for it in items if it.get("role") == "user").strip()
             context_query = user_turns_text or transcript
             existing = await self._store.search(
                 search_terms=context_query,
@@ -1778,9 +1776,7 @@ class AsyncPipelineService:
         # "loves steak") — which candidate clustering, keyed on near-duplicate
         # similarity, would never group. Automatic sweeps use cheap candidate mode.
         if get_dedup_reconcile_mode() == "candidate" and not full_rebuild:
-            return await self._reconcile_candidate_mode(
-                user_id, n=n, memory_type=memory_type, started_at=started_at
-            )
+            return await self._reconcile_candidate_mode(user_id, n=n, memory_type=memory_type, started_at=started_at)
 
         facts = await self._active_memories_for_reconcile(user_id, memory_type, n)
         result, consumed = await self._reconcile_pool(user_id, memory_type, facts)

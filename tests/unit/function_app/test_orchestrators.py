@@ -462,9 +462,7 @@ class TestExtractMemoryActivities:
             patch.object(cosmos_clients, "get_counter_container_async", new=AsyncMock(return_value=container)),
             patch.object(counters, "advance_extract_watermark", new=AsyncMock()) as advance,
         ):
-            result = asyncio.run(
-                em_mod.em_AdvanceExtractWatermark({"user_id": "u1", "thread_id": "t1", "count": 9})
-            )
+            result = asyncio.run(em_mod.em_AdvanceExtractWatermark({"user_id": "u1", "thread_id": "t1", "count": 9}))
 
         assert result is True
         advance.assert_awaited_once_with(container, "thread:u1:t1", "u1", "t1", 9)

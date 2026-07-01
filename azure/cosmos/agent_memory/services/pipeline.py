@@ -414,9 +414,7 @@ class PipelineService:
             )
         )
 
-    def _load_memories_by_ids(
-        self, user_id: str, memory_type: str, ids: Iterable[str]
-    ) -> list[dict[str, Any]]:
+    def _load_memories_by_ids(self, user_id: str, memory_type: str, ids: Iterable[str]) -> list[dict[str, Any]]:
         ids = [mid for mid in dict.fromkeys(ids) if mid]
         if not ids:
             return []
@@ -600,9 +598,7 @@ class PipelineService:
         transcript = self._build_transcript(items)
         existing = existing_for_hashes
         if threshold_config.get_dedup_context_vector_enabled():
-            user_turns_text = "\n".join(
-                str(it.get("content", "")) for it in items if it.get("role") == "user"
-            ).strip()
+            user_turns_text = "\n".join(str(it.get("content", "")) for it in items if it.get("role") == "user").strip()
             context_query = user_turns_text or transcript
             existing = self._store.search(
                 search_terms=context_query,
@@ -1640,8 +1636,7 @@ class PipelineService:
             candidate_ids = [
                 row["id"]
                 for row in candidates
-                if row.get("id")
-                and vector_similarity_at_least(row.get("score", 0.0), cluster_sim, distance_function)
+                if row.get("id") and vector_similarity_at_least(row.get("score", 0.0), cluster_sim, distance_function)
             ]
             for cid in candidate_ids:
                 edge_pairs.add(tuple(sorted((seed_id, cid))))
@@ -1698,9 +1693,7 @@ class PipelineService:
                 clusters.append([nodes_by_id[cid] for cid in component])
         return clusters, len(nodes_by_id), seeds
 
-    def _reconcile_candidate_mode(
-        self, user_id: str, *, n: int, memory_type: str, started_at: float
-    ) -> dict[str, int]:
+    def _reconcile_candidate_mode(self, user_id: str, *, n: int, memory_type: str, started_at: float) -> dict[str, int]:
         # Candidate clustering only. The periodic full-pool backstop that catches
         # dissimilar-embedding contradictions ("vegetarian" vs "loves steak") is
         # driven by the caller via ``full_rebuild`` on a PERSISTED-counter cadence
@@ -1810,9 +1803,7 @@ class PipelineService:
         # "loves steak") — which candidate clustering, keyed on near-duplicate
         # similarity, would never group. Automatic sweeps use cheap candidate mode.
         if threshold_config.get_dedup_reconcile_mode() == "candidate" and not full_rebuild:
-            return self._reconcile_candidate_mode(
-                user_id, n=n, memory_type=memory_type, started_at=started_at
-            )
+            return self._reconcile_candidate_mode(user_id, n=n, memory_type=memory_type, started_at=started_at)
 
         facts = self._active_memories_for_reconcile(user_id, memory_type, n)
         result, consumed = self._reconcile_pool(user_id, memory_type, facts)
@@ -1828,9 +1819,7 @@ class PipelineService:
         )
         return result
 
-    def _active_memories_for_reconcile(
-        self, user_id: str, memory_type: str, n: int
-    ) -> list[dict[str, Any]]:
+    def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
         # ---- Load up to N most recent active memories ----
         # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
         # physical partitions and matches the dedup prompt's tiebreaker
@@ -2058,21 +2047,21 @@ class PipelineService:
 
             try:
                 merged_payload: dict[str, Any] = {
-                        "id": merged_id,
-                        "user_id": user_id,
-                        "role": "system",
-                        "type": memory_type,
-                        "content": merged_content,
-                        "thread_id": recent_thread_id or f"__reconciled__:{user_id}",
-                        "confidence": confidence_val if confidence_val is not None else 0.5,
-                        "salience": salience_val if salience_val is not None else 0.5,
-                        "supersedes_ids": merged_supersedes,
-                        "source_memory_ids": merged_source_memory_ids,
-                        "tags": merged_tags,
-                        "content_hash": merged_content_hash,
-                        **self._prompt_lineage(prompt_filename),
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "id": merged_id,
+                    "user_id": user_id,
+                    "role": "system",
+                    "type": memory_type,
+                    "content": merged_content,
+                    "thread_id": recent_thread_id or f"__reconciled__:{user_id}",
+                    "confidence": confidence_val if confidence_val is not None else 0.5,
+                    "salience": salience_val if salience_val is not None else 0.5,
+                    "supersedes_ids": merged_supersedes,
+                    "source_memory_ids": merged_source_memory_ids,
+                    "tags": merged_tags,
+                    "content_hash": merged_content_hash,
+                    **self._prompt_lineage(prompt_filename),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 if memory_type == "fact":
                     merged_payload["metadata"] = {

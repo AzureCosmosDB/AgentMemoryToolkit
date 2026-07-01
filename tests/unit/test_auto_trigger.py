@@ -226,15 +226,19 @@ class TestPerStepAutoTrigger:
         client = _connected(processor=processor)
         client._counter_container_client = MagicMock()
 
-        with patch(
-            "azure.cosmos.agent_memory._counters.increment_counter_sync",
-            return_value=counter_result,
-        ), patch(
-            "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
-            return_value=watermark,
-        ), patch(
-            "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
-        ) as advance:
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_sync",
+                return_value=counter_result,
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
+                return_value=watermark,
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
+            ) as advance,
+        ):
             for i in range(batch_count):
                 client.add_local(user_id="u1", role="user", thread_id="t1", content=f"hi {i}")
             client.push_to_cosmos()
@@ -300,17 +304,22 @@ class TestPerStepAutoTrigger:
         client = _connected(processor=processor)
         client._counter_container_client = MagicMock()
 
-        with patch(
-            "azure.cosmos.agent_memory._counters.increment_counter_sync",
-            return_value=(0, 1),
-        ), patch(
-            "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
-            return_value=None,
-        ), patch(
-            "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
-        ) as advance, patch(
-            "azure.cosmos.agent_memory._counters.stamp_failure_sync",
-        ) as stamp:
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_sync",
+                return_value=(0, 1),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
+                return_value=None,
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
+            ) as advance,
+            patch(
+                "azure.cosmos.agent_memory._counters.stamp_failure_sync",
+            ) as stamp,
+        ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
             client.push_to_cosmos()
 
@@ -326,9 +335,7 @@ class TestPerStepAutoTrigger:
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("DEDUP_EVERY_N", "1")
-        monkeypatch.setattr(
-            "azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n", lambda: 2
-        )
+        monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n", lambda: 2)
 
         rebuilds: list[bool] = []
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -341,14 +348,18 @@ class TestPerStepAutoTrigger:
         client = _connected(processor=processor)
         client._counter_container_client = MagicMock()
 
-        with patch(
-            "azure.cosmos.agent_memory._counters.increment_counter_sync",
-            side_effect=[(0, 1), (1, 2)],
-        ), patch(
-            "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
-            return_value=None,
-        ), patch(
-            "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_sync",
+                side_effect=[(0, 1), (1, 2)],
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
+                return_value=None,
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
+            ),
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="a")
             client.push_to_cosmos()  # counter 0->1: reconcile, full crosses 2? no

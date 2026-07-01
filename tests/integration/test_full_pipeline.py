@@ -138,10 +138,7 @@ def _seed_fact_with_embedding(
     neighbour to match. Retry until an embedded copy exists (indexing is fast —
     the doc is vector-searchable within ~2s), and skip honestly if the embedding
     service is genuinely unavailable rather than reporting a false failure."""
-    check = (
-        "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content "
-        "AND IS_DEFINED(c.embedding)"
-    )
+    check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
     params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
     for _ in range(retries):
         mem.add_cosmos(
@@ -624,4 +621,3 @@ class TestExtractTimeVectorDedup:
             )
         finally:
             _cleanup(agent_memory, unique_user_id)
-

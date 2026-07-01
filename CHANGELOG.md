@@ -1,5 +1,29 @@
 ## Release History
 
+## [0.3.0b1] (Unreleased)
+
+#### Features Added
+* Contradiction-aware vector dedup and reconciliation. Extraction now runs a
+  vector-similarity dedup ladder: near-exact duplicates are auto-dropped and
+  borderline matches are tagged for review before they are written. A periodic
+  LLM reconcile pass (driven by `dedup.prompty` for facts and
+  `dedup_episodic.prompty` for episodic memories) then merges duplicate groups
+  and resolves contradictions, soft-deleting the losers with a supersede reason.
+  Reconciliation is distance-function aware (the destructive near-exact
+  auto-drop is disabled for `euclidean` containers). In-process reconcile now
+  covers both facts and episodic memories, matching the Durable backend, and its
+  cadence is derived from the persisted message counter. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Extraction watermark. The window of recent turns sent to extraction is sized
+  from a persisted per-thread watermark (`last_extract_count`) that only advances
+  after a successful extract, so under normal operation no turns are skipped when
+  extraction lags or transiently fails. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+
+#### Other Changes
+* `search_cosmos` and `search_turns` now always fuse vector similarity with
+  BM25 (full-text) ranking, falling back to vector-only for all-stopword
+  queries. The `hybrid_search` flag has been removed — hybrid ranking is the
+  default and requires no opt-in. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+
 ## [0.2.0b1] (2026-06-30)
 
 #### Features Added

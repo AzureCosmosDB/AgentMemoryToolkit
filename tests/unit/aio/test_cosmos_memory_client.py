@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
     ConfigurationError,
     CosmosNotConnectedError,
@@ -369,7 +371,8 @@ class TestCreateMemoryStore:
         assert mem._turns_container_client is mock_turns_container
 
     async def test_create_memory_store_defaults_to_serverless(self):
-        mem = _make_client(cosmos_throughput_mode="serverless")
+        # serverless mode ignores autoscale config entirely, even an invalid value.
+        mem = _make_client(cosmos_throughput_mode="serverless", cosmos_autoscale_max_ru="not-an-int")
         mock_cosmos_cls = MagicMock()
         mock_client = MagicMock()
         mock_db = AsyncMock()
@@ -391,29 +394,28 @@ class TestCreateMemoryStore:
             ]
         )
 
-        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
-            with patch.dict(
-                "sys.modules",
-                {
-                    "azure.cosmos.aio": MagicMock(CosmosClient=mock_cosmos_cls),
-                    "azure.cosmos": MagicMock(
-                        PartitionKey=MagicMock(),
-                        ThroughputProperties=MagicMock(),
-                    ),
-                },
-            ):
-                await mem.create_memory_store(
-                    endpoint="https://fake.documents.azure.com:443/",
-                    credential="fake-key",
-                    throughput_mode="serverless",
-                )
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos.aio": MagicMock(CosmosClient=mock_cosmos_cls),
+                "azure.cosmos": MagicMock(
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            await mem.create_memory_store(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+                throughput_mode="serverless",
+            )
 
         for call in mock_db.create_container_if_not_exists.await_args_list:
             assert "offer_throughput" not in call.kwargs
 
-    def test_constructor_ignores_invalid_autoscale_env_in_serverless_mode(self):
-        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
-            mem = _make_client(cosmos_throughput_mode="serverless")
+    def test_constructor_ignores_autoscale_in_serverless_mode(self):
+        # Even an invalid autoscale value is ignored in serverless mode.
+        mem = _make_client(cosmos_throughput_mode="serverless", cosmos_autoscale_max_ru="not-an-int")
 
         assert mem._cosmos_autoscale_max_ru is None
 
@@ -738,6 +740,37 @@ class TestSearchCosmos:
         query = container.query_items.call_args.kwargs["query"]
         assert "VectorDistance" in query
 
+    async def test_search_uses_keyword_params_for_hybrid_sql(self):
+        mem, container = _connected_client()
+        container.query_items = MagicMock(return_value=AsyncIterator([_make_doc()]))
+
+        mem._embeddings_client = AsyncMock()
+        mem._embeddings_client.generate = AsyncMock(return_value=[0.1])
+
+        await mem.search_cosmos(search_terms="weather Seattle", top_k=3)
+
+        query = container.query_items.call_args.kwargs["query"]
+        parameters = container.query_items.call_args.kwargs["parameters"]
+        assert "ORDER BY RANK RRF" in query
+        assert "FullTextScore(c.content, @kw0, @kw1)" in query
+        assert {"name": "@kw0", "value": "weather"} in parameters
+        assert {"name": "@kw1", "value": "seattle"} in parameters
+
+    async def test_search_all_stopwords_uses_vector_sql(self):
+        mem, container = _connected_client()
+        container.query_items = MagicMock(return_value=AsyncIterator([_make_doc()]))
+
+        mem._embeddings_client = AsyncMock()
+        mem._embeddings_client.generate = AsyncMock(return_value=[0.1])
+
+        await mem.search_cosmos(search_terms="what is the", top_k=3)
+
+        query = container.query_items.call_args.kwargs["query"]
+        parameters = container.query_items.call_args.kwargs["parameters"]
+        assert "ORDER BY VectorDistance" in query
+        assert "RRF" not in query
+        assert not any(parameter["name"].startswith("@kw") for parameter in parameters)
+
     async def test_search_hybrid(self):
         mem, container = _connected_client()
         docs = [_make_doc()]
@@ -748,7 +781,6 @@ class TestSearchCosmos:
 
         results = await mem.search_cosmos(
             search_terms="weather Seattle",
-            hybrid_search=True,
             top_k=5,
         )
 
@@ -787,6 +819,38 @@ class TestSearchCosmos:
         mem, _ = _connected_client()
         with pytest.raises(ValidationError, match="search_terms must be a non-empty string"):
             await mem.search_cosmos(search_terms="   ")
+
+    async def test_search_episodic_forwards_search_options(self):
+        containers = {key: MagicMock() for key in ContainerKey}
+        store = AsyncMemoryStore(containers=containers)
+        store.search = AsyncMock(return_value=[])
+
+        await store.search_episodic(
+            user_id="u1",
+            search_terms="weather",
+            top_k=2,
+            min_salience=0.4,
+            include_superseded=True,
+        )
+
+        store.search.assert_awaited_once_with(
+            search_terms="weather",
+            user_id="u1",
+            memory_types=["episodic"],
+            top_k=2,
+            min_salience=0.4,
+            include_superseded=True,
+        )
+
+    async def test_build_episodic_context_forwards_search_options(self):
+        containers = {key: MagicMock() for key in ContainerKey}
+        store = AsyncMemoryStore(containers=containers)
+        store.search_episodic = AsyncMock(return_value=[])
+
+        context = await store.build_episodic_context("u1", "weather", top_k=2)
+
+        assert context == ""
+        store.search_episodic.assert_awaited_once_with("u1", "weather", top_k=2)
 
 
 # ===================================================================

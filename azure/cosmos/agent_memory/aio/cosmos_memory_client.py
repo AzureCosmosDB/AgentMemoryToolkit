@@ -663,7 +663,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -681,7 +680,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             role=role,
             memory_types=memory_types,
             thread_id=thread_id,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -699,7 +697,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         user_id: str,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -721,7 +718,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             user_id=user_id,
             thread_id=thread_id,
             role=role,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -836,12 +832,23 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        return await self._get_store().search_episodic(user_id, search_terms, top_k, min_salience, include_superseded)
+        return await self._get_store().search_episodic(
+            user_id,
+            search_terms,
+            top_k,
+            min_salience,
+            include_superseded,
+        )
 
     async def build_procedural_context(self, user_id: str) -> str:
         return await self._get_pipeline().build_procedural_context(user_id)
 
-    async def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
+    async def build_episodic_context(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 3,
+    ) -> str:
         return await self._get_store().build_episodic_context(user_id, query, top_k)
 
     async def extract_memories(self, user_id: str, thread_id: str, recent_k: Optional[int] = None) -> dict[str, int]:
@@ -879,7 +886,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
         from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
-        return await self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
+        return await self._get_pipeline().reconcile_memories(
+            user_id, n if n is not None else get_dedup_pool_size(), full_rebuild=True
+        )
 
     async def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         """Force the processor to run the full pipeline RIGHT NOW for one thread.

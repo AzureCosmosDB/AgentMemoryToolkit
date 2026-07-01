@@ -10,7 +10,6 @@ sites differ — every Cosmos query, chat completion, and embedding call is
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
 import json
@@ -20,13 +19,19 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Literal, Optional
 
 from azure.cosmos.exceptions import (
-    CosmosHttpResponseError,
     CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
-from azure.cosmos.agent_memory._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
+from azure.cosmos.agent_memory._utils import (
+    DEFAULT_TTL_BY_TYPE,
+    compute_content_hash,
+    distance_function_from_container_properties,
+    vector_autodrop_supported,
+    vector_order_direction,
+    vector_similarity_at_least,
+)
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
     LLMError,
@@ -59,15 +64,22 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     parse_llm_json,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
-    format_existing_episodics as _format_existing_episodics,
-)
-from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     max_or_none as _max_or_none,
 )
 from azure.cosmos.agent_memory.store._search_helpers import top_literal
+from azure.cosmos.agent_memory.thresholds import (
+    get_dedup_candidate_topk,
+    get_dedup_cluster_sim,
+    get_dedup_context_topk,
+    get_dedup_context_vector_enabled,
+    get_dedup_reconcile_mode,
+    get_dedup_sim_high,
+    get_dedup_sim_low,
+    get_dedup_vector_enabled,
+)
 
 logger = get_logger("azure.cosmos.agent_memory.pipeline.aio")
 
@@ -252,6 +264,106 @@ class AsyncPipelineService:
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         return await self._embeddings.generate_batch(texts)
 
+    async def _vector_distance_function(self) -> str:
+        """Return the container's configured Cosmos ``distanceFunction`` (cached).
+
+        Read from the container's vector embedding policy (``await container.read()``)
+        — the authoritative, immutable source set when the container was created.
+        Drives the ORDER BY direction and similarity-threshold comparisons so dedup
+        never silently assumes cosine. Falls back to cosine when the policy can't be
+        read (e.g. ``__new__``-built test instances with mocked containers).
+        """
+        fn = getattr(self, "_distance_function_cache", None)
+        if fn is not None:
+            return fn
+        try:
+            props = await self._memories_container.read()
+        except Exception:
+            # Transient read failure is indistinguishable from "no policy" once we
+            # drop to None — so DON'T cache. An uncached cosine default self-heals on
+            # the next call; caching it would pin cosine and silently mis-handle a
+            # euclidean container (cosine bands on euclidean distances → data loss).
+            logger.debug(
+                "vector dedup: could not read container vector policy; defaulting to cosine (not cached)",
+                exc_info=True,
+            )
+            return "cosine"
+        fn = distance_function_from_container_properties(props)
+        self._distance_function_cache = fn
+        return fn
+
+    def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
+        """One-shot WARN that the near-exact vector auto-drop is disabled.
+
+        The ``DEDUP_SIM_HIGH`` thresholds are cosine-calibrated; on euclidean
+        the destructive auto-drop is skipped (borderline tagging + LLM reconcile
+        still run). Logged once per pipeline instance to avoid hot-path spam.
+        """
+        if getattr(self, "_warned_euclidean_autodrop", False):
+            return
+        self._warned_euclidean_autodrop = True
+        logger.warning(
+            "Container distanceFunction=%r: near-exact vector auto-drop is "
+            "cosine-calibrated and has been DISABLED for this distance function. "
+            "Duplicate detection falls back to borderline tagging + LLM reconcile. "
+            "Use cosine/dotproduct embeddings for vector-floor auto-dedup.",
+            distance_function,
+        )
+
+    async def _vector_candidates(
+        self,
+        *,
+        user_id: str,
+        embedding,
+        memory_type,
+        top_k,
+        exclude_ids,
+    ) -> list[dict]:
+        """Return active same-user vector candidates from Cosmos."""
+        if not user_id or not embedding or not top_k or int(top_k) < 1:
+            return []
+        excluded = set(exclude_ids or [])
+        capped_top = top_literal(int(top_k), name="_vector_candidates.top_k")
+        distance_function = await self._vector_distance_function()
+        order_direction = vector_order_direction(distance_function)
+        field = "embedding"
+        query = (
+            f"SELECT TOP {capped_top} c.id, c.content, c.type, "
+            f"VectorDistance(c.{field}, @vec) AS score "
+            "FROM c WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            f"AND IS_DEFINED(c.{field}) "
+            # Cosmos orders ORDER BY VectorDistance() most-similar-first per the
+            # container's distanceFunction; an explicit ASC/DESC is rejected (BadRequest).
+            f"ORDER BY VectorDistance(c.{field}, @vec)"
+        )
+        rows = await self._query_items(
+            self._memories_container,
+            query=query,
+            parameters=[
+                {"name": "@user_id", "value": user_id},
+                {"name": "@memory_type", "value": memory_type},
+                {"name": "@vec", "value": embedding},
+            ],
+        )
+        candidates = [
+            {
+                "id": row.get("id"),
+                "content": row.get("content"),
+                "type": row.get("type"),
+                "score": float(row.get("score") or 0.0),
+            }
+            for row in rows
+            if row.get("id") and row.get("id") not in excluded
+        ]
+        # Most-similar-first: descending score for cosine/dotproduct, ascending for euclidean.
+        candidates.sort(
+            key=lambda item: item.get("score", 0.0),
+            reverse=order_direction == "DESC",
+        )
+        return candidates
+
     def _prompt_lineage(self, filename: str) -> dict[str, str]:
         """Return ``{prompt_id, prompt_version}`` for stamping a doc.
 
@@ -354,58 +466,6 @@ class AsyncPipelineService:
             return max(timestamps)
         return datetime.now(timezone.utc).isoformat()
 
-    async def _mark_extracted_superseded(
-        self,
-        *,
-        user_id: str,
-        thread_id: str,
-        supersedes_id: str,
-        superseder_id: str,
-        reason: Literal["update", "contradict"],
-    ) -> bool:
-        try:
-            old_mem = await self._read_item(
-                self._memories_container,
-                item=supersedes_id,
-                partition_key=[user_id, thread_id],
-            )
-            if old_mem.get("superseded_by"):
-                logger.debug(
-                    "extract_memories: skipping UPDATE — target %s already superseded by %s",
-                    supersedes_id,
-                    old_mem.get("superseded_by"),
-                )
-                return False
-            return await self._mark_superseded(old_mem, superseder_id, reason=reason)
-        except CosmosResourceNotFoundError:
-            logger.debug(
-                "extract_memories: %s not found at (user_id, thread_id) — retrying cross-partition",
-                supersedes_id,
-            )
-        except Exception as exc:
-            # Includes 429s, 503s, transient connection errors — surface at WARNING
-            # so they're not masked by the silent cross-partition fallback below.
-            logger.warning(
-                "extract_memories: read_item failed for %s (%s); retrying cross-partition",
-                supersedes_id,
-                type(exc).__name__,
-            )
-        try:
-            q = f"SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid AND {_ACTIVE_DOC_FILTER}"
-            results = await self._query_items(
-                self._memories_container,
-                query=q,
-                parameters=[
-                    {"name": "@id", "value": supersedes_id},
-                    {"name": "@uid", "value": user_id},
-                ],
-            )
-            if results and not results[0].get("superseded_by"):
-                return await self._mark_superseded(results[0], superseder_id, reason=reason)
-        except CosmosHttpResponseError as exc:
-            logger.warning("Failed to mark superseded memory %s: %s", supersedes_id, exc)
-        return False
-
     async def _mark_superseded(
         self,
         old_doc: dict[str, Any],
@@ -464,30 +524,35 @@ class AsyncPipelineService:
             logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
             return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
-        existing_facts, existing_episodics = await asyncio.gather(
-            self._load_existing_memories(user_id, ["fact"]),
-            self._load_existing_memories(user_id, ["episodic"]),
-        )
+        transcript = self._build_transcript(items)
+        existing_for_hash = await self._load_existing_memories(user_id, ["fact"])
         existing_fact_hashes: set[str] = {
-            m["content_hash"] for m in existing_facts if m.get("type") == "fact" and m.get("content_hash")
+            m["content_hash"] for m in existing_for_hash if m.get("type") == "fact" and m.get("content_hash")
         }
-        if existing_facts:
+        if get_dedup_context_vector_enabled():
+            user_turns_text = "\n".join(
+                str(it.get("content", "")) for it in items if it.get("role") == "user"
+            ).strip()
+            context_query = user_turns_text or transcript
+            existing = await self._store.search(
+                search_terms=context_query,
+                user_id=user_id,
+                memory_types=["fact"],
+                top_k=get_dedup_context_topk(),
+            )
+        else:
+            existing = existing_for_hash
+        if existing:
             existing_text = "\n".join(
-                f"- [ID: {mem['id']}] {mem.get('content', '')} (type=fact, salience={mem.get('salience', 'N/A')})"
-                for mem in existing_facts
+                f"- [ID: {mem['id']}] {mem.get('content', '')} "
+                f"(type={mem.get('type', 'fact')}, salience={mem.get('salience', 'N/A')})"
+                for mem in existing
             )
         else:
             existing_text = "(none)"
-        existing_episodics_text = _format_existing_episodics(existing_episodics)
-
-        transcript = self._build_transcript(items)
         response_text = await self._run_prompty(
             "extract_memories.prompty",
-            inputs={
-                "existing_facts": existing_text,
-                "existing_episodics": existing_episodics_text,
-                "transcript": transcript,
-            },
+            inputs={"existing_facts": existing_text, "transcript": transcript},
         )
         parsed = self._parse_llm_json(response_text)
         facts = parsed.get("facts", [])
@@ -502,14 +567,13 @@ class AsyncPipelineService:
         dropped_episodic_count = 0
 
         for fact in facts:
-            action = fact.get("action", "ADD").upper()
             text = fact.get("text")
             if not text:
                 logger.warning("extract_memories: dropping malformed fact (missing 'text'): %r", fact)
                 continue
 
             new_content_hash = compute_content_hash(text)
-            if action == "ADD" and new_content_hash in existing_fact_hashes:
+            if new_content_hash in existing_fact_hashes:
                 logger.debug(
                     "extract_memories: skipping exact-dup fact hash=%s user_id=%s thread_id=%s",
                     new_content_hash,
@@ -546,22 +610,6 @@ class AsyncPipelineService:
                 "updated_at": doc_timestamp,
             }
 
-            if action in {"UPDATE", "CONTRADICT"} and fact.get("supersedes_id"):
-                reason: Literal["update", "contradict"] = "contradict" if action == "CONTRADICT" else "update"
-                if det_id == fact["supersedes_id"]:
-                    logger.debug("extract_memories: skipping UPDATE — det_id == supersedes_id (%s)", det_id)
-                    continue
-                doc["supersedes_ids"] = [fact["supersedes_id"]]
-                updates.append(
-                    {
-                        "op": "supersede",
-                        "supersedes_id": fact["supersedes_id"],
-                        "superseder_id": det_id,
-                        "thread_id": thread_id,
-                        "reason": reason,
-                    }
-                )
-
             fact_docs.append(self._validate_extracted_doc(doc))
             existing_fact_hashes.add(new_content_hash)
 
@@ -581,28 +629,16 @@ class AsyncPipelineService:
                 dropped_episodic_count += 1
                 continue
 
-            text_raw = ep.get("text")
-            text = text_raw.strip() if isinstance(text_raw, str) else None
-            if not text:
-                logger.error(
-                    "extract_memories: dropping episodic with empty/missing text field "
-                    "(LLM extraction did not populate the required `text` field — likely a "
-                    "weaker extraction model that needs upgrading or a prompt-compliance issue). "
-                    "scope_type=%s scope_value=%s user_id=%s thread_id=%s reason=missing_text",
-                    scope_type,
-                    scope_value,
-                    user_id,
-                    thread_id,
-                )
-                dropped_episodic_count += 1
-                continue
-
             situation = ep.get("situation")
             action_taken = ep.get("action_taken")
             outcome = ep.get("outcome")
+            if situation and action_taken and outcome:
+                text = f"{situation} → {action_taken} → {outcome}"
+            else:
+                text = f"For the user's {scope_value} {scope_type}, intent recorded."
 
             content_hash = compute_content_hash(text)
-            seed = _ID_SEED_SEP.join((user_id, scope_type, scope_value))
+            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
             det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(ep.get("tags", []))
             confidence = ep.get("confidence")
@@ -619,7 +655,7 @@ class AsyncPipelineService:
             doc = {
                 "id": det_id,
                 "user_id": user_id,
-                "thread_id": "__episodic__",
+                "thread_id": thread_id,
                 "role": "system",
                 "type": "episodic",
                 "content": text,
@@ -630,7 +666,6 @@ class AsyncPipelineService:
                 "metadata": {
                     "scope_type": scope_type,
                     "scope_value": scope_value,
-                    "originating_thread_id": thread_id,
                     "situation": situation,
                     "action_taken": action_taken,
                     "outcome": outcome,
@@ -694,7 +729,7 @@ class AsyncPipelineService:
         check_extracted_fact_grounding(
             fact_docs,
             items,
-            existing_facts,
+            existing,
             user_id=user_id,
             thread_id=thread_id,
             logger=logger,
@@ -714,6 +749,100 @@ class AsyncPipelineService:
             len(episodic_docs),
             len(updates),
         )
+        return result
+
+    async def dedup_extracted_memories(self, user_id: str, extracted: dict) -> dict:
+        """Apply gated vector-floor deduplication to extracted facts/episodes."""
+        if not get_dedup_vector_enabled():
+            return extracted
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not isinstance(extracted, dict):
+            raise ValidationError("extracted must be a dict")
+
+        high = get_dedup_sim_high()
+        low = get_dedup_sim_low()
+        top_k = get_dedup_candidate_topk()
+        distance_function = await self._vector_distance_function()
+        autodrop_ok = vector_autodrop_supported(distance_function)
+        if not autodrop_ok:
+            self._warn_euclidean_autodrop_once(distance_function)
+        result = {
+            "facts": [dict(doc) for doc in extracted.get("facts", [])],
+            "episodic": [dict(doc) for doc in extracted.get("episodic", [])],
+            "updates": [dict(op) for op in extracted.get("updates", [])],
+        }
+        docs = [doc for doc in result["facts"] + result["episodic"] if doc.get("content")]
+        missing_embeddings = [doc for doc in docs if not doc.get("embedding")]
+        if missing_embeddings:
+            embeddings = await self._embed_batch([str(doc["content"]) for doc in missing_embeddings])
+            for doc, embedding in zip(missing_embeddings, embeddings):
+                doc["embedding"] = embedding
+
+        vector_dedup_skipped = 0
+        dup_candidates_tagged = 0
+        kept_ids: set[str] = set()
+        dropped_ids: set[str] = set()
+        filtered_by_key: dict[str, list[dict[str, Any]]] = {"facts": [], "episodic": []}
+        for key in ("facts", "episodic"):
+            for doc in result[key]:
+                if not doc.get("content"):
+                    filtered_by_key[key].append(doc)
+                    continue
+                doc_id = str(doc.get("id") or "")
+                memory_type = str(doc.get("type") or "")
+                if not doc_id or memory_type not in {"fact", "episodic"}:
+                    # Parity with sync: under-specified docs (no id / unknown type)
+                    # skip dedup and pass through verbatim.
+                    filtered_by_key[key].append(doc)
+                    continue
+                exclude_ids = kept_ids | dropped_ids | {doc_id, *(doc.get("supersedes_ids") or [])}
+                candidates = await self._vector_candidates(
+                    user_id=user_id,
+                    embedding=doc.get("embedding"),
+                    memory_type=memory_type,
+                    top_k=top_k,
+                    exclude_ids=exclude_ids,
+                )
+                best: dict[str, Any] | None = candidates[0] if candidates else None
+                score = float(best.get("score") or 0.0) if best else 0.0
+                if best and autodrop_ok and vector_similarity_at_least(score, high, distance_function):
+                    vector_dedup_skipped += 1
+                    dropped_ids.add(doc_id)
+                    logger.info(
+                        "dedup_extracted_memories: vector skip user_id=%s dropped=%r "
+                        "surviving_id=%s surviving=%r score=%.4f",
+                        user_id,
+                        doc.get("content"),
+                        best.get("id"),
+                        best.get("content"),
+                        score,
+                    )
+                    continue
+                if best and vector_similarity_at_least(score, low, distance_function):
+                    tags = list(doc.get("tags") or [])
+                    if "sys:dup-candidate" not in tags:
+                        tags.append("sys:dup-candidate")
+                    doc["tags"] = tags
+                    metadata = dict(doc.get("metadata") or {})
+                    metadata["dup_of"] = best.get("id")
+                    metadata["dup_score"] = score
+                    doc["metadata"] = metadata
+                    dup_candidates_tagged += 1
+
+                kept_ids.add(doc_id)
+                filtered_by_key[key].append(doc)
+
+        if vector_dedup_skipped or dup_candidates_tagged:
+            result["updates"].append(
+                {
+                    "op": "stats",
+                    "vector_dedup_skipped": vector_dedup_skipped,
+                    "dup_candidates_tagged": dup_candidates_tagged,
+                }
+            )
+        result["facts"] = filtered_by_key["facts"]
+        result["episodic"] = filtered_by_key["episodic"]
         return result
 
     async def persist_extracted_memories(
@@ -763,27 +892,14 @@ class AsyncPipelineService:
             if op.get("op") == "stats":
                 result["exact_dedup_skipped"] += int(op.get("exact_dedup_skipped") or 0)
                 result["dropped_episodic_count"] += int(op.get("dropped_episodic_count") or 0)
-                continue
-            if op.get("op") != "supersede":
-                continue
-            reason = op.get("reason")
-            op_thread_id = op.get("thread_id")
-            supersedes_id = op.get("supersedes_id")
-            superseder_id = op.get("superseder_id")
-            if reason not in {"update", "contradict"} or not op_thread_id or not supersedes_id or not superseder_id:
-                continue
-            marked = await self._mark_extracted_superseded(
-                user_id=user_id,
-                thread_id=op_thread_id,
-                supersedes_id=supersedes_id,
-                superseder_id=superseder_id,
-                reason=reason,
-            )
-            if marked:
-                if reason == "contradict":
-                    result["contradicted_count"] += 1
-                else:
-                    result["updated_count"] += 1
+                if "vector_dedup_skipped" in op:
+                    result["vector_dedup_skipped"] = result.get("vector_dedup_skipped", 0) + int(
+                        op.get("vector_dedup_skipped") or 0
+                    )
+                if "dup_candidates_tagged" in op:
+                    result["dup_candidates_tagged"] = result.get("dup_candidates_tagged", 0) + int(
+                        op.get("dup_candidates_tagged") or 0
+                    )
 
         logger.info("persist_extracted_memories completed user_id=%s counts=%s", user_id, result)
 
@@ -834,6 +950,8 @@ class AsyncPipelineService:
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread and persist them."""
         extracted = await self.extract_memories_dry(user_id, thread_id, recent_k, turns=turns)
+        if get_dedup_vector_enabled():
+            extracted = await self.dedup_extracted_memories(user_id, extracted)
         return await self.persist_extracted_memories(user_id, extracted)
 
     async def synthesize_procedural(
@@ -1031,7 +1149,7 @@ class AsyncPipelineService:
             }
             validated = construct_internal(ProceduralRecord, new_doc).to_doc()
             try:
-                await self._create_item(self._memories_container, body=validated)
+                await self._create_item(self._memories_container, body=dict(validated))
                 written_doc = validated
                 break
             except CosmosResourceExistsError:
@@ -1392,7 +1510,228 @@ class AsyncPipelineService:
             },
         )
 
-    async def reconcile_memories(self, user_id: str, n: int = 50) -> dict[str, int]:
+    async def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
+        capped_n = top_literal(n, name="reconcile_memories.n")
+        query = (
+            f"SELECT TOP {capped_n} * FROM c "
+            "WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            "ORDER BY c.created_at DESC"
+        )
+        return await self._query_items(
+            self._memories_container,
+            query=query,
+            parameters=[
+                {"name": "@user_id", "value": user_id},
+                {"name": "@memory_type", "value": memory_type},
+            ],
+        )
+
+    async def _load_memories_by_ids(
+        self,
+        user_id: str,
+        memory_type: str,
+        ids: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        id_list = [mid for mid in dict.fromkeys(ids) if mid]
+        if not id_list:
+            return []
+        placeholders = ", ".join(f"@id{i}" for i in range(len(id_list)))
+        query = (
+            "SELECT * FROM c WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND c.id IN ({placeholders}) "
+            f"AND {_ACTIVE_DOC_FILTER}"
+        )
+        parameters = [
+            {"name": "@user_id", "value": user_id},
+            {"name": "@memory_type", "value": memory_type},
+        ]
+        parameters.extend({"name": f"@id{i}", "value": mid} for i, mid in enumerate(id_list))
+        return await self._query_items(self._memories_container, query=query, parameters=parameters)
+
+    async def _build_candidate_clusters(
+        self,
+        user_id: str,
+        memory_type: str,
+        n: int,
+    ) -> tuple[list[list[dict[str, Any]]], int, list[dict[str, Any]]]:
+        """Cluster dup-candidate seeds (+ vector neighbors) into connected components.
+
+        Returns ``(clusters, node_count, seeds)`` where each cluster has >= 2 members,
+        ``node_count`` is the total distinct memories pulled into the graph (used to
+        report ``reconcile_llm_calls_saved``), and ``seeds`` is the tagged seed scan
+        (so the caller can clear stale tags on orphan seeds that never clustered).
+        The seed scan is bounded to ``n`` so a single cluster can never exceed the
+        reconcile prompt's pool cap.
+        """
+        cluster_sim = get_dedup_cluster_sim()
+        top_k = get_dedup_candidate_topk()
+        distance_function = await self._vector_distance_function()
+        query = (
+            f"SELECT TOP {top_literal(n, name='reconcile_memories.candidate_n')} * FROM c "
+            "WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            "AND ARRAY_CONTAINS(c.tags, @tag) "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            "ORDER BY c.created_at DESC"
+        )
+        seeds = await self._query_items(
+            self._memories_container,
+            query=query,
+            parameters=[
+                {"name": "@user_id", "value": user_id},
+                {"name": "@memory_type", "value": memory_type},
+                {"name": "@tag", "value": "sys:dup-candidate"},
+            ],
+        )
+        nodes_by_id: dict[str, dict[str, Any]] = {doc["id"]: doc for doc in seeds if doc.get("id")}
+        edges: set[tuple[str, str]] = set()
+        for seed in seeds:
+            sid = seed.get("id")
+            if not sid:
+                continue
+            dup_of = (seed.get("metadata") or {}).get("dup_of") if isinstance(seed.get("metadata"), dict) else None
+            if dup_of:
+                for doc in await self._load_memories_by_ids(user_id, memory_type, [dup_of]):
+                    nodes_by_id[doc["id"]] = doc
+                    edges.add(tuple(sorted((sid, doc["id"]))))
+            for cand in await self._vector_candidates(
+                user_id=user_id,
+                embedding=seed.get("embedding"),
+                memory_type=memory_type,
+                top_k=top_k,
+                exclude_ids={sid},
+            ):
+                if vector_similarity_at_least(float(cand.get("score") or 0.0), cluster_sim, distance_function):
+                    for doc in await self._load_memories_by_ids(user_id, memory_type, [cand.get("id")]):
+                        nodes_by_id[doc["id"]] = doc
+                        edges.add(tuple(sorted((sid, doc["id"]))))
+        node_ids = set(nodes_by_id)
+        for doc in list(nodes_by_id.values()):
+            did = doc.get("id")
+            if not did:
+                continue
+            for cand in await self._vector_candidates(
+                user_id=user_id,
+                embedding=doc.get("embedding"),
+                memory_type=memory_type,
+                top_k=top_k,
+                exclude_ids={did},
+            ):
+                cid = cand.get("id")
+                if cid in node_ids and vector_similarity_at_least(
+                    float(cand.get("score") or 0.0), cluster_sim, distance_function
+                ):
+                    edges.add(tuple(sorted((did, cid))))
+
+        adjacency: dict[str, set[str]] = {node_id: set() for node_id in nodes_by_id}
+        for left, right in edges:
+            if left != right and left in adjacency and right in adjacency:
+                adjacency[left].add(right)
+                adjacency[right].add(left)
+        clusters: list[list[dict[str, Any]]] = []
+        seen: set[str] = set()
+        for node_id in adjacency:
+            if node_id in seen:
+                continue
+            stack = [node_id]
+            component: list[str] = []
+            seen.add(node_id)
+            while stack:
+                current = stack.pop()
+                component.append(current)
+                for nxt in adjacency[current]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            if len(component) >= 2:
+                # Cap cluster size at the reconcile pool limit: lowering the cluster
+                # threshold can chain many facts into one giant transitive component
+                # that would blow the prompt cap; keep the most-recent ``n``.
+                if len(component) > n:
+                    component = component[:n]
+                clusters.append([nodes_by_id[cid] for cid in component])
+        return clusters, len(nodes_by_id), seeds
+
+    async def _reconcile_candidate_mode(
+        self, user_id: str, *, n: int, memory_type: str, started_at: float
+    ) -> dict[str, int]:
+        # Candidate clustering only. The periodic full-pool backstop that catches
+        # dissimilar-embedding contradictions ("vegetarian" vs "loves steak") is
+        # driven by the caller via ``full_rebuild`` on a PERSISTED-counter cadence
+        # (in-process auto-trigger + durable change-feed), not an in-memory sweep
+        # counter — the latter reset per worker/process and never fired reliably on
+        # the Function-App backend.
+        clusters, node_count, seeds = await self._build_candidate_clusters(user_id, memory_type, n)
+        aggregate = {"kept": 0, "merged": 0, "contradicted": 0}
+        clustered_ids: set[str] = set()
+        for cluster in clusters:
+            # Mark members as clustered BEFORE the LLM call so a failed cluster's
+            # seeds are not treated as orphans below (which would clear their tags
+            # and prevent a retry). A truncated/malformed LLM response on one
+            # cluster must not abort the sweep or starve the remaining clusters.
+            clustered_ids.update(doc["id"] for doc in cluster if doc.get("id"))
+            try:
+                counts, consumed = await self._reconcile_pool(user_id, memory_type, cluster)
+            except Exception as exc:
+                logger.warning(
+                    "reconcile_memories: cluster reconcile failed user_id=%s memory_type=%s; "
+                    "skipping cluster, tags retained for next sweep: %s",
+                    user_id,
+                    memory_type,
+                    exc,
+                )
+                continue
+            for key in aggregate:
+                aggregate[key] += int(counts.get(key, 0))
+            # Clear dup-candidate tags only on survivors. Re-upserting a doc that
+            # was just superseded (duplicate source or contradiction loser) would
+            # resurrect it, since the in-memory cluster copy lacks superseded_by.
+            survivors = [doc for doc in cluster if doc.get("id") and doc["id"] not in consumed]
+            await self._clear_dup_candidate_tags(survivors)
+        # Orphan seeds: tagged dup-candidates that never joined a cluster have no
+        # near-duplicate, so clear the stale tag — otherwise every future sweep
+        # re-scans them as seeds and they accumulate forever.
+        orphan_seeds = [seed for seed in seeds if seed.get("id") and seed["id"] not in clustered_ids]
+        await self._clear_dup_candidate_tags(orphan_seeds)
+        aggregate["reconcile_clusters_sent"] = len(clusters)
+        aggregate["reconcile_llm_calls_saved"] = max(0, node_count - len(clusters))
+        logger.info(
+            "reconcile_memories candidate completed user_id=%s memory_type=%s result=%s",
+            user_id,
+            memory_type,
+            aggregate,
+        )
+        self._emit_reconcile_outcome(
+            started_at=started_at,
+            user_id=user_id,
+            candidates=node_count,
+            result=aggregate,
+        )
+        return aggregate
+
+    async def _clear_dup_candidate_tags(self, docs: Iterable[dict[str, Any]]) -> None:
+        for doc in docs:
+            tags = [tag for tag in (doc.get("tags") or []) if tag != "sys:dup-candidate"]
+            if tags == (doc.get("tags") or []):
+                continue
+            updated = dict(doc)
+            updated["tags"] = tags
+            metadata = dict(updated.get("metadata") or {})
+            metadata.pop("dup_of", None)
+            metadata.pop("dup_score", None)
+            updated["metadata"] = metadata
+            updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+            try:
+                await self._upsert_memory(updated)
+            except Exception:
+                logger.exception("reconcile_memories: failed to clear dup-candidate tag id=%s", doc.get("id"))
+
+    async def reconcile_memories(
+        self, user_id: str, n: int = 50, *, memory_type: str = "fact", full_rebuild: bool = False
+    ) -> dict[str, int]:
         """Reconcile a user's active facts in a single LLM pass.
 
         Loads the most recent ``n`` active (non-superseded) facts for
@@ -1417,44 +1756,64 @@ class AsyncPipelineService:
             raise ValidationError(f"n must be a positive integer, got {n!r}")
         if n > 500:
             raise ValidationError(f"n must be <= 500 to bound prompt size and LLM cost, got {n}")
+        if memory_type not in {"fact", "episodic", "procedural"}:
+            raise ValidationError(f"memory_type must be one of fact, episodic, procedural, got {memory_type!r}")
+        if memory_type == "procedural":
+            result = {
+                "kept": 0,
+                "merged": 0,
+                "contradicted": 0,
+                "reconcile_clusters_sent": 0,
+                "reconcile_llm_calls_saved": 0,
+            }
+            logger.info("reconcile_memories procedural no-op user_id=%s result=%s", user_id, result)
+            return result
 
         started_at = time.monotonic()
-        logger.info("reconcile_memories started user_id=%s n=%d", user_id, n)
+        logger.info("reconcile_memories started user_id=%s n=%d memory_type=%s", user_id, n, memory_type)
 
-        # ---- 1. Load up to N most recent active facts ----
-        # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
-        # physical partitions and matches the dedup prompt's tiebreaker
-        # ("more recent created_at first"). Cosmos's _ts is the last-write
-        # timestamp, which would diverge from created_at after any UPDATE.
-        query = (
-            f"SELECT TOP {n} * FROM c "
-            "WHERE c.user_id = @user_id "
-            "AND c.type = 'fact' "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            "ORDER BY c.created_at DESC"
-        )
-        parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
-        ]
-        facts = await self._query_items(
-            self._memories_container,
-            query=query,
-            parameters=parameters,
-        )
+        # Explicit user-triggered reconcile (full_rebuild) always takes the
+        # full-pool single-LLM-pass path: it sees every active fact together, so it
+        # catches contradictions that aren't vector-similar (e.g. "vegetarian" vs
+        # "loves steak") — which candidate clustering, keyed on near-duplicate
+        # similarity, would never group. Automatic sweeps use cheap candidate mode.
+        if get_dedup_reconcile_mode() == "candidate" and not full_rebuild:
+            return await self._reconcile_candidate_mode(
+                user_id, n=n, memory_type=memory_type, started_at=started_at
+            )
 
+        facts = await self._active_memories_for_reconcile(user_id, memory_type, n)
+        result, consumed = await self._reconcile_pool(user_id, memory_type, facts)
+        # Clear dup-candidate tags on survivors so an explicit reconcile(full_rebuild=True)
+        # doesn't leave stale sys:dup-candidate/dup_of metadata on user-visible memories.
+        survivors = [doc for doc in facts if doc.get("id") and doc["id"] not in consumed]
+        await self._clear_dup_candidate_tags(survivors)
+        self._emit_reconcile_outcome(
+            started_at=started_at,
+            user_id=user_id,
+            candidates=len(facts),
+            result=result,
+        )
+        return result
+
+    async def _reconcile_pool(
+        self, user_id: str, memory_type: str, facts: list[dict[str, Any]]
+    ) -> tuple[dict[str, int], set[str]]:
+        """Reconcile an explicit pool of same-type memories in one LLM pass.
+
+        Returns ``({"kept", "merged", "contradicted"}, consumed_ids)`` where
+        ``consumed_ids`` are the source/loser ids that were actually superseded,
+        so callers can skip them when clearing dup-candidate tags (re-upserting a
+        superseded source would resurrect it). Does not emit telemetry — the
+        caller owns the ``reconcile.outcome`` line.
+        """
         if len(facts) <= 1:
             logger.info(
-                "reconcile_memories: %d facts, nothing to reconcile",
+                "reconcile_memories: %d %s memories, nothing to reconcile",
                 len(facts),
+                memory_type,
             )
-            early_result = {"kept": len(facts), "merged": 0, "contradicted": 0}
-            self._emit_reconcile_outcome(
-                started_at=started_at,
-                user_id=user_id,
-                candidates=len(facts),
-                result=early_result,
-            )
-            return early_result
+            return {"kept": len(facts), "merged": 0, "contradicted": 0}, set()
 
         # ---- 2. Format the facts pool for the prompt ----
         # ``json.dumps`` escapes embedded quotes and pipes inside content so
@@ -1481,14 +1840,16 @@ class AsyncPipelineService:
         facts_text = "\n".join(lines)
 
         # ---- 3. Single LLM call over the entire pool ----
-        response_text = await self._run_prompty(
-            "dedup.prompty",
-            inputs={"facts_text": facts_text},
-        )
+        # Polarity keyed on an explicit predicate so a future third type (e.g.
+        # procedural, were it ever routed here) can't silently diverge from sync.
+        is_episodic = memory_type == "episodic"
+        prompt_name = "dedup_episodic.prompty" if is_episodic else "dedup.prompty"
+        prompt_inputs = {"episodics_text": facts_text} if is_episodic else {"facts_text": facts_text}
+        response_text = await self._run_prompty(prompt_name, inputs=prompt_inputs)
         parsed = self._parse_llm_json(response_text)
 
         duplicate_groups = parsed.get("duplicate_groups", []) or []
-        contradicted_pairs = parsed.get("contradicted_pairs", []) or []
+        contradicted_pairs = [] if is_episodic else (parsed.get("contradicted_pairs", []) or [])
         # ``kept_ids`` from the LLM is used below as a cross-check for
         # accounting drift (hallucinated IDs, double-counting). The actual
         # kept count is computed from facts minus consumed losers.
@@ -1564,11 +1925,13 @@ class AsyncPipelineService:
             seen_tags: set[str] = set()
             for src in source_docs:
                 for t in src.get("tags", []) or []:
+                    if t == "sys:dup-candidate":
+                        continue
                     if t not in seen_tags:
                         seen_tags.add(t)
                         merged_tags.append(t)
             if not merged_tags:
-                merged_tags = ["sys:fact"]
+                merged_tags = [f"sys:{memory_type}"]
 
             # Union source_memory_ids across all source docs (provenance chain).
             merged_source_memory_ids: list[str] = []
@@ -1625,16 +1988,39 @@ class AsyncPipelineService:
             # see the same id rather than chaining through a new UUID.
             merged_content_hash = compute_content_hash(merged_content)
             merged_id_seed = _ID_SEED_SEP.join((user_id, "merged", merged_content_hash))
-            merged_id = "fact_" + hashlib.sha256(merged_id_seed.encode()).hexdigest()[:32]
-
+            merged_prefix = "ep_" if memory_type == "episodic" else "fact_"
+            merged_id = merged_prefix + hashlib.sha256(merged_id_seed.encode()).hexdigest()[:32]
             try:
+                if memory_type == "episodic":
+                    base_metadata = dict(source_docs[0].get("metadata") or {})
+                    base_metadata.update(
+                        {
+                            "lesson": merged_content,
+                            "merged_via": "reconcile",
+                            "merged_from_count": len(valid_source_ids),
+                        }
+                    )
+                    base_metadata.setdefault("scope_type", base_metadata.get("scope_type") or "general")
+                    base_metadata.setdefault("scope_value", base_metadata.get("scope_value") or "general")
+                    base_metadata.setdefault("outcome_valence", base_metadata.get("outcome_valence") or "neutral")
+                    record_cls = EpisodicRecord
+                    prompt_lineage = self._prompt_lineage("dedup_episodic.prompty")
+                    metadata = base_metadata
+                else:
+                    record_cls = FactRecord
+                    prompt_lineage = self._prompt_lineage("dedup.prompty")
+                    metadata = {
+                        "category": "preference",
+                        "merged_via": "reconcile",
+                        "merged_from_count": len(valid_source_ids),
+                    }
                 merged_record = construct_internal(
-                    FactRecord,
+                    record_cls,
                     {
                         "id": merged_id,
                         "user_id": user_id,
                         "role": "system",
-                        "type": "fact",
+                        "type": memory_type,
                         "content": merged_content,
                         "thread_id": recent_thread_id or f"__reconciled__:{user_id}",
                         "confidence": confidence_val if confidence_val is not None else 0.5,
@@ -1643,12 +2029,8 @@ class AsyncPipelineService:
                         "source_memory_ids": merged_source_memory_ids,
                         "tags": merged_tags,
                         "content_hash": merged_content_hash,
-                        "metadata": {
-                            "category": "preference",
-                            "merged_via": "reconcile",
-                            "merged_from_count": len(valid_source_ids),
-                        },
-                        **self._prompt_lineage("dedup.prompty"),
+                        "metadata": metadata,
+                        **prompt_lineage,
                         "created_at": datetime.now(timezone.utc).isoformat(),
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     },
@@ -1820,13 +2202,7 @@ class AsyncPipelineService:
             )
         result = {"kept": kept, "merged": merged, "contradicted": contradicted}
         logger.info("reconcile_memories completed: %s", result)
-        self._emit_reconcile_outcome(
-            started_at=started_at,
-            user_id=user_id,
-            candidates=len(facts),
-            result=result,
-        )
-        return result
+        return result, consumed_ids
 
     async def build_procedural_context(self, user_id: str) -> str:
         """Return the active synthesized procedural prompt for system injection."""

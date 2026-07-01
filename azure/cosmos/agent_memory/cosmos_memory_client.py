@@ -621,7 +621,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -644,7 +643,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
             role=role,
             memory_types=memory_types,
             thread_id=thread_id,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -662,7 +660,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         user_id: str,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -684,7 +681,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
             user_id=user_id,
             thread_id=thread_id,
             role=role,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -801,15 +797,30 @@ class CosmosMemoryClient(_BaseMemoryClient):
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
         """Semantic search across episodic memories for a user."""
-        return self._get_store().search_episodic(user_id, search_terms, top_k, min_salience, include_superseded)
+        return self._get_store().search_episodic(
+            user_id=user_id,
+            search_terms=search_terms,
+            top_k=top_k,
+            min_salience=min_salience,
+            include_superseded=include_superseded,
+        )
 
     def build_procedural_context(self, user_id: str) -> str:
         """Build formatted procedural context for prompt injection."""
         return self._get_pipeline().build_procedural_context(user_id)
 
-    def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
+    def build_episodic_context(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 3,
+    ) -> str:
         """Build formatted context of relevant past experiences."""
-        return self._get_store().build_episodic_context(user_id, query, top_k)
+        return self._get_store().build_episodic_context(
+            user_id=user_id,
+            query=query,
+            top_k=top_k,
+        )
 
     def extract_memories(
         self,
@@ -855,7 +866,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Reconcile a user's facts via the contradiction-aware dedup pass."""
         from .thresholds import get_dedup_pool_size
 
-        return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
+        return self._get_pipeline().reconcile_memories(
+            user_id, n if n is not None else get_dedup_pool_size(), full_rebuild=True
+        )
 
     def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         """Force the processor to run the full pipeline RIGHT NOW for one thread.

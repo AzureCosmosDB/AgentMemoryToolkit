@@ -15,8 +15,8 @@ from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
     _build_memory_query_builder,
     _coerce_datetime_iso,
-    _validate_hybrid_search,
     compute_content_hash,
+    extract_keywords,
     new_id,
 )
 from azure.cosmos.agent_memory.exceptions import (
@@ -840,7 +840,6 @@ class MemoryStore:
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -859,9 +858,9 @@ class MemoryStore:
         :meth:`search_turns` to vector-search the raw conversation log instead.
         """
         terms = require_search_terms(search_terms, query)
-        _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
         query_vector = self._embed(terms)
+        keywords = extract_keywords(terms)
 
         qb = _build_memory_query_builder(
             memory_id=memory_id,
@@ -881,11 +880,16 @@ class MemoryStore:
         )
         add_salience_filter(qb, min_salience)
 
-        sql = build_search_sql(qb=qb, top=top, hybrid_search=hybrid_search, include_superseded=include_superseded)
+        sql = build_search_sql(
+            qb=qb,
+            top=top,
+            keyword_count=len(keywords),
+            include_superseded=include_superseded,
+        )
         parameters = qb.get_parameters()
         parameters.append({"name": "@embedding", "value": query_vector})
-        if hybrid_search:
-            parameters.append({"name": "@key_terms", "value": terms})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
 
         partition_key, cross_partition = query_scope(user_id, thread_id)
         if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
@@ -905,7 +909,6 @@ class MemoryStore:
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -915,7 +918,7 @@ class MemoryStore:
         *,
         query: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Search raw conversation turns using vector similarity with optional hybrid ranking.
+        """Search raw conversation turns using vector similarity with hybrid ranking.
 
         Only vector-searchable when turn embeddings were enabled at write time
         (see ``enable_turn_embeddings``). ``user_id`` is required and always
@@ -927,9 +930,9 @@ class MemoryStore:
         if not user_id:
             raise ValidationError("user_id is required for search_turns")
         terms = require_search_terms(search_terms, query)
-        _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
         query_vector = self._embed(terms)
+        keywords = extract_keywords(terms)
 
         qb = _QueryBuilder()
         qb.add_filter("c.user_id", "@user_id", user_id)
@@ -944,11 +947,11 @@ class MemoryStore:
             before_param="@created_before",
         )
 
-        sql = build_search_sql(qb=qb, top=top, hybrid_search=hybrid_search, include_superseded=False)
+        sql = build_search_sql(qb=qb, top=top, keyword_count=len(keywords), include_superseded=False)
         parameters = qb.get_parameters()
         parameters.append({"name": "@embedding", "value": query_vector})
-        if hybrid_search:
-            parameters.append({"name": "@key_terms", "value": terms})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
 
         partition_key, cross_partition = query_scope(user_id, thread_id)
         logger.debug("MemoryStore.search_turns query: %s", sql)

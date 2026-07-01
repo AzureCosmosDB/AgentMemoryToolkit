@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from azure.cosmos.agent_memory import thresholds
 from azure.cosmos.agent_memory.thresholds import (
     DEFAULT_ENABLE_TURN_EMBEDDINGS,
     DEFAULT_TTL_BY_TYPE,
@@ -50,3 +51,149 @@ def test_enable_turn_embeddings_truthy_values(monkeypatch, raw) -> None:
 def test_enable_turn_embeddings_falsy_values(monkeypatch, raw) -> None:
     monkeypatch.setenv("ENABLE_TURN_EMBEDDINGS", raw)
     assert get_enable_turn_embeddings() is False
+
+
+@pytest.mark.parametrize(
+    ("env_name", "getter_name", "expected"),
+    [
+        ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", 1),
+        ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", 10),
+        ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", 20),
+        ("DEDUP_EVERY_N", "get_dedup_every_n", 5),
+        ("DEDUP_POOL_SIZE", "get_dedup_pool_size", 50),
+        ("PROCEDURAL_SYNTHESIS_AUTO", "get_procedural_synthesis_auto", True),
+    ],
+)
+def test_env_config_getters_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    getter_name: str,
+    expected: object,
+) -> None:
+    monkeypatch.delenv(env_name, raising=False)
+
+    assert getattr(thresholds, getter_name)() == expected
+
+
+@pytest.mark.parametrize(
+    ("env_name", "getter_name", "raw", "expected"),
+    [
+        ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", "2", 2),
+        ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", "11", 11),
+        ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", "21", 21),
+        ("DEDUP_EVERY_N", "get_dedup_every_n", "3", 3),
+        ("DEDUP_POOL_SIZE", "get_dedup_pool_size", "75", 75),
+        ("PROCEDURAL_SYNTHESIS_AUTO", "get_procedural_synthesis_auto", "false", False),
+    ],
+)
+def test_env_config_getters_parse_env(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    getter_name: str,
+    raw: str,
+    expected: object,
+) -> None:
+    monkeypatch.setenv(env_name, raw)
+
+    assert getattr(thresholds, getter_name)() == expected
+
+
+@pytest.mark.parametrize(
+    ("env_name", "getter_name", "expected"),
+    [
+        ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", 1),
+        ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", 10),
+        ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", 20),
+        ("DEDUP_EVERY_N", "get_dedup_every_n", 5),
+        ("DEDUP_POOL_SIZE", "get_dedup_pool_size", 50),
+    ],
+)
+def test_int_getters_reject_negative(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    getter_name: str,
+    expected: int,
+) -> None:
+    monkeypatch.setenv(env_name, "-1")
+
+    assert getattr(thresholds, getter_name)() == expected
+
+
+@pytest.mark.parametrize(
+    ("env_name", "getter_name", "expected"),
+    [
+        ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", 1),
+        ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", 10),
+        ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", 20),
+        ("DEDUP_EVERY_N", "get_dedup_every_n", 5),
+        ("DEDUP_POOL_SIZE", "get_dedup_pool_size", 50),
+    ],
+)
+def test_int_getters_invalid_use_default(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    getter_name: str,
+    expected: int,
+) -> None:
+    monkeypatch.setenv(env_name, "bogus")
+
+    assert getattr(thresholds, getter_name)() == expected
+
+
+def test_dedup_pool_size_clamps_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEDUP_POOL_SIZE", "501")
+
+    assert thresholds.get_dedup_pool_size() == 500
+
+
+def test_dedup_pool_size_rejects_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEDUP_POOL_SIZE", "0")
+
+    assert thresholds.get_dedup_pool_size() == 50
+
+
+def test_procedural_synthesis_auto_invalid_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROCEDURAL_SYNTHESIS_AUTO", "bogus")
+
+    assert thresholds.get_procedural_synthesis_auto() is True
+
+
+def test_processor_owner_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MEMORY_PROCESSOR_OWNER", raising=False)
+
+    assert thresholds.get_processor_owner() is None
+
+
+@pytest.mark.parametrize("raw", ["inprocess", "durable", "INPROCESS", "DURABLE"])
+def test_processor_owner_parse_env(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", raw)
+
+    assert thresholds.get_processor_owner() == raw.lower()
+
+
+def test_processor_owner_invalid_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "bogus")
+
+    assert thresholds.get_processor_owner() is None
+
+
+def test_internalized_getters_return_fixed_constants_and_ignore_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEDUP_CONTEXT_VECTOR_ENABLED", "false")
+    monkeypatch.setenv("DEDUP_CONTEXT_TOPK", "7")
+    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "false")
+    monkeypatch.setenv("DEDUP_SIM_HIGH", "0.50")
+    monkeypatch.setenv("DEDUP_SIM_LOW", "0.40")
+    monkeypatch.setenv("DEDUP_CANDIDATE_TOPK", "8")
+    monkeypatch.setenv("DEDUP_RECONCILE_MODE", "full_pool")
+    monkeypatch.setenv("DEDUP_CLUSTER_SIM", "0.10")
+    monkeypatch.setenv("DEDUP_FULL_RECLUSTER_EVERY_N", "4")
+
+    assert thresholds.get_dedup_context_vector_enabled() is True
+    assert thresholds.get_dedup_context_topk() == 10
+    assert thresholds.get_dedup_vector_enabled() is True
+    assert thresholds.get_dedup_sim_high() == 0.97
+    assert thresholds.get_dedup_sim_low() == 0.80
+    assert thresholds.get_dedup_candidate_topk() == 10
+    assert thresholds.get_dedup_reconcile_mode() == "candidate"
+    assert thresholds.get_dedup_cluster_sim() == 0.60
+    assert thresholds.get_dedup_full_recluster_every_n() == 12

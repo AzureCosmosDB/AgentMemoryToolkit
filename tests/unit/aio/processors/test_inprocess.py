@@ -24,10 +24,11 @@ async def test_process_thread_calls_summarize_extract_reconcile_in_order():
         "generate_thread_summary",
         "extract_memories",
         "reconcile_memories",
+        "reconcile_memories",
     ]
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary", "type": "thread_summary"}
-    assert result.reconciled_count == 2
+    assert result.reconciled_count == 4
 
 
 @pytest.mark.asyncio
@@ -62,8 +63,19 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     count = await proc.process_reconcile(user_id="u")
 
-    pipeline.reconcile_memories.assert_called_once_with("u", 37)
-    assert count == 5  # merged + contradicted
+    # Reconciles fact + episodic; both forward the env pool size.
+    assert pipeline.reconcile_memories.await_count == 2
+    assert pipeline.reconcile_memories.await_args_list[0].kwargs == {
+        "n": 37,
+        "memory_type": "fact",
+        "full_rebuild": False,
+    }
+    assert pipeline.reconcile_memories.await_args_list[1].kwargs == {
+        "n": 37,
+        "memory_type": "episodic",
+        "full_rebuild": False,
+    }
+    assert count == 10  # (merged+contradicted) x2 types
 
 
 @pytest.mark.asyncio
@@ -75,9 +87,9 @@ async def test_process_extract_memories_invokes_pipeline_and_filters_to_ints():
     }
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
-    result = await proc.process_extract_memories(user_id="u", thread_id="t")
+    result = await proc.process_extract_memories(user_id="u", thread_id="t", recent_k=3)
 
-    pipeline.extract_memories.assert_called_once_with("u", "t")
+    pipeline.extract_memories.assert_called_once_with("u", "t", recent_k=3)
     assert result == {"fact_count": 3}
 
 

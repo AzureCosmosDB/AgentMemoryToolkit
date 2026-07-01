@@ -37,8 +37,8 @@
 
 ### Retrieval
 
-- `search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, hybrid_search=False, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — vector or hybrid search derived memories (facts/episodic/procedural).
-- `search_turns(search_terms, user_id, thread_id=None, role=None, hybrid_search=False, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, created_after=None, created_before=None) -> list[dict]` — vector or hybrid search the raw conversation log instead of facts/episodic/procedural (requires turn embeddings; see `enable_turn_embeddings`). `user_id` is required so the search is scoped to one partition instead of scanning every user's turns.
+- `search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — hybrid vector/full-text search memories, falling back to vector-only for all-stopword queries.
+- `search_turns(search_terms, user_id, thread_id=None, role=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, created_after=None, created_before=None) -> list[dict]` — hybrid vector/full-text search the raw conversation log instead of facts/episodic/procedural (requires turn embeddings; see `enable_turn_embeddings`). `user_id` is required so the search is scoped to one partition instead of scanning every user's turns.
 - `get_procedural_prompt(user_id) -> Optional[str]` — read the active procedural prompt.
 - `get_procedural_history(user_id, limit=10) -> list[dict]` — read procedural prompt history.
 - `get_procedural_memories(user_id, priority=None, category=None, min_salience=None, include_superseded=False) -> list[dict]` — retrieve procedural memory documents.
@@ -91,8 +91,8 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 
 ### Retrieval
 
-- `async search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, hybrid_search=False, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — vector or hybrid search derived memories (facts/episodic/procedural).
-- `async search_turns(search_terms, user_id, thread_id=None, role=None, hybrid_search=False, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, created_after=None, created_before=None) -> list[dict]` — vector or hybrid search the raw conversation log instead of facts/episodic/procedural (requires turn embeddings; see `enable_turn_embeddings`). `user_id` is required so the search is scoped to one partition instead of scanning every user's turns.
+- `async search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` — hybrid vector/full-text search memories, falling back to vector-only for all-stopword queries.
+- `async search_turns(search_terms, user_id, thread_id=None, role=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, created_after=None, created_before=None) -> list[dict]` — hybrid vector/full-text search the raw conversation log instead of facts/episodic/procedural (requires turn embeddings; see `enable_turn_embeddings`). `user_id` is required so the search is scoped to one partition instead of scanning every user's turns.
 - `async get_procedural_prompt(user_id) -> Optional[str]` — read the active procedural prompt.
 - `async get_procedural_history(user_id, limit=10) -> list[dict]` — read procedural prompt history.
 - `async get_procedural_memories(user_id, priority=None, category=None, min_salience=None, include_superseded=False) -> list[dict]` — retrieve procedural memory documents.

@@ -177,6 +177,8 @@ async def increment_counter_by(
                 new_doc["last_failure_at"] = existing_doc.get("last_failure_at")
             if "last_failure_reason" in existing_doc:
                 new_doc["last_failure_reason"] = existing_doc.get("last_failure_reason")
+            if "last_extract_count" in existing_doc:
+                new_doc["last_extract_count"] = existing_doc.get("last_extract_count")
         # Stamp the writing backend (advisory only — not enforced server-side).
         if owner is not None:
             new_doc["last_owner"] = owner
@@ -259,3 +261,40 @@ def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:
     if n <= 0:
         raise ValueError("n must be > 0")
     return old_count // n != new_count // n
+
+
+async def read_extract_watermark(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+) -> int | None:
+    """Return the count value at the last successful extract, or ``None``.
+
+    Lets recent_k cover every turn since the previous extract succeeded so
+    turns are never skipped when extraction lags or transiently fails.
+    Best-effort: returns ``None`` on any read error so callers fall back to a
+    batch-based recent_k.
+    """
+    try:
+        doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+        value = doc.get("last_extract_count")
+        return int(value) if value is not None else None
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("read_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        return None
+
+
+async def advance_extract_watermark(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    count: int,
+) -> None:
+    """Stamp ``last_extract_count=count`` after a successful extract."""
+    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
+    try:
+        await container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)

@@ -6,15 +6,12 @@ model:
   apiType: chat
   options:
     seed: 42
-    maxOutputTokens: 2500
+    maxOutputTokens: 16384
     additionalProperties:
       response_format:
         type: json_object
 inputs:
   existing_facts:
-    type: string
-    default: '(none)'
-  existing_episodics:
     type: string
     default: '(none)'
   transcript:
@@ -34,11 +31,11 @@ Every memory must be explicitly grounded in the conversation — never inferred,
 
 ## Speaker Discrimination — Where Memories May Come From
 
-The transcript below is line-tagged: `[user]:` lines are the human's own words, `[assistant]:` lines are the agent's response. These two sources are NOT interchangeable.
+The transcript below is line-tagged: `[user]:` lines are the human's own words, `[agent]:` lines are the agent's response. These two sources are NOT interchangeable.
 
-- **Facts about the user may ONLY come from `[user]:` lines.** The assistant may restate, paraphrase, confirm, or make assumptions on the user's behalf ("Got it, you don't eat meat", "I assume you want a luxury hotel") — those are the agent's response, NOT the user's assertion. Never treat assistant text as a new source of user facts. If a fact appears only in `[assistant]:` content and is not asserted by the user, do not extract it.
-- **Episodic memories may use both speakers' content** — the user's stated intent or scope is the anchor (and must be present in `[user]:`), but the assistant's content may help fill in the `action_taken` or `outcome` of a `situation → action_taken → outcome` arc when the agent carried out the action on the user's behalf.
-- The assistant's general world-knowledge answers (e.g. "Python 3.13 was released in October 2024") are never user facts and never user episodic memories.
+- **Facts about the user may ONLY come from `[user]:` lines.** The agent may restate, paraphrase, confirm, or make assumptions on the user's behalf ("Got it, you don't eat meat", "I assume you want a luxury hotel") — those are the agent's response, NOT the user's assertion. Never treat agent text as a new source of user facts. If a fact appears only in `[agent]:` content and is not asserted by the user, do not extract it.
+- **Episodic memories may use both speakers' content** — the user's stated intent or scope is the anchor (and must be present in `[user]:`), but the agent's content may help fill in the `action_taken` or `outcome` of a `situation → action_taken → outcome` arc when the agent carried out the action on the user's behalf.
+- The agent's general world-knowledge answers (e.g. "Python 3.13 was released in October 2024") are never user facts and never user episodic memories.
 
 ## Confidence Scoring
 
@@ -73,94 +70,12 @@ Extract concrete, factual statements that fall into these categories:
 - Each fact must be self-contained and intelligible without context — no pronouns like "it" or "they" without antecedents
 - Write in third person ("The user...", "The project...")
 - Keep each fact concise — under 40 words
-- Consolidate closely related items **within the same category** into a single fact (e.g., multiple search results on the same topic)
-- **Never merge across categories.** A single user turn that combines, say, a `preference` ("I don't eat meat") and a `requirement` ("I need wheelchair-accessible restaurants") MUST produce two separate facts. Compound user statements regularly cross category boundaries; extract every category that applies. Silently folding one into the other drops information.
-- Only split *within* a category when the claims are about genuinely different topics
+- Consolidate closely related items into a single fact (e.g., multiple search results on the same topic)
+- Only split into separate facts when the claims are about genuinely different topics
 - Each fact will be stored as its own document with its own vector embedding — self-contained phrasing is essential for retrieval
 
-### Fact Reconciliation
-Before adding a fact, check it against the existing memories provided below. Use the `action` field:
-- **ADD** — This is a genuinely new fact not present in existing memories
-- **UPDATE** — This fact refines, narrows, or supplies more detail to an existing memory while remaining *compatible* with it (e.g. "user lives in Seattle" → "user lives in Seattle, WA"). Set `supersedes_id` to the ID of the memory being refined
-- **CONTRADICT** — This new fact is the opposite, a negation, or otherwise mutually exclusive with an existing memory (e.g. existing: "user is vegetarian"; new: "user now eats meat"). The old fact is no longer true — emit `CONTRADICT`, **not** UPDATE. Set `supersedes_id` to the ID of the memory being contradicted
-- **NONE** — This fact is already captured in existing memories with no meaningful change. Do not include NONE entries in your output — simply omit them
-
-**UPDATE vs CONTRADICT — the decisive test:** If the old fact and the new fact could both be true at the same moment about the same subject, use UPDATE. If they cannot both be true (one negates, reverses, or excludes the other), use CONTRADICT.
-
-### ADD / CONTRADICT / UPDATE — hard constraints
-
-These rules are absolute. Violating them silently corrupts the user's memory store.
-
-1. **Every emitted fact (ADD, UPDATE, or CONTRADICT) must paraphrase a claim directly stated by the user in a `[user]:` line in this extraction's transcript.** Do not invent supporting, clarifying, or "explicit-negation" facts. Do not synthesize facts by combining, restating, or "consolidating" entries from the existing-facts list. If the [user]: lines in this transcript do not assert claim X, do NOT emit claim X — regardless of what the existing-facts list contains. Merging existing facts is the job of a separate reconciliation pass, not yours.
-2. **One user statement → one fact, even when it implies a contradiction.** If a single user statement both adds new information AND opposes an existing fact, emit EXACTLY ONE fact: `text` paraphrases what the user actually said, `action="CONTRADICT"`, `supersedes_id` points at the opposed fact. The `supersedes_id` field by itself encodes the semantic opposition — do NOT also emit a second "explicit-negation" fact that restates the opposite of the prior claim. See the worked examples below.
-3. **Fact text must describe the world, never describe a memory operation.** Strings like `"X is contradicted by Y"`, `"The user's prior preference is no longer accurate"`, or `"Previous fact superseded"` are meta-commentary about prior reconciliations and are **never** valid fact content. If you find yourself writing one, drop the item entirely.
-4. **`supersedes_id` must point at a fact that is semantically about the same subject and property as the new fact.** A new dietary fact may only contradict an existing dietary fact; a new accessibility requirement may only update an existing accessibility requirement. Cross-subject supersedes (e.g. contradicting a "wheelchair access" fact with a new "loves seafood" fact) are always wrong — emit `ADD` instead.
-5. **When in doubt, emit `ADD`.** A spurious `ADD` is recoverable (exact-content-hash deduping catches it; reconciliation can later merge or supersede it). A spurious `CONTRADICT` or `UPDATE` corrupts the audit trail and silently marks a still-valid fact as superseded.
-
-#### Worked example A — explicit CONTRADICT (user states the negation directly)
-
-- Existing memory: `[ID: fact_abc123] User is vegetarian.`
-- New turn: *"I started eating meat again last month."*
-- Correct output (one fact, text paraphrases what the user said):
-  ```json
-  {
-    "text": "User eats meat.",
-    "category": "preference",
-    "action": "CONTRADICT",
-    "supersedes_id": "fact_abc123",
-    "confidence": 0.95,
-    "salience": 0.8
-  }
-  ```
-- **Wrong**: emitting `"action": "UPDATE"` here would be a silent bug — the pipeline treats UPDATE as a compatible refinement and CONTRADICT as an opposing claim, and downstream telemetry / belief-revision logic depends on the distinction.
-
-#### Worked example B — implicit CONTRADICT (user states a claim that semantically opposes an existing fact)
-
-- Existing memory: `[ID: fact_xyz789] The user does not eat meat.`
-- New turn: *"Actually, I love steak and seafood."*
-- Correct output (ONE fact — `text` is what the user said, `supersedes_id` carries the opposition):
-  ```json
-  {
-    "text": "The user loves steak and seafood.",
-    "category": "preference",
-    "action": "CONTRADICT",
-    "supersedes_id": "fact_xyz789",
-    "confidence": 0.95,
-    "salience": 0.8
-  }
-  ```
-- **Wrong** — emitting two facts:
-  ```json
-  // BAD: phantom explicit-negation fact alongside the literal user claim
-  [
-    {"text": "The user loves steak and seafood.", "action": "ADD", ...},
-    {"text": "The user eats meat.", "action": "CONTRADICT", "supersedes_id": "fact_xyz789", ...}
-  ]
-  ```
-  The phantom `"The user eats meat"` fact was never said by the user — it is an invented restatement to make the contradiction "explicit". This pollutes the fact store with claims the user did not make. The CONTRADICT relation on the literal fact is sufficient.
-
-#### Worked example C — do NOT synthesize ADDs from existing facts
-
-- Existing memories:
-  - `[ID: fact_111] The user eats meat.`
-  - `[ID: fact_222] The user loves steak and seafood.`
-- New turn: *"Normally, I prefer moderate hotels."*
-- Correct output (ONE fact — only the hotel preference; the existing-facts list is reference-only):
-  ```json
-  {
-    "text": "The user normally prefers moderate hotels.",
-    "category": "preference",
-    "action": "ADD",
-    "confidence": 0.9,
-    "salience": 0.7
-  }
-  ```
-- **Wrong** — emitting a synthesized "consolidation" fact:
-  ```json
-  // BAD: this fact is a paraphrase-merge of fact_111 + fact_222; the user never said this in this turn
-  {"text": "The user loves steak and seafood, indicating they eat meat.", "action": "ADD", ...}
-  ```
-  Merging existing facts is the job of a separate reconciliation pass. Your job here is to extract claims from the new [user] turn only.
+### Avoiding Duplicates
+Before adding a fact, check it against the existing memories provided below. **Only emit facts that are genuinely new.** If a fact is already captured in existing memories with no meaningful change, simply omit it. Do not try to update, merge, or flag contradictions with existing facts — that is handled later by a separate reconciliation step. Your only job here is to extract new facts and episodic memories from the transcript.
 
 ---
 
@@ -175,12 +90,8 @@ Extract memories that are tied to a **specific situation, scope, or context** th
 ### Required Fields
 - **scope_type** — short, free-form noun describing the kind of context (e.g. `trip`, `project`, `event`, `session`, `release`, `campaign`). Pick whatever vocabulary fits the user's domain. Do not invent a value if one is not implied — if no scope is present, the memory probably belongs in facts.
 - **scope_value** — the specific instance of that scope (e.g. `Paris 2025`, `Acme revamp`, `Q3 launch`).
-- **text** — short, self-contained one-liner (under 25 words) describing what this memory is *about*. Required, non-empty. This is the field that gets embedded and full-text-indexed — vague text like "intent recorded" silently kills retrieval. Write it like a subject line:
-  - *Planned / in-flight* intents — capture the goal **plus the key constraints** the user has stated. Example: `"Planning a Tokyo trip with vegetarian and wheelchair-accessible-restaurant constraints."`
-  - *Past events* — summarize situation→action→outcome in one sentence. Example: `"Resolved Q3 K8s OOM outage by raising pod memory limits to 1GB."`
-  - *Ongoing context* — describe the current state. Example: `"User is heads-down on the Acme launch this week and wants short answers."`
 
-All three of `scope_type`, `scope_value`, and `text` must be non-empty. (The `text` field plays the same role for episodic that it does for facts — self-contained phrasing intended for embedding.)
+Both must be non-empty.
 
 ### Optional Fields (include only when applicable)
 - **situation** — the context or problem faced (present for past/in-flight events)
@@ -191,7 +102,7 @@ All three of `scope_type`, `scope_value`, and `text` must be non-empty. (The `te
 - **lesson** — a transferable takeaway
 - **domain** — topic area
 
-For planned/in-flight or ongoing-context memories, leave `situation`, `action_taken`, `outcome`, `outcome_valence`, `reasoning`, and `lesson` as `null`. The scope fields plus `text` carry the meaning.
+For planned/in-flight or ongoing-context memories, leave `situation`, `action_taken`, `outcome`, `outcome_valence`, `reasoning`, and `lesson` as `null`. The scope fields alone carry the meaning.
 
 ---
 
@@ -214,33 +125,17 @@ When in doubt:
 ---
 
 ## Existing Memories
+The following facts already exist for this user. They are provided so you can avoid re-extracting facts that are already known. If a fact from the new transcript is already captured here, omit it.
 
-### Existing facts (REFERENCE ONLY — never source ADDs from this list)
+### Existing Memories Are Context, Not a Source
 
-The list below shows facts already stored for this user. Use it ONLY for these three purposes:
+The existing memories block is provided ONLY for grounding and for deciding whether a fact from the new transcript is already known and should be omitted. It is NOT part of the conversation transcript.
 
-1. **Deduplication** — if a fact you would otherwise ADD is already captured (semantically equivalent to an existing entry), omit it (action=NONE; don't include NONE entries in your output).
-2. **UPDATE** — if a NEW `[user]:` line in this transcript refines or adds detail to an existing fact in a compatible way, emit one fact with `action=UPDATE` and `supersedes_id` pointing at the existing fact.
-3. **CONTRADICT** — if a NEW `[user]:` line in this transcript opposes or negates an existing fact, emit one fact with `action=CONTRADICT` and `supersedes_id` pointing at the existing fact. The new fact's `text` paraphrases what the user actually said (not an invented explicit-negation).
-
-**Do NOT** treat this list as source material for ADD. Never combine, merge, restate, or "consolidate" entries from this list into a new ADD fact. If the new `[user]:` lines do not directly assert claim X, do NOT emit claim X — regardless of what the existing list contains. Cross-fact merging is the job of a separate reconciliation pass, not this one.
+- New memories must come exclusively from the new transcript below.
+- Never extract a fact or episodic memory solely because it appears in existing memories.
+- If information appears only in existing memories and not in the new transcript, do not emit it.
 
 {{existing_facts}}
-
-### Existing episodics
-
-The following episodic memories already exist for this user, grouped by scope. **Each scope (the pair of `scope_type` + `scope_value`) is the unique identity of an episodic memory** — there is one episodic per scope. Storage is upsert-by-scope: whatever you emit for an existing scope **replaces** the prior record. There is no ADD/UPDATE/CONTRADICT vocabulary for episodics — emit the full current state in `text` and the pipeline does the right thing.
-
-Decision rule when the transcript mentions a scope:
-
-- **Already captured, nothing new** — if the same scope is already covered and the transcript adds no new information (e.g. the user just re-states "for the Tokyo trip, I want luxury hotels" and that intent is already in the existing record), **omit it from the output**. Re-emitting it accomplishes nothing.
-- **Refinement / extension** — the transcript adds new details to a scope already present (e.g. existing: "Planning Tokyo trip with luxury hotels"; new turn: "let's also book a 5-night Shinjuku stay"). Emit the episodic with **the merged, richer `text`** that includes both the prior intent and the new detail. The new text replaces the old record by scope.
-- **Reversal** — the transcript negates or replaces the prior intent for the same scope (e.g. existing: "Planning Tokyo trip with luxury hotels"; new turn: "switching to budget hostels"). Emit the episodic with the **new** `text` describing the updated intent. The reversal replaces the old record by scope.
-- **New scope** — the transcript introduces a scope that is not in the list below. Emit a fresh episodic with that scope.
-
-If two genuinely-distinct events would share the same `(scope_type, scope_value)` (e.g. "lost wallet in Tokyo" and "booked Tokyo hotel" both as `(trip, Tokyo)`), differentiate them via `scope_value` (`Tokyo lost-wallet incident` vs `Tokyo trip`) — not by emitting two records under the same scope.
-
-{{existing_episodics}}
 
 ---
 
@@ -283,7 +178,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
 1. Could someone act on or reference this fact without reading the original thread?
 2. Is this fact stated explicitly, not inferred?
 3. Is each fact truly atomic — one claim per entry?
-4. Is every emitted fact grounded in a `[user]:` line in this transcript? (Existing-facts entries are reference-only; never source new ADDs from them.)
+4. Can any facts be merged because they describe variants of the same thing?
 
 **For Episodic:**
 1. Did this event actually happen, or is it hypothetical?
@@ -312,9 +207,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
       "confidence": 1.0,
       "salience": 0.9,
       "temporal_context": null,
-      "tags": ["topic:identity"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:identity"]
     },
     {
       "text": "Alex is a data engineer at Acme Corp.",
@@ -325,9 +218,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
       "confidence": 1.0,
       "salience": 0.8,
       "temporal_context": null,
-      "tags": ["topic:identity", "topic:career"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:identity", "topic:career"]
     },
     {
       "text": "Alex's new ETL pipeline project has a deadline at end of Q2.",
@@ -338,9 +229,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
       "confidence": 0.95,
       "salience": 0.9,
       "temporal_context": "end of Q2",
-      "tags": ["topic:project", "topic:ETL"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:project", "topic:ETL"]
     }
   ],
   "episodic": []
@@ -365,16 +254,13 @@ A fact is a standing claim that holds outside any specific context. The test: if
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": "last month",
-      "tags": ["topic:kubernetes", "topic:infrastructure"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:kubernetes", "topic:infrastructure"]
     }
   ],
   "episodic": [
     {
       "scope_type": "incident",
       "scope_value": "Q3 K8s OOM outage",
-      "text": "Resolved Q3 K8s OOM outage by raising pod memory limits to 1GB and adding per-namespace resource quotas.",
       "situation": "Kubernetes pods in production were repeatedly OOM-killed, causing an outage.",
       "action_taken": "Bumped pod memory limits from 512MB to 1GB and added resource quotas per namespace.",
       "outcome": "The OOM-killing stopped and production stabilized.",
@@ -408,9 +294,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
-      "tags": ["topic:database", "topic:BigQuery"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:database", "topic:BigQuery"]
     },
     {
       "text": "The marketing team's budget is $50,000 for the current quarter.",
@@ -421,9 +305,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
       "confidence": 0.95,
       "salience": 0.9,
       "temporal_context": "current quarter",
-      "tags": ["topic:budget", "topic:marketing"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:budget", "topic:marketing"]
     }
   ],
   "episodic": []
@@ -451,16 +333,13 @@ The first statement is a standing preference and belongs in `facts`. The second 
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
-      "tags": ["topic:travel", "topic:hotels"],
-      "action": "ADD",
-      "supersedes_id": null
+      "tags": ["topic:travel", "topic:hotels"]
     }
   ],
   "episodic": [
     {
       "scope_type": "trip",
       "scope_value": "Paris",
-      "text": "Planning a Paris trip with a luxury-accommodations preference.",
       "situation": null,
       "action_taken": null,
       "outcome": null,
@@ -476,126 +355,11 @@ The first statement is a standing preference and belongs in `facts`. The second 
 }
 ```
 
-### Example 6: Episodic — same scope, same intent already captured (OMIT)
-
-**Existing episodics:**
-```
-- trip = Tokyo (1 episodic)
-  - [ID: ep_a1b2c3] (salience 0.8) Planning a Tokyo trip with a luxury hotel preference.
-```
-
-**Conversation:**
-> User: "For this Tokyo trip, I want luxury hotels."
-> User: "Normally, I prefer moderate hotels."
-
-The first user turn re-states an intent that is already captured for `(trip, Tokyo)`. Omit it — re-emitting the same intent for the same scope accomplishes nothing (the pipeline upserts by scope). The second user turn is a standing preference and belongs in `facts`.
-
-**Output:**
-```json
-{
-  "facts": [
-    {
-      "text": "The user normally prefers moderate hotels.",
-      "category": "preference",
-      "subject": "user",
-      "predicate": "hotel_preference",
-      "object": "moderate hotels",
-      "confidence": 0.95,
-      "salience": 0.7,
-      "temporal_context": null,
-      "tags": ["topic:travel", "topic:hotels"],
-      "action": "ADD",
-      "supersedes_id": null
-    }
-  ],
-  "episodic": []
-}
-```
-
-### Example 7: Episodic — refinement (emit merged text for the same scope)
-
-**Existing episodics:**
-```
-- trip = Tokyo (1 episodic)
-  - [ID: ep_a1b2c3] (salience 0.8) Planning a Tokyo trip with a luxury hotel preference.
-```
-
-**Conversation:**
-> User: "For the Tokyo trip, let's also book a 5-night stay in Shinjuku."
-
-The transcript adds a new detail (5-night Shinjuku stay) to the existing Tokyo scope. Emit one episodic for `(trip, Tokyo)` with the **merged richer text** that carries both the prior luxury-hotel intent and the new accommodation detail. The pipeline upserts by scope, so this replaces the prior record.
-
-**Output:**
-```json
-{
-  "facts": [],
-  "episodic": [
-    {
-      "scope_type": "trip",
-      "scope_value": "Tokyo",
-      "text": "Planning a Tokyo trip with a luxury hotel preference and a 5-night stay in Shinjuku.",
-      "situation": null,
-      "action_taken": null,
-      "outcome": null,
-      "outcome_valence": null,
-      "reasoning": null,
-      "lesson": null,
-      "domain": "travel",
-      "confidence": 0.95,
-      "salience": 0.85,
-      "tags": ["topic:travel", "topic:hotels", "topic:itinerary"]
-    }
-  ]
-}
-```
-
-### Example 5: Compound user statement crossing fact categories
-
-**Conversation:**
-> User: "I don't eat meat and I need wheelchair-accessible restaurants."
-
-A single user turn that combines a `preference` (diet) and a `requirement` (accessibility). These are different categories — they MUST be emitted as separate facts. Collapsing both into one "restaurant preferences" fact silently loses the accessibility constraint, which is the more operationally critical of the two.
-
-**Output:**
-```json
-{
-  "facts": [
-    {
-      "text": "The user does not eat meat.",
-      "category": "preference",
-      "subject": "user",
-      "predicate": "dietary_restriction",
-      "object": "no meat",
-      "confidence": 1.0,
-      "salience": 0.9,
-      "temporal_context": null,
-      "tags": ["topic:diet", "topic:food"],
-      "action": "ADD",
-      "supersedes_id": null
-    },
-    {
-      "text": "The user requires wheelchair-accessible restaurants.",
-      "category": "requirement",
-      "subject": "user",
-      "predicate": "accessibility_requirement",
-      "object": "wheelchair-accessible restaurants",
-      "confidence": 1.0,
-      "salience": 0.95,
-      "temporal_context": null,
-      "tags": ["topic:accessibility", "topic:restaurants"],
-      "action": "ADD",
-      "supersedes_id": null
-    }
-  ],
-  "episodic": []
-}
-```
-
 ---
 
 ## Output Format
 
-You must output ONLY valid JSON matching the schema below. No preamble, no explanation, no closing remarks — just the JSON object. Each array can be empty if no memories of that type are found. Omit entries with action=NONE entirely.
+You must output ONLY valid JSON matching the schema below. No preamble, no explanation, no closing remarks — just the JSON object. Each array can be empty if no memories of that type are found. Omit any fact that is already captured in the existing memories.
 
 ```json
 {
@@ -609,16 +373,13 @@ You must output ONLY valid JSON matching the schema below. No preamble, no expla
       "confidence": 0.95,
       "salience": 0.8,
       "temporal_context": "optional time ref or null",
-      "tags": ["topic:x"],
-      "action": "ADD|UPDATE|CONTRADICT",
-      "supersedes_id": "id or null"
+      "tags": ["topic:x"]
     }
   ],
   "episodic": [
     {
       "scope_type": "trip|project|event|session|release|campaign|... (free-form, required, non-empty)",
       "scope_value": "specific instance, e.g. Paris 2025 (required, non-empty)",
-      "text": "self-contained one-liner describing the memory — required, non-empty",
       "situation": "context/problem, or null",
       "action_taken": "what was tried, or null",
       "outcome": "what happened, or null",

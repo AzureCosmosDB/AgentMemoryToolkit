@@ -26,6 +26,7 @@ from shared.cosmos_clients import get_counter_container_async
 from shared.counters import (
     crosses_threshold,
     increment_counter_by,
+    read_extract_watermark,
     thread_counter_id,
     user_counter_id,
 )
@@ -128,6 +129,16 @@ async def process_changefeed_batch(
     # Reconcile fires every (n_facts * n_dedup) turns, matching the SDK
     # auto-trigger contract. Disabled when either knob is 0.
     n_dedup_turns = n_facts * n_dedup if (n_facts > 0 and n_dedup > 0) else 0
+    # Full-pool reconcile backstop cadence. The candidate-mode "every Nth sweep"
+    # gate is an in-memory per-worker counter, which on the FA backend (per-worker
+    # singleton pipeline) resets on recycle/scale and never reaches N for a user —
+    # so the full-pool pass that catches dissimilar-embedding contradictions almost
+    # never fires. Derive it from the PERSISTED counter instead: every
+    # DEDUP_FULL_RECLUSTER_EVERY_N-th reconcile = every n_dedup_turns * N turns.
+    from azure.cosmos.agent_memory.thresholds import get_dedup_full_recluster_every_n
+
+    n_full_recluster = get_dedup_full_recluster_every_n()
+    n_full_turns = n_dedup_turns * n_full_recluster if (n_dedup_turns > 0 and n_full_recluster > 0) else 0
 
     if n_thread == 0 and n_facts == 0 and n_user == 0:
         return  # all orchestrators disabled
@@ -206,6 +217,22 @@ async def process_changefeed_batch(
             if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
                 instance_id = f"extract:{user_id}:{thread_id}:{new_count}"
                 should_reconcile = bool(n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns))
+                # Persisted-counter backstop: every n_full_turns turns, force a
+                # full-pool reconcile so dissimilar-embedding contradictions are
+                # caught reliably on FA (not gated by the in-memory sweep counter).
+                should_full_reconcile = bool(
+                    n_full_turns > 0 and crosses_threshold(old_count, new_count, n_full_turns)
+                )
+                watermark = await read_extract_watermark(counter_container, cid, user_id, thread_id)
+                # Not capped: new_count - watermark is exactly the unextracted backlog
+                # and the orchestrator advances the watermark to new_count, so capping
+                # would strand the oldest turns (DEDUP_POOL_SIZE is the reconcile knob,
+                # not the extraction window). Bootstrap: with no watermark yet, base=0
+                # so recent_k = new_count covers every turn so far — using only this
+                # batch (new_count - old_count) would strand turns added during earlier
+                # failed extracts once the watermark first advances to new_count.
+                base = watermark if watermark is not None else 0
+                recent_k = max(new_count - base, 1)
                 await _safe_start(
                     starter,
                     "ExtractMemoriesOrchestrator",
@@ -215,6 +242,8 @@ async def process_changefeed_batch(
                         "thread_id": thread_id,
                         "count": new_count,
                         "reconcile": should_reconcile,
+                        "full_rebuild": should_full_reconcile,
+                        "recent_k": recent_k,
                     },
                     orchestration_errors,
                 )

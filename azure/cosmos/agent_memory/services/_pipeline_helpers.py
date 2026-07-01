@@ -280,47 +280,6 @@ def build_transcript(
     return "\n".join(parts)
 
 
-def format_existing_episodics(memories: list[dict[str, Any]]) -> str:
-    """Render existing episodic memories for the extract_memories prompt.
-
-    Groups by ``(scope_type, scope_value)`` so the LLM can see, per-scope,
-    which intent is already captured. Episodics use **scope-as-identity**:
-    the deterministic id is seeded from ``(user_id, scope_type, scope_value)``,
-    so any re-emission for the same scope (paraphrased intent, added detail,
-    or a reversal) collides and overwrites the prior record via upsert. The
-    LLM does NOT make ``ADD``/``UPDATE``/``CONTRADICT`` decisions on
-    episodics — that vocabulary is not in the episodic schema.
-
-    What this rendering gives the model is per-scope context so it can:
-
-    1. Emit a single coherent ``text`` that reflects the *current* intent
-       for the scope (the upsert will overwrite the prior one).
-    2. Avoid re-emitting an episodic when the new turn carries no
-       additional signal beyond what the existing one already records.
-
-    Distinct events under the same umbrella (e.g. hotel booking vs lost
-    wallet, both under a Tokyo trip) belong under distinct ``scope_value``
-    strings so they don't collide on the deterministic id.
-    """
-    if not memories:
-        return "(none)"
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for mem in memories:
-        meta = mem.get("metadata") or {}
-        scope_type = (meta.get("scope_type") or "(none)").strip() or "(none)"
-        scope_value = (meta.get("scope_value") or "(none)").strip() or "(none)"
-        grouped[(scope_type, scope_value)].append(mem)
-    lines: list[str] = []
-    for (scope_type, scope_value), bucket in grouped.items():
-        lines.append(f"- {scope_type} = {scope_value} ({len(bucket)} episodic{'s' if len(bucket) != 1 else ''})")
-        for mem in bucket:
-            mem_id = mem.get("id", "(no-id)")
-            salience = mem.get("salience", "N/A")
-            content = (mem.get("content") or "").strip() or "(empty content)"
-            lines.append(f"  - [ID: {mem_id}] (salience {salience}) {content}")
-    return "\n".join(lines)
-
-
 # Stopwords stripped from grounding checks. Keep this list short and focused
 # on tokens that carry no factual content; any word a memory might legitimately
 # differ on (e.g. "not", "no") must NOT be added here.
@@ -502,11 +461,29 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
             cleaned = cleaned.lstrip("`").lstrip()
     if cleaned.endswith("```"):
         cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
     try:
-        return json.loads(cleaned.strip())
+        return json.loads(cleaned)
     except json.JSONDecodeError as exc:
         preview = (text or "")[:200].replace("\n", " ")
+        if _looks_truncated(cleaned, exc):
+            raise LLMError(
+                "LLM JSON output appears TRUNCATED (decode error at the very end of a "
+                f"{len(cleaned)}-char body — the model almost certainly hit its output-token "
+                "cap mid-object). Increase 'maxOutputTokens' in the calling prompty, or reduce "
+                "the amount of input per call (e.g. lower the fact-extraction batch size / "
+                f"recent_k, or split oversized turns). Decode error: {exc}. preview={preview!r}"
+            ) from exc
         raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
+
+
+def _looks_truncated(cleaned: str, exc: json.JSONDecodeError) -> bool:
+    """Heuristic: did the JSON fail because the model ran out of output tokens?"""
+    if not cleaned:
+        return False
+    unbalanced = cleaned.count("{") > cleaned.count("}") or cleaned.count("[") > cleaned.count("]")
+    unterminated_string = "Unterminated string" in str(exc)
+    return unbalanced or unterminated_string
 
 
 def default_prompts_dir() -> str:

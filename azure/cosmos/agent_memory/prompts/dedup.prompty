@@ -6,7 +6,7 @@ model:
   apiType: chat
   options:
     seed: 43
-    maxOutputTokens: 2000
+    maxOutputTokens: 16384
     additionalProperties:
       response_format:
         type: json_object

@@ -453,31 +453,31 @@ class TestCreateMemoryStore:
             mock_lease_container,
         ]
 
-        mem = _make_client(cosmos_throughput_mode="serverless")
+        # serverless mode ignores autoscale config entirely, even an invalid value.
+        mem = _make_client(cosmos_throughput_mode="serverless", cosmos_autoscale_max_ru="not-an-int")
 
-        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
-            with patch.dict(
-                "sys.modules",
-                {
-                    "azure.cosmos": MagicMock(
-                        CosmosClient=mock_cosmos_cls,
-                        PartitionKey=MagicMock(),
-                        ThroughputProperties=MagicMock(),
-                    ),
-                },
-            ):
-                mem.create_memory_store(
-                    endpoint="https://fake.documents.azure.com:443/",
-                    credential="fake-key",
-                    throughput_mode="serverless",
-                )
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls,
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            mem.create_memory_store(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+                throughput_mode="serverless",
+            )
 
         for call in mock_db.create_container_if_not_exists.call_args_list:
             assert "offer_throughput" not in call.kwargs
 
-    def test_constructor_ignores_invalid_autoscale_env_in_serverless_mode(self):
-        with patch.dict("os.environ", {"COSMOS_DB_AUTOSCALE_MAX_RU": "not-an-int"}, clear=False):
-            mem = _make_client(cosmos_throughput_mode="serverless")
+    def test_constructor_ignores_autoscale_in_serverless_mode(self):
+        # Even an invalid autoscale value is ignored in serverless mode.
+        mem = _make_client(cosmos_throughput_mode="serverless", cosmos_autoscale_max_ru="not-an-int")
 
         assert mem._cosmos_autoscale_max_ru is None
 
@@ -797,7 +797,7 @@ class TestSearchCosmos:
         assert "VectorDistance" in call_kwargs["query"]
         assert len(result) == 1
 
-    def test_search_hybrid(self):
+    def test_search_hybrid_uses_keyword_params(self):
         mem, container = _connected_client()
         container.query_items.return_value = [_make_doc()]
 
@@ -806,14 +806,79 @@ class TestSearchCosmos:
 
         mem.search_cosmos(
             search_terms="weather Seattle",
-            hybrid_search=True,
             top_k=5,
         )
 
         call_kwargs = container.query_items.call_args.kwargs
         query = call_kwargs["query"]
+        params = {p["name"]: p["value"] for p in call_kwargs["parameters"]}
         assert "RANK RRF" in query
-        assert "FullTextScore" in query
+        assert "FullTextScore(c.content, @kw0, @kw1)" in query
+        assert params["@kw0"] == "weather"
+        assert params["@kw1"] == "seattle"
+
+    def test_search_cosmos_forwards_search_options_to_store(self):
+        mem, _ = _connected_client()
+        store = MagicMock()
+        store._containers = mem._containers
+        store._embeddings_client = mem._embeddings_client
+        store.search.return_value = []
+        mem._store = store
+
+        mem.search_cosmos(search_terms="weather")
+
+        store.search.assert_called_once_with(
+            search_terms="weather",
+            memory_id=None,
+            user_id=None,
+            role=None,
+            memory_types=None,
+            thread_id=None,
+            top_k=5,
+            tags_all=None,
+            tags_any=None,
+            exclude_tags=None,
+            include_superseded=False,
+            min_salience=None,
+            min_confidence=None,
+            created_after=None,
+            created_before=None,
+        )
+
+    def test_search_episodic_memories_forwards_search_options(self):
+        mem, _ = _connected_client()
+        store = MagicMock()
+        store._containers = mem._containers
+        store._embeddings_client = mem._embeddings_client
+        store.search_episodic.return_value = []
+        mem._store = store
+
+        mem.search_episodic_memories("u1", "weather")
+
+        store.search_episodic.assert_called_once_with(
+            user_id="u1",
+            search_terms="weather",
+            top_k=5,
+            min_salience=None,
+            include_superseded=False,
+        )
+
+    def test_build_episodic_context_forwards_search_options(self):
+        mem, _ = _connected_client()
+        store = MagicMock()
+        store._containers = mem._containers
+        store._embeddings_client = mem._embeddings_client
+        store.build_episodic_context.return_value = "context"
+        mem._store = store
+
+        result = mem.build_episodic_context("u1", "weather")
+
+        assert result == "context"
+        store.build_episodic_context.assert_called_once_with(
+            user_id="u1",
+            query="weather",
+            top_k=3,
+        )
 
     def test_search_turns(self):
         mem, container = _connected_client()

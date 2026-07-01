@@ -73,9 +73,16 @@ def _make_counter_container_starting_at(start_count: int = 0) -> MagicMock:
         state[body["id"]] = dict(body)
         return body
 
+    async def patch_item(*, item, partition_key, patch_operations):
+        doc = state.setdefault(item, {"id": item})
+        for op in patch_operations:
+            doc[op["path"].lstrip("/")] = op["value"]
+        return dict(doc)
+
     container.read_item = AsyncMock(side_effect=read_item)
     container.create_item = AsyncMock(side_effect=create_item)
     container.upsert_item = AsyncMock(side_effect=upsert_item)
+    container.patch_item = AsyncMock(side_effect=patch_item)
     container._state = state  # exposed for assertions
     return container
 
@@ -618,10 +625,19 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     asyncio.run(process_changefeed_batch([_turn() for _ in range(4)], starter, counter_container=container))
     extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
     assert len(extract_calls) == 1
-    assert _extract_payload(extract_calls[0]).get("reconcile") is False
+    first_payload = _extract_payload(extract_calls[0])
+    assert first_payload.get("reconcile") is False
+    # Bootstrap: no watermark yet -> recent_k spans all 4 turns so far.
+    assert first_payload.get("recent_k") == 4
+
+    # Simulate the extract orchestrator's em_AdvanceExtractWatermark activity
+    # advancing the watermark to the processed count (4) after batch 1.
+    from shared.counters import advance_extract_watermark, thread_counter_id
+
+    asyncio.run(advance_extract_watermark(container, thread_counter_id("u1", "t1"), "u1", "t1", 4))
 
     # Next batch: counter 4 -> 5. Reconcile threshold crossed, so the same
-    # extract dispatch carries reconcile=True.
+    # extract dispatch carries reconcile=True, and recent_k = 5 - watermark(4) = 1.
     starter.start_new.reset_mock()
     asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
     extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
@@ -629,6 +645,69 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     payload = _extract_payload(extract_calls[0])
     assert payload.get("reconcile") is True
     assert payload.get("user_id") == "u1"
+    assert payload.get("recent_k") == 1
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "USER_SUMMARY_EVERY_N": "0",
+        "DEDUP_EVERY_N": "1",
+    },
+    clear=False,
+)
+def test_full_rebuild_flag_set_on_persisted_counter_cadence():
+    """The full-pool backstop is driven by the PERSISTED counter (durable-safe),
+    not the in-memory per-worker sweep counter: full_rebuild=True every
+    (n_facts * n_dedup * DEDUP_FULL_RECLUSTER_EVERY_N) turns. Here that's
+    1 * 1 * 2 = every 2 turns."""
+    with patch(
+        "azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n",
+        return_value=2,
+    ):
+        starter = _make_starter()
+        container = _make_counter_container_starting_at()
+
+        # Turn 1: counter 0->1. Reconcile crosses (n=1), full does NOT (n=2).
+        asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
+        p1 = _extract_payload(
+            next(c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator")
+        )
+        assert p1.get("reconcile") is True
+        assert p1.get("full_rebuild") is False
+
+        # Turn 2: counter 1->2. Full backstop threshold (2) crossed.
+        starter.start_new.reset_mock()
+        asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
+        p2 = _extract_payload(
+            next(c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator")
+        )
+        assert p2.get("reconcile") is True
+        assert p2.get("full_rebuild") is True
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "USER_SUMMARY_EVERY_N": "0",
+        "DEDUP_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_extract_payload_recent_k_uses_max_threshold_and_batch_delta():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(process_changefeed_batch([_turn() for _ in range(3)], starter, counter_container=container))
+
+    extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
+    assert len(extract_calls) == 1
+    payload = _extract_payload(extract_calls[0])
+    assert payload["recent_k"] == 3
 
 
 @patch.dict(

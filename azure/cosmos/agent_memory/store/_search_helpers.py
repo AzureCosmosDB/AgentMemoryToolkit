@@ -94,16 +94,27 @@ def build_search_sql(
     *,
     qb: _QueryBuilder,
     top: int,
-    hybrid_search: bool,
+    keyword_count: int,
     include_superseded: bool,
 ) -> str:
+    """Build the search SQL.
+
+    When ``keyword_count > 0`` the query is hybrid: ``RANK RRF`` fuses the vector
+    distance with ``FullTextScore`` over ``keyword_count`` individual keyword
+    parameters (``@kw0``..``@kw{n-1}``). When there are no keywords (e.g. an
+    all-stopword query) it falls back to pure vector ranking. ``similarity_score``
+    is always the vector distance and is *not* the RRF ranking basis under hybrid.
+    """
     if not include_superseded:
         qb.add_is_null_or_undefined("c.superseded_by")
-    order_by = "ORDER BY VectorDistance(c.embedding, @embedding)"
-    if hybrid_search:
-        order_by = "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), FullTextScore(c.content, @key_terms))"
+    vector_distance = "VectorDistance(c.embedding, @embedding)"
+    if keyword_count > 0:
+        keyword_params = ", ".join(f"@kw{i}" for i in range(keyword_count))
+        order_by = f"ORDER BY RANK RRF({vector_distance}, FullTextScore(c.content, {keyword_params}))"
+    else:
+        order_by = f"ORDER BY {vector_distance}"
     return (
         f"SELECT TOP {top} {MEMORY_PROJECTION}, "
-        "VectorDistance(c.embedding, @embedding) AS similarity_score "
+        f"{vector_distance} AS similarity_score "
         f"FROM c{qb.build_where()} {order_by}"
     )

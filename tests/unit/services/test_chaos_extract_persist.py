@@ -11,6 +11,26 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
+@pytest.fixture(autouse=True)
+def _pin_legacy_extract_dedup(monkeypatch):
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_vector_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_context_vector_enabled",
+        lambda: False,
+    )
+
+
 class _FlakyContainer:
     def __init__(self):
         self.docs: dict[str, dict[str, Any]] = {}

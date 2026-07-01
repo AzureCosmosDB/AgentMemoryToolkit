@@ -273,6 +273,63 @@ def test_search_adds_created_time_range_filters():
     assert params["@created_before"] == "2026-03-01T00:00:00+00:00"
 
 
+def test_search_uses_keyword_params_for_hybrid_sql():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    store.search("weather in Seattle", user_id="u1")
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "ORDER BY RANK RRF" in call_kwargs["query"]
+    assert "FullTextScore(c.content, @kw0, @kw1)" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@kw0"] == "weather"
+    assert params["@kw1"] == "seattle"
+
+
+def test_search_all_stopwords_falls_back_to_vector_only():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    store.search("what is the", user_id="u1")
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    assert "ORDER BY VectorDistance" in call_kwargs["query"]
+    assert "RANK RRF" not in call_kwargs["query"]
+    assert not any(name.startswith("@kw") for name in _params_by_name(call_kwargs))
+
+
+def test_search_episodic_forwards_search_options():
+    store = MemoryStore(containers=_containers())
+    store.search = MagicMock(return_value=[])
+
+    store.search_episodic("u1", "weather")
+
+    store.search.assert_called_once_with(
+        search_terms="weather",
+        user_id="u1",
+        memory_types=["episodic"],
+        top_k=5,
+        min_salience=None,
+        include_superseded=False,
+    )
+
+
+def test_build_episodic_context_forwards_search_options():
+    store = MemoryStore(containers=_containers())
+    store.search_episodic = MagicMock(return_value=[])
+
+    assert store.build_episodic_context("u1", "weather") == ""
+
+    store.search_episodic.assert_called_once_with("u1", "weather", top_k=3)
+
+
 def test_add_cosmos_routes_by_type():
     turns = MagicMock()
     memories = MagicMock()

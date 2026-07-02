@@ -33,6 +33,7 @@ class AsyncMemoryProcessor(Protocol):
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]: ...
 
     async def process_thread_summary(
@@ -53,6 +54,7 @@ class AsyncMemoryProcessor(Protocol):
         self,
         *,
         user_id: str,
+        full_rebuild: bool = False,
     ) -> int: ...
 
     async def generate_user_summary(

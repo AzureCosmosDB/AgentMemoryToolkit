@@ -40,6 +40,7 @@ class AsyncDurableFunctionProcessor:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
         logger.debug(
             "AsyncDurableFunctionProcessor.process_extract_memories no-op user_id=%s thread_id=%s",
@@ -73,7 +74,7 @@ class AsyncDurableFunctionProcessor:
         )
         return UserSummaryResult(summary=None)
 
-    async def process_reconcile(self, *, user_id: str) -> int:
+    async def process_reconcile(self, *, user_id: str, full_rebuild: bool = False) -> int:
         logger.debug(
             "AsyncDurableFunctionProcessor.process_reconcile no-op user_id=%s",
             user_id,

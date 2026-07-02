@@ -46,6 +46,7 @@ class DurableFunctionProcessor:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
         logger.debug(
             "DurableFunctionProcessor.process_extract_memories no-op user_id=%s thread_id=%s",
@@ -79,7 +80,7 @@ class DurableFunctionProcessor:
         )
         return UserSummaryResult(summary=None)
 
-    def process_reconcile(self, *, user_id: str) -> int:
+    def process_reconcile(self, *, user_id: str, full_rebuild: bool = False) -> int:
         logger.debug(
             "DurableFunctionProcessor.process_reconcile no-op user_id=%s",
             user_id,

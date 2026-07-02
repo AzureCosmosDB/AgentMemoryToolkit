@@ -81,9 +81,7 @@ class InProcessProcessor:
 
         thread_summary = self._pipeline.generate_thread_summary(user_id, thread_id)
         extracted = self._pipeline.extract_memories(user_id, thread_id)
-        reconciled = self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
-
-        deduped_count = self._extract_reconcile_count(reconciled)
+        deduped_count = self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
 
         extracted_counts: dict[str, int] = (
             {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
@@ -102,8 +100,9 @@ class InProcessProcessor:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
-        extracted = self._pipeline.extract_memories(user_id, thread_id)
+        extracted = self._pipeline.extract_memories(user_id, thread_id, recent_k=recent_k)
         return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
 
     def process_thread_summary(
@@ -126,16 +125,32 @@ class InProcessProcessor:
         summary = self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
-    def process_reconcile(self, *, user_id: str) -> int:
+    def process_reconcile(self, *, user_id: str, full_rebuild: bool = False) -> int:
         """Run reconciliation standalone. Returns count of facts merged + contradicted.
 
         Pool size is read from ``DEDUP_POOL_SIZE`` (env-tunable, default 50,
         capped at 500) so the auto-trigger and the standalone path agree.
+        ``full_rebuild`` (set by the auto-trigger on its persisted-counter
+        full-recluster cadence) forces the full-pool LLM pass that catches
+        dissimilar-embedding contradictions.
         """
         from ..thresholds import get_dedup_pool_size
 
-        reconciled = self._pipeline.reconcile_memories(user_id, n=get_dedup_pool_size())
-        return self._extract_reconcile_count(reconciled)
+        return self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size(), full_rebuild=full_rebuild)
+
+    def _reconcile_fact_and_episodic(self, user_id: str, n: int, *, full_rebuild: bool = False) -> int:
+        """Reconcile facts and episodic memories; sum merged+contradicted counts.
+
+        SDK in-process processing reconciles both types (matching the Durable
+        backend) so episodic dups don't accrue forever.
+        """
+        total = 0
+        for memory_type in ("fact", "episodic"):
+            reconciled = self._pipeline.reconcile_memories(
+                user_id, n=n, memory_type=memory_type, full_rebuild=full_rebuild
+            )
+            total += self._extract_reconcile_count(reconciled)
+        return total
 
     @staticmethod
     def _extract_reconcile_count(reconciled: Any) -> int:

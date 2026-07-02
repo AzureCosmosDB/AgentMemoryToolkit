@@ -89,10 +89,11 @@ def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None
 # ---------------------------------------------------------------------------
 
 def vector_search(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 1 — Pure vector (semantic similarity) search."""
-    print_header("1. Vector Search (semantic similarity)")
+    """Pattern 1 — Semantic-style query (natural language, low keyword overlap)."""
+    print_header("1. Semantic Search (natural-language query)")
     print("  Query: 'outdoor activities'")
-    print("  Finds semantically related memories even without exact keyword matches.\n")
+    print("  Hybrid ranking leans on embedding similarity when there are few exact")
+    print("  keyword matches, so semantically related memories still surface.\n")
 
     results = mem.search_cosmos(
         search_terms="outdoor activities",
@@ -103,15 +104,15 @@ def vector_search(mem: CosmosMemoryClient, user_id: str) -> None:
 
 
 def hybrid_search(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 2 — Hybrid search (vector + full-text)."""
+    """Pattern 2 — Hybrid search (vector + full-text) is the default."""
     print_header("2. Hybrid Search (vector + full-text)")
     print("  Query: 'hiking trails Pacific Northwest'")
-    print("  Combines embedding similarity with BM25 keyword matching.\n")
+    print("  Every search_cosmos call fuses embedding similarity with BM25 keyword")
+    print("  matching automatically — no flag required.\n")
 
     results = mem.search_cosmos(
         search_terms="hiking trails Pacific Northwest",
         user_id=user_id,
-        hybrid_search=True,
         top_k=5,
     )
     print_results(results)

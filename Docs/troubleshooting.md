@@ -50,15 +50,11 @@ COSMOS_DB_DATABASE=ai_memory
 COSMOS_DB_MEMORIES_CONTAINER=memories
 COSMOS_DB_COUNTERS_CONTAINER=counter
 COSMOS_DB_LEASE_CONTAINER=leases
-COSMOS_DB_THROUGHPUT_MODE=serverless
-COSMOS_DB_AUTOSCALE_MAX_RU=1000
 
 AI_FOUNDRY_ENDPOINT=https://<account>.openai.azure.com/
 AI_FOUNDRY_API_KEY=
 AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 AI_FOUNDRY_EMBEDDING_DIMENSIONS=1536
-AI_FOUNDRY_EMBEDDING_DATA_TYPE=float32
-AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION=cosine
 AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=<chat-deployment-name>
 ```
 
@@ -76,8 +72,6 @@ The notebooks and samples pass these values into the client like this:
 | `AI_FOUNDRY_API_KEY` | `ai_foundry_api_key` |
 | `AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME` | `embedding_deployment_name` |
 | `AI_FOUNDRY_CHAT_DEPLOYMENT_NAME` | `chat_deployment_name` |
-
-`AI_FOUNDRY_EMBEDDING_DIMENSIONS`, `AI_FOUNDRY_EMBEDDING_DATA_TYPE`, and `AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION` are read by the toolkit when creating the Cosmos DB vector policy. The Function App also reads `COSMOS_DB__accountEndpoint` for its identity-based Cosmos DB trigger binding; set it to the same value as `COSMOS_DB_ENDPOINT`.
 
 Run `az login` before using `DefaultAzureCredential`.
 
@@ -104,7 +98,7 @@ The memories container is created with:
 
 If vector or full-text search fails after changing dimensions or indexing settings, create a fresh container with the desired configuration. Cosmos container vector policies are creation-time infrastructure choices.
 
-Use `COSMOS_DB_THROUGHPUT_MODE=serverless` for the default setup. Use `autoscale` with `COSMOS_DB_AUTOSCALE_MAX_RU` when you need provisioned autoscale throughput.
+Pass `cosmos_throughput_mode="serverless"` (the default) when creating the client. Use `cosmos_throughput_mode="autoscale"` with `cosmos_autoscale_max_ru` when you need provisioned autoscale throughput.
 
 ---
 
@@ -117,7 +111,7 @@ Embedding failures usually mean one of these is wrong:
 - `AI_FOUNDRY_EMBEDDING_DIMENSIONS`
 - Azure OpenAI / AI Services RBAC
 
-For hybrid search, `search_terms` is required when `hybrid_search=True`.
+Search always uses hybrid vector/full-text ranking when keyword extraction finds terms; all-stopword queries fall back to vector-only ranking.
 
 If search returns documents but scores look poor, check that records have an `embedding` field and that the query uses similar language to the stored memory content.
 

@@ -66,6 +66,34 @@ DEDUP_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
+# dedup_episodic.prompty — reconcile a pool of active episodic memories
+# (MERGE-ONLY: same-event duplicates collapse; no contradiction/deletion)
+# ---------------------------------------------------------------------------
+DEDUP_EPISODIC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "duplicate_groups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "merged_content": {"type": "string"},
+                    "source_ids": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": ["number", "null"]},
+                    "salience": {"type": ["number", "null"]},
+                },
+                "required": ["merged_content", "source_ids", "confidence", "salience"],
+                "additionalProperties": False,
+            },
+        },
+        "kept_ids": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["duplicate_groups", "kept_ids"],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
 # extract_memories.prompty — extract facts + episodic + unclassified
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
@@ -91,8 +119,6 @@ _FACT_ITEM = {
         "salience": {"type": "number"},
         "temporal_context": {"type": ["string", "null"]},
         "tags": {"type": "array", "items": {"type": "string"}},
-        "action": {"type": "string", "enum": ["ADD", "UPDATE", "CONTRADICT"]},
-        "supersedes_id": {"type": ["string", "null"]},
     },
     "required": [
         "text",
@@ -104,8 +130,6 @@ _FACT_ITEM = {
         "salience",
         "temporal_context",
         "tags",
-        "action",
-        "supersedes_id",
     ],
     "additionalProperties": False,
 }
@@ -115,7 +139,6 @@ _EPISODIC_ITEM = {
     "properties": {
         "scope_type": {"type": "string"},
         "scope_value": {"type": "string"},
-        "text": {"type": "string"},
         "situation": {"type": ["string", "null"]},
         "action_taken": {"type": ["string", "null"]},
         "outcome": {"type": ["string", "null"]},
@@ -133,7 +156,6 @@ _EPISODIC_ITEM = {
     "required": [
         "scope_type",
         "scope_value",
-        "text",
         "situation",
         "action_taken",
         "outcome",
@@ -282,6 +304,7 @@ SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
     "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),
+    "dedup_episodic.prompty": ("DedupEpisodicOutput", DEDUP_EPISODIC_SCHEMA),
     "extract_memories.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
     "summarize.prompty": ("SummarizeOutput", SUMMARIZE_SCHEMA),
     "summarize_update.prompty": ("SummarizeUpdateOutput", SUMMARIZE_UPDATE_SCHEMA),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -50,7 +50,13 @@ def test_process_now_with_inprocess_invokes_full_pipeline():
     assert isinstance(client._processor, InProcessProcessor)
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.reconcile_memories.assert_called_once_with("u1", 50)
+    assert pipeline.reconcile_memories.call_count == 2
+    pipeline.reconcile_memories.assert_has_calls(
+        [
+            call("u1", n=50, memory_type="fact", full_rebuild=False),
+            call("u1", n=50, memory_type="episodic", full_rebuild=False),
+        ]
+    )
     pipeline.synthesize_procedural.assert_called_once_with(user_id="u1", force=False)
     pipeline.generate_user_summary.assert_called_once_with("u1", None)
     assert result.procedural == {"id": "proc1", "type": "procedural"}

@@ -17,6 +17,14 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 ASYNC_LOGGER_NAME = "azure.cosmos.agent_memory.pipeline.aio"
 
 
+@pytest.fixture(autouse=True)
+def _pin_async_legacy_reconcile(monkeypatch):
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_reconcile_mode",
+        lambda: "full_pool",
+    )
+
+
 def _make_async_pipeline() -> AsyncPipelineService:
     p = AsyncPipelineService.__new__(AsyncPipelineService)
     p._embeddings = MagicMock()

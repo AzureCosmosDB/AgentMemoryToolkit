@@ -70,9 +70,7 @@ class AsyncInProcessProcessor:
 
         thread_summary = await self._pipeline.generate_thread_summary(user_id, thread_id)
         extracted = await self._pipeline.extract_memories(user_id, thread_id)
-        reconciled = await self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
-
-        deduped_count = self._extract_reconcile_count(reconciled)
+        deduped_count = await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
 
         extracted_counts: dict[str, int] = (
             {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
@@ -91,8 +89,9 @@ class AsyncInProcessProcessor:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
-        extracted = await self._pipeline.extract_memories(user_id, thread_id)
+        extracted = await self._pipeline.extract_memories(user_id, thread_id, recent_k=recent_k)
         return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
 
     async def process_thread_summary(
@@ -113,11 +112,26 @@ class AsyncInProcessProcessor:
         summary = await self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
-    async def process_reconcile(self, *, user_id: str) -> int:
+    async def process_reconcile(self, *, user_id: str, full_rebuild: bool = False) -> int:
         from ...thresholds import get_dedup_pool_size
 
-        reconciled = await self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
-        return self._extract_reconcile_count(reconciled)
+        return await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size(), full_rebuild=full_rebuild)
+
+    async def _reconcile_fact_and_episodic(self, user_id: str, n: int, *, full_rebuild: bool = False) -> int:
+        """Reconcile facts and episodic memories; sum merged+contradicted counts.
+
+        SDK in-process processing reconciles both types (matching the Durable
+        backend) so episodic dups don't accrue forever. ``full_rebuild`` (set by
+        the auto-trigger on its persisted-counter full-recluster cadence) forces
+        the full-pool LLM pass that catches dissimilar-embedding contradictions.
+        """
+        total = 0
+        for memory_type in ("fact", "episodic"):
+            reconciled = await self._pipeline.reconcile_memories(
+                user_id, n=n, memory_type=memory_type, full_rebuild=full_rebuild
+            )
+            total += self._extract_reconcile_count(reconciled)
+        return total
 
     @staticmethod
     def _extract_reconcile_count(reconciled: Any) -> int:

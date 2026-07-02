@@ -116,17 +116,6 @@ def _parse_int(name: str, default: int) -> int:
         return default
 
 
-def _parse_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except (ValueError, TypeError):
-        logger.warning("Invalid value for %s=%r, using default %f", name, raw, default)
-        return default
-
-
 def _parse_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":

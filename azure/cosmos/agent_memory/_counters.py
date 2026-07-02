@@ -170,7 +170,7 @@ def increment_counter_sync(
             if exc.status_code == 412 and attempt < MAX_RETRIES - 1:
                 continue
             logger.warning(
-                "Counter increment failed counter_id=%s status=%s — auto-trigger skipped",
+                "Counter increment failed counter_id=%s status=%s — auto-trigger skipped (increment dropped)",
                 counter_id,
                 exc.status_code,
             )
@@ -277,6 +277,10 @@ def _build_counter_doc(
         doc["last_batch_old_count"] = existing.get("last_batch_old_count", old_count)
     else:
         doc["last_batch_lsn"] = None
+    # Preserve the extraction watermark (count value at the last successful
+    # extract) so recent_k can cover every turn since, not just this batch.
+    if existing is not None and "last_extract_count" in existing:
+        doc["last_extract_count"] = existing.get("last_extract_count")
     # Carry over auto-trigger failure breadcrumbs so they aren't blown away
     # by a successful write. ``stamp_failure_*`` helpers refresh them on
     # failure; operators can monitor ``last_failure_at`` directly.
@@ -346,6 +350,74 @@ async def stamp_failure_async(
         logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, exc)
 
 
+def read_extract_watermark_sync(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+) -> Optional[int]:
+    """Return the count value at the last successful extract, or ``None``.
+
+    The watermark lets recent_k cover every turn since the previous extract
+    succeeded, instead of just the current batch — so turns are never skipped
+    when extraction lags or transiently fails. Best-effort: returns ``None``
+    on any read error so callers fall back to a batch-based recent_k.
+    """
+    try:
+        doc = container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+        value = doc.get("last_extract_count")
+        return int(value) if value is not None else None
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("read_extract_watermark_sync failed counter_id=%s: %s", counter_id, exc)
+        return None
+
+
+def advance_extract_watermark_sync(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    count: int,
+) -> None:
+    """Stamp ``last_extract_count=count`` after a successful extract (sync)."""
+    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
+    try:
+        container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("advance_extract_watermark_sync failed counter_id=%s: %s", counter_id, exc)
+
+
+async def read_extract_watermark_async(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+) -> Optional[int]:
+    """Async version of :func:`read_extract_watermark_sync`."""
+    try:
+        doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+        value = doc.get("last_extract_count")
+        return int(value) if value is not None else None
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("read_extract_watermark_async failed counter_id=%s: %s", counter_id, exc)
+        return None
+
+
+async def advance_extract_watermark_async(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    count: int,
+) -> None:
+    """Stamp ``last_extract_count=count`` after a successful extract (async)."""
+    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
+    try:
+        await container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("advance_extract_watermark_async failed counter_id=%s: %s", counter_id, exc)
+
+
 __all__ = [
     "USER_COUNTER_THREAD_ID",
     "thread_counter_id",
@@ -355,4 +427,8 @@ __all__ = [
     "increment_counter_async",
     "stamp_failure_sync",
     "stamp_failure_async",
+    "read_extract_watermark_sync",
+    "advance_extract_watermark_sync",
+    "read_extract_watermark_async",
+    "advance_extract_watermark_async",
 ]

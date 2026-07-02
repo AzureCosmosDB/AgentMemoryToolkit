@@ -79,6 +79,7 @@ class MemoryProcessor(Protocol):
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]: ...
 
     def process_thread_summary(
@@ -99,6 +100,7 @@ class MemoryProcessor(Protocol):
         self,
         *,
         user_id: str,
+        full_rebuild: bool = False,
     ) -> int: ...
 
     def generate_user_summary(

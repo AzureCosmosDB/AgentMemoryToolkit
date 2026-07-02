@@ -118,26 +118,52 @@ Prompts for summarization and fact extraction live in `azure_functions/prompts/`
 
 ## Memory Reconciliation
 
-The `reconcile_memories(user_id, n=50)` pipeline step reads up to N most-recent active facts for a user and asks the LLM to identify two orthogonal outcomes in one pass:
+Reconciliation runs in **two complementary tiers**: a cheap, LLM-free **vector-floor dedup ladder** applied to freshly-extracted memories before they persist, and a periodic **LLM reconcile** that runs in a **dual mode** (cheap candidate clusters most sweeps, a full-pool backstop occasionally).
 
-- **Duplicates** — two or more facts that restate the same claim in different words. Resolution: collapse into one merged fact; the originals are soft-deleted with `supersede_reason="duplicate"` and `superseded_by` set to the merged fact's id.
-- **Contradictions** — two facts that assert opposing claims about the same subject. Resolution: keep the winner (more recent first, higher confidence as tiebreaker), soft-delete the loser with `supersede_reason="contradict"` and `superseded_by` set to the winner.
+### Vector-floor dedup ladder (write path, LLM-free)
 
-### Why one pass
+Between extraction and persist, `dedup_extracted_memories` compares each new fact/episodic memory against the user's existing active memories of the same type using Cosmos `VectorDistance` (pure vector, no hybrid). Each new memory takes one rung of a similarity ladder:
 
-Detecting contradictions semantically requires the LLM to see the candidate pool as a whole — paraphrased ("user prefers aisle seats") and contradictory ("user is vegetarian" vs "user loves steak") facts often have very different embedding vectors and would never co-occur in any cosine cluster. Putting all N candidates into one prompt lets the LLM do the semantic reasoning across both axes simultaneously. The pipeline returns `{"kept": int, "merged": int, "contradicted": int}`.
+| band | condition (cosine) | action |
+|------|--------------------|--------|
+| exact | `content_hash` hit | skip (Stage 0, free) |
+| near-exact | `s ≥ DEDUP_SIM_HIGH` (0.97) | **auto-skip** the new memory (no LLM); logged for audit |
+| borderline | `DEDUP_SIM_LOW ≤ s < DEDUP_SIM_HIGH` (0.80–0.97) | persist, tag `sys:dup-candidate` + stash `dup_of`/`dup_score` for the LLM reconcile |
+| novel | `s < DEDUP_SIM_LOW` | persist clean |
+
+The thresholds are calibrated for **cosine/dotproduct** on normalized embeddings. On a container whose `distanceFunction` is **euclidean**, the destructive near-exact auto-skip is **disabled** (one-shot warning) and those memories fall through to borderline tagging so the LLM adjudicates — euclidean distances aren't a bounded [0,1] similarity and would mis-fire the cosine-tuned drop.
+
+### Dual-mode LLM reconcile
+
+`reconcile_memories(user_id, n=50, *, memory_type="fact", full_rebuild=False)` identifies two orthogonal outcomes:
+
+- **Duplicates** — facts restating the same claim. Resolution: collapse into one merged fact; originals soft-deleted with `supersede_reason="duplicate"` and `superseded_by` set to the merged fact.
+- **Contradictions** — facts asserting opposing claims about the same subject. Resolution: keep the winner (more recent first, higher confidence as tiebreaker), soft-delete the loser with `supersede_reason="contradict"`.
+
+It runs in one of two modes:
+
+- **Candidate mode** (default auto sweeps) — builds connected-component clusters from the `sys:dup-candidate` seeds + their vector neighbors (edge threshold `DEDUP_CLUSTER_SIM`, 0.60) and sends **only those clusters** to the LLM. Cheap, but keyed on near-duplicate similarity. Tagged seeds that never join a cluster have their stale tag cleared so they aren't re-scanned forever.
+- **Full-pool backstop** — every `DEDUP_FULL_RECLUSTER_EVERY_N`-th sweep (default 12), and on any explicit `reconcile(full_rebuild=True)`, the **entire** active pool goes into one LLM pass. This is the only path that catches **dissimilar contradictions** — paraphrased ("prefers aisle seats") and contradictory ("vegetarian" vs "loves steak") facts have very different embedding vectors and would never co-occur in a cosine cluster, so candidate mode alone can't link them.
+
+Both modes return `{"kept": int, "merged": int, "contradicted": int}`. In-process and durable backends reconcile **both** facts and episodic memories so episodic duplicates don't accrue forever.
 
 ### Loser preservation
 
-Soft-deleted facts stay in the container with their `supersede_reason`, `superseded_at`, and `superseded_by` fields populated. Default reads (`get_memories`, `search_cosmos`) filter them out via `superseded_by IS NULL`. To inspect the audit trail (e.g. "show everything that ever applied to this user"), opt out of the filter at the query level.
+Soft-deleted facts stay in the container with their `supersede_reason`, `superseded_at`, and `superseded_by` fields populated. Default reads (`get_memories`, `search_cosmos`) filter them out via `superseded_by IS NULL`. To inspect the audit trail, opt out of the filter at the query level.
 
 ### Write-time exact dedup
 
 Each fact written by `extract_memories` carries a `content_hash` (SHA-256 of normalized content, truncated to 32 hex chars; lowercase, whitespace-collapsed). Before upserting a freshly-extracted fact, the pipeline checks the hash against existing active facts and short-circuits if a match exists, incrementing the `exact_dedup_skipped` metric. This catches identical re-extractions cheaply without an LLM call.
 
+### Extraction watermark (`recent_k`)
+
+The auto-trigger paths size `recent_k` (how many recent turns extraction reads) from a per-thread **watermark** (`last_extract_count` on the counter doc): `recent_k = current_count − last_extract_count` (with `last_extract_count` treated as `0` before the first successful extract). The newest-`recent_k` turns are exactly the turns added since the last successful extract, and the watermark advances **only after a successful extract** — so under normal operation no turns are skipped when extraction lags or transiently fails: a failed run leaves the watermark put and the full backlog is retried next sweep. The window is deliberately **not** capped by `DEDUP_POOL_SIZE` (that knob governs the reconcile prompt, not the extraction window) — capping would extract only the newest N and silently strand the oldest backlog turns.
+
+> **Caveat (rare):** the SDK's inline counter increment is best-effort — under sustained optimistic-concurrency contention it can drop an increment rather than block the user's write path (see `increment_counter_sync`). A dropped increment leaves `current_count` lagging the true turn count, which can in turn under-cover a later extraction window. This is the one case where the "no turns skipped" property does not hold; the Function App backend avoids it by raising to force change-feed redelivery.
+
 ### Tunable
 
-`DEDUP_EVERY_N` (default 5) controls how often `reconcile_memories` runs in the auto-trigger path. Set to `0` to disable. The candidate cap `n` (default 50) is tunable per call; larger values give the LLM a wider view at higher token cost.
+`DEDUP_EVERY_N` (default 5) controls how often reconcile runs in the auto-trigger path. Set to `0` to disable. The candidate cap `n` (default `DEDUP_POOL_SIZE`, 50) is tunable per call; larger values give the LLM a wider view at higher token cost. `DEDUP_FULL_RECLUSTER_EVERY_N` (default 12) sets how often the full-pool backstop fires.
 
 > **Indexing note.** The reconcile pool query orders by `created_at` (matching the prompt's "more recent first" tiebreaker). Cosmos's default indexing policy includes every property, so this works out of the box. If you customize the indexing policy to reduce write RU, ensure `/created_at/?` remains indexed or the query will fail with a 400 (`Order-by over a non-indexed path`).
 

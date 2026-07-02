@@ -28,6 +28,23 @@ DEFAULT_DEDUP_EVERY_N = 5
 # of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
 
+# ---------------------------------------------------------------------------
+# INTERNAL dedup/search tuning — NOT customer-configurable.
+# These ship as fixed feature constants (no env vars, not in any settings
+# template). They are maintainer-tunable here in code only; if a knob ever
+# needs to become operator-facing we add the env plumbing back deliberately.
+# The dedup + hybrid-search features ship ON via these values.
+# ---------------------------------------------------------------------------
+DEDUP_CONTEXT_VECTOR_ENABLED = True  # Stage-1 relevance-ranked extraction context
+DEDUP_CONTEXT_TOPK = 10
+DEDUP_VECTOR_ENABLED = True  # Stage-3 vector near-dup ladder
+DEDUP_SIM_HIGH = 0.97  # >= -> auto-skip near-exact
+DEDUP_SIM_LOW = 0.80  # < -> novel; between -> tag candidate
+DEDUP_CANDIDATE_TOPK = 10
+DEDUP_RECONCILE_MODE = "candidate"  # clustered candidate reconcile (vs legacy full_pool)
+DEDUP_CLUSTER_SIM = 0.60  # Stage-5 clustering edge threshold
+DEDUP_FULL_RECLUSTER_EVERY_N = 12  # full re-cluster safety net cadence
+
 DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "turn": 2_592_000,
     "episodic": 7_776_000,
@@ -138,6 +155,56 @@ def get_dedup_pool_size() -> int:
     return raw
 
 
+# ---------------------------------------------------------------------------
+# Internal dedup/search feature accessors — return fixed constants (no env).
+# Kept as thin functions so call sites stay stable and the values can be
+# changed in one place; NOT customer-configurable.
+# ---------------------------------------------------------------------------
+def get_dedup_context_vector_enabled() -> bool:
+    """Whether Stage-1 extraction context uses vector retrieval (internal; on)."""
+    return DEDUP_CONTEXT_VECTOR_ENABLED
+
+
+def get_dedup_context_topk() -> int:
+    """Top-K memories to retrieve for Stage-1 extraction context (internal)."""
+    return DEDUP_CONTEXT_TOPK
+
+
+def get_dedup_vector_enabled() -> bool:
+    """Whether Stage-3 vector deduplication is enabled (internal; on)."""
+    return DEDUP_VECTOR_ENABLED
+
+
+def get_dedup_sim_high() -> float:
+    """Similarity at/above which near-exact memories are auto-skipped (internal)."""
+    return DEDUP_SIM_HIGH
+
+
+def get_dedup_sim_low() -> float:
+    """Similarity below which memories are treated as novel (internal)."""
+    return DEDUP_SIM_LOW
+
+
+def get_dedup_candidate_topk() -> int:
+    """Top-K existing memories pulled per new memory in Stage-3 (internal)."""
+    return DEDUP_CANDIDATE_TOPK
+
+
+def get_dedup_reconcile_mode() -> str:
+    """Reconcile mode: ``candidate`` clustering (internal; the shipped feature)."""
+    return DEDUP_RECONCILE_MODE
+
+
+def get_dedup_cluster_sim() -> float:
+    """Similarity threshold for Stage-5 clustering edges (internal)."""
+    return DEDUP_CLUSTER_SIM
+
+
+def get_dedup_full_recluster_every_n() -> int:
+    """Full re-cluster safety-net cadence, every Nth reconcile sweep (internal)."""
+    return DEDUP_FULL_RECLUSTER_EVERY_N
+
+
 def get_procedural_synthesis_auto() -> bool:
     """Whether procedural synthesis auto-fires after extract.
 
@@ -214,6 +281,15 @@ __all__ = [
     "get_user_summary_every_n",
     "get_dedup_every_n",
     "get_dedup_pool_size",
+    "get_dedup_context_vector_enabled",
+    "get_dedup_context_topk",
+    "get_dedup_vector_enabled",
+    "get_dedup_sim_high",
+    "get_dedup_sim_low",
+    "get_dedup_candidate_topk",
+    "get_dedup_reconcile_mode",
+    "get_dedup_cluster_sim",
+    "get_dedup_full_recluster_every_n",
     "get_procedural_synthesis_auto",
     "get_enable_turn_embeddings",
     "get_processor_owner",

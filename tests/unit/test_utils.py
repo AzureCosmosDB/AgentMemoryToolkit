@@ -4,6 +4,7 @@ import pytest
 
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
+    MAX_FULLTEXT_TERMS,
     _build_container_kwargs,
     _container_policies,
     _make_memory,
@@ -12,7 +13,11 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_full_text_language,
     _resolve_vector_index_type,
     compute_content_hash,
+    distance_function_from_container_properties,
+    extract_keywords,
     normalize_ai_foundry_endpoint,
+    vector_order_direction,
+    vector_similarity_at_least,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
@@ -192,65 +197,132 @@ def test_make_memory_invalid_type():
         _make_memory(user_id="u1", role="user", content="test", memory_type="invalid")
 
 
-def test_resolve_embedding_data_type_defaults(monkeypatch):
-    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", raising=False)
+def test_resolve_embedding_data_type_defaults():
     assert _resolve_embedding_data_type(None) == "float32"
 
 
-def test_resolve_embedding_data_type_from_env(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", "int8")
-    assert _resolve_embedding_data_type(None) == "int8"
-
-
-def test_resolve_embedding_data_type_explicit_overrides_env(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", "int8")
+def test_resolve_embedding_data_type_explicit():
+    assert _resolve_embedding_data_type("int8") == "int8"
     assert _resolve_embedding_data_type("uint8") == "uint8"
 
 
-def test_resolve_embedding_data_type_invalid_raises(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DATA_TYPE", "bogus")
+def test_resolve_embedding_data_type_invalid_raises():
     with pytest.raises(ConfigurationError):
-        _resolve_embedding_data_type(None)
+        _resolve_embedding_data_type("bogus")
 
 
-def test_resolve_distance_function_defaults(monkeypatch):
-    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION", raising=False)
+def test_resolve_distance_function_defaults():
     assert _resolve_distance_function(None) == "cosine"
 
 
-def test_resolve_distance_function_from_env(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION", "dotproduct")
-    assert _resolve_distance_function(None) == "dotproduct"
+def test_resolve_distance_function_explicit():
+    assert _resolve_distance_function("dotproduct") == "dotproduct"
+    assert _resolve_distance_function("euclidean") == "euclidean"
 
 
-def test_resolve_distance_function_invalid_raises(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_DISTANCE_FUNCTION", "manhattan")
+def test_resolve_distance_function_invalid_raises():
     with pytest.raises(ConfigurationError):
-        _resolve_distance_function(None)
+        _resolve_distance_function("manhattan")
 
 
-def test_resolve_vector_index_type_defaults(monkeypatch):
-    monkeypatch.delenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", raising=False)
+def test_vector_order_direction_per_function():
+    # cosine/dotproduct: higher VectorDistance == more similar -> DESC for nearest-first.
+    assert vector_order_direction("cosine") == "DESC"
+    assert vector_order_direction("dotproduct") == "DESC"
+    # euclidean: lower distance == more similar -> ASC for nearest-first.
+    assert vector_order_direction("euclidean") == "ASC"
+
+
+def test_vector_similarity_at_least_cosine_and_dotproduct():
+    # Higher score is more similar; threshold is a floor.
+    for fn in ("cosine", "dotproduct"):
+        assert vector_similarity_at_least(0.97, 0.97, fn) is True
+        assert vector_similarity_at_least(0.99, 0.97, fn) is True
+        assert vector_similarity_at_least(0.80, 0.97, fn) is False
+
+
+def test_vector_similarity_at_least_euclidean_inverts():
+    # Lower distance is more similar; threshold is a ceiling.
+    assert vector_similarity_at_least(0.10, 0.20, "euclidean") is True
+    assert vector_similarity_at_least(0.20, 0.20, "euclidean") is True
+    assert vector_similarity_at_least(0.50, 0.20, "euclidean") is False
+
+
+def test_distance_function_from_container_properties_reads_policy():
+    props = {
+        "id": "memories",
+        "vectorEmbeddingPolicy": {
+            "vectorEmbeddings": [
+                {"path": "/embedding", "dataType": "float32", "distanceFunction": "euclidean", "dimensions": 1536}
+            ]
+        },
+    }
+    assert distance_function_from_container_properties(props) == "euclidean"
+
+
+def test_distance_function_from_container_properties_reads_single_embedding():
+    # This SDK provisions a single vector embedding; the resolver reads its
+    # distanceFunction directly (the path value is irrelevant here).
+    props = {
+        "vectorEmbeddingPolicy": {
+            "vectorEmbeddings": [
+                {"path": "/embedding", "distanceFunction": "dotproduct"},
+            ]
+        }
+    }
+    assert distance_function_from_container_properties(props) == "dotproduct"
+
+
+@pytest.mark.parametrize(
+    "props",
+    [
+        None,
+        {},
+        {"vectorEmbeddingPolicy": {}},
+        {"vectorEmbeddingPolicy": {"vectorEmbeddings": []}},
+        {"vectorEmbeddingPolicy": {"vectorEmbeddings": [{"path": "/embedding", "distanceFunction": "manhattan"}]}},
+        "not-a-dict",
+    ],
+)
+def test_distance_function_from_container_properties_falls_back_to_cosine(props):
+    assert distance_function_from_container_properties(props) == "cosine"
+
+
+def test_extract_keywords_basic_and_stopwords():
+    # Stopwords removed, lowercased, de-duplicated, first-seen order preserved.
+    assert extract_keywords("The user LOVES hiking and hiking trails") == [
+        "user",
+        "loves",
+        "hiking",
+        "trails",
+    ]
+    assert extract_keywords("") == []
+    assert extract_keywords("the and of a an") == []  # all stopwords
+
+
+def test_extract_keywords_capped_at_cosmos_fulltext_limit():
+    # Cosmos FullTextScore rejects >30 terms; extraction must cap at exactly 30 so
+    # the hybrid query is always valid even for long multi-turn context strings.
+    text = " ".join(f"term{i}" for i in range(100))
+    kws = extract_keywords(text)
+    assert len(kws) == MAX_FULLTEXT_TERMS == 30
+    assert kws == [f"term{i}" for i in range(30)]
+
+
+def test_resolve_vector_index_type_defaults():
     assert _resolve_vector_index_type(None) == "quantizedFlat"
 
 
-def test_resolve_vector_index_type_from_env(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", "quantizedFlat")
-    assert _resolve_vector_index_type(None) == "quantizedFlat"
-
-
-def test_resolve_vector_index_type_explicit_overrides_env(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", "quantizedFlat")
+def test_resolve_vector_index_type_explicit():
     assert _resolve_vector_index_type("flat") == "flat"
 
 
-def test_resolve_vector_index_type_invalid_raises(monkeypatch):
-    monkeypatch.setenv("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE", "hnsw")
+def test_resolve_vector_index_type_invalid_raises():
     with pytest.raises(ConfigurationError):
-        _resolve_vector_index_type(None)
+        _resolve_vector_index_type("hnsw")
 
 
-def test_container_policies_defaults_to_diskann():
+def test_container_policies_defaults_vector_index_type():
     _, indexing_policy, _ = _container_policies(
         embedding_dimensions=1536,
         embedding_data_type="float32",
@@ -266,19 +338,17 @@ def test_container_policies_uses_supplied_vector_index_type():
         embedding_data_type="float32",
         distance_function="cosine",
         full_text_language="en-US",
-        vector_index_type="quantizedFlat",
+        vector_index_type="diskANN",
     )
-    assert indexing_policy["vectorIndexes"] == [{"path": "/embedding", "type": "quantizedFlat"}]
+    assert indexing_policy["vectorIndexes"] == [{"path": "/embedding", "type": "diskANN"}]
 
 
-def test_resolve_full_text_language_defaults(monkeypatch):
-    monkeypatch.delenv("COSMOS_DB_FULL_TEXT_LANGUAGE", raising=False)
+def test_resolve_full_text_language_defaults():
     assert _resolve_full_text_language(None) == "en-US"
 
 
-def test_resolve_full_text_language_from_env(monkeypatch):
-    monkeypatch.setenv("COSMOS_DB_FULL_TEXT_LANGUAGE", "fr-FR")
-    assert _resolve_full_text_language(None) == "fr-FR"
+def test_resolve_full_text_language_explicit():
+    assert _resolve_full_text_language("fr-FR") == "fr-FR"
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@
     "// --- Threshold knobs (set to 0 to disable that orchestrator) ---": "",
     "THREAD_SUMMARY_EVERY_N": "10",
     "FACT_EXTRACTION_EVERY_N": "1",
+    "DEDUP_EVERY_N": "5",
     "USER_SUMMARY_EVERY_N": "20",
 
     "// --- Processor ownership: 'durable' (FA owns) or 'inprocess' (SDK owns). FA skips processing if not set to 'durable' to avoid double-fire when an SDK install runs against the same Cosmos. ---": "",

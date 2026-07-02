@@ -15,6 +15,18 @@ from azure.cosmos.agent_memory.services.pipeline import PipelineService
 from azure.cosmos.agent_memory.store import MemoryStore
 
 
+@pytest.fixture(autouse=True)
+def _pin_legacy_extract_dedup(monkeypatch):
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
+        lambda: False,
+    )
+
+
 def _assert_iso8601(text: str) -> None:
     assert text
     datetime.fromisoformat(text)

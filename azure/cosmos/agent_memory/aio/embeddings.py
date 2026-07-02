@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from azure.cosmos.agent_memory._embedding_tokens import truncate_text_to_token_budget
 from azure.cosmos.agent_memory.chat import resolve_api_version
 from azure.cosmos.agent_memory.exceptions import ConfigurationError
 from azure.cosmos.agent_memory.logging import get_logger
@@ -94,6 +95,7 @@ class AsyncEmbeddingsClient:
 
     def _build_kwargs(self, input_: str | list[str]) -> dict[str, Any]:
         texts = [input_] if isinstance(input_, str) else input_
+        texts = [truncate_text_to_token_budget(t, self._model) for t in texts]
         logger.debug(
             "Embedding request: model=%s, dimensions=%s, texts=%d",
             self._model,

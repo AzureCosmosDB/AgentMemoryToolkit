@@ -476,3 +476,80 @@ async def test_async_extract_memories_dry_stage1_legacy_path_when_context_vector
     await service.extract_memories_dry("u1", "t1")
 
     store.search.assert_not_awaited()
+
+
+def test_extract_memories_dry_stage1_search_failure_falls_back_to_hash_memories() -> None:
+    """A failing dedup-context vector search must not abort extraction; it
+    falls back to the hash-loaded existing memories (option 3 resilience)."""
+    chat = _SyncChat([_response()])
+    memories_store = _Store(
+        [
+            {
+                "id": "hash-memory",
+                "user_id": "u1",
+                "type": "fact",
+                "content": "Existing hash-based memory from load.",
+                "content_hash": "h1",
+                "salience": 0.6,
+            }
+        ]
+    )
+
+    def _boom(**_kwargs):
+        raise RuntimeError("vector search down")
+
+    memories_store.search = _boom
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
+    )
+
+    # Must not raise despite the Stage-1 vector search failing.
+    output = service.extract_memories_dry("u1", "t1")
+
+    assert output["facts"]  # extraction proceeded
+    # Fallback surfaced the hash-loaded memory into the extraction prompt.
+    assert "Existing hash-based memory from load." in json.dumps(chat.messages)
+
+
+@pytest.mark.asyncio
+async def test_async_extract_memories_dry_stage1_search_failure_falls_back_to_hash_memories() -> None:
+    class _RecordingAsyncChat(_AsyncChat):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.messages: list = []
+
+        async def generate(self, messages, **opts):
+            self.messages.append(messages)
+            del opts
+            self.calls += 1
+            return json.dumps(self.responses.pop(0))
+
+    chat = _RecordingAsyncChat([_response()])
+    store = _AsyncStore(
+        [
+            {
+                "id": "hash-memory",
+                "user_id": "u1",
+                "type": "fact",
+                "content": "Existing hash-based memory from load.",
+                "content_hash": "h1",
+                "salience": 0.6,
+            }
+        ]
+    )
+    store.search = AsyncMock(side_effect=RuntimeError("vector search down"))
+    service = AsyncPipelineService(
+        store,
+        chat,
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(store, turns_store=_AsyncStore([_turn(1)])),
+    )
+
+    output = await service.extract_memories_dry("u1", "t1")
+
+    assert output["facts"]  # extraction proceeded
+    store.search.assert_awaited_once()
+    assert "Existing hash-based memory from load." in json.dumps(chat.messages)

@@ -532,12 +532,20 @@ class AsyncPipelineService:
         if get_dedup_context_vector_enabled():
             user_turns_text = "\n".join(str(it.get("content", "")) for it in items if it.get("role") == "user").strip()
             context_query = user_turns_text or transcript
-            existing = await self._store.search(
-                search_terms=context_query,
-                user_id=user_id,
-                memory_types=["fact"],
-                top_k=get_dedup_context_topk(),
-            )
+            try:
+                existing = await self._store.search(
+                    search_terms=context_query,
+                    user_id=user_id,
+                    memory_types=["fact"],
+                    top_k=get_dedup_context_topk(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "extract_memories_dry dedup-context vector search failed (%s); "
+                    "falling back to hash-based existing memories",
+                    exc,
+                )
+                existing = existing_for_hash
         else:
             existing = existing_for_hash
         if existing:

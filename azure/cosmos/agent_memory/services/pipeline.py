@@ -600,12 +600,20 @@ class PipelineService:
         if threshold_config.get_dedup_context_vector_enabled():
             user_turns_text = "\n".join(str(it.get("content", "")) for it in items if it.get("role") == "user").strip()
             context_query = user_turns_text or transcript
-            existing = self._store.search(
-                search_terms=context_query,
-                user_id=user_id,
-                memory_types=["fact"],
-                top_k=threshold_config.get_dedup_context_topk(),
-            )
+            try:
+                existing = self._store.search(
+                    search_terms=context_query,
+                    user_id=user_id,
+                    memory_types=["fact"],
+                    top_k=threshold_config.get_dedup_context_topk(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "extract_memories_dry dedup-context vector search failed (%s); "
+                    "falling back to hash-based existing memories",
+                    exc,
+                )
+                existing = existing_for_hashes
         if existing:
             existing_text = "\n".join(
                 f"- [ID: {mem['id']}] {mem.get('content', '')} "

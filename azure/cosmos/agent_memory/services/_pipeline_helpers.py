@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from azure.cosmos.agent_memory.exceptions import LLMError
+from azure.cosmos.agent_memory.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Separator for deterministic id seeds. Using NUL ensures user_id /
 # thread_id values can never collide with literal section markers
@@ -463,7 +466,7 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
         cleaned = cleaned[:-3]
     cleaned = cleaned.strip()
     try:
-        return json.loads(cleaned)
+        obj, end = json.JSONDecoder().raw_decode(cleaned)
     except json.JSONDecodeError as exc:
         preview = (text or "")[:200].replace("\n", " ")
         if _looks_truncated(cleaned, exc):
@@ -475,6 +478,15 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
                 f"recent_k, or split oversized turns). Decode error: {exc}. preview={preview!r}"
             ) from exc
         raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
+    trailing = cleaned[end:].strip()
+    if trailing:
+        logger.warning(
+            "LLM response had %d chars of extra data after the first JSON object; using the "
+            "first object and ignoring the remainder (trailing_preview=%r)",
+            len(trailing),
+            trailing[:120].replace("\n", " "),
+        )
+    return obj
 
 
 def _looks_truncated(cleaned: str, exc: json.JSONDecodeError) -> bool:

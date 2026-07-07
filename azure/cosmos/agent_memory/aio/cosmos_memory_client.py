@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory._base import _BaseMemoryClient
 from azure.cosmos.agent_memory._base.base_client import is_transient_tail_step_error
@@ -90,6 +90,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         chat_client: Optional[Any] = None,
         processor: Optional[AsyncMemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
+        cadence_thresholds: Optional[Mapping[str, int]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -146,6 +147,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._processor: Optional[AsyncMemoryProcessor] = processor
         self._processor_explicit = processor is not None
         self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
+        # Optional per-turn cadence override, keyed by the same names as the env vars (e.g.
+        # ``FACT_EXTRACTION_EVERY_N``, ``DEDUP_EVERY_N``, ``THREAD_SUMMARY_EVERY_N``,
+        # ``USER_SUMMARY_EVERY_N``). When provided, the auto-trigger uses these values instead of
+        # reading ``os.environ``; any key not present falls back to the environment/defaults.
+        # ``None`` preserves the env-only behavior.
+        self._cadence_thresholds: Optional[Mapping[str, int]] = cadence_thresholds
         logger.info("AsyncCosmosMemoryClient initialized")
 
     async def __aenter__(self) -> "AsyncCosmosMemoryClient":
@@ -539,7 +546,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
         if not turn_counts:
             return
-        await maybe_trigger_steps(self._get_processor(), self._get_counter_container(), turn_counts)
+        await maybe_trigger_steps(
+            self._get_processor(),
+            self._get_counter_container(),
+            turn_counts,
+            thresholds=self._cadence_thresholds,
+        )
 
     def _container_for_type(self, memory_type: str) -> Any:
         """Return the Cosmos container client that owns ``memory_type``."""

@@ -997,3 +997,31 @@ def test_list_tags_delegates_to_store():
     kwargs = container.query_items.call_args.kwargs
     assert "SELECT VALUE c.tags" in kwargs["query"]
     assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]
+
+
+class TestSyncCadenceThresholdsForwarding:
+    """A ``cadence_thresholds`` mapping on the sync client is forwarded to the auto-trigger, so
+    callers can set per-turn cadence in-process instead of mutating ``os.environ``."""
+
+    def test_cadence_thresholds_forwarded(self):
+        thresholds = {"FACT_EXTRACTION_EVERY_N": 3, "DEDUP_EVERY_N": 2}
+        mem = CosmosMemoryClient(use_default_credential=False, cadence_thresholds=thresholds)
+        mem._get_processor = MagicMock(return_value=MagicMock())
+        mem._get_counter_container = MagicMock(return_value=MagicMock())
+
+        with patch("azure.cosmos.agent_memory.cosmos_memory_client.maybe_trigger_steps") as mock_trigger:
+            mem._maybe_auto_trigger({("u1", "t1"): 1})
+
+        mock_trigger.assert_called_once()
+        assert mock_trigger.call_args.kwargs["thresholds"] is thresholds
+
+    def test_defaults_to_none_when_unset(self):
+        mem = CosmosMemoryClient(use_default_credential=False)
+        mem._get_processor = MagicMock(return_value=MagicMock())
+        mem._get_counter_container = MagicMock(return_value=MagicMock())
+
+        with patch("azure.cosmos.agent_memory.cosmos_memory_client.maybe_trigger_steps") as mock_trigger:
+            mem._maybe_auto_trigger({("u1", "t1"): 1})
+
+        # None preserves the env-only behavior (the auto-trigger treats None as defaults).
+        assert mock_trigger.call_args.kwargs["thresholds"] is None

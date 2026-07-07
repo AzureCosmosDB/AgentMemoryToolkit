@@ -1,5 +1,16 @@
 ## Release History
 
+## [Unreleased]
+
+#### Features Added
+* Per-turn processing cadence can now be set in-process via the new
+  `cadence_thresholds` constructor argument on `CosmosMemoryClient` and
+  `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a
+  mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,
+  `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
+  present falls back to the environment/defaults, and `None` preserves today's
+  env-only behavior.
+
 ## [0.2.0b2] (2026-07-01)
 
 #### Features Added

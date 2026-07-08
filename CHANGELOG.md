@@ -9,7 +9,7 @@
   argument on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`. The toolkit's
   own user-agent (`azsdk-python-cosmos-agent-memory/<version>`) is always sent to
   Azure Cosmos DB so usage can be tracked; when a custom value is provided it is prefixed and
-  the toolkit's user-agent is suffixed behind it (`"<custom> <toolkit>"`).
+  the toolkit's user-agent is suffixed behind it (`"<custom> <toolkit>"`). See [PR:#30](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/30)
 * Per-turn processing cadence can now be set in-process via the new
   `cadence_thresholds` constructor argument on `CosmosMemoryClient` and
   `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a

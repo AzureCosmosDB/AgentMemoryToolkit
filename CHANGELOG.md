@@ -9,7 +9,9 @@
   mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,
   `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
   present falls back to the environment/defaults, and `None` preserves today's
-  env-only behavior.
+  env-only behavior. The mapping is validated and defensively copied at
+  construction: values are coerced to `int`, negatives are rejected (`0` disables
+  a step), and later mutation of the caller's mapping cannot change client behavior.
 
 ## [0.2.0b2] (2026-07-01)
 

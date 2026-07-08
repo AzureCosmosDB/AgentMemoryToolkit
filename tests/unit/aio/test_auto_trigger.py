@@ -183,3 +183,29 @@ class TestCadenceThresholdsForwarding:
 
         # None preserves the env-only behavior (the auto-trigger treats None as defaults).
         assert mock_trigger.await_args.kwargs["thresholds"] is None
+
+
+class TestCadenceThresholdsNormalization:
+    """The async client normalizes ``cadence_thresholds`` at construction time."""
+
+    def test_defensive_copy_isolates_later_mutation(self):
+        thresholds = {"FACT_EXTRACTION_EVERY_N": 3}
+        client = AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds=thresholds)
+        thresholds["FACT_EXTRACTION_EVERY_N"] = 99
+        assert client._cadence_thresholds == {"FACT_EXTRACTION_EVERY_N": 3}
+
+    def test_string_values_are_coerced_to_int(self):
+        client = AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": "5"})
+        assert client._cadence_thresholds == {"DEDUP_EVERY_N": 5}
+
+    def test_negative_value_rejected(self):
+        with pytest.raises(ValueError):
+            AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": -1})
+
+    def test_non_int_value_rejected(self):
+        with pytest.raises(ValueError):
+            AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": "x"})
+
+    def test_non_mapping_rejected(self):
+        with pytest.raises(TypeError):
+            AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds=[("DEDUP_EVERY_N", 5)])

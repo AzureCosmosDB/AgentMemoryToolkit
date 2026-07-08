@@ -27,7 +27,7 @@ from .chat import ChatClient
 from .embeddings import EmbeddingsClient
 from .exceptions import CosmosOperationError, ValidationError
 from .processors import InProcessProcessor, MemoryProcessor
-from .services._pipeline_helpers import _normalize_metadata_keys
+from .services._pipeline_helpers import _normalize_cadence_thresholds, _normalize_metadata_keys
 from .services.pipeline import PipelineService
 from .store import MemoryStore
 from .thresholds import DEFAULT_TTL_BY_TYPE
@@ -143,8 +143,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
         # ``FACT_EXTRACTION_EVERY_N``, ``DEDUP_EVERY_N``, ``THREAD_SUMMARY_EVERY_N``,
         # ``USER_SUMMARY_EVERY_N``). When provided, the auto-trigger uses these values instead of
         # reading ``os.environ``; any key not present falls back to the environment/defaults.
-        # ``None`` preserves the env-only behavior.
-        self._cadence_thresholds: Optional[Mapping[str, int]] = cadence_thresholds
+        # ``None`` preserves the env-only behavior. Normalized to a defensive ``dict[str, int]``
+        # so later mutation of the caller's mapping cannot change client behavior, and invalid
+        # values fail fast at construction rather than deep inside the trigger path.
+        self._cadence_thresholds: Optional[dict[str, int]] = _normalize_cadence_thresholds(cadence_thresholds)
         if self._cosmos_endpoint:
             self.create_memory_store()
         logger.info("CosmosMemoryClient initialized")

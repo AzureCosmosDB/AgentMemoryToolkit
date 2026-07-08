@@ -29,7 +29,10 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, CosmosOperationError, ValidationError
 from azure.cosmos.agent_memory.logging import get_logger
-from azure.cosmos.agent_memory.services._pipeline_helpers import _normalize_metadata_keys
+from azure.cosmos.agent_memory.services._pipeline_helpers import (
+    _normalize_cadence_thresholds,
+    _normalize_metadata_keys,
+)
 from azure.cosmos.agent_memory.thresholds import DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -151,8 +154,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         # ``FACT_EXTRACTION_EVERY_N``, ``DEDUP_EVERY_N``, ``THREAD_SUMMARY_EVERY_N``,
         # ``USER_SUMMARY_EVERY_N``). When provided, the auto-trigger uses these values instead of
         # reading ``os.environ``; any key not present falls back to the environment/defaults.
-        # ``None`` preserves the env-only behavior.
-        self._cadence_thresholds: Optional[Mapping[str, int]] = cadence_thresholds
+        # ``None`` preserves the env-only behavior. Normalized to a defensive ``dict[str, int]``
+        # so later mutation of the caller's mapping cannot change client behavior, and invalid
+        # values fail fast at construction rather than deep inside the trigger path.
+        self._cadence_thresholds: Optional[dict[str, int]] = _normalize_cadence_thresholds(cadence_thresholds)
         logger.info("AsyncCosmosMemoryClient initialized")
 
     async def __aenter__(self) -> "AsyncCosmosMemoryClient":

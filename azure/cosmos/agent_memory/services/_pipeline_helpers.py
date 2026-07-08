@@ -226,9 +226,7 @@ def _normalize_cadence_thresholds(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"cadence_thresholds[{key!r}] must be an int, got {raw!r}.") from exc
         if coerced < 0:
-            raise ValueError(
-                f"cadence_thresholds[{key!r}] must be >= 0 (0 disables the step), got {coerced}."
-            )
+            raise ValueError(f"cadence_thresholds[{key!r}] must be >= 0 (0 disables the step), got {coerced}.")
         normalized[str(key)] = coerced
     return normalized or None
 

@@ -13,16 +13,22 @@
   auto-drop is disabled for `euclidean` containers). In-process reconcile now
   covers both facts and episodic memories, matching the Durable backend, and its
   cadence is derived from the persisted message counter. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
-* Extraction watermark. The window of recent turns sent to extraction is sized
-  from a persisted per-thread watermark (`last_extract_count`) that only advances
-  after a successful extract, so under normal operation no turns are skipped when
-  extraction lags or transiently fails. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 #### Other Changes
 * `search_cosmos` and `search_turns` now always fuse vector similarity with
   BM25 (full-text) ranking, falling back to vector-only for all-stopword
   queries. The `hybrid_search` flag has been removed — hybrid ranking is the
   default and requires no opt-in. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+
+* Per-turn processing cadence can now be set in-process via the new
+  `cadence_thresholds` constructor argument on `CosmosMemoryClient` and
+  `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a
+  mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,
+  `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
+  present falls back to the environment/defaults, and `None` preserves today's
+  env-only behavior. The mapping is validated and defensively copied at
+  construction: values are coerced to `int`, negatives are rejected (`0` disables
+  a step), and later mutation of the caller's mapping cannot change client behavior.
 
 ## [0.2.0b2] (2026-07-01)
 

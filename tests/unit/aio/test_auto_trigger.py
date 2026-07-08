@@ -408,3 +408,67 @@ class TestPushToCosmosUnflushedDelta:
             await client.push_to_cosmos()
             await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
             assert captured == [{("u1", "t1"): 1}]
+
+
+class TestCadenceThresholdsForwarding:
+    """A ``cadence_thresholds`` mapping on the client is forwarded to the auto-trigger.
+
+    This lets callers set per-turn cadence in-process instead of mutating ``os.environ``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cadence_thresholds_forwarded(self):
+        thresholds = {"FACT_EXTRACTION_EVERY_N": 3, "DEDUP_EVERY_N": 2}
+        client = AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds=thresholds)
+        client._get_processor = MagicMock(return_value=MagicMock())
+        client._get_counter_container = MagicMock(return_value=MagicMock())
+
+        with patch(
+            "azure.cosmos.agent_memory.aio.cosmos_memory_client.maybe_trigger_steps",
+            new=AsyncMock(),
+        ) as mock_trigger:
+            await client._maybe_auto_trigger({("u1", "t1"): 1})
+
+        mock_trigger.assert_awaited_once()
+        assert mock_trigger.await_args.kwargs["thresholds"] == thresholds
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_none_when_unset(self):
+        client = AsyncCosmosMemoryClient(use_default_credential=False)
+        client._get_processor = MagicMock(return_value=MagicMock())
+        client._get_counter_container = MagicMock(return_value=MagicMock())
+
+        with patch(
+            "azure.cosmos.agent_memory.aio.cosmos_memory_client.maybe_trigger_steps",
+            new=AsyncMock(),
+        ) as mock_trigger:
+            await client._maybe_auto_trigger({("u1", "t1"): 1})
+
+        # None preserves the env-only behavior (the auto-trigger treats None as defaults).
+        assert mock_trigger.await_args.kwargs["thresholds"] is None
+
+
+class TestCadenceThresholdsNormalization:
+    """The async client normalizes ``cadence_thresholds`` at construction time."""
+
+    def test_defensive_copy_isolates_later_mutation(self):
+        thresholds = {"FACT_EXTRACTION_EVERY_N": 3}
+        client = AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds=thresholds)
+        thresholds["FACT_EXTRACTION_EVERY_N"] = 99
+        assert client._cadence_thresholds == {"FACT_EXTRACTION_EVERY_N": 3}
+
+    def test_string_values_are_coerced_to_int(self):
+        client = AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": "5"})
+        assert client._cadence_thresholds == {"DEDUP_EVERY_N": 5}
+
+    def test_negative_value_rejected(self):
+        with pytest.raises(ValueError):
+            AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": -1})
+
+    def test_non_int_value_rejected(self):
+        with pytest.raises(ValueError):
+            AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": "x"})
+
+    def test_non_mapping_rejected(self):
+        with pytest.raises(TypeError):
+            AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds=[("DEDUP_EVERY_N", 5)])

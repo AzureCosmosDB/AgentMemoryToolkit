@@ -14,7 +14,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.logging import get_logger
@@ -203,6 +203,35 @@ def _normalize_metadata_keys(
         )
     keys = tuple(str(k) for k in value if str(k))
     return keys or None
+
+
+def _normalize_cadence_thresholds(
+    value: Optional[Mapping[str, int]],
+) -> Optional[dict[str, int]]:
+    """Validate + defensively copy a ``cadence_thresholds`` argument.
+
+    Coerces each value to ``int`` and rejects negatives (``0`` disables the
+    corresponding step). Returns a new ``dict`` so later mutation of the
+    caller's mapping cannot change client behavior. Returns ``None`` for
+    missing or empty input.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "cadence_thresholds must be a mapping of env-var name to int "
+            f"(e.g. {{'FACT_EXTRACTION_EVERY_N': 5}}), not {type(value).__name__}."
+        )
+    normalized: dict[str, int] = {}
+    for key, raw in value.items():
+        try:
+            coerced = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"cadence_thresholds[{key!r}] must be an int, got {raw!r}.") from exc
+        if coerced < 0:
+            raise ValueError(f"cadence_thresholds[{key!r}] must be >= 0 (0 disables the step), got {coerced}.")
+        normalized[str(key)] = coerced
+    return normalized or None
 
 
 def _format_metadata_segment(

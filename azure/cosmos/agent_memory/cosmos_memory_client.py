@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory.logging import get_logger
 
@@ -27,7 +27,7 @@ from .chat import ChatClient
 from .embeddings import EmbeddingsClient
 from .exceptions import CosmosOperationError, ValidationError
 from .processors import InProcessProcessor, MemoryProcessor
-from .services._pipeline_helpers import _normalize_metadata_keys
+from .services._pipeline_helpers import _normalize_cadence_thresholds, _normalize_metadata_keys
 from .services.pipeline import PipelineService
 from .store import MemoryStore
 from .thresholds import DEFAULT_TTL_BY_TYPE
@@ -85,6 +85,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         chat_client: Optional[Any] = None,
         processor: Optional[MemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
+        cadence_thresholds: Optional[Mapping[str, int]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -138,6 +139,14 @@ class CosmosMemoryClient(_BaseMemoryClient):
         self._processor: Optional[MemoryProcessor] = processor
         self._processor_explicit = processor is not None
         self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
+        # Optional per-turn cadence override, keyed by the same names as the env vars (e.g.
+        # ``FACT_EXTRACTION_EVERY_N``, ``DEDUP_EVERY_N``, ``THREAD_SUMMARY_EVERY_N``,
+        # ``USER_SUMMARY_EVERY_N``). When provided, the auto-trigger uses these values instead of
+        # reading ``os.environ``; any key not present falls back to the environment/defaults.
+        # ``None`` preserves the env-only behavior. Normalized to a defensive ``dict[str, int]``
+        # so later mutation of the caller's mapping cannot change client behavior, and invalid
+        # values fail fast at construction rather than deep inside the trigger path.
+        self._cadence_thresholds: Optional[dict[str, int]] = _normalize_cadence_thresholds(cadence_thresholds)
         if self._cosmos_endpoint:
             self.create_memory_store()
         logger.info("CosmosMemoryClient initialized")
@@ -494,7 +503,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
     def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
         if not turn_counts:
             return
-        maybe_trigger_steps(self._get_processor(), self._get_counter_container(), turn_counts)
+        maybe_trigger_steps(
+            self._get_processor(),
+            self._get_counter_container(),
+            turn_counts,
+            thresholds=self._cadence_thresholds,
+        )
 
     def _container_for_type(self, memory_type: str) -> Any:
         """Return the Cosmos container client that owns ``memory_type``."""

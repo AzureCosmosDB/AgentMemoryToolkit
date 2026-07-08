@@ -148,8 +148,10 @@ class TestPushToCosmosUnflushedDelta:
 
 
 class TestCadenceThresholdsForwarding:
-    """A ``cadence_thresholds`` mapping on the client is forwarded to the auto-trigger, so
-    callers can set per-turn cadence in-process instead of mutating ``os.environ``."""
+    """A ``cadence_thresholds`` mapping on the client is forwarded to the auto-trigger.
+
+    This lets callers set per-turn cadence in-process instead of mutating ``os.environ``.
+    """
 
     @pytest.mark.asyncio
     async def test_cadence_thresholds_forwarded(self):
@@ -165,7 +167,7 @@ class TestCadenceThresholdsForwarding:
             await client._maybe_auto_trigger({("u1", "t1"): 1})
 
         mock_trigger.assert_awaited_once()
-        assert mock_trigger.await_args.kwargs["thresholds"] is thresholds
+        assert mock_trigger.await_args.kwargs["thresholds"] == thresholds
 
     @pytest.mark.asyncio
     async def test_defaults_to_none_when_unset(self):

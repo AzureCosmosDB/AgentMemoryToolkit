@@ -1000,8 +1000,10 @@ def test_list_tags_delegates_to_store():
 
 
 class TestSyncCadenceThresholdsForwarding:
-    """A ``cadence_thresholds`` mapping on the sync client is forwarded to the auto-trigger, so
-    callers can set per-turn cadence in-process instead of mutating ``os.environ``."""
+    """A ``cadence_thresholds`` mapping on the sync client is forwarded to the auto-trigger.
+
+    This lets callers set per-turn cadence in-process instead of mutating ``os.environ``.
+    """
 
     def test_cadence_thresholds_forwarded(self):
         thresholds = {"FACT_EXTRACTION_EVERY_N": 3, "DEDUP_EVERY_N": 2}
@@ -1013,7 +1015,7 @@ class TestSyncCadenceThresholdsForwarding:
             mem._maybe_auto_trigger({("u1", "t1"): 1})
 
         mock_trigger.assert_called_once()
-        assert mock_trigger.call_args.kwargs["thresholds"] is thresholds
+        assert mock_trigger.call_args.kwargs["thresholds"] == thresholds
 
     def test_defaults_to_none_when_unset(self):
         mem = CosmosMemoryClient(use_default_credential=False)

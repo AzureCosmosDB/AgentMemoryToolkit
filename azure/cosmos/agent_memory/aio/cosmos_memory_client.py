@@ -249,7 +249,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
             await self._drain_cosmos_client()
             client = CosmosClient(
-                self._cosmos_endpoint, credential=self._cosmos_credential, user_agent=self._cosmos_user_agent
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
             )
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
@@ -324,7 +326,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
             await self._drain_cosmos_client()
             client = CosmosClient(
-                self._cosmos_endpoint, credential=self._cosmos_credential, user_agent=self._cosmos_user_agent
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
             )
             db = await client.create_database_if_not_exists(id=self._cosmos_database)
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")

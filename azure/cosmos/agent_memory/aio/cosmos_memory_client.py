@@ -89,6 +89,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
         enable_turn_embeddings: Optional[bool] = None,
+        user_agent: Optional[str] = None,
         embeddings_client: Optional[Any] = None,
         chat_client: Optional[Any] = None,
         processor: Optional[AsyncMemoryProcessor] = None,
@@ -115,6 +116,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             chat_deployment_name=chat_deployment_name,
             use_default_credential=use_default_credential,
             enable_turn_embeddings=enable_turn_embeddings,
+            user_agent=user_agent,
             default_credential_module="azure.identity.aio",
         )
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -246,7 +248,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             from azure.cosmos.aio import CosmosClient
 
             await self._drain_cosmos_client()
-            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            client = CosmosClient(
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
+            )
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
             self._memories_container_client = db.get_container_client(self._cosmos_container)
@@ -319,7 +325,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             from azure.cosmos.aio import CosmosClient
 
             await self._drain_cosmos_client()
-            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            client = CosmosClient(
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
+            )
             db = await client.create_database_if_not_exists(id=self._cosmos_database)
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
             offer = _cosmos_container_offer_throughput(

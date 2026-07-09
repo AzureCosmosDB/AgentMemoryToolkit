@@ -2,16 +2,21 @@
 
 ## [Unreleased]
 
+## [0.2.0b3] (2026-07-08)
+
 #### Features Added
+* A custom user-agent can now be supplied via the new `user_agent` constructor
+  argument on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`. The toolkit's
+  own user-agent (`azsdk-python-cosmos-agent-memory/<version>`) is always sent to
+  Azure Cosmos DB so usage can be tracked; when a custom value is provided it is prefixed and
+  the toolkit's user-agent is suffixed behind it (`"<custom> <toolkit>"`). See [PR:#30](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/30)
 * Per-turn processing cadence can now be set in-process via the new
   `cadence_thresholds` constructor argument on `CosmosMemoryClient` and
   `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a
   mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,
   `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
   present falls back to the environment/defaults, and `None` preserves today's
-  env-only behavior. The mapping is validated and defensively copied at
-  construction: values are coerced to `int`, negatives are rejected (`0` disables
-  a step), and later mutation of the caller's mapping cannot change client behavior.
+  env-only behavior. See [PR:#29](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/29)
 
 ## [0.2.0b2] (2026-07-01)
 

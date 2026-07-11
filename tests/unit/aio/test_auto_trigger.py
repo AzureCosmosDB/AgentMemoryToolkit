@@ -100,7 +100,6 @@ class TestAsyncAutoTriggerNonBlocking:
 
 class TestAsyncExtractRecentK:
     @pytest.mark.asyncio
-    @pytest.mark.asyncio
     async def test_extract_fires_without_recent_k_or_watermark(self, monkeypatch):
         """Async: extraction covers all un-extracted turns (extracted_at gated) and
         batches internally, so it fires with NO recent_k and NO success watermark."""

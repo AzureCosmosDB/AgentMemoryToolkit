@@ -812,23 +812,23 @@ class PipelineService:
 
         For each newly extracted fact/episodic doc we find its single nearest
         active same-type neighbor. If similarity is at/above ``SIM_HIGH`` the new
-        doc is a near-duplicate: we refresh the existing neighbor in place —
+        doc is a near-duplicate: we refresh the existing neighbor in place -
         recency-wins content + embedding, unioned tags, max salience/confidence,
-        bumped ``updated_at`` — keeping its id, and drop the new doc so it is not
+        bumped ``updated_at`` - keeping its id, and drop the new doc so it is not
         written as a fresh record. Everything below the threshold is novel and
         flows through to ``persist_extracted_memories`` unchanged.
 
         This makes the write path convergent: a restatement updates one existing
         document rather than minting a new one that a later reconcile sweep must
         merge and supersede. There is no ``sys:dup-candidate`` tagging and no
-        clustering — reconcile only resolves contradictions.
+        clustering - reconcile only resolves contradictions.
 
         In-place folds commit here, before ``persist_extracted_memories`` writes
         the novel docs. A crash between the two leaves some memories folded and
         some novel docs unwritten, but the source turns are not stamped
         ``extracted_at`` until persist completes, so the whole turn set is simply
         re-extracted on the next run (folds are idempotent and re-ADDs hit
-        exact-hash/vector dedup) — no data is lost, only repeated.
+        exact-hash/vector dedup) - no data is lost, only repeated.
         """
         if not threshold_config.get_dedup_vector_enabled():
             return extracted
@@ -891,7 +891,7 @@ class PipelineService:
                 exclude_ids={doc_id} | set(doc.get("supersedes_ids") or []),
             )
             if not neighbor or not vector_similarity_at_least(score, high, distance_function):
-                continue  # novel — leave in result for persist to ADD
+                continue  # novel - leave in result for persist to ADD
 
             neighbor_id = str(neighbor.get("id") or "")
             if not neighbor_id:
@@ -906,7 +906,7 @@ class PipelineService:
                 inplace_updated += 1
                 folded_ids.add(doc_id)
             # If the in-place update failed, leave the doc in result so persist
-            # ADDs it as a novel record — never silently lose an extraction.
+            # ADDs it as a novel record - never silently lose an extraction.
 
         if folded_ids:
             for bucket in ("facts", "episodic"):
@@ -967,8 +967,8 @@ class PipelineService:
         Uses ETag optimistic concurrency: the update is applied with
         ``IfNotModified`` against the neighbor's ``_etag`` so a concurrent
         supersede/refresh cannot be clobbered (which would resurrect a
-        soft-deleted memory or lose an update). On an ETag conflict — or any
-        other failure — returns False and the caller keeps the new doc as a
+        soft-deleted memory or lose an update). On an ETag conflict - or any
+        other failure - returns False and the caller keeps the new doc as a
         novel ADD, so nothing is lost.
 
         Recency wins: the neighbor keeps its id / created_at / partition but takes
@@ -1692,7 +1692,7 @@ class PipelineService:
         """Resolve contradictions among a user's most-recent active memories.
 
         Loads up to ``n`` active (non-superseded) ``memory_type`` records and
-        asks the dedup prompt to identify ``contradicted_pairs`` — opposing
+        asks the dedup prompt to identify ``contradicted_pairs`` - opposing
         claims about the same subject (e.g. "deadline March 1" vs "March 15").
         Each loser is soft-deleted with ``supersede_reason="contradict"`` and
         ``superseded_by`` set to the winner.
@@ -1700,7 +1700,7 @@ class PipelineService:
         Near-duplicate *paraphrases* are no longer merged here: the write-time
         in-place dedup (:meth:`dedup_extracted_memories`) folds restatements into
         their canonical record before they land, so reconcile is a bounded,
-        convergent contradiction pass — no clustering, no synthesized merged
+        convergent contradiction pass - no clustering, no synthesized merged
         documents, no re-merge churn. Episodic and procedural types are no-ops
         (episodic has no contradiction semantics; its near-dups fold at write
         time).
@@ -1736,11 +1736,12 @@ class PipelineService:
     def _reconcile_contradictions(self, user_id: str, memory_type: str, facts: list[dict[str, Any]]) -> dict[str, int]:
         """Resolve contradictions within an explicit pool of same-type memories.
 
-        Runs the dedup prompt over the pool and applies ONLY its
-        ``contradicted_pairs`` — the loser of each pair is soft-deleted with
-        ``superseded_by`` set to the winner. ``duplicate_groups`` in the response
-        are ignored (write-time in-place dedup already handles paraphrases), so
-        no merged documents are minted and the pass is convergent. Returns
+        Runs the dedup prompt over the pool and applies its
+        ``contradicted_pairs`` - the loser of each pair is soft-deleted with
+        ``superseded_by`` set to the winner. Paraphrases are not merged here;
+        the dedup prompt/schema no longer emits duplicate groups because
+        write-time in-place dedup already folds them, so no merged documents are
+        minted and the pass is convergent. Returns
         ``{"kept", "merged": 0, "contradicted"}``.
         """
         if len(facts) <= 1:

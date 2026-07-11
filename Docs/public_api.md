@@ -52,7 +52,7 @@
 - `synthesize_procedural(user_id, *, force=False) -> dict` — synthesize the procedural prompt.
 - `generate_thread_summary(user_id, thread_id, recent_k=None, **kwargs) -> dict` — generate and persist a thread summary.
 - `generate_user_summary(user_id, thread_ids=None, recent_k=None, **kwargs) -> dict` — generate and persist a user summary.
-- `reconcile(user_id, n=None) -> dict[str, int]` — reconcile duplicate or contradictory facts.
+- `reconcile(user_id, n=None) -> dict[str, int]` — resolve contradictory facts (paraphrases fold at write time).
 - `process_now(*, user_id, thread_id) -> ProcessThreadResult` — run the configured processor immediately.
 - `process_now_and_wait(*, user_id, thread_id, timeout=30.0) -> bool` — process and wait for a summary.
 
@@ -106,7 +106,7 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 - `async synthesize_procedural(user_id, *, force=False) -> dict` — synthesize the procedural prompt.
 - `async generate_thread_summary(user_id, thread_id, recent_k=None, **kwargs) -> dict` — generate and persist a thread summary.
 - `async generate_user_summary(user_id, thread_ids=None, recent_k=None, **kwargs) -> dict` — generate and persist a user summary.
-- `async reconcile(user_id, n=None) -> dict[str, int]` — reconcile duplicate or contradictory facts.
+- `async reconcile(user_id, n=None) -> dict[str, int]` — resolve contradictory facts (paraphrases fold at write time).
 - `async process_now(*, user_id, thread_id) -> ProcessThreadResult` — run the configured processor immediately.
 - `async process_now_and_wait(*, user_id, thread_id, timeout=30.0) -> bool` — process and wait for a summary.
 

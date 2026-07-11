@@ -800,7 +800,7 @@ class AsyncPipelineService:
                 exclude_ids={doc_id} | set(doc.get("supersedes_ids") or []),
             )
             if not neighbor or not vector_similarity_at_least(score, high, distance_function):
-                continue  # novel — leave in result for persist to ADD
+                continue  # novel - leave in result for persist to ADD
 
             neighbor_id = str(neighbor.get("id") or "")
             if not neighbor_id:
@@ -1608,7 +1608,7 @@ class AsyncPipelineService:
         Async mirror of the sync contradiction-only reconcile. Near-duplicate
         paraphrases are folded in place at write time
         (:meth:`dedup_extracted_memories`); this pass only supersedes the loser
-        of each ``contradicted_pairs`` entry — no clustering, no merged
+        of each ``contradicted_pairs`` entry - no clustering, no merged
         documents, no re-merge churn. Episodic and procedural types are no-ops.
         Returns ``{"kept", "merged", "contradicted"}`` with ``merged`` always 0.
         """
@@ -1643,9 +1643,10 @@ class AsyncPipelineService:
     ) -> dict[str, int]:
         """Async mirror: resolve only ``contradicted_pairs`` within the pool.
 
-        ``duplicate_groups`` are ignored (write-time in-place dedup handles
-        paraphrases), so no merged docs are minted and the pass is convergent.
-        Returns ``{"kept", "merged": 0, "contradicted"}``.
+        Paraphrases are not merged here; the dedup prompt/schema no longer emits
+        duplicate groups because write-time in-place dedup already folds them, so
+        no merged docs are minted and the pass is convergent. Returns
+        ``{"kept", "merged": 0, "contradicted"}``.
         """
         if len(facts) <= 1:
             return {"kept": len(facts), "merged": 0, "contradicted": 0}

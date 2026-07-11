@@ -3,7 +3,7 @@
 The procedural-synthesis business logic is covered exhaustively by sync
 tests in ``tests/unit/test_procedural_synthesis.py`` against
 ``PipelineService``; ``AsyncPipelineService`` is a 1:1 async mirror.
-These tests verify async wiring — that the client awaits the pipeline
+These tests verify async wiring - that the client awaits the pipeline
 correctly, that the durable-processor branch short-circuits, and that
 the store-backed procedural reads work over async iterators.
 """

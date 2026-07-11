@@ -1,7 +1,7 @@
 """Cross-thread user profile generation.
 
 Runs ``CosmosMemoryClient.generate_user_summary(...)`` which synthesises
-a single user profile from per-thread summaries and extracted facts —
+a single user profile from per-thread summaries and extracted facts -
 again, all in-process via the shared ProcessingPipeline.
 
 Required env vars (.env supported):
@@ -55,7 +55,7 @@ def main() -> None:
     t1 = str(uuid.uuid4())
     for role, content in [
         ("user", "What's a good pasta recipe for a weeknight dinner?"),
-        ("agent", "Try aglio e olio — pasta, garlic, olive oil, chilli flakes, parsley."),
+        ("agent", "Try aglio e olio - pasta, garlic, olive oil, chilli flakes, parsley."),
         ("user", "Sounds great. I love simple Italian food, especially fresh ingredients."),
         ("agent", "Italian cuisine emphasises quality ingredients prepared simply."),
     ]:
@@ -68,9 +68,9 @@ def main() -> None:
     _banner("Thread 2 – travel")
     t2 = str(uuid.uuid4())
     for role, content in [
-        ("user", "I want to visit Italy next year — Rome, Florence, Tuscany."),
-        ("agent", "Great itinerary! Tuscany is amazing in autumn — wine harvest season."),
-        ("user", "Perfect — I love wine, especially Chianti and Brunello."),
+        ("user", "I want to visit Italy next year - Rome, Florence, Tuscany."),
+        ("agent", "Great itinerary! Tuscany is amazing in autumn - wine harvest season."),
+        ("user", "Perfect - I love wine, especially Chianti and Brunello."),
         ("agent", "Brunello di Montalcino producers offer wonderful cellar tours."),
     ]:
         mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=t2)
@@ -85,7 +85,7 @@ def main() -> None:
         ("user", "What's the best way to deploy a Python FastAPI app on Azure?"),
         ("agent", "Azure Container Apps is a great fit for FastAPI."),
         ("user", "Cool. I'm a Python engineer building AI tooling."),
-        ("agent", "Azure has excellent AI services — AI Foundry, AI Search, Cosmos DB for vectors."),
+        ("agent", "Azure has excellent AI services - AI Foundry, AI Search, Cosmos DB for vectors."),
     ]:
         mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=t3)
 
@@ -93,7 +93,7 @@ def main() -> None:
     mem.generate_thread_summary(user_id=user_id, thread_id=t3)
 
     # ---------- generate user summary across all threads ----------
-    _banner("User profile — synthesis across all 3 threads")
+    _banner("User profile - synthesis across all 3 threads")
     doc = mem.generate_user_summary(user_id=user_id, thread_ids=[t1, t2, t3])
     print(f"id           : {doc['id']}")
     print(f"source_count : {doc.get('metadata', {}).get('source_count')}")

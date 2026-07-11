@@ -16,10 +16,58 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from azure.cosmos.agent_memory._embedding_tokens import count_tokens
 from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.logging import get_logger
 
 logger = get_logger(__name__)
+
+_NON_RETRYABLE_LLM_MARKERS = (
+    "content_filter",
+    "content management policy",
+    "context_length_exceeded",
+    "maximum context length",
+)
+
+
+def is_retryable_llm_error(exc: BaseException) -> bool:
+    """Classify an extraction LLM failure as retryable (transient) or not."""
+    text = str(exc).lower()
+    return not any(marker in text for marker in _NON_RETRYABLE_LLM_MARKERS)
+
+
+def batch_turns_by_tokens(
+    items: list[dict[str, Any]],
+    max_tokens: int,
+    *,
+    model: str = "gpt-5.4",
+) -> list[list[dict[str, Any]]]:
+    """Greedily pack ordered *items* into batches whose combined content stays
+    within *max_tokens*.
+
+    Token-bounded batching keeps each extraction call small enough that (a) the
+    model can attend to every turn (more complete extraction - smaller windows
+    extract more faithfully) and (b) a single poisoned turn fails only its own
+    batch instead of the whole backlog. A turn larger than *max_tokens* on its
+    own becomes a singleton batch (never dropped).
+    """
+    if not items:
+        return []
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_tokens = 0
+    for item in items:
+        item_tokens = count_tokens(str(item.get("content") or ""), model)
+        if current and current_tokens + item_tokens > max_tokens:
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(item)
+        current_tokens += item_tokens
+    if current:
+        batches.append(current)
+    return batches
+
 
 # Separator for deterministic id seeds. Using NUL ensures user_id /
 # thread_id values can never collide with literal section markers
@@ -241,7 +289,7 @@ def build_transcript(
         If *True*, group messages under ``=== Thread <id> ===`` headers.
     metadata_keys:
         Allow-list of metadata keys to surface in each transcript line.
-        Defaults to ``None`` (no metadata serialized — only ``[role]:
+        Defaults to ``None`` (no metadata serialized - only ``[role]:
         content`` lines). When provided, only the listed keys are emitted,
         in iteration order. Keys absent from a given turn's metadata are
         silently skipped.
@@ -250,7 +298,7 @@ def build_transcript(
         ``TurnRecord.metadata`` that the extraction LLM should see
         (e.g. ``["agent_id", "timestamp"]``). Leaving it unset keeps free-form
         metadata blobs (raw tool calls, IDE schema, etc.) out of every
-        prompt — they're often 10-100x larger than the dialog itself and
+        prompt - they're often 10-100x larger than the dialog itself and
         dilute extraction quality.
 
         Accepts any iterable of strings except ``str`` itself (which would
@@ -340,6 +388,46 @@ _GROUNDING_STOPWORDS = frozenset(
         "may",
         "might",
         "must",
+        "say",
+        "says",
+        "said",
+        "saying",
+        "tell",
+        "tells",
+        "told",
+        "ask",
+        "asks",
+        "asked",
+        "mention",
+        "mentions",
+        "mentioned",
+        "stated",
+        "noted",
+        "added",
+        "replied",
+        "want",
+        "wants",
+        "wanted",
+        "decide",
+        "decides",
+        "decided",
+        "propose",
+        "proposes",
+        "proposed",
+        "suggest",
+        "suggests",
+        "suggested",
+        "planned",
+        "choose",
+        "chooses",
+        "chose",
+        "like",
+        "likes",
+        "liked",
+        "later",
+        "then",
+        "also",
+        "again",
     }
 )
 
@@ -366,7 +454,7 @@ def check_extracted_fact_grounding(
 
     Catches two known LLM failure modes that previously corrupted the fact store:
 
-    1. **Synthesis from existing facts** — the LLM emits an ADD whose content
+    1. **Synthesis from existing facts** - the LLM emits an ADD whose content
        paraphrase-merges two or more existing facts (e.g. existing
        "user eats meat" + "user loves steak" → emitted "user loves steak,
        indicating they eat meat") even though the new user turn says nothing
@@ -374,7 +462,7 @@ def check_extracted_fact_grounding(
        but the visible artefact is a chain of "duplicate" supersedes that the
        user never triggered.
 
-    2. **Phantom explicit-negation** — the LLM emits a second CONTRADICT fact
+    2. **Phantom explicit-negation** - the LLM emits a second CONTRADICT fact
        alongside the literal user statement (e.g. user says "I love steak and
        seafood"; LLM emits both "user loves steak and seafood" and an invented
        "user eats meat" CONTRADICT) when the supersedes_id on the literal fact
@@ -386,8 +474,8 @@ def check_extracted_fact_grounding(
     facts → strong synthesis signal. If they come from a single existing
     fact with >=50%% overlap → weaker phantom-negation signal.
 
-    Logs a WARNING for each suspected fact. Does NOT drop facts — downstream
-    reconciliation remains the dedup authority — but the WARNING is the
+    Logs a WARNING for each suspected fact. Does NOT drop facts - downstream
+    reconciliation remains the dedup authority - but the WARNING is the
     deterministic test signal that catches regressions.
     """
     if not fact_docs or not turn_items:
@@ -421,7 +509,7 @@ def check_extracted_fact_grounding(
         if len(contributors) >= 2:
             logger.warning(
                 "extract_memories: emitted fact appears synthesized from %d existing facts "
-                "(ungrounded in user turns) — extract should ground only in this turn's [user] lines. "
+                "(ungrounded in user turns) - extract should ground only in this turn's [user] lines. "
                 "doc_id=%s content=%r ungrounded_tokens=%s contributor_ids=%s "
                 "user_id=%s thread_id=%s",
                 len(contributors),
@@ -438,7 +526,7 @@ def check_extracted_fact_grounding(
             if overlap_ratio >= 0.5:
                 logger.warning(
                     "extract_memories: emitted fact has ungrounded tokens overlapping a single existing fact "
-                    "(possible phantom-negation/restatement) — extract should ground only in this turn's "
+                    "(possible phantom-negation/restatement) - extract should ground only in this turn's "
                     "[user] lines. doc_id=%s content=%r ungrounded_tokens=%s overlap_existing_id=%s "
                     "overlap_ratio=%.2f user_id=%s thread_id=%s",
                     doc.get("id"),
@@ -472,7 +560,7 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
         if _looks_truncated(cleaned, exc):
             raise LLMError(
                 "LLM JSON output appears TRUNCATED (decode error at the very end of a "
-                f"{len(cleaned)}-char body — the model almost certainly hit its output-token "
+                f"{len(cleaned)}-char body - the model almost certainly hit its output-token "
                 "cap mid-object). Increase 'maxOutputTokens' in the calling prompty, or reduce "
                 "the amount of input per call (e.g. lower the fact-extraction batch size / "
                 f"recent_k, or split oversized turns). Decode error: {exc}. preview={preview!r}"
@@ -564,7 +652,7 @@ class PromptyLoader:
         return messages, params
 
 
-# Allowed values for the EpisodicRecord ``outcome_valence`` field — mirrors
+# Allowed values for the EpisodicRecord ``outcome_valence`` field - mirrors
 # ``azure.cosmos.agent_memory.models._EPISODIC_ALLOWED_VALENCES`` but kept inline
 # to avoid an import cycle (helpers must not import models).
 VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})

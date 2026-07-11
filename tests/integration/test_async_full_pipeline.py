@@ -3,7 +3,7 @@
 The async pipeline mirrors every sync dedup/reconcile code path line-for-line
 (watermark, euclidean guard, ``exclude_ids`` parity, reconcile cadence, the
 vector-floor dedup ladder). The sync suite covers all of that against a live
-backend, but the async client had **no** live coverage — its processor test is
+backend, but the async client had **no** live coverage - its processor test is
 fully mocked. This module exercises the real async end-to-end flow (write turns
 → extract → reconcile → search) so the async mirror can't silently diverge from
 sync without a test failing.
@@ -146,7 +146,7 @@ async def _async_seed_fact_with_embedding(
         if embedded:
             return
         await asyncio.sleep(1)
-    pytest.skip(f"embedding service unavailable — could not seed an embedded fact for {content!r}")
+    pytest.skip(f"embedding service unavailable - could not seed an embedded fact for {content!r}")
 
 
 async def _async_wait_vector_searchable(
@@ -228,7 +228,7 @@ class TestAsyncEndToEnd:
     ):
         """Async extract-time vector floor drops/tags a near-duplicate fact.
 
-        Parity check with the sync ``TestExtractTimeVectorDedup`` — guards the
+        Parity check with the sync ``TestExtractTimeVectorDedup`` - guards the
         async ``dedup_extracted_memories`` mirror (``_vector_candidates`` +
         similarity bands) against a live backend. Driven with a controlled
         near-duplicate (no LLM variance) so the assertion is deterministic.

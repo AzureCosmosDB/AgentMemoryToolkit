@@ -121,23 +121,24 @@ def test_vector_candidates_orders_nearest_first_by_distance_function() -> None:
     assert [c["id"] for c in out] == ["far", "near"]
 
 
-def test_dedup_extracted_vector_ladder_and_intra_batch() -> None:
+def test_dedup_extracted_folds_near_dup_in_place_and_keeps_novel() -> None:
+    # Write-time in-place dedup: a new fact whose nearest active neighbor is at/above
+    # DEDUP_SIM_HIGH is folded into that neighbor in place (dropped from the ADD set);
+    # a fact with no close neighbor is novel and passes through to persist.
     p = _make_pipeline()
-    p._embed_batch.return_value = [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.99, 0.01]]
-    p._vector_candidates = MagicMock(
+    p._vector_distance_function = MagicMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0], [0.0, 1.0]]
+    p._nearest_active_full = MagicMock(
         side_effect=[
-            [{"id": "existing-high", "content": "same", "type": "fact", "score": 0.99}],
-            [{"id": "existing-mid", "content": "near", "type": "fact", "score": 0.85}],
-            [{"id": "existing-low", "content": "far", "type": "fact", "score": 0.20}],
-            [{"id": "existing-low-2", "content": "far", "type": "fact", "score": 0.10}],
+            ({"id": "existing-1", "content": "same", "type": "fact"}, 0.99),
+            (None, 0.0),
         ]
     )
+    p._apply_inplace_update = MagicMock(return_value=True)
     extracted = {
         "facts": [
-            _doc("f-high", "drop against existing"),
-            _doc("f-mid", "tag against existing"),
-            _doc("f-clean", "keep clean"),
-            _doc("f-intra", "near-dup in batch is now kept (deferred to reconcile)"),
+            _doc("f-dup", "restatement of existing"),
+            _doc("f-novel", "brand new fact"),
         ],
         "episodic": [],
         "updates": [],
@@ -145,173 +146,139 @@ def test_dedup_extracted_vector_ladder_and_intra_batch() -> None:
 
     out = p.dedup_extracted_memories("u1", extracted)
 
-    # Intra-batch new-vs-new dedup was removed: f-intra is compared only against
-    # persisted memories (Cosmos) -> novel here -> kept; reconcile catches any
-    # same-batch near-dups later.
-    assert [doc["id"] for doc in out["facts"]] == ["f-mid", "f-clean", "f-intra"]
-    assert out["facts"][0]["tags"][-1] == "sys:dup-candidate"
-    assert out["facts"][0]["metadata"]["dup_of"] == "existing-mid"
-    assert out["facts"][0]["metadata"]["dup_score"] == 0.85
-    assert "sys:dup-candidate" not in out["facts"][1]["tags"]
-    assert all("embedding" in doc for doc in out["facts"])
-    assert out["updates"][-1]["vector_dedup_skipped"] == 1
-    assert out["updates"][-1]["dup_candidates_tagged"] == 1
+    # f-dup folded in place (removed from ADD set); f-novel kept.
+    assert [doc["id"] for doc in out["facts"]] == ["f-novel"]
+    p._apply_inplace_update.assert_called_once()
+    target, new_doc = p._apply_inplace_update.call_args.args
+    assert target["id"] == "existing-1"
+    assert new_doc["id"] == "f-dup"
+    assert out["updates"][-1]["inplace_updated"] == 1
 
 
-def test_candidate_mode_clears_tags_only_for_survivors() -> None:
-    # Latent-bug regression: a source consumed (superseded) by a merge must NOT be
-    # re-upserted by tag-clearing, which would resurrect it without superseded_by.
+def test_dedup_extracted_failed_inplace_update_keeps_new_doc() -> None:
+    # If the in-place upsert fails, the new doc must NOT be lost - it stays in the
+    # result so persist ADDs it as a novel record.
     p = _make_pipeline()
-    f1 = _doc("f1", "a", tags=["sys:fact", "sys:dup-candidate"])
-    f2 = _doc("f2", "b", tags=["sys:fact", "sys:dup-candidate"])
-    f3 = _doc("f3", "c", tags=["sys:fact", "sys:dup-candidate"])
-    p._build_candidate_clusters = MagicMock(return_value=([[f1, f2, f3]], 3, [f1, f2, f3]))
-    p._reconcile_pool = MagicMock(return_value=({"kept": 1, "merged": 2, "contradicted": 0}, {"f1", "f2"}))
-    cleared: list[str] = []
-    p._clear_dup_candidate_tags = MagicMock(side_effect=lambda docs: cleared.extend(d["id"] for d in docs))
-    p._emit_reconcile_outcome = MagicMock()
+    p._vector_distance_function = MagicMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0]]
+    p._nearest_active_full = MagicMock(return_value=({"id": "existing-1", "content": "same", "type": "fact"}, 0.99))
+    p._apply_inplace_update = MagicMock(return_value=False)
+    extracted = {"facts": [_doc("f-dup", "restatement")], "episodic": [], "updates": []}
 
-    result = p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
+    out = p.dedup_extracted_memories("u1", extracted)
 
-    assert cleared == ["f3"]
-    assert result == {
-        "kept": 1,
-        "merged": 2,
-        "contradicted": 0,
-        "reconcile_clusters_sent": 1,
-        "reconcile_llm_calls_saved": 2,
+    assert [doc["id"] for doc in out["facts"]] == ["f-dup"]
+    assert all(op.get("op") != "stats" or "inplace_updated" not in op for op in out["updates"])
+
+
+def test_dedup_extracted_below_threshold_is_novel() -> None:
+    # A neighbor below DEDUP_SIM_HIGH is not a near-duplicate: the new fact is novel
+    # and no in-place update happens.
+    p = _make_pipeline()
+    p._vector_distance_function = MagicMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0]]
+    p._nearest_active_full = MagicMock(return_value=({"id": "existing-1", "content": "near", "type": "fact"}, 0.85))
+    p._apply_inplace_update = MagicMock(return_value=True)
+    extracted = {"facts": [_doc("f-new", "somewhat similar")], "episodic": [], "updates": []}
+
+    out = p.dedup_extracted_memories("u1", extracted)
+
+    assert [doc["id"] for doc in out["facts"]] == ["f-new"]
+    p._apply_inplace_update.assert_not_called()
+
+
+def test_dedup_second_batch_dup_of_same_target_is_dropped_once() -> None:
+    # Two new facts that both fold into the SAME existing neighbor: only the first
+    # refreshes it; the second is dropped without re-writing the target.
+    p = _make_pipeline()
+    p._vector_distance_function = MagicMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0], [1.0, 0.0]]
+    p._nearest_active_full = MagicMock(
+        side_effect=[
+            ({"id": "existing-1", "content": "same", "type": "fact"}, 0.99),
+            ({"id": "existing-1", "content": "same", "type": "fact"}, 0.98),
+        ]
+    )
+    p._apply_inplace_update = MagicMock(return_value=True)
+    extracted = {
+        "facts": [_doc("f-a", "restate one"), _doc("f-b", "restate two")],
+        "episodic": [],
+        "updates": [],
     }
 
+    out = p.dedup_extracted_memories("u1", extracted)
 
-def test_candidate_mode_clears_tags_on_orphan_seeds() -> None:
-    # Seeds tagged sys:dup-candidate that never join a cluster (no near-duplicate)
-    # must have their stale tag cleared so future sweeps don't re-scan them forever.
-    p = _make_pipeline()
-    orphan = _doc("orphan", "lonely", tags=["sys:fact", "sys:dup-candidate"])
-    c1 = _doc("c1", "a", tags=["sys:fact", "sys:dup-candidate"])
-    c2 = _doc("c2", "b", tags=["sys:fact", "sys:dup-candidate"])
-    p._build_candidate_clusters = MagicMock(return_value=([[c1, c2]], 3, [orphan, c1, c2]))
-    p._reconcile_pool = MagicMock(return_value=({"kept": 2, "merged": 0, "contradicted": 0}, set()))
-    cleared: list[str] = []
-    p._clear_dup_candidate_tags = MagicMock(side_effect=lambda docs: cleared.extend(d["id"] for d in docs))
-    p._emit_reconcile_outcome = MagicMock()
-
-    p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
-
-    # Cluster survivors (c1, c2) plus the orphan all get cleared.
-    assert set(cleared) == {"c1", "c2", "orphan"}
+    assert out["facts"] == []
+    assert p._apply_inplace_update.call_count == 1
+    assert out["updates"][-1]["inplace_updated"] == 1
 
 
-def test_euclidean_disables_near_exact_autodrop() -> None:
-    # On euclidean distance the cosine-calibrated DEDUP_SIM_HIGH auto-drop is
-    # disabled: a near-identical existing memory must NOT silently drop the new
-    # one. It falls through to borderline tagging (LLM reconcile adjudicates).
+def test_euclidean_disables_inplace_folding() -> None:
+    # On euclidean distance the cosine-calibrated DEDUP_SIM_HIGH is not comparable,
+    # so in-place folding is disabled and every extracted doc passes through as-is.
     p = _make_pipeline()
     p._vector_distance_function = MagicMock(return_value="euclidean")
     p._embed_batch.return_value = [[1.0, 0.0]]
-    # euclidean score = distance; 0.05 is "near-exact" (would drop under cosine rules).
-    p._vector_candidates = MagicMock(
-        return_value=[{"id": "existing", "content": "same", "type": "fact", "score": 0.05}]
-    )
+    p._nearest_active_full = MagicMock()
+    p._apply_inplace_update = MagicMock()
     extracted = {"facts": [_doc("f-new", "near identical")], "episodic": [], "updates": []}
 
     out = p.dedup_extracted_memories("u1", extracted)
 
-    # Not dropped — kept and tagged for LLM reconcile instead.
     assert [doc["id"] for doc in out["facts"]] == ["f-new"]
-    assert out["facts"][0]["tags"][-1] == "sys:dup-candidate"
-    assert out["updates"][-1]["vector_dedup_skipped"] == 0
-    assert out["updates"][-1]["dup_candidates_tagged"] == 1
+    p._nearest_active_full.assert_not_called()
+    p._apply_inplace_update.assert_not_called()
 
 
-def test_candidate_mode_has_no_inmemory_backstop() -> None:
-    # The periodic full-pool backstop is no longer driven by an in-memory sweep
-    # counter (unreliable on the FA per-worker singleton). Candidate mode does
-    # ONLY clustering now; the full-pool pass is requested by the caller via
-    # full_rebuild on a persisted-counter cadence.
+def test_apply_inplace_update_recency_wins_and_unions() -> None:
+    # The refreshed doc keeps the neighbor's id but takes the new content/embedding,
+    # max salience/confidence, unioned tags (minus sys:dup-candidate), bumped updated_at.
     p = _make_pipeline()
-    assert not hasattr(p, "_next_reconcile_sweep")
-    p._build_candidate_clusters = MagicMock(return_value=([], 0, []))
-    p._active_memories_for_reconcile = MagicMock()
-    p._emit_reconcile_outcome = MagicMock()
-
-    # Many sweeps in a row never escalate to a full-pool pass on their own.
-    for _ in range(30):
-        p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
-    p._build_candidate_clusters.assert_called()
-    p._active_memories_for_reconcile.assert_not_called()
-
-
-def test_full_rebuild_bypasses_candidate_mode(monkeypatch) -> None:
-    # Public reconcile(full_rebuild=True) must take the full-pool single-LLM-pass
-    # path even under candidate mode, so it catches dissimilar contradictions.
-    monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_reconcile_mode", lambda: "candidate")
-    p = _make_pipeline()
-    pool = [_doc("f1", "User is vegetarian"), _doc("f2", "User loves steak")]
-    p._active_memories_for_reconcile = MagicMock(return_value=pool)
-    p._reconcile_pool = MagicMock(return_value=({"kept": 1, "merged": 0, "contradicted": 1}, set()))
-    p._reconcile_candidate_mode = MagicMock()
-    p._emit_reconcile_outcome = MagicMock()
-
-    result = p.reconcile_memories("u1", n=50, memory_type="fact", full_rebuild=True)
-
-    p._reconcile_candidate_mode.assert_not_called()
-    p._reconcile_pool.assert_called_once_with("u1", "fact", pool)
-    assert result["contradicted"] == 1
-
-
-def test_full_rebuild_clears_survivor_tags(monkeypatch) -> None:
-    # full_rebuild full-pool path must clear sys:dup-candidate on survivors so it
-    # doesn't leave stale tags/metadata on user-visible memories.
-    monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_reconcile_mode", lambda: "candidate")
-    p = _make_pipeline()
-    pool = [
-        _doc("f1", "a", tags=["sys:fact", "sys:dup-candidate"]),
-        _doc("f2", "b", tags=["sys:fact", "sys:dup-candidate"]),
-    ]
-    p._active_memories_for_reconcile = MagicMock(return_value=pool)
-    # f1 consumed (superseded), f2 survives.
-    p._reconcile_pool = MagicMock(return_value=({"kept": 1, "merged": 1, "contradicted": 0}, {"f1"}))
-    cleared: list[str] = []
-    p._clear_dup_candidate_tags = MagicMock(side_effect=lambda docs: cleared.extend(d["id"] for d in docs))
-    p._emit_reconcile_outcome = MagicMock()
-
-    p.reconcile_memories("u1", n=50, memory_type="fact", full_rebuild=True)
-
-    # Survivor f2 cleared; consumed f1 not re-upserted (would resurrect it).
-    assert cleared == ["f2"]
-
-
-def test_sweep_survives_one_cluster_failure() -> None:
-    # A truncated/malformed LLM response on one cluster must not abort the sweep:
-    # remaining clusters still reconcile, orphan clearing still runs, and the failed
-    # cluster's tags are RETAINED (not cleared) so it retries next sweep.
-    p = _make_pipeline()
-    c1 = [
-        _doc("a1", "x", tags=["sys:fact", "sys:dup-candidate"]),
-        _doc("a2", "y", tags=["sys:fact", "sys:dup-candidate"]),
-    ]
-    c2 = [
-        _doc("b1", "p", tags=["sys:fact", "sys:dup-candidate"]),
-        _doc("b2", "q", tags=["sys:fact", "sys:dup-candidate"]),
-    ]
-    orphan = _doc("o1", "lonely", tags=["sys:fact", "sys:dup-candidate"])
-    seeds = [c1[0], c1[1], c2[0], c2[1], orphan]
-    p._build_candidate_clusters = MagicMock(return_value=([c1, c2], 5, seeds))
-    p._reconcile_pool = MagicMock(
-        side_effect=[RuntimeError("truncated LLM response"), ({"kept": 2, "merged": 0, "contradicted": 0}, set())]
+    neighbor = _doc("existing-1", "old content", confidence=0.6, salience=0.5, tags=["sys:fact", "topic:a"])
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _doc(
+        "f-new",
+        "new richer content",
+        confidence=0.9,
+        salience=0.8,
+        tags=["sys:fact", "topic:b", "sys:dup-candidate"],
+        embedding=[0.5, 0.5],
     )
-    cleared: list[str] = []
-    p._clear_dup_candidate_tags = MagicMock(side_effect=lambda docs: cleared.extend(d["id"] for d in docs))
-    p._emit_reconcile_outcome = MagicMock()
 
-    result = p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
+    ok = p._apply_inplace_update(neighbor, new_doc)
 
-    # c1 failed -> its tags retained (not cleared) for retry; c2 survivors + orphan cleared.
-    assert "a1" not in cleared and "a2" not in cleared
-    assert {"b1", "b2", "o1"} <= set(cleared)
-    assert result["reconcile_clusters_sent"] == 2
-    assert result["kept"] == 2
+    assert ok is True
+    written = p._memories_container.upsert_item.call_args.kwargs["body"]
+    assert written["id"] == "existing-1"
+    assert written["content"] == "new richer content"
+    assert written["embedding"] == [0.5, 0.5]
+    assert written["salience"] == 0.8
+    assert written["confidence"] == 0.9
+    assert "topic:a" in written["tags"] and "topic:b" in written["tags"]
+    assert "sys:dup-candidate" not in written["tags"]
+    assert "_etag" not in written
+    assert written["updated_at"] != neighbor["updated_at"]
+
+
+def test_nearest_active_full_returns_full_doc_and_skips_excluded() -> None:
+    p = _make_pipeline()
+    doc_a = _doc("a", "first")
+    doc_b = _doc("b", "second")
+
+    def query_items(*, query: str, parameters, **kwargs):
+        del query, parameters, kwargs
+        return iter(
+            [
+                {"doc": doc_a, "score": 0.99},
+                {"doc": doc_b, "score": 0.80},
+            ]
+        )
+
+    p._memories_container.query_items.side_effect = query_items
+    # Exclude the closest -> falls through to the next candidate.
+    neighbor, score = p._nearest_active_full(user_id="u1", embedding=[1.0, 0.0], memory_type="fact", exclude_ids={"a"})
+    assert neighbor["id"] == "b"
+    assert score == 0.80
 
 
 def test_dedup_extracted_flag_off_is_noop(monkeypatch) -> None:
@@ -325,60 +292,46 @@ def test_dedup_extracted_flag_off_is_noop(monkeypatch) -> None:
     p._embed_batch.assert_not_called()
 
 
-def test_reconcile_memory_type_routing_episodic_and_procedural(monkeypatch) -> None:
-    monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_reconcile_mode", lambda: "full_pool")
+def test_reconcile_memory_type_routing_episodic_and_procedural() -> None:
+    # Episodic and procedural reconcile are no-ops (their near-dups fold at write
+    # time / have no contradiction semantics): no LLM call, zeroed counts.
     p = _make_pipeline()
-    episodes = [_doc("e1", "episode one", "episodic"), _doc("e2", "episode two", "episodic")]
-    p._memories_container.query_items.return_value = iter(episodes)
-    p._run_prompty.return_value = json.dumps({"duplicate_groups": [], "kept_ids": ["e1", "e2"]})
 
-    result = p.reconcile_memories("u1", memory_type="episodic")
+    episodic_result = p.reconcile_memories("u1", memory_type="episodic")
+    assert episodic_result == {"kept": 0, "merged": 0, "contradicted": 0}
 
-    assert result["contradicted"] == 0
-    assert p._run_prompty.call_args.args[0] == "dedup_episodic.prompty"
-    assert "episodics_text" in p._run_prompty.call_args.kwargs["inputs"]
+    procedural_result = p.reconcile_memories("u1", memory_type="procedural")
+    assert procedural_result == {"kept": 0, "merged": 0, "contradicted": 0}
 
-    p._run_prompty.reset_mock()
-    assert p.reconcile_memories("u1", memory_type="procedural")["reconcile_clusters_sent"] == 0
     p._run_prompty.assert_not_called()
 
 
-def test_candidate_mode_connected_components() -> None:
+def test_reconcile_fact_contradiction_only() -> None:
+    # The fact reconcile path applies only contradicted_pairs; duplicate_groups in
+    # the LLM response are ignored (write-time in-place dedup owns paraphrases).
     p = _make_pipeline()
-    seed = _doc(
-        "f1",
-        "User likes coffee",
-        embedding=[1.0, 0.0],
-        tags=["sys:fact", "sys:dup-candidate"],
-        metadata={"category": "preference", "dup_of": "f2", "dup_score": 0.9},
-    )
-    neighbor = _doc("f2", "User loves coffee", embedding=[0.95, 0.05])
-
-    def query_items(*, query: str, parameters: list[dict[str, Any]], **kwargs: Any):
-        del kwargs
-        params = {p["name"]: p["value"] for p in parameters}
-        if "ARRAY_CONTAINS" in query:
-            return iter([seed])
-        ids = {value for name, value in params.items() if name.startswith("@id")}
-        if ids:
-            return iter([doc for doc in (seed, neighbor) if doc["id"] in ids])
-        return iter([seed, neighbor])
-
-    p._memories_container.query_items.side_effect = query_items
-    p._vector_candidates = MagicMock(
-        return_value=[{"id": "f2", "content": neighbor["content"], "type": "fact", "score": 0.9}]
-    )
-    p._run_prompty.return_value = json.dumps(
-        {
-            "duplicate_groups": [{"merged_content": "User likes coffee.", "source_ids": ["f1", "f2"]}],
-            "contradicted_pairs": [],
-            "kept_ids": [],
-        }
+    facts = [
+        _doc("f1", "User's deadline is March 1", created_at="2024-01-01T00:00:00+00:00"),
+        _doc("f2", "User's deadline is March 15", created_at="2024-02-01T00:00:00+00:00"),
+    ]
+    p._memories_container.query_items.return_value = iter(facts)
+    p._run_prompty = MagicMock(
+        return_value=json.dumps(
+            {
+                "duplicate_groups": [{"merged_content": "ignored", "source_ids": ["f1", "f2"]}],
+                "contradicted_pairs": [{"winner_id": "f2", "loser_id": "f1", "reason": "more recent"}],
+                "kept_ids": ["f2"],
+            }
+        )
     )
 
     result = p.reconcile_memories("u1", memory_type="fact")
 
-    assert result["reconcile_clusters_sent"] == 1
-    assert result["merged"] == 2
-    p._run_prompty.assert_called_once()
+    assert result == {"kept": 1, "merged": 0, "contradicted": 1}
+    # No merged doc upserted; only the loser superseded.
+    p._upsert_memory.assert_not_called()
+    assert p._mark_superseded.call_count == 1
+    assert p._mark_superseded.call_args.args[0]["id"] == "f1"
+    assert p._mark_superseded.call_args.args[1] == "f2"
+    assert p._mark_superseded.call_args.kwargs["reason"] == "contradict"
     assert p._run_prompty.call_args.args[0] == "dedup.prompty"

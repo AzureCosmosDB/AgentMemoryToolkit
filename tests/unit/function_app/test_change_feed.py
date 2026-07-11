@@ -416,7 +416,7 @@ def test_per_thread_grouping_is_correct():
         _turn(user_id="u1", thread_id="t1"),
         _turn(user_id="u1", thread_id="t1"),  # t1 crosses 4
         _turn(user_id="u1", thread_id="t2"),
-        _turn(user_id="u1", thread_id="t2"),  # t2 only at 2 — no cross
+        _turn(user_id="u1", thread_id="t2"),  # t2 only at 2 - no cross
     ]
 
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
@@ -425,7 +425,7 @@ def test_per_thread_grouping_is_correct():
     # t1 crossed → summary + extract started for t1 only.
     assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
     assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
-    # t2 below threshold — no orchestrators for t2.
+    # t2 below threshold - no orchestrators for t2.
     assert not any("t2" in iid for _, iid in started)
 
 
@@ -485,16 +485,16 @@ def test_lsn_replay_does_not_double_increment():
 
     # Layer 2 (deterministic instance ID): on replay the counter helper still
     # reports the same ``(old, new)`` it returned the first time, so the
-    # threshold is "crossed" again — but with the IDENTICAL deterministic
+    # threshold is "crossed" again - but with the IDENTICAL deterministic
     # instance id. Azure Durable Functions then dedups the duplicate
     # ``start_new`` server-side. We assert the determinism here.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
-    assert len(summary_starts) == 2  # same id sent twice — durable dedups
+    assert len(summary_starts) == 2  # same id sent twice - durable dedups
     assert all(c.kwargs["instance_id"] == "thread_summary:u1:t1:4" for c in summary_starts)
 
 
 # ---------------------------------------------------------------------------
-# MEMORY_PROCESSOR_OWNER exclusivity — the change-feed trigger must
+# MEMORY_PROCESSOR_OWNER exclusivity - the change-feed trigger must
 # respect the owner env var the same way the SDK auto-trigger does, so a
 # shared Cosmos container is processed by exactly one backend.
 # ---------------------------------------------------------------------------
@@ -553,7 +553,7 @@ def test_runs_normally_when_owner_durable():
 
     # Counter was written.
     assert container._state["thread:u1:t1"]["count"] == 2
-    # Threshold (2) crossed — orchestrator started.
+    # Threshold (2) crossed - orchestrator started.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 1
 
@@ -572,7 +572,7 @@ def test_skips_when_owner_unset(monkeypatch):
 
     This is the protection against the day-one footgun where a customer
     deploys the Function App next to an existing SDK install without
-    configuring the env var — without this guard both backends would
+    configuring the env var - without this guard both backends would
     race on the same writes.
     """
     monkeypatch.delenv("MEMORY_PROCESSOR_OWNER", raising=False)
@@ -616,8 +616,8 @@ def _extract_payload(call):
 def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     """Reconcile threshold = FACT_EXTRACTION_EVERY_N * DEDUP_EVERY_N
     (here 1 * 5 = 5). The change-feed signals reconcile via the
-    ``reconcile`` flag on the orchestrator payload — never as a separate
-    dispatch — so DEDUP_EVERY_N is honored on the FA path."""
+    ``reconcile`` flag on the orchestrator payload - never as a separate
+    dispatch - so DEDUP_EVERY_N is honored on the FA path."""
     starter = _make_starter()
     container = _make_counter_container_starting_at()
 
@@ -646,46 +646,6 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     assert payload.get("reconcile") is True
     assert payload.get("user_id") == "u1"
     assert payload.get("recent_k") == 1
-
-
-@patch.dict(
-    os.environ,
-    {
-        "THREAD_SUMMARY_EVERY_N": "0",
-        "FACT_EXTRACTION_EVERY_N": "1",
-        "USER_SUMMARY_EVERY_N": "0",
-        "DEDUP_EVERY_N": "1",
-    },
-    clear=False,
-)
-def test_full_rebuild_flag_set_on_persisted_counter_cadence():
-    """The full-pool backstop is driven by the PERSISTED counter (durable-safe),
-    not the in-memory per-worker sweep counter: full_rebuild=True every
-    (n_facts * n_dedup * DEDUP_FULL_RECLUSTER_EVERY_N) turns. Here that's
-    1 * 1 * 2 = every 2 turns."""
-    with patch(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n",
-        return_value=2,
-    ):
-        starter = _make_starter()
-        container = _make_counter_container_starting_at()
-
-        # Turn 1: counter 0->1. Reconcile crosses (n=1), full does NOT (n=2).
-        asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
-        p1 = _extract_payload(
-            next(c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator")
-        )
-        assert p1.get("reconcile") is True
-        assert p1.get("full_rebuild") is False
-
-        # Turn 2: counter 1->2. Full backstop threshold (2) crossed.
-        starter.start_new.reset_mock()
-        asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
-        p2 = _extract_payload(
-            next(c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator")
-        )
-        assert p2.get("reconcile") is True
-        assert p2.get("full_rebuild") is True
 
 
 @patch.dict(

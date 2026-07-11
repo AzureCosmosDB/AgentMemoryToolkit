@@ -35,7 +35,7 @@ def client():
 
 
 # ===================================================================
-# generate() — success
+# generate() - success
 # ===================================================================
 
 
@@ -51,7 +51,7 @@ async def test_generate_success(client):
 
 
 # ===================================================================
-# generate() — lazy init
+# generate() - lazy init
 # ===================================================================
 
 
@@ -77,7 +77,7 @@ async def test_generate_lazy_init():
 
 
 # ===================================================================
-# generate() — api_key vs credential auth
+# generate() - api_key vs credential auth
 # ===================================================================
 
 
@@ -124,7 +124,7 @@ async def test_generate_credential_auth():
 
 
 # ===================================================================
-# generate() — missing endpoint
+# generate() - missing endpoint
 # ===================================================================
 
 
@@ -145,7 +145,7 @@ async def test_generate_missing_credential_and_api_key():
 
 
 # ===================================================================
-# generate() — API failure
+# generate() - API failure
 # ===================================================================
 
 
@@ -200,7 +200,7 @@ async def test_generate_batch_api_failure(client):
 
 
 # ===================================================================
-# generate_batch() — N=16 chunk guard
+# generate_batch() - N=16 chunk guard
 # ===================================================================
 
 

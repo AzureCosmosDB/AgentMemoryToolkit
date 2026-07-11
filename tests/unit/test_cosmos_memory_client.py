@@ -75,8 +75,8 @@ class TestConstructor:
 
         with patch.dict("sys.modules", {"azure.identity": mock_module}):
             mem = CosmosMemoryClient(use_default_credential=True)
-            # Two independent instances — one per consumer (cosmos + AI Foundry)
-            # — so close() can tear each down without affecting the other.
+            # Two independent instances - one per consumer (cosmos + AI Foundry)
+            # - so close() can tear each down without affecting the other.
             assert mock_module.DefaultAzureCredential.call_count == 2
             assert mem._cosmos_credential is sentinel
             assert mem._ai_foundry_credential is sentinel
@@ -205,7 +205,7 @@ class TestAddLocal:
         mem = _make_client()
         with pytest.raises(ValidationError, match="thread_id is required"):
             mem.add_local(user_id="u1", role="user", content="hi")
-        # Validation must run BEFORE append — otherwise an orphan turn
+        # Validation must run BEFORE append - otherwise an orphan turn
         # with thread_id=None would persist and pollute pk on push.
         assert mem.local_memory == []
         assert mem._unflushed_turn_counts == {}
@@ -558,7 +558,7 @@ class TestCreateMemoryStore:
 class TestAddCosmos:
     def test_add_cosmos(self):
         mem, container = _connected_client()
-        # Suppress cadence work — the trigger path is exercised in
+        # Suppress cadence work - the trigger path is exercised in
         # tests/unit/test_auto_trigger.py; this test just asserts the CRUD write.
         mem._maybe_auto_trigger = MagicMock()
         mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
@@ -604,12 +604,12 @@ class TestAddCosmos:
         trigger.assert_called_once_with({("u1", "t1"): 1})
 
     def test_add_cosmos_swallows_cadence_failure(self):
-        """If the cadence trigger raises, the add_cosmos call must still succeed —
+        """If the cadence trigger raises, the add_cosmos call must still succeed -
         the user's turn was written; cadence is best-effort telemetry."""
         mem, _ = _connected_client()
         mem._maybe_auto_trigger = MagicMock(side_effect=RuntimeError("boom"))
 
-        # Should NOT raise — the write succeeded.
+        # Should NOT raise - the write succeeded.
         result_id = mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
 
         assert isinstance(result_id, str)
@@ -685,7 +685,7 @@ class TestPushToCosmos:
         mem.push_to_cosmos()
         mem.push_to_cosmos()
 
-        # Second push should not re-embed — embedding is cached on local_memory.
+        # Second push should not re-embed - embedding is cached on local_memory.
         assert embed_calls == [["fact one"]]
         assert mem.local_memory[0]["embedding"] == [0.5, 0.6, 0.7]
 

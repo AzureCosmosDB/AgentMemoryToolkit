@@ -46,7 +46,7 @@ def _make_sync_token_provider_for_async(credential: Any, scope: str):
     awaitable yielding the bearer token. When the caller supplied a sync
     ``azure.identity.DefaultAzureCredential`` (the common case), we cannot
     use ``azure.identity.aio.get_bearer_token_provider`` because it
-    ``await``s the credential's ``get_token`` — which is not a coroutine on
+    ``await``s the credential's ``get_token`` - which is not a coroutine on
     sync credentials and would raise at runtime.
 
     Instead we wrap the sync ``get_token`` call in :func:`asyncio.to_thread`
@@ -111,7 +111,7 @@ class AsyncChatClient:
                 )
 
             # Detect sync vs async credential. Callers commonly pass a sync
-            # ``DefaultAzureCredential`` (from ``azure.identity``) — its
+            # ``DefaultAzureCredential`` (from ``azure.identity``) - its
             # ``get_token`` method is *not* awaitable and will hang the async
             # client if used with ``azure.identity.aio.get_bearer_token_provider``.
             # When the credential exposes an ``async def get_token`` we use the
@@ -166,7 +166,7 @@ class AsyncChatClient:
         exponential backoff using ``asyncio.sleep``.
 
         Any additional keyword arguments are forwarded directly to the OpenAI
-        client — typically sourced from a prompty file's ``model.parameters``.
+        client - typically sourced from a prompty file's ``model.parameters``.
 
         Raises
         ------

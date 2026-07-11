@@ -53,8 +53,8 @@ async def test_process_now_with_inprocess_invokes_full_pipeline():
     assert pipeline.reconcile_memories.await_count == 2
     pipeline.reconcile_memories.assert_has_awaits(
         [
-            call("u", n=50, memory_type="fact", full_rebuild=False),
-            call("u", n=50, memory_type="episodic", full_rebuild=False),
+            call("u", n=50, memory_type="fact"),
+            call("u", n=50, memory_type="episodic"),
         ]
     )
     pipeline.synthesize_procedural.assert_awaited_once_with("u", force=False)
@@ -176,7 +176,7 @@ async def test_process_now_propagates_permanent_user_summary_failure():
 
 @pytest.mark.asyncio
 async def test_process_now_with_durable_skips_tail_steps():
-    """Durable mode must NOT call synthesize_procedural or generate_user_summary —
+    """Durable mode must NOT call synthesize_procedural or generate_user_summary -
     those are driven by the change-feed-fed sibling Function app."""
     client = _connected(processor=AsyncDurableFunctionProcessor())
     pipeline = AsyncMock()

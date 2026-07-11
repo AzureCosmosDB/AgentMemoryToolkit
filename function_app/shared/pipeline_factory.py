@@ -1,7 +1,7 @@
 """Lazy PipelineService factory (MI auth, sync clients).
 
 The activities reuse :class:`azure.cosmos.agent_memory.services.pipeline.PipelineService`
-verbatim — no business logic is duplicated in the function app.
+verbatim - no business logic is duplicated in the function app.
 """
 
 from __future__ import annotations

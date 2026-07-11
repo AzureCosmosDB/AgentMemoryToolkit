@@ -40,7 +40,7 @@ async def main() -> None:
             ("user", "Hi! I love Cosmos DB."),
             ("agent", "Cosmos DB is fantastic for low-latency global apps."),
             ("user", "Can it do vector search?"),
-            ("agent", "Yes — DiskANN indexes power semantic search natively."),
+            ("agent", "Yes - DiskANN indexes power semantic search natively."),
             ("user", "Great. What about hierarchical partition keys?"),
             ("agent", "HPK lets you co-locate related items for efficient queries."),
         ]

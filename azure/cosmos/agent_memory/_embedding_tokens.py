@@ -2,9 +2,9 @@
 
 Azure OpenAI embedding models (``text-embedding-3-*``) reject any single
 input that exceeds their 8192-token context window. Callers in this toolkit
-embed user-supplied and document-derived text of unbounded size — the
+embed user-supplied and document-derived text of unbounded size - the
 dedup-context query in extraction, ``search_turns`` queries, and stored turn
-vectors when ``enable_turn_embeddings`` is on — so an oversized string would
+vectors when ``enable_turn_embeddings`` is on - so an oversized string would
 otherwise crash the embed call or, at the write sites that swallow embed
 errors, silently persist a record with no vector.
 
@@ -54,6 +54,21 @@ def _encoding_for_model(model: str) -> Any:
             return None
 
 
+def count_tokens(text: str, model: str = "gpt-4o") -> int:
+    """Return the token count of *text* for *model*.
+
+    Uses tiktoken when available; falls back to a conservative character-based
+    estimate (~4 chars/token) so callers that batch by token budget still get a
+    usable (slightly over-counted) estimate when tiktoken is missing.
+    """
+    if not text:
+        return 0
+    encoding = _encoding_for_model(model)
+    if encoding is None:
+        return (len(text) // _FALLBACK_CHARS_PER_TOKEN) + 1
+    return len(encoding.encode(text))
+
+
 def truncate_text_to_token_budget(
     text: str,
     model: str,
@@ -63,7 +78,7 @@ def truncate_text_to_token_budget(
 
     Returns *text* unchanged when it is already within budget. Truncation
     keeps the leading tokens and logs a warning so oversized inputs remain
-    observable — that warning is also the signal for where ingestion-time
+    observable - that warning is also the signal for where ingestion-time
     chunking is needed.
     """
     if not text:

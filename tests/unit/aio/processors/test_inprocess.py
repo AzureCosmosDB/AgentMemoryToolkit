@@ -53,7 +53,7 @@ async def test_close_is_noop():
 @pytest.mark.asyncio
 async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch):
     """Regression: this was completely broken (ModuleNotFoundError on
-    ``from ..thresholds``) — auto-trigger silently never reconciled in
+    ``from ..thresholds``) - auto-trigger silently never reconciled in
     async deployments. Verify the call now succeeds and forwards the
     env-tunable pool size from ``get_dedup_pool_size``."""
     monkeypatch.setenv("DEDUP_POOL_SIZE", "37")
@@ -68,12 +68,10 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
     assert pipeline.reconcile_memories.await_args_list[0].kwargs == {
         "n": 37,
         "memory_type": "fact",
-        "full_rebuild": False,
     }
     assert pipeline.reconcile_memories.await_args_list[1].kwargs == {
         "n": 37,
         "memory_type": "episodic",
-        "full_rebuild": False,
     }
     assert count == 10  # (merged+contradicted) x2 types
 

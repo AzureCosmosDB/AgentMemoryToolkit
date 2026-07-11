@@ -13,15 +13,7 @@ from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreC
 @pytest.fixture(autouse=True)
 def _pin_legacy_dedup_paths(monkeypatch):
     monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_reconcile_mode",
-        lambda: "full_pool",
-    )
-    monkeypatch.setattr(
         "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
         lambda: False,
     )
 
@@ -247,7 +239,7 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
 
 
 def test_extract_memories_creates_new_fact_without_superseding() -> None:
-    # Extract no longer detects updates/contradictions — it just adds new facts.
+    # Extract no longer detects updates/contradictions - it just adds new facts.
     # Contradiction resolution happens later in reconcile, not at extract time.
     old = _fact("old_fact", "The user prefers light mode.")
     store = FakeStore([old])
@@ -304,7 +296,7 @@ def test_synthesize_procedural_produces_procedural_memory() -> None:
     assert store.upserts == [proc]
 
 
-def test_reconcile_memories_returns_three_bucket_counts() -> None:
+def test_reconcile_memories_returns_contradiction_counts() -> None:
     store = FakeStore(
         [
             _fact("f1", "User likes coffee", ts=1),
@@ -316,6 +308,8 @@ def test_reconcile_memories_returns_three_bucket_counts() -> None:
     llm = FakeLLMService(
         [
             {
+                # duplicate_groups are ignored now (paraphrases fold at write time);
+                # only contradicted_pairs are applied.
                 "duplicate_groups": [
                     {"source_ids": ["f1", "f2"], "merged_content": "The user prefers coffee.", "confidence": 0.9}
                 ],
@@ -327,7 +321,9 @@ def test_reconcile_memories_returns_three_bucket_counts() -> None:
 
     result = _pipeline(store, llm).reconcile_memories("u1", n=4)
 
-    assert result == {"kept": 1, "merged": 2, "contradicted": 1}
+    # f1/f2 are NOT merged (paraphrase folding moved to write time); only f4 loses a
+    # contradiction. Survivors: f1, f2, f3.
+    assert result == {"kept": 3, "merged": 0, "contradicted": 1}
 
 
 def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
@@ -352,8 +348,10 @@ def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
     _pipeline(store, llm).reconcile_memories("u1", n=4)
 
     by_id = {doc["id"]: doc for doc in store.docs}
-    assert by_id["f1"]["supersede_reason"] == "duplicate"
-    assert by_id["f2"]["supersede_reason"] == "duplicate"
+    # Paraphrases f1/f2 are left untouched (no write-time merge in reconcile).
+    assert by_id["f1"].get("supersede_reason") is None
+    assert by_id["f2"].get("supersede_reason") is None
+    # Only the contradiction loser is tombstoned.
     assert by_id["f4"]["supersede_reason"] == "contradict"
     assert by_id["f4"]["superseded_by"] == "f3"
 

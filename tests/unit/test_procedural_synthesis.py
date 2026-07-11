@@ -21,10 +21,6 @@ def _pin_legacy_extract_dedup(monkeypatch):
         "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
         lambda: False,
     )
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
-        lambda: False,
-    )
 
 
 def _assert_iso8601(text: str) -> None:
@@ -37,7 +33,7 @@ def _capture_upserts():
 
     The pipeline writes new facts/episodics via ``create_item`` (for 409
     idempotency) and writes new procedural versions via ``create_item +
-    bump-seq-retry``. Either way, tests want the persisted body — so the
+    bump-seq-retry``. Either way, tests want the persisted body - so the
     helper now wires the same capture to both side_effects.
     """
     upserted: list[dict] = []
@@ -318,7 +314,6 @@ def test_synthesize_procedural_only_touches_memories_container():
         [],
         [_fact_doc("f1", "Always use bullet points.", category="preference", salience=0.95)],
         [_episodic_doc("e1", lesson="Keep examples small.")],
-        [],
     ]
     memories_container.create_item.side_effect = lambda body: body
     containers = {
@@ -334,7 +329,7 @@ def test_synthesize_procedural_only_touches_memories_container():
     result = pipeline.synthesize_procedural("u1")
 
     assert result["status"] == "synthesized"
-    assert memories_container.query_items.call_count == 4
+    assert memories_container.query_items.call_count == 3
     memories_container.create_item.assert_called_once()
     turns_container.method_calls == []
     summaries_container.method_calls == []
@@ -462,7 +457,7 @@ def test_synthesize_procedural_short_circuits_on_second_call_with_tied_salience(
     Before the SQL composite ORDER BY (salience DESC, created_at ASC, id ASC),
     Cosmos returned an arbitrary 50-of-60 per query; the prior/current source
     sets never matched and the LLM fired on every reconcile. The Python re-sort
-    that previously masked this in unit tests has been removed — the SQL itself
+    that previously masked this in unit tests has been removed - the SQL itself
     must be deterministic.
     """
     fact_docs = [
@@ -647,7 +642,6 @@ def test_synthesize_procedural_retries_with_fresh_llm_call_when_winner_has_parti
         [prior_v1],
         fact_docs,
         [],
-        [],
         [
             prior_v1,
             _procedural_doc(
@@ -705,7 +699,7 @@ def test_synthesize_procedural_retries_with_fresh_llm_call_when_winner_has_parti
 def test_synthesize_procedural_short_circuits_when_race_winner_covers_loser_sources():
     """Common race case: both writers process the same source set. After 409,
     loser re-reads, finds winner's source_ids ⊇ loser's, and returns the
-    winner's doc as ``unchanged`` — no second LLM call, no wasted write.
+    winner's doc as ``unchanged`` - no second LLM call, no wasted write.
     """
     from azure.cosmos.exceptions import CosmosResourceExistsError
 
@@ -735,7 +729,6 @@ def test_synthesize_procedural_short_circuits_when_race_winner_covers_loser_sour
     container.query_items.side_effect = [
         [prior_v1],
         fact_docs,
-        [],
         [],
         [prior_v1, winner_v2],
     ]

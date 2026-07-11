@@ -146,7 +146,7 @@ class AsyncEmbeddingsClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         openai.OpenAIError
-            Propagated from the SDK on API failure (no retry — see module
+            Propagated from the SDK on API failure (no retry - see module
             docstring).
         """
         if not texts:

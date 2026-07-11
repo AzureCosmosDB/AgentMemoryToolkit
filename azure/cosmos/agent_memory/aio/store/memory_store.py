@@ -32,6 +32,7 @@ from azure.cosmos.agent_memory.exceptions import (
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.models import MemoryRecord
 from azure.cosmos.agent_memory.store._search_helpers import (
+    MEMORY_PROJECTION,
     add_salience_filter,
     add_tag_filters,
     build_search_sql,
@@ -460,7 +461,7 @@ class AsyncMemoryStore:
             raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
         except CosmosAccessConditionFailedError as exc:
             raise MemoryConflictError(
-                f"delete conflicted for memory_id={memory_id!r} — document was modified after the type check"
+                f"delete conflicted for memory_id={memory_id!r} - document was modified after the type check"
             ) from exc
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"async delete failed for {memory_id}: {exc}") from exc
@@ -865,6 +866,65 @@ class AsyncMemoryStore:
             container_key=ContainerKey.MEMORIES,
             partition_key=partition_key,
         )
+
+    async def get_memory_history(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        *,
+        max_depth: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a memory's superseded predecessors, most-recently-superseded first.
+
+        When a fact is updated or
+        contradicted, the prior document is retained with ``superseded_by``
+        pointing at its replacement (see :meth:`mark_superseded`). This walks
+        that chain backwards from *memory_id* so callers can reason about how a
+        fact evolved - knowledge updates, preference reversals, relocations -
+        instead of seeing only the current value.
+
+        The document identified by *memory_id* is not itself included; the return
+        value is everything it superseded, transitively, bounded by *max_depth*
+        to guard against cycles. Each entry carries the ``superseded_at`` /
+        ``supersede_reason`` audit fields so callers can order and explain the
+        transitions.
+        """
+        if not memory_id:
+            raise ValidationError("memory_id is required")
+        if not user_id:
+            raise ValidationError("user_id is required")
+        partition_key, _ = query_scope(user_id, thread_id)
+        history: list[dict[str, Any]] = []
+        seen: set[str] = {memory_id}
+        frontier: list[str] = [memory_id]
+        for _ in range(max(1, max_depth)):
+            id_params = [{"name": f"@sid{i}", "value": sid} for i, sid in enumerate(frontier)]
+            placeholders = ", ".join(param["name"] for param in id_params)
+            parameters: list[dict[str, Any]] = [*id_params, {"name": "@user_id", "value": user_id}]
+            where = f"c.superseded_by IN ({placeholders}) AND c.user_id = @user_id"
+            if thread_id is not None:
+                where += " AND c.thread_id = @thread_id"
+                parameters.append({"name": "@thread_id", "value": thread_id})
+            sql = f"SELECT {MEMORY_PROJECTION} FROM c WHERE {where}"
+            rows = await self.query(
+                sql,
+                parameters,
+                container_key=ContainerKey.MEMORIES,
+                partition_key=partition_key,
+            )
+            frontier = []
+            for doc in rows:
+                doc_id = doc.get("id")
+                if not doc_id or doc_id in seen:
+                    continue
+                seen.add(doc_id)
+                history.append(doc)
+                frontier.append(doc_id)
+            if not frontier:
+                break
+        history.sort(key=lambda d: d.get("superseded_at") or d.get("created_at") or "", reverse=True)
+        return history
 
     async def search_turns(
         self,

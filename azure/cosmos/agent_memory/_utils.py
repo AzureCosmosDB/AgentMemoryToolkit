@@ -77,7 +77,7 @@ def _normalize_for_hash(text: str) -> str:
 
     Deliberately conservative: lowercase, strip, and collapse internal runs
     of whitespace to a single space. Punctuation and word order still matter.
-    The point is to catch *identical* re-extractions cheaply — paraphrases
+    The point is to catch *identical* re-extractions cheaply - paraphrases
     are handled by the reconciliation LLM pass.
     """
     return _WHITESPACE_RE.sub(" ", text.strip().lower())
@@ -313,7 +313,7 @@ def vector_autodrop_supported(distance_function: str) -> bool:
     The destructive ``DEDUP_SIM_HIGH`` auto-skip drops a new memory without an
     LLM check, relying on thresholds (~0.97) calibrated for cosine/dotproduct
     on normalized embeddings. Euclidean returns an *unbounded distance* (not a
-    [0,1] similarity), so those thresholds mis-fire — auto-drop is disabled for
+    [0,1] similarity), so those thresholds mis-fire - auto-drop is disabled for
     euclidean and the borderline tagging path (LLM-adjudicated) is used instead.
     """
     return distance_function != "euclidean"
@@ -602,7 +602,7 @@ def extract_keywords(text: Optional[str]) -> list[str]:
     Lowercases, tokenizes on alphanumeric runs (apostrophes/punctuation split into
     fragments that are themselves stopwords), removes stopwords, and de-duplicates
     while preserving first-seen order. The result is capped at ``MAX_FULLTEXT_TERMS``
-    (30) — the hard limit on terms Azure Cosmos DB ``FullTextScore`` accepts — so the
+    (30) - the hard limit on terms Azure Cosmos DB ``FullTextScore`` accepts - so the
     hybrid search query is always valid. Returns ``[]`` when the text is empty or all
     stopwords, which the search layer treats as a signal to fall back to pure vector
     ranking.

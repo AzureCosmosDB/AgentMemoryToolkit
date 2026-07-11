@@ -3,11 +3,11 @@
 All knobs are read from environment variables / Azure Functions app settings.
 Defaults:
 
-* ``FACT_EXTRACTION_EVERY_N``      — default 1 (per-turn extraction)
-* ``THREAD_SUMMARY_EVERY_N``       — default 10 (rolling summary cadence)
-* ``USER_SUMMARY_EVERY_N``         — default 20
-* ``PROCEDURAL_SYNTHESIS_AUTO``    — default true
-* ``MAX_BATCH_SIZE``               — default 20
+* ``FACT_EXTRACTION_EVERY_N``      - default 1 (per-turn extraction)
+* ``THREAD_SUMMARY_EVERY_N``       - default 10 (rolling summary cadence)
+* ``USER_SUMMARY_EVERY_N``         - default 20
+* ``PROCEDURAL_SYNTHESIS_AUTO``    - default true
+* ``MAX_BATCH_SIZE``               - default 20
 
 The fact-extraction default of ``1`` - every
 new turn produces fresh facts. Operators can raise this for cost-sensitive
@@ -27,7 +27,7 @@ A single change-feed batch advances each counter by the entire batch's
 contribution in one ETag-guarded write. Even if the resulting jump crosses
 several ``EVERY_N`` boundaries (e.g. ``EVERY_N=10`` and a batch of 100
 turns advances a counter from 0 → 100), exactly **one** orchestrator is
-started — keyed on the new counter value — and it folds in only the
+started - keyed on the new counter value - and it folds in only the
 trailing ``MAX_BATCH_SIZE`` items. For high-throughput bursts this means
 summarization is coarser than ``EVERY_N`` alone implies. Operators who
 need finer per-boundary fan-out should lower ``MAX_BATCH_SIZE`` and raise

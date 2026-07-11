@@ -100,7 +100,6 @@ class MemoryProcessor(Protocol):
         self,
         *,
         user_id: str,
-        full_rebuild: bool = False,
     ) -> int: ...
 
     def generate_user_summary(

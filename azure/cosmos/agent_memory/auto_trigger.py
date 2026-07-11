@@ -108,12 +108,6 @@ def maybe_trigger_steps(
         return
 
     n_dedup_turns = n_facts * n_dedup if n_facts > 0 and n_dedup > 0 else 0
-    # Full-pool reconcile backstop cadence, derived from the PERSISTED counter so
-    # it fires reliably regardless of process/worker lifetime (the old in-memory
-    # per-instance sweep counter reset and under-fired). Every
-    # DEDUP_FULL_RECLUSTER_EVERY_N-th reconcile = every n_dedup_turns * N turns.
-    n_full_recluster = _threshold_int(thresholds, "get_dedup_full_recluster_every_n", "DEDUP_FULL_RECLUSTER_EVERY_N")
-    n_full_turns = n_dedup_turns * n_full_recluster if (n_dedup_turns > 0 and n_full_recluster > 0) else 0
     user_batch_counts = _trigger_thread_steps(
         processor,
         counter_container,
@@ -121,7 +115,6 @@ def maybe_trigger_steps(
         n_facts=n_facts,
         n_summary=n_summary,
         n_dedup_turns=n_dedup_turns,
-        n_full_turns=n_full_turns,
         thresholds=thresholds,
     )
     _trigger_user_steps(processor, counter_container, user_batch_counts, n_user=n_user)
@@ -135,7 +128,6 @@ def _trigger_thread_steps(
     n_facts: int,
     n_summary: int,
     n_dedup_turns: int,
-    n_full_turns: int,
     thresholds: Any = None,
 ) -> dict[str, int]:
     user_batch_counts: dict[str, int] = {}
@@ -166,37 +158,9 @@ def _trigger_thread_steps(
             fire_extract=n_facts > 0 and _counters.crosses_threshold(old_count, new_count, n_facts),
             fire_summary=n_summary > 0 and _counters.crosses_threshold(old_count, new_count, n_summary),
             fire_dedup=n_dedup_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_dedup_turns),
-            fire_full_rebuild=n_full_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_full_turns),
             thresholds=thresholds,
         )
     return user_batch_counts
-
-
-def _watermark_recent_k(
-    counter_container: Any,
-    counter_id: str,
-    user_id: str,
-    thread_id: str,
-    *,
-    new_count: int,
-) -> int:
-    """recent_k covering every turn since the last successful extract.
-
-    ``new_count - watermark`` is exactly the count of turns added since the last
-    successful extract, and the newest-``recent_k`` slice in the pipeline picks
-    precisely those turns — so the whole backlog is covered and the watermark can
-    safely advance to ``new_count``. **Not capped:** capping would extract only the
-    newest N and strand the oldest ``backlog - N`` turns.
-
-    **Bootstrap:** before a thread's first successful extract there is no watermark,
-    so we treat it as ``0`` — ``recent_k = new_count`` covers every turn the thread
-    has so far. Using only the current batch size here would strand turns added
-    during earlier *failed* extracts, because the watermark still advances to
-    ``new_count`` on the first success.
-    """
-    watermark = _counters.read_extract_watermark_sync(counter_container, counter_id, user_id, thread_id)
-    base = watermark if watermark is not None else 0
-    return max(new_count - base, 1)
 
 
 def _fire_thread_steps(
@@ -210,7 +174,6 @@ def _fire_thread_steps(
     fire_extract: bool,
     fire_summary: bool,
     fire_dedup: bool,
-    fire_full_rebuild: bool = False,
     thresholds: Any = None,
 ) -> None:
     fire_procedural = fire_dedup and bool(
@@ -222,16 +185,8 @@ def _fire_thread_steps(
         )
     )
     if fire_extract:
-        recent_k = _watermark_recent_k(
-            counter_container,
-            counter_id,
-            user_id,
-            thread_id,
-            new_count=new_count,
-        )
         try:
-            processor.process_extract_memories(user_id=user_id, thread_id=thread_id, recent_k=recent_k)
-            _counters.advance_extract_watermark_sync(counter_container, counter_id, user_id, thread_id, new_count)
+            processor.process_extract_memories(user_id=user_id, thread_id=thread_id)
         except Exception as exc:
             logger.warning("Auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, exc)
             _counters.stamp_failure_sync(
@@ -241,7 +196,7 @@ def _fire_thread_steps(
         (
             fire_dedup,
             "process_reconcile",
-            lambda: processor.process_reconcile(user_id=user_id, full_rebuild=fire_full_rebuild),
+            lambda: processor.process_reconcile(user_id=user_id),
         ),
         (
             fire_procedural,

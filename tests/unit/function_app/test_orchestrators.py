@@ -235,7 +235,7 @@ class TestExtractMemoriesOrchestrator:
 
         names = [c[0] for c in ctx._yielded_calls]
         assert names == ["em_Extract", "em_Dedup", "em_Persist", "em_ReconcileMemories"]
-        assert ctx._yielded_calls[3][2] == {"user_id": "u1", "full_rebuild": False}
+        assert ctx._yielded_calls[3][2] == {"user_id": "u1"}
         assert [s[0] for s in ctx._yielded_sub_orchestrators] == [
             "SynthesizeProceduralOrchestrator",
         ]
@@ -267,7 +267,7 @@ class TestExtractMemoriesOrchestrator:
         gen.send({"facts": [{"id": "f1"}], "episodic": [], "updates": []})
         # Yield 4: em_ReconcileMemories
         gen.send({"fact_count": 2, "episodic_count": 0, "updated_count": 0})
-        # Yield 5: SynthesizeProceduralOrchestrator — throw an exception
+        # Yield 5: SynthesizeProceduralOrchestrator - throw an exception
         gen.send(
             {
                 "fact": {"kept": 0, "merged": 1, "contradicted": 0},
@@ -428,29 +428,14 @@ class TestExtractMemoryActivities:
         ):
             result = em_mod.em_ReconcileMemories({"user_id": "u1"})
 
-        # full_rebuild defaults False when the change-feed didn't request a backstop.
         assert pipeline.reconcile_memories.call_args_list == [
-            call(user_id="u1", n=17, memory_type="fact", full_rebuild=False),
-            call(user_id="u1", n=17, memory_type="episodic", full_rebuild=False),
+            call(user_id="u1", n=17, memory_type="fact"),
+            call(user_id="u1", n=17, memory_type="episodic"),
         ]
         assert result == {
             "fact": {"kept": 2, "merged": 1, "contradicted": 0},
             "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
         }
-
-    def test_em_reconcile_memories_forwards_full_rebuild(self):
-        pipeline = MagicMock()
-        pipeline.reconcile_memories.side_effect = [{"kept": 0}, {"kept": 0}]
-        with (
-            patch.object(em_mod, "get_pipeline", return_value=pipeline),
-            patch("azure.cosmos.agent_memory.thresholds.get_dedup_pool_size", return_value=17),
-        ):
-            em_mod.em_ReconcileMemories({"user_id": "u1", "full_rebuild": True})
-
-        assert pipeline.reconcile_memories.call_args_list == [
-            call(user_id="u1", n=17, memory_type="fact", full_rebuild=True),
-            call(user_id="u1", n=17, memory_type="episodic", full_rebuild=True),
-        ]
 
     def test_em_advance_extract_watermark_stamps_counter(self):
         import asyncio

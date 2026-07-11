@@ -19,10 +19,6 @@ def _pin_legacy_extract_dedup(monkeypatch):
         "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
         lambda: False,
     )
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
-        lambda: False,
-    )
 
 
 def _make_pipeline(llm_response: dict):
@@ -113,35 +109,6 @@ def test_extract_defaults_confidence_to_half_when_missing():
 
     for doc in upserted:
         assert doc["confidence"] == 0.5, f"missing default for {doc['type']} {doc['id']}"
-
-
-def test_extract_routes_unclassified_to_fact_with_tag():
-    pipeline, upserted = _make_pipeline(
-        {
-            "unclassified": [
-                {
-                    "text": "Weird ambiguous thing about the user",
-                    "confidence": 0.45,
-                    "salience": 0.4,
-                    "tags": ["ambig"],
-                    "reason": "could be fact or episodic",
-                }
-            ]
-        }
-    )
-
-    result = pipeline.extract_memories("u1", "t1")
-
-    assert len(upserted) == 1
-    doc = upserted[0]
-    assert doc["type"] == "fact"
-    assert "sys:unclassified" in doc["tags"]
-    assert "sys:fact" in doc["tags"]
-    assert "topic:ambig" in doc["tags"]
-    assert doc["confidence"] == pytest.approx(0.45)
-    assert doc["metadata"]["unclassified_reason"] == "could be fact or episodic"
-    assert result["unclassified_count"] == 1
-    assert result["fact_count"] == 0
 
 
 def test_extract_episodic_carries_confidence():

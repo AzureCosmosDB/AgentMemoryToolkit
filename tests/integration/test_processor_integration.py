@@ -1,7 +1,7 @@
 """Integration-style tests for the processor protocol surface.
 
 Exercises ``CosmosMemoryClient.process_now`` / ``process_now_and_wait`` end-to-end with
-a fully mocked Cosmos container — no live Azure calls — to validate that
+a fully mocked Cosmos container - no live Azure calls - to validate that
 the SDK wires the active :class:`MemoryProcessor` correctly through the
 public API.
 """

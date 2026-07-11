@@ -6,18 +6,18 @@ backends can be swapped without losing per-thread / per-user counts.
 
 Counter document shape::
 
-    # thread-scoped — id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
+    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "last_batch_lsn": int|None, "last_batch_old_count": int,
       "last_failure_at": str|None, "last_failure_reason": str|None,
       "last_owner": str|None }
 
-    # user-scoped — id = "user:{user_id}", PK = [user_id, "__counters__"]
+    # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
     { ... same fields ... }
 
 Unlike the FA-side helper, the SDK clients drive these counters without LSN
 replay protection because each ``push_to_cosmos()`` call is its own atomic
-boundary — there is no change-feed redelivery to defend against. We
+boundary - there is no change-feed redelivery to defend against. We
 **preserve any existing ``last_batch_lsn``** the FA may have written so the
 FA's monotonicity assumption stays valid even on shared deployments.
 
@@ -79,7 +79,7 @@ def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], o
 
     Operators run with either ``MEMORY_PROCESSOR_OWNER=inprocess`` or
     ``=durable``. If the same counter doc keeps getting touched by both
-    backends, that's a misconfiguration — both pipelines are extracting
+    backends, that's a misconfiguration - both pipelines are extracting
     against the same memories container.
     """
     if not existing_owner or not observer_owner or existing_owner == observer_owner:
@@ -90,7 +90,7 @@ def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], o
     _warned_owner_mismatch.add(key)
     logger.warning(
         "Counter doc %s was last written by owner=%r but this process is "
-        "owner=%r — both backends appear to be processing the same container. "
+        "owner=%r - both backends appear to be processing the same container. "
         "Set MEMORY_PROCESSOR_OWNER consistently across all clients and the "
         "Function App to avoid double-extraction. Further mismatches for this "
         "counter will be logged at DEBUG level.",
@@ -121,7 +121,7 @@ def increment_counter_sync(
     on shared deployments. Stamps ``last_owner`` (advisory) when *owner*
     is provided.
 
-    Returns ``(0, 0)`` and logs a warning if the container is unreachable —
+    Returns ``(0, 0)`` and logs a warning if the container is unreachable -
     auto-trigger failures must never block the user's primary write path.
     """
     partition_key = [user_id, thread_id]
@@ -170,7 +170,7 @@ def increment_counter_sync(
             if exc.status_code == 412 and attempt < MAX_RETRIES - 1:
                 continue
             logger.warning(
-                "Counter increment failed counter_id=%s status=%s — auto-trigger skipped (increment dropped)",
+                "Counter increment failed counter_id=%s status=%s - auto-trigger skipped (increment dropped)",
                 counter_id,
                 exc.status_code,
             )
@@ -235,7 +235,7 @@ async def increment_counter_async(
             if exc.status_code == 412 and attempt < MAX_RETRIES - 1:
                 continue
             logger.warning(
-                "Counter increment failed counter_id=%s status=%s — auto-trigger skipped",
+                "Counter increment failed counter_id=%s status=%s - auto-trigger skipped",
                 counter_id,
                 exc.status_code,
             )
@@ -307,7 +307,7 @@ def stamp_failure_sync(
 ) -> None:
     """Best-effort stamp ``last_failure_at`` / ``last_failure_reason`` on the counter doc.
 
-    Uses Cosmos ``patch_item`` so only the failure fields are touched —
+    Uses Cosmos ``patch_item`` so only the failure fields are touched -
     concurrent counter increments cannot lose updates here. Failures are
     logged and swallowed; we never want failure-stamping itself to break
     the user's write path.
@@ -350,74 +350,6 @@ async def stamp_failure_async(
         logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, exc)
 
 
-def read_extract_watermark_sync(
-    container: Any,
-    counter_id: str,
-    user_id: str,
-    thread_id: str,
-) -> Optional[int]:
-    """Return the count value at the last successful extract, or ``None``.
-
-    The watermark lets recent_k cover every turn since the previous extract
-    succeeded, instead of just the current batch — so turns are never skipped
-    when extraction lags or transiently fails. Best-effort: returns ``None``
-    on any read error so callers fall back to a batch-based recent_k.
-    """
-    try:
-        doc = container.read_item(item=counter_id, partition_key=[user_id, thread_id])
-        value = doc.get("last_extract_count")
-        return int(value) if value is not None else None
-    except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("read_extract_watermark_sync failed counter_id=%s: %s", counter_id, exc)
-        return None
-
-
-def advance_extract_watermark_sync(
-    container: Any,
-    counter_id: str,
-    user_id: str,
-    thread_id: str,
-    count: int,
-) -> None:
-    """Stamp ``last_extract_count=count`` after a successful extract (sync)."""
-    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
-    try:
-        container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
-    except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("advance_extract_watermark_sync failed counter_id=%s: %s", counter_id, exc)
-
-
-async def read_extract_watermark_async(
-    container: Any,
-    counter_id: str,
-    user_id: str,
-    thread_id: str,
-) -> Optional[int]:
-    """Async version of :func:`read_extract_watermark_sync`."""
-    try:
-        doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
-        value = doc.get("last_extract_count")
-        return int(value) if value is not None else None
-    except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("read_extract_watermark_async failed counter_id=%s: %s", counter_id, exc)
-        return None
-
-
-async def advance_extract_watermark_async(
-    container: Any,
-    counter_id: str,
-    user_id: str,
-    thread_id: str,
-    count: int,
-) -> None:
-    """Stamp ``last_extract_count=count`` after a successful extract (async)."""
-    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
-    try:
-        await container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
-    except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("advance_extract_watermark_async failed counter_id=%s: %s", counter_id, exc)
-
-
 __all__ = [
     "USER_COUNTER_THREAD_ID",
     "thread_counter_id",
@@ -427,8 +359,4 @@ __all__ = [
     "increment_counter_async",
     "stamp_failure_sync",
     "stamp_failure_async",
-    "read_extract_watermark_sync",
-    "advance_extract_watermark_sync",
-    "read_extract_watermark_async",
-    "advance_extract_watermark_async",
 ]

@@ -1,7 +1,7 @@
 """Tests for ``azure.cosmos.agent_memory._counters``.
 
 Covers counter-doc construction (LSN preservation, failure breadcrumbs)
-and ``stamp_failure_sync`` — the helpers that let SDK and FA share a
+and ``stamp_failure_sync`` - the helpers that let SDK and FA share a
 counter container without trampling each other.
 """
 
@@ -114,11 +114,11 @@ class TestStampFailureSync:
         assert "/last_failure_at" in op_paths
 
     def test_swallows_patch_errors(self):
-        """Failure stamping is best-effort breadcrumbing — must never raise."""
+        """Failure stamping is best-effort breadcrumbing - must never raise."""
         container = MagicMock()
         container.patch_item.side_effect = RuntimeError("cosmos down")
         stamp_failure_sync(container, "thread:u:t", "u", "t", "boom")
-        # Did not propagate — that's the contract.
+        # Did not propagate - that's the contract.
 
     def test_truncates_long_reason(self):
         container = MagicMock()

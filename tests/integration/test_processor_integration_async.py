@@ -31,7 +31,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
     async def test_process_now_invokes_pipeline_with_correct_args(self):
         pipeline = MagicMock()
         # ``AsyncInProcessProcessor`` awaits these pipeline methods, so the
-        # mocks must be ``AsyncMock`` — a plain ``MagicMock`` returns the dict
+        # mocks must be ``AsyncMock`` - a plain ``MagicMock`` returns the dict
         # synchronously, which ``await`` cannot consume.
         pipeline.generate_thread_summary = AsyncMock(
             return_value={
@@ -167,7 +167,7 @@ class TestAsyncDurableProcessNowAndWaitTimeout:
 
         monkeypatch.setattr("asyncio.sleep", _no_sleep)
 
-        # Tiny timeout — loop.time() advances normally, so this expires fast.
+        # Tiny timeout - loop.time() advances normally, so this expires fast.
         ok = await client.process_now_and_wait(user_id="u-to", thread_id="th-to", timeout=0.001)
 
         assert ok is False

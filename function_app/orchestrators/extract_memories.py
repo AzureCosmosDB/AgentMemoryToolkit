@@ -34,7 +34,6 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     should_reconcile = bool(payload.get("reconcile", False))
-    full_rebuild = bool(payload.get("full_rebuild", False))
     recent_k = payload.get("recent_k")
     retry = default_retry_options()
 
@@ -71,7 +70,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         reconciled = yield context.call_activity_with_retry(
             "em_ReconcileMemories",
             retry,
-            {"user_id": user_id, "full_rebuild": full_rebuild},
+            {"user_id": user_id},
         )
         if config.get_procedural_synthesis_auto():
             count = payload.get("count")
@@ -172,16 +171,10 @@ def em_ReconcileMemories(payload: dict) -> dict:
     # GA keeps reconcile single-activity: its LLM dedup decisions and supersession
     # operations are larger/more coupled than the extract→dedup→persist split handled here.
     user_id = payload["user_id"]
-    # full_rebuild forces the full-pool single-LLM-pass path (catches dissimilar
-    # contradictions). The change-feed sets it on a persisted-counter cadence so it
-    # fires reliably on FA, where the in-memory candidate-mode sweep counter can't.
-    full_rebuild = bool(payload.get("full_rebuild", False))
     pipeline = get_pipeline()
     from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     n = get_dedup_pool_size()
-    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact", full_rebuild=full_rebuild) or {}
-    episodic = (
-        pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic", full_rebuild=full_rebuild) or {}
-    )
+    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact") or {}
+    episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic") or {}
     return {"fact": facts, "episodic": episodic}

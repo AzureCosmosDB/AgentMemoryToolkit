@@ -111,328 +111,204 @@ async def test_vector_candidates_orders_nearest_first_by_distance_function():
 
 
 @pytest.mark.asyncio
-async def test_candidate_mode_clears_tags_only_for_survivors():
-    # Latent-bug regression (async mirror): consumed sources must not be
-    # re-upserted by tag-clearing, which would resurrect them without superseded_by.
+async def test_dedup_extracted_folds_near_dup_in_place_and_keeps_novel():
     p = _service()
-    f1 = _fact("f1", "a", tags=["sys:fact", "sys:dup-candidate"])
-    f2 = _fact("f2", "b", tags=["sys:fact", "sys:dup-candidate"])
-    f3 = _fact("f3", "c", tags=["sys:fact", "sys:dup-candidate"])
-    p._build_candidate_clusters = AsyncMock(return_value=([[f1, f2, f3]], 3, [f1, f2, f3]))
-    p._reconcile_pool = AsyncMock(return_value=({"kept": 1, "merged": 2, "contradicted": 0}, {"f1", "f2"}))
-    cleared: list[str] = []
-
-    async def clear(docs):
-        cleared.extend(d["id"] for d in docs)
-
-    p._clear_dup_candidate_tags = AsyncMock(side_effect=clear)
-    p._emit_reconcile_outcome = MagicMock()
-
-    result = await p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
-
-    assert cleared == ["f3"]
-    assert result == {
-        "kept": 1,
-        "merged": 2,
-        "contradicted": 0,
-        "reconcile_clusters_sent": 1,
-        "reconcile_llm_calls_saved": 2,
+    p._vector_distance_function = AsyncMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0], [0.0, 1.0]]
+    p._nearest_active_full = AsyncMock(
+        side_effect=[
+            ({"id": "existing-1", "content": "same", "type": "fact"}, 0.99),
+            (None, 0.0),
+        ]
+    )
+    p._apply_inplace_update = AsyncMock(return_value=True)
+    extracted = {
+        "facts": [_fact("f-dup", "restatement"), _fact("f-novel", "brand new")],
+        "episodic": [],
+        "updates": [],
     }
 
+    out = await p.dedup_extracted_memories("u1", extracted)
 
-@pytest.mark.asyncio
-async def test_candidate_mode_clears_tags_on_orphan_seeds():
-    # Async mirror: orphan dup-candidate seeds (no cluster) get their stale tag cleared.
-    p = _service()
-    orphan = _fact("orphan", "lonely", tags=["sys:fact", "sys:dup-candidate"])
-    c1 = _fact("c1", "a", tags=["sys:fact", "sys:dup-candidate"])
-    c2 = _fact("c2", "b", tags=["sys:fact", "sys:dup-candidate"])
-    p._build_candidate_clusters = AsyncMock(return_value=([[c1, c2]], 3, [orphan, c1, c2]))
-    p._reconcile_pool = AsyncMock(return_value=({"kept": 2, "merged": 0, "contradicted": 0}, set()))
-    cleared: list[str] = []
-
-    async def clear(docs):
-        cleared.extend(d["id"] for d in docs)
-
-    p._clear_dup_candidate_tags = AsyncMock(side_effect=clear)
-    p._emit_reconcile_outcome = MagicMock()
-
-    await p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
-
-    assert set(cleared) == {"c1", "c2", "orphan"}
+    assert [doc["id"] for doc in out["facts"]] == ["f-novel"]
+    p._apply_inplace_update.assert_awaited_once()
+    target, new_doc = p._apply_inplace_update.call_args.args
+    assert target["id"] == "existing-1"
+    assert new_doc["id"] == "f-dup"
+    assert out["updates"][-1]["inplace_updated"] == 1
 
 
 @pytest.mark.asyncio
-async def test_sweep_survives_one_cluster_failure():
-    # Async mirror: one failing cluster must not abort the sweep; failed cluster's
-    # tags are retained, remaining cluster + orphan are still cleared.
+async def test_dedup_extracted_failed_inplace_update_keeps_new_doc():
     p = _service()
-    c1 = [
-        _fact("a1", "x", tags=["sys:fact", "sys:dup-candidate"]),
-        _fact("a2", "y", tags=["sys:fact", "sys:dup-candidate"]),
-    ]
-    c2 = [
-        _fact("b1", "p", tags=["sys:fact", "sys:dup-candidate"]),
-        _fact("b2", "q", tags=["sys:fact", "sys:dup-candidate"]),
-    ]
-    orphan = _fact("o1", "lonely", tags=["sys:fact", "sys:dup-candidate"])
-    p._build_candidate_clusters = AsyncMock(return_value=([c1, c2], 5, [*c1, *c2, orphan]))
-    p._reconcile_pool = AsyncMock(
-        side_effect=[RuntimeError("truncated LLM response"), ({"kept": 2, "merged": 0, "contradicted": 0}, set())]
+    p._vector_distance_function = AsyncMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0]]
+    p._nearest_active_full = AsyncMock(return_value=({"id": "existing-1", "content": "same", "type": "fact"}, 0.99))
+    p._apply_inplace_update = AsyncMock(return_value=False)
+    extracted = {"facts": [_fact("f-dup", "restatement")], "episodic": [], "updates": []}
+
+    out = await p.dedup_extracted_memories("u1", extracted)
+
+    assert [doc["id"] for doc in out["facts"]] == ["f-dup"]
+    assert all(op.get("op") != "stats" or "inplace_updated" not in op for op in out["updates"])
+
+
+@pytest.mark.asyncio
+async def test_dedup_extracted_below_threshold_is_novel():
+    p = _service()
+    p._vector_distance_function = AsyncMock(return_value="cosine")
+    p._embed_batch.return_value = [[1.0, 0.0]]
+    p._nearest_active_full = AsyncMock(return_value=({"id": "existing-1", "content": "near", "type": "fact"}, 0.85))
+    p._apply_inplace_update = AsyncMock(return_value=True)
+    extracted = {"facts": [_fact("f-new", "somewhat similar")], "episodic": [], "updates": []}
+
+    out = await p.dedup_extracted_memories("u1", extracted)
+
+    assert [doc["id"] for doc in out["facts"]] == ["f-new"]
+    p._apply_inplace_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_euclidean_disables_inplace_folding():
+    p = _service()
+    p._vector_distance_function = AsyncMock(return_value="euclidean")
+    p._embed_batch.return_value = [[1.0, 0.0]]
+    p._nearest_active_full = AsyncMock()
+    p._apply_inplace_update = AsyncMock()
+    extracted = {"facts": [_fact("f-new", "near identical")], "episodic": [], "updates": []}
+
+    out = await p.dedup_extracted_memories("u1", extracted)
+
+    assert [doc["id"] for doc in out["facts"]] == ["f-new"]
+    p._nearest_active_full.assert_not_awaited()
+    p._apply_inplace_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_inplace_update_recency_wins_and_unions():
+    p = _service()
+    p._upsert_item = AsyncMock()
+    neighbor = _fact("existing-1", "old content", tags=["sys:fact", "topic:a"])
+    neighbor["confidence"] = 0.6
+    neighbor["salience"] = 0.5
+    neighbor["updated_at"] = "2025-01-01T00:00:00+00:00"
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _fact(
+        "f-new", "new richer content", embedding=[0.5, 0.5], tags=["sys:fact", "topic:b", "sys:dup-candidate"]
     )
-    cleared: list[str] = []
+    new_doc["confidence"] = 0.9
+    new_doc["salience"] = 0.8
 
-    async def clear(docs):
-        cleared.extend(d["id"] for d in docs)
+    ok = await p._apply_inplace_update(neighbor, new_doc)
 
-    p._clear_dup_candidate_tags = AsyncMock(side_effect=clear)
-    p._emit_reconcile_outcome = MagicMock()
-
-    result = await p._reconcile_candidate_mode("u1", n=50, memory_type="fact", started_at=0.0)
-
-    assert "a1" not in cleared and "a2" not in cleared
-    assert {"b1", "b2", "o1"} <= set(cleared)
-    assert result["reconcile_clusters_sent"] == 2
+    assert ok is True
+    written = p._upsert_item.call_args.kwargs["body"]
+    assert written["id"] == "existing-1"
+    assert written["content"] == "new richer content"
+    assert written["embedding"] == [0.5, 0.5]
+    assert written["salience"] == 0.8
+    assert written["confidence"] == 0.9
+    assert "topic:a" in written["tags"] and "topic:b" in written["tags"]
+    assert "sys:dup-candidate" not in written["tags"]
+    assert "_etag" not in written
 
 
 @pytest.mark.asyncio
-async def test_full_rebuild_clears_survivor_tags(monkeypatch):
-    # Async mirror: full_rebuild full-pool path clears survivor dup-candidate tags.
-    monkeypatch.setattr("azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_reconcile_mode", lambda: "candidate")
+async def test_nearest_active_full_returns_full_doc_and_skips_excluded():
     p = _service()
-    pool = [
-        _fact("f1", "a", tags=["sys:fact", "sys:dup-candidate"]),
-        _fact("f2", "b", tags=["sys:fact", "sys:dup-candidate"]),
-    ]
-    p._active_memories_for_reconcile = AsyncMock(return_value=pool)
-    p._reconcile_pool = AsyncMock(return_value=({"kept": 1, "merged": 1, "contradicted": 0}, {"f1"}))
-    cleared: list[str] = []
+    doc_a = _fact("a", "first")
+    doc_b = _fact("b", "second")
 
-    async def clear(docs):
-        cleared.extend(d["id"] for d in docs)
+    async def query_items(_container, *, query, parameters):
+        del query, parameters
+        return [{"doc": doc_a, "score": 0.99}, {"doc": doc_b, "score": 0.80}]
 
-    p._clear_dup_candidate_tags = AsyncMock(side_effect=clear)
-    p._emit_reconcile_outcome = MagicMock()
-
-    await p.reconcile_memories("u1", n=50, memory_type="fact", full_rebuild=True)
-
-    assert cleared == ["f2"]
+    p._query_items = AsyncMock(side_effect=query_items)
+    neighbor, score = await p._nearest_active_full(
+        user_id="u1", embedding=[1.0, 0.0], memory_type="fact", exclude_ids={"a"}
+    )
+    assert neighbor["id"] == "b"
+    assert score == 0.80
 
 
 @pytest.mark.asyncio
 async def test_dedup_extracted_memories_flag_off_is_noop(monkeypatch):
     monkeypatch.setattr("azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_vector_enabled", lambda: False)
     p = _service()
-    extracted = {"facts": [_fact("f1", "User likes tea")], "episodic": [], "updates": []}
+    extracted = {"facts": [_fact("f1", "content")], "episodic": [], "updates": []}
 
     out = await p.dedup_extracted_memories("u1", extracted)
 
     assert out is extracted
-    p._embed_batch.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_euclidean_disables_near_exact_autodrop():
-    # Async mirror: euclidean disables the cosine-calibrated near-exact auto-drop;
-    # the near-identical new memory is kept + tagged for LLM reconcile.
-    p = _service()
-    p._vector_distance_function = AsyncMock(return_value="euclidean")
-    fact = _fact("f-new", "near identical")
-    fact.pop("embedding", None)
-    p._embed_batch.return_value = [[1.0, 0.0]]
-    p._vector_candidates = AsyncMock(
-        return_value=[{"id": "existing", "content": "same", "type": "fact", "score": 0.05}]
-    )
-
-    out = await p.dedup_extracted_memories("u1", {"facts": [fact], "episodic": [], "updates": []})
-
-    assert [doc["id"] for doc in out["facts"]] == ["f-new"]
-    assert out["facts"][0]["tags"][-1] == "sys:dup-candidate"
-    assert out["updates"][-1]["vector_dedup_skipped"] == 0
-    assert out["updates"][-1]["dup_candidates_tagged"] == 1
+    p._embed_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_dedup_extracted_memories_passes_user_id_per_concurrent_call():
+    # Two concurrent dedup calls for different users must each query with their own
+    # user_id (no shared mutable state leaking one user's id into another's query).
     p = _service()
-    seen: list[tuple[str, str]] = []
+    p._vector_distance_function = AsyncMock(return_value="cosine")
+    seen_users: list[str] = []
 
-    async def vector_candidates(**kwargs):
-        await asyncio.sleep(0)
-        exclude_ids = kwargs["exclude_ids"]
-        doc_id = next(iter(exclude_ids))
-        seen.append((doc_id, kwargs["user_id"]))
-        return []
+    async def nearest(*, user_id, embedding, memory_type, exclude_ids):
+        del embedding, memory_type, exclude_ids
+        seen_users.append(user_id)
+        return None, 0.0
 
-    p._vector_candidates = AsyncMock(side_effect=vector_candidates)
-    user_a_doc = _fact("user-a-doc", "User A likes tea")
-    user_b_doc = _fact("user-b-doc", "User B likes coffee")
+    p._nearest_active_full = AsyncMock(side_effect=nearest)
 
-    await asyncio.gather(
-        p.dedup_extracted_memories("user-a", {"facts": [user_a_doc], "episodic": [], "updates": []}),
-        p.dedup_extracted_memories("user-b", {"facts": [user_b_doc], "episodic": [], "updates": []}),
-    )
+    async def run(uid):
+        p2 = _service()
+        p2._vector_distance_function = AsyncMock(return_value="cosine")
+        p2._nearest_active_full = AsyncMock(side_effect=nearest)
+        p2._embed_batch.return_value = [[1.0, 0.0]]
+        await p2.dedup_extracted_memories(uid, {"facts": [_fact("f", "c")], "episodic": [], "updates": []})
 
-    assert dict(seen) == {"user-a-doc": "user-a", "user-b-doc": "user-b"}
+    await asyncio.gather(run("userA"), run("userB"))
+    assert set(seen_users) == {"userA", "userB"}
 
 
 @pytest.mark.asyncio
-async def test_dedup_extracted_memories_vector_ladder_and_intra_batch():
+async def test_reconcile_memory_type_routes_episodic_and_procedural_noop():
     p = _service()
-    docs = [
-        _fact("drop-existing", "User likes tea"),
-        _fact("tag-existing", "User likes coffee"),
-        _fact("clean", "User likes water"),
-        _fact("batch-keeper", "User likes green tea"),
-        _fact("drop-batch", "User likes green tea too"),
+    p._run_prompty = AsyncMock()
+
+    episodic_result = await p.reconcile_memories("u1", memory_type="episodic")
+    assert episodic_result == {"kept": 0, "merged": 0, "contradicted": 0}
+
+    procedural_result = await p.reconcile_memories("u1", memory_type="procedural")
+    assert procedural_result == {"kept": 0, "merged": 0, "contradicted": 0}
+
+    p._run_prompty.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fact_contradiction_only():
+    p = _service()
+    facts = [
+        _fact("f1", "User's deadline is March 1"),
+        _fact("f2", "User's deadline is March 15"),
     ]
-    for doc in docs:
-        doc.pop("embedding", None)
-    p._embed_batch.return_value = [
-        [1.0, 0.0],
-        [0.0, 1.0],
-        [1.0, -1.0],
-        [0.7, 0.7],
-        [0.7, 0.7],
-    ]
-    p._vector_candidates = AsyncMock(
-        side_effect=[
-            [{"id": "old-high", "content": "User likes tea.", "type": "fact", "score": 0.99}],
-            [{"id": "old-mid", "content": "User enjoys coffee.", "type": "fact", "score": 0.90}],
-            [{"id": "old-low", "content": "Unrelated", "type": "fact", "score": 0.20}],
-            [],
-            [],
-        ]
-    )
-
-    out = await p.dedup_extracted_memories("u1", {"facts": docs, "episodic": [], "updates": []})
-
-    # Intra-batch new-vs-new dedup was removed: drop-batch (no existing match)
-    # is now kept; same-batch near-dups are deferred to reconcile.
-    ids = [doc["id"] for doc in out["facts"]]
-    assert ids == ["tag-existing", "clean", "batch-keeper", "drop-batch"]
-    assert all("embedding" in doc for doc in out["facts"])
-    tagged = out["facts"][0]
-    assert "sys:dup-candidate" in tagged["tags"]
-    assert tagged["metadata"]["dup_of"] == "old-mid"
-    assert tagged["metadata"]["dup_score"] == 0.90
-    assert "sys:dup-candidate" not in out["facts"][1]["tags"]
-    stats = out["updates"][-1]
-    assert stats["vector_dedup_skipped"] == 1
-    assert stats["dup_candidates_tagged"] == 1
-
-
-@pytest.mark.asyncio
-async def test_dedup_skips_underspecified_doc_verbatim():
-    # Parity with sync: a doc with no/unknown type is passed through untouched
-    # and never runs vector dedup (async previously defaulted type to the bucket).
-    p = _service()
-    p._vector_candidates = AsyncMock(return_value=[{"id": "x", "content": "c", "type": "fact", "score": 0.99}])
-    doc = _fact("f1", "content")
-    doc.pop("type")
-    doc.pop("embedding", None)
-    p._embed_batch.return_value = [[1.0, 0.0]]
-
-    out = await p.dedup_extracted_memories("u1", {"facts": [doc], "episodic": [], "updates": []})
-
-    assert [d["id"] for d in out["facts"]] == ["f1"]
-    assert "sys:dup-candidate" not in out["facts"][0].get("tags", [])
-    p._vector_candidates.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_reconcile_memory_type_routes_episodic_merge_only(monkeypatch):
-    monkeypatch.setattr("azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_reconcile_mode", lambda: "full_pool")
-    p = _service()
-    episodes = [_episode("ep_1", "CI failed then retries fixed it"), _episode("ep_2", "CI failed; retries fixed it")]
-    p._active_memories_for_reconcile = AsyncMock(return_value=episodes)
+    facts[0]["created_at"] = "2024-01-01T00:00:00+00:00"
+    facts[1]["created_at"] = "2024-02-01T00:00:00+00:00"
+    p._active_memories_for_reconcile = AsyncMock(return_value=facts)
     p._run_prompty = AsyncMock(
         return_value=json.dumps(
             {
-                "duplicate_groups": [
-                    {
-                        "merged_content": "CI failed, then retries fixed it",
-                        "source_ids": ["ep_1", "ep_2"],
-                        "confidence": 0.9,
-                        "salience": 0.8,
-                    }
-                ],
-                "kept_ids": [],
-                "contradicted_pairs": [{"winner_id": "ep_1", "loser_id": "ep_2"}],
+                "duplicate_groups": [{"merged_content": "ignored", "source_ids": ["f1", "f2"]}],
+                "contradicted_pairs": [{"winner_id": "f2", "loser_id": "f1", "reason": "more recent"}],
+                "kept_ids": ["f2"],
             }
         )
     )
 
-    result = await p.reconcile_memories("u1", memory_type="episodic")
+    result = await p.reconcile_memories("u1", memory_type="fact")
 
-    assert result == {"kept": 0, "merged": 2, "contradicted": 0}
-    assert p._run_prompty.await_args.kwargs["inputs"].keys() == {"episodics_text"}
-    assert p._run_prompty.await_args.args[0] == "dedup_episodic.prompty"
-
-
-@pytest.mark.asyncio
-async def test_candidate_reconcile_builds_connected_component():
-    p = _service()
-    docs = {
-        "f1": _fact("f1", "User likes aisle seats", tags=["sys:fact", "sys:dup-candidate"]),
-        "f2": _fact("f2", "User prefers aisle seats"),
-        "f3": _fact("f3", "User enjoys aisle seats"),
-    }
-
-    async def query_items(_container, **kwargs):
-        params = {p["name"]: p["value"] for p in kwargs.get("parameters", [])}
-        if params.get("@tag") == "sys:dup-candidate":
-            return [docs["f1"]]
-        ids = [value for name, value in params.items() if name.startswith("@id")]
-        return [docs[mid] for mid in ids if mid in docs]
-
-    p._query_items = AsyncMock(side_effect=query_items)
-    p._vector_candidates = AsyncMock(
-        side_effect=[
-            [
-                {"id": "f2", "content": docs["f2"]["content"], "type": "fact", "score": 0.90},
-                {"id": "f3", "content": docs["f3"]["content"], "type": "fact", "score": 0.88},
-            ],
-            [
-                {"id": "f2", "content": docs["f2"]["content"], "type": "fact", "score": 0.90},
-                {"id": "f3", "content": docs["f3"]["content"], "type": "fact", "score": 0.88},
-            ],
-            [
-                {"id": "f1", "content": docs["f1"]["content"], "type": "fact", "score": 0.90},
-                {"id": "f3", "content": docs["f3"]["content"], "type": "fact", "score": 0.89},
-            ],
-            [
-                {"id": "f1", "content": docs["f1"]["content"], "type": "fact", "score": 0.88},
-                {"id": "f2", "content": docs["f2"]["content"], "type": "fact", "score": 0.89},
-            ],
-        ]
-    )
-    p._run_prompty = AsyncMock(
-        return_value=json.dumps(
-            {
-                "duplicate_groups": [
-                    {
-                        "merged_content": "User prefers aisle seats",
-                        "source_ids": ["f1", "f2", "f3"],
-                        "confidence": 0.9,
-                        "salience": 0.8,
-                    }
-                ],
-                "contradicted_pairs": [],
-                "kept_ids": [],
-            }
-        )
-    )
-
-    result = await p.reconcile_memories("u1")
-
-    assert result == {
-        "kept": 0,
-        "merged": 3,
-        "contradicted": 0,
-        "reconcile_clusters_sent": 1,
-        "reconcile_llm_calls_saved": 2,
-    }
-    p._run_prompty.assert_awaited_once()
-    facts_text = p._run_prompty.await_args.kwargs["inputs"]["facts_text"]
-    assert all(fid in facts_text for fid in ["f1", "f2", "f3"])
+    assert result == {"kept": 1, "merged": 0, "contradicted": 1}
+    p._upsert_memory.assert_not_awaited()
+    assert p._mark_superseded.await_count == 1
+    assert p._mark_superseded.call_args.args[0]["id"] == "f1"
+    assert p._mark_superseded.call_args.args[1] == "f2"
+    assert p._mark_superseded.call_args.kwargs["reason"] == "contradict"
+    assert p._run_prompty.call_args.args[0] == "dedup.prompty"

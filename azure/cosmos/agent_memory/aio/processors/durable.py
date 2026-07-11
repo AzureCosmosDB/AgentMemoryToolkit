@@ -74,7 +74,7 @@ class AsyncDurableFunctionProcessor:
         )
         return UserSummaryResult(summary=None)
 
-    async def process_reconcile(self, *, user_id: str, full_rebuild: bool = False) -> int:
+    async def process_reconcile(self, *, user_id: str) -> int:
         logger.debug(
             "AsyncDurableFunctionProcessor.process_reconcile no-op user_id=%s",
             user_id,

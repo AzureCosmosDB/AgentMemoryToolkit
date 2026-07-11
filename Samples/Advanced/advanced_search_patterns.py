@@ -1,5 +1,5 @@
 """
-Advanced Search Patterns — Agent Memory Toolkit
+Advanced Search Patterns - Agent Memory Toolkit
 
 Demonstrates vector, hybrid, and filtered search patterns using Cosmos DB
 with AI Foundry embeddings.
@@ -89,7 +89,7 @@ def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None
 # ---------------------------------------------------------------------------
 
 def vector_search(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 1 — Semantic-style query (natural language, low keyword overlap)."""
+    """Pattern 1 - Semantic-style query (natural language, low keyword overlap)."""
     print_header("1. Semantic Search (natural-language query)")
     print("  Query: 'outdoor activities'")
     print("  Hybrid ranking leans on embedding similarity when there are few exact")
@@ -104,11 +104,11 @@ def vector_search(mem: CosmosMemoryClient, user_id: str) -> None:
 
 
 def hybrid_search(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 2 — Hybrid search (vector + full-text) is the default."""
+    """Pattern 2 - Hybrid search (vector + full-text) is the default."""
     print_header("2. Hybrid Search (vector + full-text)")
     print("  Query: 'hiking trails Pacific Northwest'")
     print("  Every search_cosmos call fuses embedding similarity with BM25 keyword")
-    print("  matching automatically — no flag required.\n")
+    print("  matching automatically - no flag required.\n")
 
     results = mem.search_cosmos(
         search_terms="hiking trails Pacific Northwest",
@@ -119,8 +119,8 @@ def hybrid_search(mem: CosmosMemoryClient, user_id: str) -> None:
 
 
 def filtered_by_role(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 3 — Filtered search: only user messages."""
-    print_header("3. Filtered Search — by role ('user')")
+    """Pattern 3 - Filtered search: only user messages."""
+    print_header("3. Filtered Search - by role ('user')")
     print("  Query: 'preferences'")
     print("  Restricts results to a specific conversation role.\n")
 
@@ -134,8 +134,8 @@ def filtered_by_role(mem: CosmosMemoryClient, user_id: str) -> None:
 
 
 def filtered_by_memory_type(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 4 — Filtered search: only 'fact' memories."""
-    print_header("4. Filtered Search — by memory_type ('fact')")
+    """Pattern 4 - Filtered search: only 'fact' memories."""
+    print_header("4. Filtered Search - by memory_type ('fact')")
     print("  Query: 'food preferences'")
     print("  Narrows results to a specific memory category.\n")
 
@@ -149,8 +149,8 @@ def filtered_by_memory_type(mem: CosmosMemoryClient, user_id: str) -> None:
 
 
 def filtered_by_thread(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None:
-    """Pattern 5 — Filtered search: scoped to a single thread."""
-    print_header("5. Filtered Search — by thread_id")
+    """Pattern 5 - Filtered search: scoped to a single thread."""
+    print_header("5. Filtered Search - by thread_id")
     print(f"  Query: 'activities'  |  thread: {thread_id[:8]}…")
     print("  Limits results to a specific conversation thread.\n")
 
@@ -164,7 +164,7 @@ def filtered_by_thread(mem: CosmosMemoryClient, user_id: str, thread_id: str) ->
 
 
 def top_k_tuning(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Pattern 6 — top-k tuning comparison."""
+    """Pattern 6 - top-k tuning comparison."""
     print_header("6. Top-K Tuning Comparison")
     print("  Query: 'hobbies and interests'")
     print("  Demonstrates how top_k affects the breadth of results.\n")

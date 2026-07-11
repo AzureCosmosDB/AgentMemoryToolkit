@@ -1,4 +1,4 @@
-"""Tests for InProcessProcessor — verifies pipeline delegation order."""
+"""Tests for InProcessProcessor - verifies pipeline delegation order."""
 
 from __future__ import annotations
 

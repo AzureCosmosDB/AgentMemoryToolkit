@@ -519,7 +519,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         For ``memory_type='turn'`` this also bumps the auto-trigger counter and
         schedules cadence-aware processing (extract / reconcile / procedural /
         thread_summary / user_summary) via :func:`maybe_trigger_steps`, exactly
-        like :meth:`push_to_cosmos` does for buffered turns — so the
+        like :meth:`push_to_cosmos` does for buffered turns - so the
         ``FACT_EXTRACTION_EVERY_N`` / ``THREAD_SUMMARY_EVERY_N`` /
         ``USER_SUMMARY_EVERY_N`` / ``DEDUP_EVERY_N`` knobs apply uniformly
         whether the caller uses the buffer or writes through directly.
@@ -707,6 +707,31 @@ class CosmosMemoryClient(_BaseMemoryClient):
             created_before=created_before,
         )
 
+    def get_memory_history(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        *,
+        max_depth: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a memory's superseded predecessors, most-recently-superseded first.
+
+        AMT supersedes rather than deletes, so the full history of a fact - how a
+        preference, decision, or attribute changed over time - is preserved. This
+        walks the ``superseded_by`` chain backwards from *memory_id* and returns
+        every version it replaced (transitively), each carrying its
+        ``superseded_at`` / ``supersede_reason`` audit fields. Useful for
+        answering "what changed?" / "what was it before?" questions that a
+        current-value-only view cannot.
+        """
+        return self._get_store().get_memory_history(
+            memory_id,
+            user_id,
+            thread_id,
+            max_depth=max_depth,
+        )
+
     def get_thread(
         self,
         thread_id: str,
@@ -884,9 +909,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Reconcile a user's facts via the contradiction-aware dedup pass."""
         from .thresholds import get_dedup_pool_size
 
-        return self._get_pipeline().reconcile_memories(
-            user_id, n if n is not None else get_dedup_pool_size(), full_rebuild=True
-        )
+        return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
 
     def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         """Force the processor to run the full pipeline RIGHT NOW for one thread.
@@ -901,7 +924,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         caught and logged as warnings so the per-thread work already
         persisted by the prior steps is not erased. Permanent failures
         (config bugs, auth errors, 4xx Cosmos errors, Python builtins like
-        ``KeyError`` / ``TypeError``) are re-raised — silencing them turns
+        ``KeyError`` / ``TypeError``) are re-raised - silencing them turns
         operational issues into invisible ``WARNING`` lines.
         """
         self._require_cosmos()

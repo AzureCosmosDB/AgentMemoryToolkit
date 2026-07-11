@@ -178,22 +178,10 @@ def test_processor_owner_invalid_uses_default(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_internalized_getters_return_fixed_constants_and_ignore_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEDUP_CONTEXT_VECTOR_ENABLED", "false")
-    monkeypatch.setenv("DEDUP_CONTEXT_TOPK", "7")
+    monkeypatch.setenv("EXTRACTION_BATCH_MAX_TOKENS", "999")
     monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "false")
     monkeypatch.setenv("DEDUP_SIM_HIGH", "0.50")
-    monkeypatch.setenv("DEDUP_SIM_LOW", "0.40")
-    monkeypatch.setenv("DEDUP_CANDIDATE_TOPK", "8")
-    monkeypatch.setenv("DEDUP_RECONCILE_MODE", "full_pool")
-    monkeypatch.setenv("DEDUP_CLUSTER_SIM", "0.10")
-    monkeypatch.setenv("DEDUP_FULL_RECLUSTER_EVERY_N", "4")
 
-    assert thresholds.get_dedup_context_vector_enabled() is True
-    assert thresholds.get_dedup_context_topk() == 10
+    assert thresholds.get_extraction_batch_max_tokens() == 7000
     assert thresholds.get_dedup_vector_enabled() is True
     assert thresholds.get_dedup_sim_high() == 0.97
-    assert thresholds.get_dedup_sim_low() == 0.80
-    assert thresholds.get_dedup_candidate_topk() == 10
-    assert thresholds.get_dedup_reconcile_mode() == "candidate"
-    assert thresholds.get_dedup_cluster_sim() == 0.60
-    assert thresholds.get_dedup_full_recluster_every_n() == 12

@@ -1,5 +1,5 @@
 """
-Multi-Agent Collaboration — Agent Memory Toolkit
+Multi-Agent Collaboration - Agent Memory Toolkit
 
 Demonstrates two agents (planner + researcher) sharing a single Cosmos DB
 thread so each can read the other's contributions via get_thread.
@@ -46,7 +46,7 @@ def print_header(title: str) -> None:
 
 def print_thread(thread: list[dict], label: str = "Thread") -> None:
     """Pretty-print a thread, highlighting agent_id from metadata."""
-    print(f"\n  — {label} ({len(thread)} messages) —")
+    print(f"\n  - {label} ({len(thread)} messages) -")
     for i, msg in enumerate(thread, 1):
         role = msg.get("role", "?")
         agent = msg.get("metadata", {}).get("agent_id", "n/a")
@@ -74,7 +74,7 @@ def step1_user_question(
     mem: CosmosMemoryClient, user_id: str, thread_id: str,
 ) -> None:
     """User asks a complex, multi-part question."""
-    print_header("Step 1 — User posts a complex question")
+    print_header("Step 1 - User posts a complex question")
 
     mem.add_cosmos(
         user_id=user_id,
@@ -94,7 +94,7 @@ def step2_planner_creates_plan(
     mem: CosmosMemoryClient, user_id: str, thread_id: str,
 ) -> None:
     """Planner reads the user question and stores a structured plan."""
-    print_header("Step 2 — Planner reads question & creates plan")
+    print_header("Step 2 - Planner reads question & creates plan")
 
     # Planner retrieves the thread to see the user's question
     thread = mem.get_thread(thread_id=thread_id, user_id=user_id)
@@ -126,7 +126,7 @@ def step3_researcher_performs_research(
     mem: CosmosMemoryClient, user_id: str, thread_id: str,
 ) -> None:
     """Researcher reads the planner's plan, then stores research findings."""
-    print_header("Step 3 — Researcher reads plan & stores findings")
+    print_header("Step 3 - Researcher reads plan & stores findings")
 
     # Researcher reads the full thread to find the plan
     thread = mem.get_thread(thread_id=thread_id, user_id=user_id)
@@ -143,7 +143,7 @@ def step3_researcher_performs_research(
     findings = [
         {
             "content": (
-                "FINDING 1 — Manufacturing: EV battery production emits ~8 tonnes "
+                "FINDING 1 - Manufacturing: EV battery production emits ~8 tonnes "
                 "CO₂ per 60 kWh pack. Fuel-cell stack production is lower per unit "
                 "but hydrogen tanks require energy-intensive carbon-fibre."
             ),
@@ -151,7 +151,7 @@ def step3_researcher_performs_research(
         },
         {
             "content": (
-                "FINDING 2 — Energy source: EVs charged on renewable grids achieve "
+                "FINDING 2 - Energy source: EVs charged on renewable grids achieve "
                 "near-zero operational emissions. Green hydrogen (electrolysis) is "
                 "promising but currently 3× less energy-efficient than direct "
                 "grid-to-battery charging."
@@ -160,7 +160,7 @@ def step3_researcher_performs_research(
         },
         {
             "content": (
-                "FINDING 3 — End-of-life: Li-ion battery recycling recovers ~95% "
+                "FINDING 3 - End-of-life: Li-ion battery recycling recovers ~95% "
                 "of cobalt and nickel via hydrometallurgy. Fuel-cell membranes "
                 "(PEM) contain platinum, which is recoverable but recycling "
                 "infrastructure is nascent."
@@ -185,7 +185,7 @@ def step4_planner_synthesises_answer(
     mem: CosmosMemoryClient, user_id: str, thread_id: str,
 ) -> None:
     """Planner reads the researcher's findings and generates a final answer."""
-    print_header("Step 4 — Planner reads findings & produces final answer")
+    print_header("Step 4 - Planner reads findings & produces final answer")
 
     # Planner retrieves the full thread
     thread = mem.get_thread(thread_id=thread_id, user_id=user_id)
@@ -221,7 +221,7 @@ def step5_review_shared_thread(
     mem: CosmosMemoryClient, user_id: str, thread_id: str,
 ) -> None:
     """Display the complete thread and per-agent filtered views."""
-    print_header("Step 5 — Review the shared thread")
+    print_header("Step 5 - Review the shared thread")
 
     full_thread = mem.get_thread(thread_id=thread_id, user_id=user_id)
     print_thread(full_thread, label="Full shared thread")
@@ -229,8 +229,8 @@ def step5_review_shared_thread(
     # Filtered views
     planner_only = filter_by_agent(full_thread, PLANNER)
     researcher_only = filter_by_agent(full_thread, RESEARCHER)
-    print_thread(planner_only, label=f"Filtered — {PLANNER} only")
-    print_thread(researcher_only, label=f"Filtered — {RESEARCHER} only")
+    print_thread(planner_only, label=f"Filtered - {PLANNER} only")
+    print_thread(researcher_only, label=f"Filtered - {RESEARCHER} only")
 
     turns = mem.get_thread(thread_id=thread_id, user_id=user_id)
     print_thread(turns, label="Thread turns")

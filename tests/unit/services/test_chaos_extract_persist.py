@@ -18,15 +18,7 @@ def _pin_legacy_extract_dedup(monkeypatch):
         lambda: False,
     )
     monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
         "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_vector_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_context_vector_enabled",
         lambda: False,
     )
 

@@ -2,7 +2,7 @@
 
 The underlying :class:`azure.cosmos.agent_memory.aio.services.pipeline.AsyncPipelineService`
 exposes native ``async def`` methods, so every call here is a direct
-``await`` — no ``asyncio.to_thread`` adapter, no sync sub-clients.
+``await`` - no ``asyncio.to_thread`` adapter, no sync sub-clients.
 """
 
 from __future__ import annotations
@@ -112,24 +112,20 @@ class AsyncInProcessProcessor:
         summary = await self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
-    async def process_reconcile(self, *, user_id: str, full_rebuild: bool = False) -> int:
+    async def process_reconcile(self, *, user_id: str) -> int:
         from ...thresholds import get_dedup_pool_size
 
-        return await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size(), full_rebuild=full_rebuild)
+        return await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
 
-    async def _reconcile_fact_and_episodic(self, user_id: str, n: int, *, full_rebuild: bool = False) -> int:
-        """Reconcile facts and episodic memories; sum merged+contradicted counts.
+    async def _reconcile_fact_and_episodic(self, user_id: str, n: int) -> int:
+        """Reconcile facts and episodic memories; sum contradicted counts.
 
         SDK in-process processing reconciles both types (matching the Durable
-        backend) so episodic dups don't accrue forever. ``full_rebuild`` (set by
-        the auto-trigger on its persisted-counter full-recluster cadence) forces
-        the full-pool LLM pass that catches dissimilar-embedding contradictions.
+        backend) so contradictions are resolved for each.
         """
         total = 0
         for memory_type in ("fact", "episodic"):
-            reconciled = await self._pipeline.reconcile_memories(
-                user_id, n=n, memory_type=memory_type, full_rebuild=full_rebuild
-            )
+            reconciled = await self._pipeline.reconcile_memories(user_id, n=n, memory_type=memory_type)
             total += self._extract_reconcile_count(reconciled)
         return total
 
@@ -138,7 +134,7 @@ class AsyncInProcessProcessor:
         """Sum ``merged + contradicted`` from a ``reconcile_memories`` result.
 
         ``ProcessingPipeline.reconcile_memories`` returns a dict with
-        ``{"kept", "merged", "contradicted"}`` — both ``merged`` and
+        ``{"kept", "merged", "contradicted"}`` - both ``merged`` and
         ``contradicted`` represent facts that were consolidated or retired,
         so they contribute to the dedup-count metric.
         """

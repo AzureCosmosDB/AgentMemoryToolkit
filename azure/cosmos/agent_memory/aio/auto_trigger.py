@@ -64,10 +64,6 @@ async def maybe_trigger_steps(
         return
 
     n_dedup_turns = n_facts * n_dedup if n_facts > 0 and n_dedup > 0 else 0
-    # Persisted-counter full-pool backstop cadence (durable-safe, mirrors the
-    # change-feed): every DEDUP_FULL_RECLUSTER_EVERY_N-th reconcile.
-    n_full_recluster = _threshold_int(thresholds, "get_dedup_full_recluster_every_n", "DEDUP_FULL_RECLUSTER_EVERY_N")
-    n_full_turns = n_dedup_turns * n_full_recluster if (n_dedup_turns > 0 and n_full_recluster > 0) else 0
     user_batch_counts = await _trigger_thread_steps(
         processor,
         counter_container,
@@ -75,7 +71,6 @@ async def maybe_trigger_steps(
         n_facts=n_facts,
         n_summary=n_summary,
         n_dedup_turns=n_dedup_turns,
-        n_full_turns=n_full_turns,
         thresholds=thresholds,
     )
     await _trigger_user_steps(processor, counter_container, user_batch_counts, n_user=n_user)
@@ -89,7 +84,6 @@ async def _trigger_thread_steps(
     n_facts: int,
     n_summary: int,
     n_dedup_turns: int,
-    n_full_turns: int,
     thresholds: Any = None,
 ) -> dict[str, int]:
     user_batch_counts: dict[str, int] = {}
@@ -120,32 +114,9 @@ async def _trigger_thread_steps(
             fire_extract=n_facts > 0 and _counters.crosses_threshold(old_count, new_count, n_facts),
             fire_summary=n_summary > 0 and _counters.crosses_threshold(old_count, new_count, n_summary),
             fire_dedup=n_dedup_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_dedup_turns),
-            fire_full_rebuild=n_full_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_full_turns),
             thresholds=thresholds,
         )
     return user_batch_counts
-
-
-async def _watermark_recent_k(
-    counter_container: Any,
-    counter_id: str,
-    user_id: str,
-    thread_id: str,
-    *,
-    new_count: int,
-) -> int:
-    """Async: recent_k covering every turn since the last successful extract.
-
-    Not capped — ``new_count - watermark`` is exactly the unextracted backlog and
-    the newest-``recent_k`` slice covers precisely those turns, so the watermark
-    can advance to ``new_count`` with no stranded turns. **Bootstrap:** with no
-    watermark yet the base is ``0`` (``recent_k = new_count``), so turns added
-    during earlier failed extracts aren't stranded when the watermark first
-    advances to ``new_count``.
-    """
-    watermark = await _counters.read_extract_watermark_async(counter_container, counter_id, user_id, thread_id)
-    base = watermark if watermark is not None else 0
-    return max(new_count - base, 1)
 
 
 async def _fire_thread_steps(
@@ -159,7 +130,6 @@ async def _fire_thread_steps(
     fire_extract: bool,
     fire_summary: bool,
     fire_dedup: bool,
-    fire_full_rebuild: bool = False,
     thresholds: Any = None,
 ) -> None:
     fire_procedural = fire_dedup and bool(
@@ -171,20 +141,8 @@ async def _fire_thread_steps(
         )
     )
     if fire_extract:
-        recent_k = await _watermark_recent_k(
-            counter_container,
-            counter_id,
-            user_id,
-            thread_id,
-            new_count=new_count,
-        )
         try:
-            await _call_async_compatible(
-                processor.process_extract_memories, user_id=user_id, thread_id=thread_id, recent_k=recent_k
-            )
-            await _counters.advance_extract_watermark_async(
-                counter_container, counter_id, user_id, thread_id, new_count
-            )
+            await _call_async_compatible(processor.process_extract_memories, user_id=user_id, thread_id=thread_id)
         except Exception as exc:
             logger.warning("Async auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, exc)
             await _counters.stamp_failure_async(
@@ -195,7 +153,7 @@ async def _fire_thread_steps(
             fire_dedup,
             "process_reconcile",
             processor.process_reconcile,
-            {"user_id": user_id, "full_rebuild": fire_full_rebuild},
+            {"user_id": user_id},
         ),
         (
             fire_procedural,

@@ -246,87 +246,14 @@ def test_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> N
     )
 
 
-def test_extract_memories_dry_stage1_searches_user_turn_text_by_default() -> None:
-    chat = _SyncChat([_response()])
+def test_extract_memories_dry_does_not_call_store_search() -> None:
+    """Extraction is single-pass and existing-memory-free: it must not issue a
+    dedup-context vector search (dedup is handled by hash + reconciliation)."""
     memories_store = _Store([])
-    memories_store.search_results = [
-        {
-            "id": "memory-hybrid",
-            "content": "Existing hybrid memory from search.",
-            "type": "fact",
-            "salience": 0.7,
-        }
-    ]
-    turns = [_turn(1), _turn(2)]
-    turns_store = _Store(turns)
-    service = PipelineService(
-        memories_store,
-        chat,
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    service.extract_memories_dry("u1", "t1")
-
-    assert memories_store.search_calls == [
-        {
-            "search_terms": "\n".join(turn["content"] for turn in turns),
-            "user_id": "u1",
-            "memory_types": ["fact"],
-            "top_k": 10,
-            "include_superseded": False,
-        }
-    ]
-    assert "Existing hybrid memory from search." in json.dumps(chat.messages)
-
-
-def test_extract_memories_dry_stage1_falls_back_to_transcript_without_user_turns() -> None:
-    memories_store = _Store([])
-    turns = [
-        {
-            **_turn(1),
-            "id": "assistant-turn-1",
-            "role": "assistant",
-            "content": "Assistant response with no user-role content.",
-        }
-    ]
+    memories_store.search_results = [{"id": "should-not-appear", "content": "x", "type": "fact"}]
     service = PipelineService(
         memories_store,
         _SyncChat([_response()]),
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=_Store(turns)),
-    )
-
-    service.extract_memories_dry("u1", "t1")
-
-    assert memories_store.search_calls == [
-        {
-            "search_terms": service._build_transcript(turns),
-            "user_id": "u1",
-            "memory_types": ["fact"],
-            "top_k": 10,
-            "include_superseded": False,
-        }
-    ]
-
-
-def test_extract_memories_dry_stage1_legacy_context_does_not_call_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled", lambda: False)
-    chat = _SyncChat([_response()])
-    memories_store = _Store(
-        [
-            {
-                "id": "legacy-memory",
-                "user_id": "u1",
-                "type": "fact",
-                "content": "Existing legacy memory from load.",
-                "salience": 0.6,
-            }
-        ]
-    )
-    service = PipelineService(
-        memories_store,
-        chat,
         _SyncEmbeddings(),
         containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
     )
@@ -334,14 +261,10 @@ def test_extract_memories_dry_stage1_legacy_context_does_not_call_search(monkeyp
     service.extract_memories_dry("u1", "t1")
 
     assert memories_store.search_calls == []
-    assert "Existing legacy memory from load." in json.dumps(chat.messages)
 
 
 @pytest.mark.asyncio
-async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_context_vector_enabled", lambda: False
-    )
+async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
     chat = _AsyncChat([_response()])
     embeddings = _AsyncEmbeddings()
     memories_store = _AsyncStore([])
@@ -362,10 +285,7 @@ async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings(m
 
 
 @pytest.mark.asyncio
-async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_response(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_context_vector_enabled", lambda: False
-    )
+async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> None:
     store = _AsyncStore([])
     turns_store = _AsyncStore([_turn(1)])
     service = AsyncPipelineService(
@@ -384,93 +304,15 @@ async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_res
 
 
 @pytest.mark.asyncio
-async def test_async_extract_memories_dry_stage1_searches_user_turn_text_by_default() -> None:
+async def test_async_extract_memories_dry_does_not_call_store_search() -> None:
     store = _AsyncStore([])
-    store.search = AsyncMock(
-        return_value=[
-            {
-                "id": "fact-1",
-                "content": "The user prefers dark mode.",
-                "type": "fact",
-                "salience": 0.7,
-            }
-        ]
-    )
-    turns_store = _AsyncStore([_turn(1)])
-    service = AsyncPipelineService(
-        store,
-        _AsyncChat([_response()]),
-        _AsyncEmbeddings(),
-        containers=_async_containers_for_store(store, turns_store=turns_store),
-    )
-    service._vector_candidates = AsyncMock(return_value=[])
-    turns = [_turn(1)]
 
-    await service.extract_memories_dry("u1", "t1")
-
-    store.search.assert_awaited_once_with(
-        search_terms="\n".join(turn["content"] for turn in turns),
-        user_id="u1",
-        memory_types=["fact"],
-        top_k=10,
-    )
-    service._vector_candidates.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_async_extract_memories_dry_stage1_falls_back_to_transcript_without_user_turns() -> None:
-    store = _AsyncStore([])
     store.search = AsyncMock(return_value=[])
-    turns = [
-        {
-            **_turn(1),
-            "id": "assistant-turn-1",
-            "role": "assistant",
-            "content": "Assistant response with no user-role content.",
-        }
-    ]
-    turns_store = _AsyncStore(turns)
     service = AsyncPipelineService(
         store,
         _AsyncChat([_response()]),
         _AsyncEmbeddings(),
-        containers=_async_containers_for_store(store, turns_store=turns_store),
-    )
-    transcript = service._build_transcript(turns)
-
-    await service.extract_memories_dry("u1", "t1")
-
-    store.search.assert_awaited_once_with(
-        search_terms=transcript,
-        user_id="u1",
-        memory_types=["fact"],
-        top_k=10,
-    )
-
-
-@pytest.mark.asyncio
-async def test_async_extract_memories_dry_stage1_legacy_path_when_context_vector_unset(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_context_vector_enabled", lambda: False
-    )
-    store = _AsyncStore(
-        [
-            {
-                "id": "fact-1",
-                "user_id": "u1",
-                "type": "fact",
-                "content": "Existing fact.",
-                "content_hash": "hash-1",
-            }
-        ]
-    )
-    store.search = AsyncMock(return_value=[])
-    turns_store = _AsyncStore([_turn(1)])
-    service = AsyncPipelineService(
-        store,
-        _AsyncChat([_response()]),
-        _AsyncEmbeddings(),
-        containers=_async_containers_for_store(store, turns_store=turns_store),
+        containers=_async_containers_for_store(store, turns_store=_AsyncStore([_turn(1)])),
     )
 
     await service.extract_memories_dry("u1", "t1")
@@ -478,78 +320,99 @@ async def test_async_extract_memories_dry_stage1_legacy_path_when_context_vector
     store.search.assert_not_awaited()
 
 
-def test_extract_memories_dry_stage1_search_failure_falls_back_to_hash_memories() -> None:
-    """A failing dedup-context vector search must not abort extraction; it
-    falls back to the hash-loaded existing memories (option 3 resilience)."""
-    chat = _SyncChat([_response()])
-    memories_store = _Store(
-        [
+class _BatchChat:
+    """Returns a unique fact per call; optionally raises on a chosen call index."""
+
+    def __init__(self, fail_on_call=None, error=None):
+        self.calls = 0
+        self.fail_on_call = fail_on_call
+        self.error = error
+
+    def generate(self, messages, **opts):
+        del messages, opts
+        self.calls += 1
+        if self.fail_on_call and self.calls == self.fail_on_call:
+            raise self.error
+        return json.dumps(
             {
-                "id": "hash-memory",
-                "user_id": "u1",
-                "type": "fact",
-                "content": "Existing hash-based memory from load.",
-                "content_hash": "h1",
-                "salience": 0.6,
+                "facts": [
+                    {
+                        "text": f"Fact from call {self.calls}.",
+                        "category": "other",
+                        "confidence": 0.9,
+                        "salience": 0.8,
+                        "temporal_context": None,
+                        "tags": [],
+                    }
+                ],
+                "episodic": [],
             }
-        ]
-    )
+        )
 
-    def _boom(**_kwargs):
-        raise RuntimeError("vector search down")
 
-    memories_store.search = _boom
+def _one_turn_per_batch(monkeypatch):
+    # Force each small turn into its own extraction batch.
+    monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_extraction_batch_max_tokens", lambda: 5)
+
+
+def test_extract_batches_run_independently_one_call_per_batch(monkeypatch) -> None:
+    _one_turn_per_batch(monkeypatch)
+    chat = _BatchChat()
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(3)])
     service = PipelineService(
         memories_store,
         chat,
         _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    # Must not raise despite the Stage-1 vector search failing.
-    output = service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_dry("u1", "t1")
 
-    assert output["facts"]  # extraction proceeded
-    # Fallback surfaced the hash-loaded memory into the extraction prompt.
-    assert "Existing hash-based memory from load." in json.dumps(chat.messages)
+    assert chat.calls == 3  # one LLM call per batch
+    assert len(out["facts"]) == 3
+    assert len(out["processed_turn_docs"]) == 3
 
 
-@pytest.mark.asyncio
-async def test_async_extract_memories_dry_stage1_search_failure_falls_back_to_hash_memories() -> None:
-    class _RecordingAsyncChat(_AsyncChat):
-        def __init__(self, responses):
-            super().__init__(responses)
-            self.messages: list = []
-
-        async def generate(self, messages, **opts):
-            self.messages.append(messages)
-            del opts
-            self.calls += 1
-            return json.dumps(self.responses.pop(0))
-
-    chat = _RecordingAsyncChat([_response()])
-    store = _AsyncStore(
-        [
-            {
-                "id": "hash-memory",
-                "user_id": "u1",
-                "type": "fact",
-                "content": "Existing hash-based memory from load.",
-                "content_hash": "h1",
-                "salience": 0.6,
-            }
-        ]
-    )
-    store.search = AsyncMock(side_effect=RuntimeError("vector search down"))
-    service = AsyncPipelineService(
-        store,
+def test_extract_quarantines_non_retryable_batch_but_keeps_others(monkeypatch) -> None:
+    _one_turn_per_batch(monkeypatch)
+    chat = _BatchChat(fail_on_call=2, error=Exception("Error code: 400 content_filter"))
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(3)])
+    service = PipelineService(
+        memories_store,
         chat,
-        _AsyncEmbeddings(),
-        containers=_async_containers_for_store(store, turns_store=_AsyncStore([_turn(1)])),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    output = await service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_dry("u1", "t1")
 
-    assert output["facts"]  # extraction proceeded
-    store.search.assert_awaited_once()
-    assert "Existing hash-based memory from load." in json.dumps(chat.messages)
+    # Batches 1 and 3 produced facts; batch 2 was quarantined (no fact) ...
+    assert len(out["facts"]) == 2
+    # ... but ALL 3 turns are stamped (quarantined turn included) so it never re-poisons.
+    assert len(out["processed_turn_docs"]) == 3
+    stats = [u for u in out["updates"] if u.get("op") == "stats" and "quarantined_turn_count" in u]
+    assert stats and stats[0]["quarantined_turn_count"] == 1
+
+
+def test_extract_defers_retryable_batch_leaving_turns_unstamped(monkeypatch) -> None:
+    _one_turn_per_batch(monkeypatch)
+    chat = _BatchChat(fail_on_call=2, error=Exception("Error code: 429 rate limit"))
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(3)])
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    out = service.extract_memories_dry("u1", "t1")
+
+    # Batches 1 and 3 produced facts; batch 2 deferred (retryable) ...
+    assert len(out["facts"]) == 2
+    # ... its turn is NOT in processed_turn_docs, so it stays un-extracted and retries.
+    assert len(out["processed_turn_docs"]) == 2
+    stats = [u for u in out["updates"] if u.get("op") == "stats" and "deferred_turn_count" in u]
+    assert stats and stats[0]["deferred_turn_count"] == 1

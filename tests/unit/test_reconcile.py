@@ -31,17 +31,10 @@ from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 @pytest.fixture(autouse=True)
 def _pin_legacy_dedup_paths(monkeypatch):
-    """These tests cover the pre-candidate reconcile/extract code paths."""
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_reconcile_mode",
-        lambda: "full_pool",
-    )
+    """Disable write-time in-place folding so the extract-path tests here
+    exercise the plain ADD path deterministically."""
     monkeypatch.setattr(
         "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_context_vector_enabled",
         lambda: False,
     )
 
@@ -157,143 +150,6 @@ class TestReconcileMemories:
         with pytest.raises(ValidationError, match="<= 500"):
             p.reconcile_memories("u1", n=501)
 
-    def test_merge_falls_back_to_max_source_confidence_salience_when_llm_omits(self):
-        """If the LLM omits or zero-fills confidence/salience on a duplicate
-        group, the merged record must inherit max(source_*) so it doesn't
-        silently drop below ``min_confidence`` / ``min_salience`` filters."""
-        p = _make_pipeline()
-        facts = [
-            _fact("f1", "User likes aisle seats", confidence=0.92, salience=0.7),
-            _fact("f2", "User prefers aisle seats on flights", confidence=0.85, salience=0.65),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User prefers aisle seats",
-                            "source_ids": ["f1", "f2"],
-                            # confidence/salience deliberately omitted
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.return_value = [0.0]
-        p.reconcile_memories("u1")
-        merged_doc = p._upsert_memory.call_args.args[0]
-        assert merged_doc["confidence"] == 0.92  # max of 0.92, 0.85
-        assert merged_doc["salience"] == 0.7  # max of 0.7, 0.65
-
-    def test_merge_treats_zero_confidence_as_omitted(self):
-        """gpt-4o-mini sometimes echoes the literal placeholder. A zero
-        confidence/salience on the LLM output must trigger the same
-        max(source_*) fallback as omission."""
-        p = _make_pipeline()
-        facts = [
-            _fact("f1", "User likes coffee", confidence=0.9, salience=0.8),
-            _fact("f2", "User loves coffee in the mornings", confidence=0.95, salience=0.85),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User loves coffee in the mornings",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.0,
-                            "salience": 0.0,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.return_value = [0.0]
-        p.reconcile_memories("u1")
-        merged_doc = p._upsert_memory.call_args.args[0]
-        assert merged_doc["confidence"] == 0.95
-        assert merged_doc["salience"] == 0.85
-
-    def test_merged_doc_thread_id_picked_from_newest_source_by_ts(self):
-        """Merged record's thread_id (partition key) must come from the
-        source with the highest Cosmos ``_ts``, independent of the order
-        the LLM lists ``source_ids`` in."""
-        p = _make_pipeline()
-        # f-old has lower _ts; f-new has higher. LLM lists them in the
-        # "wrong" order (old first) — pipeline must still pick f-new's
-        # thread_id for the merged doc.
-        f_old = _fact("f-old", "User likes coffee", thread_id="thread-old")
-        f_old["_ts"] = 100
-        f_new = _fact("f-new", "User loves coffee", thread_id="thread-new")
-        f_new["_ts"] = 999
-        p._container.query_items.return_value = iter([f_new, f_old])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User loves coffee",
-                            "source_ids": ["f-old", "f-new"],
-                            "confidence": 0.9,
-                            "salience": 0.7,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.return_value = [0.0]
-        p.reconcile_memories("u1")
-        merged_doc = p._upsert_memory.call_args.args[0]
-        assert merged_doc["thread_id"] == "thread-new"
-
-    def test_synthetic_partition_is_user_scoped_when_no_thread_id(self):
-        """If every source somehow lacks a thread_id, the synthetic
-        fallback must be scoped per-user to avoid cross-tenant collisions."""
-        p = _make_pipeline()
-        f1 = _fact("f1", "alpha", thread_id="")
-        f2 = _fact("f2", "alpha-restated", thread_id="")
-        p._container.query_items.return_value = iter([f1, f2])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "alpha",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.9,
-                            "salience": 0.7,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.return_value = [0.0]
-        p.reconcile_memories("user-abc")
-        merged_doc = p._upsert_memory.call_args.args[0]
-        assert merged_doc["thread_id"] == "__reconciled__:user-abc"
-
     def test_empty_pool(self):
         p = _make_pipeline()
         p._container.query_items.return_value = iter([])
@@ -309,43 +165,6 @@ class TestReconcileMemories:
         result = p.reconcile_memories("u1")
         assert result == {"kept": 1, "merged": 0, "contradicted": 0}
         p._run_prompty.assert_not_called()
-
-    def test_only_duplicates(self):
-        p = _make_pipeline()
-        facts = [
-            _fact("f1", "User prefers aisle seats on flights"),
-            _fact("f2", "User likes aisle seats when flying"),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User prefers aisle seats on flights",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.95,
-                            "salience": 0.7,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-
-        result = p.reconcile_memories("u1")
-
-        assert result == {"kept": 0, "merged": 2, "contradicted": 0}
-        # merged doc upserted
-        assert p._upsert_memory.call_count == 1
-        merged_doc = p._upsert_memory.call_args.args[0]
-        assert merged_doc["content"] == "User prefers aisle seats on flights"
-        assert "f1" in merged_doc["supersedes_ids"] and "f2" in merged_doc["supersedes_ids"]
-        # both sources marked superseded with reason=duplicate
-        assert p._mark_superseded.call_count == 2
-        for call in p._mark_superseded.call_args_list:
-            assert call.kwargs["reason"] == "duplicate"
 
     def test_only_contradictions(self):
         p = _make_pipeline()
@@ -374,104 +193,6 @@ class TestReconcileMemories:
         assert call.args[0]["id"] == "f1"
         assert call.args[1] == "f2"
         assert call.kwargs["reason"] == "contradict"
-
-    def test_mixed_pool_with_dangling_resolution(self):
-        """Loser of a contradiction is also a duplicate source.
-
-        Pipeline must redirect the contradiction's ``loser_id`` through
-        ``source_to_merged_id`` and supersede the *merged* doc, not the
-        original (already-merged) source.
-        """
-        p = _make_pipeline()
-        facts = [
-            _fact("f1", "User prefers aisle seats on flights"),
-            _fact("f2", "User likes aisle seats when flying"),
-            _fact("f3", "User loves the window seat"),
-        ]
-        p._container.query_items.return_value = iter(facts)
-
-        # The dangling-loser redirect resolves through the in-memory
-        # ``merged_docs_by_id`` cache populated when the merged doc is
-        # upserted — no second Cosmos query is issued. The upsert
-        # response carries the ``_etag`` that flows through the cache.
-        def upsert(doc):
-            snap = dict(doc)
-            snap["_etag"] = "merged-etag"
-            return snap
-
-        p._upsert_memory.side_effect = upsert
-
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User prefers aisle seats on flights",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.95,
-                            "salience": 0.7,
-                        }
-                    ],
-                    "contradicted_pairs": [
-                        # Loser f2 was just merged into the merged doc;
-                        # winner f3 must contradict the *merged* doc.
-                        {"winner_id": "f3", "loser_id": "f2", "reason": "contradicts merged"}
-                    ],
-                    "kept_ids": ["f3"],
-                }
-            )
-        )
-
-        result = p.reconcile_memories("u1")
-
-        assert result["merged"] == 2  # f1, f2 marked dup
-        assert result["contradicted"] == 1  # merged doc marked contradiction
-        # mark_superseded calls: f1 (dup), f2 (dup), then merged doc (contradiction)
-        assert p._mark_superseded.call_count == 3
-        last = p._mark_superseded.call_args_list[-1]
-        # The third call should target the merged doc (fetched via resolver)
-        # and use the merged record's id as the new winner id only if winner
-        # also collapsed; here winner=f3 stays as-is.
-        assert last.kwargs["reason"] == "contradict"
-        # winner remains f3 (was not in any dup group)
-        assert last.args[1] == "f3"
-
-    def test_dangling_collapses_to_no_op(self):
-        """Both winner and loser absorbed into the same merged group → skip."""
-        p = _make_pipeline()
-        facts = [
-            _fact("f1", "User likes coffee"),
-            _fact("f2", "User likes coffee in the morning"),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User likes coffee in the morning",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.9,
-                            "salience": 0.6,
-                        }
-                    ],
-                    "contradicted_pairs": [
-                        # Both f1 and f2 collapse to the same merged id → skip
-                        {"winner_id": "f1", "loser_id": "f2", "reason": "irrelevant"}
-                    ],
-                    "kept_ids": [],
-                }
-            )
-        )
-
-        result = p.reconcile_memories("u1")
-
-        assert result["merged"] == 2
-        assert result["contradicted"] == 0
-        # No contradiction supersede call beyond the two duplicate marks
-        assert p._mark_superseded.call_count == 2
-        for call in p._mark_superseded.call_args_list:
-            assert call.kwargs["reason"] == "duplicate"
 
     def test_n_cap_honored(self):
         """Custom ``n`` is interpolated into the SQL query's TOP clause."""
@@ -618,7 +339,7 @@ class TestExactDedupCrossTypeIsolation:
     def test_fact_not_dropped_when_only_procedural_has_same_hash(self):
         p = self._build()
         text = "Always reply in Spanish"
-        # Existing PROCEDURAL with that text — must NOT poison the FACT bucket.
+        # Existing PROCEDURAL with that text - must NOT poison the FACT bucket.
         existing = [
             {
                 "id": "proc_existing",
@@ -690,52 +411,9 @@ class TestExtractEarlyReturnShape:
             assert out[key] == 0
 
 
-class TestReconcileEmbeddingFailureAborts:
-    """If embedding generation fails for the merged content, the duplicate
-    group must be aborted entirely — no upsert, no supersede — so we don't
-    create a search-index hole."""
-
-    def test_embedding_failure_skips_upsert_and_supersede(self):
-        p = PipelineService.__new__(PipelineService)
-        p._container = MagicMock()
-        p._memories_container = p._container
-        p._turns_container = p._container
-        p._summaries_container = p._container
-        facts = [
-            _fact("f1", "alpha"),
-            _fact("f2", "alpha-restated"),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "alpha (consolidated)",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.9,
-                            "salience": 0.7,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.side_effect = RuntimeError("rate limit")
-        result = p.reconcile_memories("u1")
-        # Embedding failed → abort: nothing upserted, nothing superseded.
-        p._upsert_memory.assert_not_called()
-        p._mark_superseded.assert_not_called()
-        assert result == {"kept": 2, "merged": 0, "contradicted": 0}
-
-
 class TestReconcileSupersedeRaceCounting:
     """When ``_mark_superseded`` returns False (lost ETag race), the source
-    must NOT be added to ``source_to_merged_id`` or counted as consumed —
+    must NOT be added to ``source_to_merged_id`` or counted as consumed -
     otherwise contradictions get redirected to a doc that doesn't claim
     the source, and ``kept`` undercounts."""
 
@@ -778,7 +456,7 @@ class TestReconcileSupersedeRaceCounting:
 
 
 class TestReconcileWinnerValidation:
-    """Hallucinated ``winner_id`` must be refused — never write a dangling
+    """Hallucinated ``winner_id`` must be refused - never write a dangling
     ``superseded_by`` that breaks the audit trail."""
 
     def test_hallucinated_winner_id_skipped(self):
@@ -815,89 +493,6 @@ class TestReconcileWinnerValidation:
         p._mark_superseded.assert_not_called()
         assert result == {"kept": 2, "merged": 0, "contradicted": 0}
 
-    def test_resolved_winner_via_merge_redirect_is_accepted(self):
-        """If winner_id refers to a fact that was just absorbed into a
-        duplicate group, the merged_id must satisfy the validation."""
-        p = PipelineService.__new__(PipelineService)
-        p._container = MagicMock()
-        p._memories_container = p._container
-        p._turns_container = p._container
-        p._summaries_container = p._container
-        facts = [
-            _fact("f1", "alpha"),
-            _fact("f2", "alpha-paraphrased"),
-            _fact("f3", "contradicts alpha"),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "alpha (consolidated)",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 0.9,
-                            "salience": 0.7,
-                        }
-                    ],
-                    "contradicted_pairs": [
-                        # winner_id=f1 was absorbed into the merged group;
-                        # redirect must resolve and validate cleanly.
-                        {"winner_id": "f1", "loser_id": "f3", "reason": "x"},
-                    ],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.return_value = [0.0]
-        result = p.reconcile_memories("u1")
-        assert result["contradicted"] == 1
-
-
-class TestReconcileBoolNotNumeric:
-    """``True`` and ``False`` are instances of ``int`` in Python — they must
-    NOT be treated as numeric LLM-supplied confidence/salience."""
-
-    def test_bool_confidence_falls_back_to_max_source(self):
-        p = PipelineService.__new__(PipelineService)
-        p._container = MagicMock()
-        p._memories_container = p._container
-        p._turns_container = p._container
-        p._summaries_container = p._container
-        facts = [
-            _fact("f1", "alpha", confidence=0.7, salience=0.5),
-            _fact("f2", "alpha-restated", confidence=0.85, salience=0.6),
-        ]
-        p._container.query_items.return_value = iter(facts)
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "alpha",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": True,  # JSON boolean — must be ignored
-                            "salience": False,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p._upsert_memory = MagicMock()
-        p._mark_superseded = MagicMock(return_value=True)
-        p._embeddings = MagicMock()
-        p._embeddings.generate.return_value = [0.0]
-        p.reconcile_memories("u1")
-        merged_doc = p._upsert_memory.call_args.args[0]
-        # NOT 1.0 (True coerced) and NOT 0.0 (False coerced); fallback to max source.
-        assert merged_doc["confidence"] == 0.85
-        assert merged_doc["salience"] == 0.6
-
 
 class TestReconcileFactsTextEscapesContent:
     """Content with ``"`` or ``|`` must not break the prompt grammar."""
@@ -924,7 +519,7 @@ class TestReconcileFactsTextEscapesContent:
         p._mark_superseded = MagicMock(return_value=True)
         p._embeddings = MagicMock()
         p.reconcile_memories("u1")
-        # The embedded `"` must be escaped (\\") — not raw — and the
+        # The embedded `"` must be escaped (\\") - not raw - and the
         # Content: field must remain JSON-quoted so the LLM can parse it
         # as a single string even though the original text contained ``|``.
         text = captured["facts_text"]
@@ -964,183 +559,8 @@ class TestDedupPoolSizeThreshold:
         assert get_dedup_pool_size() == DEFAULT_DEDUP_POOL_SIZE
 
 
-class TestReconcileMergedIdDeterministic:
-    """RD#1: merged_id is deterministic on (user, content_hash) so cycles are idempotent."""
-
-    def test_same_merged_content_yields_same_id_across_runs(self):
-        import hashlib
-
-        p = _make_pipeline()
-        upserts: list[dict] = []
-        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
-        p._mark_superseded = MagicMock(return_value=True)
-        p._container.query_items.return_value = iter(
-            [_fact("a1", "User likes coffee"), _fact("a2", "User enjoys coffee")]
-        )
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User likes coffee",
-                            "source_ids": ["a1", "a2"],
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p.reconcile_memories("u1")
-        first_id = upserts[0]["id"]
-        # Predict id from public formula:
-        ch = compute_content_hash("User likes coffee")
-        from azure.cosmos.agent_memory.services.pipeline import _ID_SEED_SEP
-
-        seed = _ID_SEED_SEP.join(("u1", "merged", ch))
-        expected = "fact_" + hashlib.sha256(seed.encode()).hexdigest()[:32]
-        assert first_id == expected
-        # Second run: different source ids, identical canonical merged
-        # content → identical merged id (idempotent upsert).
-        upserts.clear()
-        p._container.query_items.return_value = iter(
-            [_fact("b1", "User likes coffee"), _fact("b2", "user LIKES coffee")]
-        )
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User likes coffee",
-                            "source_ids": ["b1", "b2"],
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p.reconcile_memories("u1")
-        assert upserts[0]["id"] == first_id
-
-
-class TestReconcileSupersedesIdsFiltered:
-    """RD#4: hallucinated source_ids are scrubbed from supersedes_ids."""
-
-    def test_hallucinated_source_ids_filtered(self):
-        p = _make_pipeline()
-        upserts: list[dict] = []
-        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
-        p._mark_superseded = MagicMock(return_value=True)
-        p._container.query_items.return_value = iter([_fact("real1", "X"), _fact("real2", "Y")])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "X and Y",
-                            "source_ids": ["real1", "real2", "ghost_id_404"],
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p.reconcile_memories("u1")
-        assert upserts, "merged doc should have been upserted"
-        assert "ghost_id_404" not in upserts[0]["supersedes_ids"]
-        assert set(upserts[0]["supersedes_ids"]) == {"real1", "real2"}
-
-
-class TestReconcileTransitiveSupersedes:
-    """RD#1 follow-on: prior chain hops survive into the new merged record."""
-
-    def test_prior_supersedes_ids_preserved_in_chain(self):
-        p = _make_pipeline()
-        upserts: list[dict] = []
-        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
-        p._mark_superseded = MagicMock(return_value=True)
-        # f1 was itself a previously-merged record carrying its own provenance.
-        f1 = _fact("f1", "X v1")
-        f1["supersedes_ids"] = ["older_a", "older_b"]
-        f2 = _fact("f2", "X v2")
-        p._container.query_items.return_value = iter([f1, f2])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [{"merged_content": "X canonical", "source_ids": ["f1", "f2"]}],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p.reconcile_memories("u1")
-        sup = upserts[0]["supersedes_ids"]
-        assert "f1" in sup and "f2" in sup
-        assert "older_a" in sup and "older_b" in sup
-
-
-class TestReconcileMergedMetadata:
-    """RD#3: merged docs carry a positive merged_via signal."""
-
-    def test_merged_doc_has_metadata(self):
-        p = _make_pipeline()
-        upserts: list[dict] = []
-        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
-        p._mark_superseded = MagicMock(return_value=True)
-        p._container.query_items.return_value = iter([_fact("x1", "A"), _fact("x2", "B")])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [{"merged_content": "A and B", "source_ids": ["x1", "x2"]}],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        p.reconcile_memories("u1")
-        meta = upserts[0].get("metadata") or {}
-        assert meta.get("merged_via") == "reconcile"
-        assert meta.get("merged_from_count") == 2
-
-
-class TestReconcileNoOrphanDeleteOnRace:
-    """When ALL supersede attempts lose the ETag race, the merged doc must
-    NOT be deleted: deleting it would orphan any sources whose
-    ``superseded_by`` was already pointed at this deterministic merged id
-    by the concurrent-reconcile winner — those sources would become
-    invisible to default reads (filter ``superseded_by IS NULL``) and to
-    the reconcile pool, causing permanent data loss. The merged doc is
-    idempotent (deterministic id) so leaving it in place is consistent."""
-
-    def test_orphan_merged_doc_is_not_deleted_when_no_supersede_succeeds(self):
-        p = _make_pipeline()
-        p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
-        # Every supersede attempt loses the race → without the fix, the
-        # merged doc would be hard-deleted. With the fix, the merged doc
-        # stays as-is and the loss path is logged at INFO.
-        p._mark_superseded = MagicMock(return_value=False)
-        p._container.query_items.return_value = iter([_fact("o1", "A"), _fact("o2", "B")])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [{"merged_content": "A&B", "source_ids": ["o1", "o2"]}],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        result = p.reconcile_memories("u1")
-        # delete_item must NOT be called — orphan-delete path was the
-        # data-loss bug fixed in this round.
-        assert not p._container.delete_item.called
-        # No facts merged (no supersede succeeded).
-        assert result["merged"] == 0
-
-
 class TestReconcileContradictionWinnerNotInKeptIds:
-    """RD#5+#13: contradiction winners are absent from kept_ids — must NOT trigger warning."""
+    """RD#5+#13: contradiction winners are absent from kept_ids - must NOT trigger warning."""
 
     def test_clean_contradiction_does_not_warn_about_kept_mismatch(self, caplog):
         import logging
@@ -1180,132 +600,6 @@ class TestReconcileNullCheckUsesIsNull:
         assert "c.superseded_by = null" not in sql
 
 
-class TestReconcileClampsConfidenceAndSalience:
-    """LLM emitting values outside (0, 1] (e.g. 1.05 from a model that
-    confused percent with [0,1]) must NOT propagate to MemoryRecord — the
-    Pydantic validator would reject and the blanket except in reconcile
-    would silently drop the entire merge group. Out-of-range values must
-    fall back to ``max(source.*)``."""
-
-    def test_out_of_range_confidence_falls_back_to_source_max(self):
-        p = _make_pipeline()
-        upserts: list[dict] = []
-        p._upsert_memory = MagicMock(side_effect=lambda doc: upserts.append(doc) or doc)
-        p._container.query_items.return_value = iter(
-            [
-                _fact("f1", "User likes coffee", confidence=0.7, salience=0.6),
-                _fact("f2", "User enjoys coffee", confidence=0.85, salience=0.8),
-            ]
-        )
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {
-                            "merged_content": "User likes coffee",
-                            "source_ids": ["f1", "f2"],
-                            "confidence": 1.05,
-                            "salience": 1.5,
-                        }
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": [],
-                }
-            )
-        )
-        result = p.reconcile_memories("u1")
-        assert result["merged"] == 2
-        assert len(upserts) == 1
-        assert upserts[0]["confidence"] == pytest.approx(0.85)
-        assert upserts[0]["salience"] == pytest.approx(0.8)
-
-
-class TestReconcileEtagFlowsThroughMergedDocCache:
-    """``_upsert_memory`` must return the response (which carries the
-    fresh ``_etag``) so the in-memory ``merged_docs_by_id`` cache can
-    feed it into a downstream supersede on the contradiction-redirect
-    path. Without it, ``_mark_superseded`` falls through to
-    ``upsert_item`` with no concurrency protection.
-
-    This test exercises the full path: a duplicate group folds f1 + f2
-    into a fresh merged doc M, then a contradiction names f2 as the
-    loser. The pipeline must redirect the contradiction to M and call
-    ``_mark_superseded(M, ...)`` with M carrying the etag returned from
-    the upsert.
-    """
-
-    def test_supersede_on_merged_doc_receives_doc_with_etag(self):
-        p = _make_pipeline()
-
-        def upsert_response(doc):
-            response = dict(doc)
-            response["_etag"] = "etag-from-cosmos"
-            return response
-
-        p._upsert_memory = MagicMock(side_effect=upsert_response)
-        p._mark_superseded = MagicMock(return_value=True)
-        p._container.query_items.return_value = iter(
-            [
-                _fact("f1", "User likes tea"),
-                _fact("f2", "User enjoys tea"),
-                _fact("f3", "User hates all hot drinks"),
-            ]
-        )
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [{"merged_content": "User likes tea", "source_ids": ["f1", "f2"]}],
-                    "contradicted_pairs": [{"winner_id": "f3", "loser_id": "f2", "reason": "contradicts merged"}],
-                    "kept_ids": ["f3"],
-                }
-            )
-        )
-        p.reconcile_memories("u1")
-
-        # The third call to _mark_superseded targets the merged doc
-        # (loser f2 was redirected through merged_docs_by_id). That
-        # doc must carry the _etag returned by _upsert_memory — proving
-        # the response actually flowed through the cache and not just
-        # the locally-built dict.
-        assert p._mark_superseded.call_count == 3
-        contradiction_call = p._mark_superseded.call_args_list[-1]
-        merged_doc_passed = contradiction_call.args[0]
-        assert merged_doc_passed.get("_etag") == "etag-from-cosmos"
-
-
-class TestReconcileSkipsSingleSourceDuplicateGroup:
-    """A `duplicate_group` with only one valid `source_id` is a no-op
-    masquerading as a merge — it would supersede a single fact with a
-    near-identical clone (extra row, no signal) and could redirect a
-    later contradiction's loser_id onto a merged doc that represents
-    nothing real. Skip such groups."""
-
-    def test_single_source_duplicate_group_does_not_create_merged_doc(self):
-        p = _make_pipeline()
-        p._upsert_memory = MagicMock(side_effect=lambda d: dict(d, _etag="e"))
-        p._mark_superseded = MagicMock(return_value=True)
-        p._container.query_items.return_value = iter([_fact("f1", "User likes tea"), _fact("f2", "User likes coffee")])
-        p._run_prompty = MagicMock(
-            return_value=json.dumps(
-                {
-                    "duplicate_groups": [
-                        {"merged_content": "User likes tea", "source_ids": ["f1"]},
-                    ],
-                    "contradicted_pairs": [],
-                    "kept_ids": ["f1", "f2"],
-                }
-            )
-        )
-
-        out = p.reconcile_memories("u1")
-
-        # No merged record created; no source superseded as a duplicate.
-        merged_upserts = [c for c in p._upsert_memory.call_args_list if c.args[0].get("type") == "fact"]
-        assert merged_upserts == []
-        assert p._mark_superseded.call_count == 0
-        assert out["merged"] == 0
-
-
 class TestFactsTextHandlesNullConfidence:
     """Pool facts with ``confidence=None`` / ``salience=None`` (legacy
     docs from before these fields existed) must render as ``N/A`` in the
@@ -1342,7 +636,7 @@ class TestFactsTextHandlesNullConfidence:
 class TestExtractUpdateSelfCollapseGuard:
     """Procedural synthesis self-collapse guard: when synthesis would emit a
     proc id identical to the existing one, treat as a no-op. (Fact extract-time
-    UPDATE was removed — facts/contradictions are reconciled, not extract-tagged.)"""
+    UPDATE was removed - facts/contradictions are reconciled, not extract-tagged.)"""
 
     def _build(self) -> PipelineService:
         p = PipelineService.__new__(PipelineService)

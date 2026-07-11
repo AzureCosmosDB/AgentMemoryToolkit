@@ -10,10 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-from azure.cosmos.agent_memory import _counters
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.processors import DurableFunctionProcessor, InProcessProcessor
 
@@ -85,7 +83,7 @@ def test_push_to_cosmos_fires_inprocess_trigger_per_turn(monkeypatch):
         client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
         client.push_to_cosmos()
 
-    pipeline.extract_memories.assert_called_once_with("u1", "t1", recent_k=1)
+    pipeline.extract_memories.assert_called_once_with("u1", "t1", recent_k=None)
 
 
 def test_push_to_cosmos_durable_does_not_fire_trigger(monkeypatch):
@@ -156,7 +154,7 @@ def test_push_to_cosmos_skips_when_counter_container_unavailable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Per-step trigger gating — each *_EVERY_N fires its own pipeline step
+# Per-step trigger gating - each *_EVERY_N fires its own pipeline step
 # independently. The InProcess backend mirrors the function-app
 # split-orchestrator behavior so the two backends produce the same memory
 # contents for the same chat history.
@@ -185,38 +183,15 @@ class TestPerStepAutoTrigger:
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
             client.push_to_cosmos()
 
-        processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1", recent_k=1)
+        processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1")
         processor.process_thread_summary.assert_not_called()
         processor.process_user_summary.assert_not_called()
 
-    @pytest.mark.parametrize(
-        ("n_facts", "batch_count", "counter_result", "watermark", "expected_recent_k"),
-        [
-            (1, 1, (0, 1), None, 1),
-            (1, 3, (0, 3), None, 3),
-            (5, 1, (4, 5), None, 5),
-            (1, 1, (5, 10), 5, 5),
-            # Large backlog is NOT capped: recent_k spans every turn since the
-            # watermark (newest-recent_k slice covers exactly those), so the
-            # watermark can advance to new_count with no stranded turns.
-            (1, 1, (98, 100), 0, 100),
-            # BOOTSTRAP regression: no watermark yet but the counter is already
-            # ahead of this batch (earlier extracts failed). base=0 so recent_k =
-            # new_count (30) covers ALL turns — the old fallback max(n_facts,
-            # batch_count) would return 2 and strand turns 1-28 forever.
-            (1, 2, (20, 30), None, 30),
-        ],
-    )
-    def test_extract_recent_k_uses_watermark_then_falls_back(
-        self,
-        monkeypatch,
-        n_facts,
-        batch_count,
-        counter_result,
-        watermark,
-        expected_recent_k,
-    ):
-        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", str(n_facts))
+    def test_extract_fires_without_recent_k_or_watermark(self, monkeypatch):
+        """Extraction now covers all un-extracted turns (gated per-turn by
+        extracted_at) and batches internally, so the auto-trigger fires it with
+        NO recent_k and tracks NO success-gated watermark."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
@@ -226,74 +201,19 @@ class TestPerStepAutoTrigger:
         client = _connected(processor=processor)
         client._counter_container_client = MagicMock()
 
-        with (
-            patch(
-                "azure.cosmos.agent_memory._counters.increment_counter_sync",
-                return_value=counter_result,
-            ),
-            patch(
-                "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
-                return_value=watermark,
-            ),
-            patch(
-                "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
-            ) as advance,
+        with patch(
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
+            return_value=(0, 1),
         ):
-            for i in range(batch_count):
-                client.add_local(user_id="u1", role="user", thread_id="t1", content=f"hi {i}")
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
             client.push_to_cosmos()
 
-        processor.process_extract_memories.assert_called_once_with(
-            user_id="u1",
-            thread_id="t1",
-            recent_k=expected_recent_k,
-        )
-        advance.assert_called_once()
+        processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1")
 
-    def test_watermark_round_trip_fail_then_succeed_no_strand(self, monkeypatch):
-        """End-to-end round-trip against a REAL in-memory counter (no constant
-        mocks): a thread's first extract fails, the second succeeds, and the
-        second must cover EVERY turn so far — not just its own batch — so turns
-        from the failed batch are never stranded. This is the bootstrap case the
-        constant-mock tests could not catch."""
-        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
-        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
-        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
-
-        counter = _FakeCounterContainer()
-        recorded_recent_k: list[int] = []
-
-        def extract(*, user_id, thread_id, recent_k):
-            recorded_recent_k.append(recent_k)
-            if len(recorded_recent_k) == 1:
-                raise RuntimeError("transient LLM outage")  # first extract fails
-            return {}
-
-        processor = InProcessProcessor(pipeline=MagicMock())
-        processor.process_extract_memories = MagicMock(side_effect=extract)
-        client = _connected(processor=processor)
-        client._counter_container_client = counter
-
-        # Batch 1: 10 turns -> counter 0->10, extract FAILS (watermark not advanced).
-        for i in range(10):
-            client.add_local(user_id="u1", role="user", thread_id="t1", content=f"a{i}")
-        client.push_to_cosmos()
-
-        # Batch 2: 10 turns -> counter 10->20, extract SUCCEEDS.
-        for i in range(10):
-            client.add_local(user_id="u1", role="user", thread_id="t1", content=f"b{i}")
-        client.push_to_cosmos()
-
-        # First fired with 10 (all turns so far); second with 20 (ALL turns, since
-        # the failed first extract left the watermark unset) — NOT 10.
-        assert recorded_recent_k == [10, 20]
-        # Watermark now seeded at the full count after the successful extract.
-        cid = _counters.thread_counter_id("u1", "t1")
-        assert _counters.read_extract_watermark_sync(counter, cid, "u1", "t1") == 20
-
-    def test_watermark_not_advanced_when_extract_fails(self, monkeypatch):
-        """advance-on-success: a failing extract must NOT move the watermark, so
-        the skipped turns are retried next sweep; failure is stamped instead."""
+    def test_extract_failure_stamps_failure(self, monkeypatch):
+        """A total extract failure is recorded via stamp_failure (telemetry); there
+        is no watermark to (not) advance - per-batch failures are handled inside
+        the pipeline, so this outer path only sees unexpected total failures."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
@@ -310,63 +230,13 @@ class TestPerStepAutoTrigger:
                 return_value=(0, 1),
             ),
             patch(
-                "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
-                return_value=None,
-            ),
-            patch(
-                "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
-            ) as advance,
-            patch(
                 "azure.cosmos.agent_memory._counters.stamp_failure_sync",
             ) as stamp,
         ):
             client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
             client.push_to_cosmos()
 
-        advance.assert_not_called()
         stamp.assert_called_once()
-
-    def test_reconcile_full_rebuild_on_persisted_counter_cadence(self, monkeypatch):
-        """Symmetry with the durable backend: the in-process auto-trigger requests
-        a full-pool reconcile (full_rebuild=True) on a PERSISTED-counter cadence —
-        every DEDUP_FULL_RECLUSTER_EVERY_N-th reconcile — not via an in-memory
-        per-instance sweep counter. Here that's every 2 turns."""
-        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
-        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
-        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
-        monkeypatch.setenv("DEDUP_EVERY_N", "1")
-        monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_dedup_full_recluster_every_n", lambda: 2)
-
-        rebuilds: list[bool] = []
-        processor = InProcessProcessor(pipeline=MagicMock())
-        processor.process_extract_memories = MagicMock(return_value={})
-        processor.synthesize_procedural = MagicMock(return_value=None)
-        processor.process_reconcile = MagicMock(
-            side_effect=lambda *, user_id, full_rebuild=False: rebuilds.append(full_rebuild)
-        )
-
-        client = _connected(processor=processor)
-        client._counter_container_client = MagicMock()
-
-        with (
-            patch(
-                "azure.cosmos.agent_memory._counters.increment_counter_sync",
-                side_effect=[(0, 1), (1, 2)],
-            ),
-            patch(
-                "azure.cosmos.agent_memory._counters.read_extract_watermark_sync",
-                return_value=None,
-            ),
-            patch(
-                "azure.cosmos.agent_memory._counters.advance_extract_watermark_sync",
-            ),
-        ):
-            client.add_local(user_id="u1", role="user", thread_id="t1", content="a")
-            client.push_to_cosmos()  # counter 0->1: reconcile, full crosses 2? no
-            client.add_local(user_id="u1", role="user", thread_id="t1", content="b")
-            client.push_to_cosmos()  # counter 1->2: full backstop threshold (2) crossed
-
-        assert rebuilds == [False, True]
 
     def test_summary_fires_independently_when_threshold_crossed(self, monkeypatch):
         """N_summary=10 boundary fires summary; N_facts=0 prevents extract."""
@@ -416,7 +286,7 @@ class TestPerStepAutoTrigger:
 
 
 # ---------------------------------------------------------------------------
-# Owner exclusivity — MEMORY_PROCESSOR_OWNER ensures only one of
+# Owner exclusivity - MEMORY_PROCESSOR_OWNER ensures only one of
 # {SDK auto-trigger, FA change-feed processor} runs against a shared
 # container, preventing double-extraction / double-dedup.
 # ---------------------------------------------------------------------------

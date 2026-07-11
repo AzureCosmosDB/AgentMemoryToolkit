@@ -489,7 +489,7 @@ def test_search_with_episodic_and_thread_id_forces_cross_partition():
     call_kwargs = memories.query_items.call_args.kwargs
     # When user-scoped types are in scope, search must fan out across
     # partitions instead of confining to [u1, t1] (where no episodic
-    # ever lives — they all use the "__episodic__" sentinel partition).
+    # ever lives - they all use the "__episodic__" sentinel partition).
     assert call_kwargs.get("enable_cross_partition_query") is True
     assert "partition_key" not in call_kwargs
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]

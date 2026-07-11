@@ -117,7 +117,7 @@ def run_demo() -> None:
     thread_id = f"rag-session-{uuid.uuid4().hex[:8]}"
 
     # ------------------------------------------------------------------
-    # Step 1 — Seed user facts and conversation history
+    # Step 1 - Seed user facts and conversation history
     # ------------------------------------------------------------------
     _print_section("Step 1: Seeding user facts & conversation history")
 
@@ -141,7 +141,7 @@ def run_demo() -> None:
     conversation = [
         ("user", "I'm starting a new microservice and need a web framework."),
         ("agent", "Based on your Python preference, I'd suggest FastAPI or Flask."),
-        ("user", "I also need a database — something flexible for evolving schemas."),
+        ("user", "I also need a database - something flexible for evolving schemas."),
         ("agent", "Azure Cosmos DB with its NoSQL API would be a great fit."),
     ]
     for role, content in conversation:
@@ -155,7 +155,7 @@ def run_demo() -> None:
     print(f"  ✓ Stored {len(conversation)} conversation turns")
 
     # ------------------------------------------------------------------
-    # Step 2 — New query arrives
+    # Step 2 - New query arrives
     # ------------------------------------------------------------------
     _print_section("Step 2: New user query")
 
@@ -163,7 +163,7 @@ def run_demo() -> None:
     print(f"  User asks: \"{user_query}\"")
 
     # ------------------------------------------------------------------
-    # Step 3 — Search memory for relevant context
+    # Step 3 - Search memory for relevant context
     # ------------------------------------------------------------------
     _print_section("Step 3: Searching memory for relevant context")
 
@@ -177,7 +177,7 @@ def run_demo() -> None:
         print(f"    • [{m.get('memory_type')}] {m.get('content', '')[:80]}")
 
     # ------------------------------------------------------------------
-    # Step 3b — Retrieve user summary (if one exists)
+    # Step 3b - Retrieve user summary (if one exists)
     # ------------------------------------------------------------------
     _print_section("Step 3b: Retrieving user summary")
 
@@ -189,7 +189,7 @@ def run_demo() -> None:
         print("  No summary available yet (generate one via generate_thread_summary).")
 
     # ------------------------------------------------------------------
-    # Step 4 — Build augmented prompt
+    # Step 4 - Build augmented prompt
     # ------------------------------------------------------------------
     _print_section("Step 4: Building augmented prompt")
 
@@ -229,7 +229,7 @@ def run_demo() -> None:
     print(augmented_prompt)
 
     # ------------------------------------------------------------------
-    # Step 5 — Show how memory personalises the response
+    # Step 5 - Show how memory personalises the response
     # ------------------------------------------------------------------
     _print_section("Step 5: Personalised response (simulated)")
 
@@ -239,7 +239,7 @@ def run_demo() -> None:
         **Web Framework → FastAPI**
         You already know Flask and expressed interest in trying FastAPI.
         It offers async support, automatic OpenAPI docs, and great
-        performance — ideal for the Azure-hosted SaaS microservice
+        performance - ideal for the Azure-hosted SaaS microservice
         you're building.
 
         **Database → Azure Cosmos DB (NoSQL API)**
@@ -255,7 +255,7 @@ def run_demo() -> None:
     print(simulated_response)
 
     # ------------------------------------------------------------------
-    # Cleanup — remove seeded data so the sample is re-runnable
+    # Cleanup - remove seeded data so the sample is re-runnable
     # ------------------------------------------------------------------
     _print_section("Cleanup")
 

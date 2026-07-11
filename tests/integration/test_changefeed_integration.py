@@ -12,7 +12,7 @@ Enable by setting both::
 A running Azure Functions host (deployed or local ``func start``) with the
 change-feed trigger configured is required, along with the ``turns``,
 ``counter``, and ``leases`` containers. Post container-split, the change-feed
-trigger binds to the ``turns`` container — turn documents must be inserted
+trigger binds to the ``turns`` container - turn documents must be inserted
 there, not into ``memories``.
 """
 

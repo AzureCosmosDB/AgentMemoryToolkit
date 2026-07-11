@@ -15,7 +15,8 @@ from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationE
 
 MEMORY_PROJECTION = (
     "c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
-    "c.metadata, c.created_at, c.tags, c.salience, c.confidence, c.superseded_by"
+    "c.metadata, c.created_at, c.tags, c.salience, c.confidence, "
+    "c.superseded_by, c.superseded_at, c.supersede_reason"
 )
 
 
@@ -71,7 +72,7 @@ def coerce_embedding(result: Any) -> list[float]:
         return result
     if isinstance(result, list) and not result:
         raise ConfigurationError(
-            "Embedder returned an empty vector — likely an upstream embedding failure",
+            "Embedder returned an empty vector - likely an upstream embedding failure",
             parameter="embeddings_client",
         )
     raise ConfigurationError("Embedder must return list[float]", parameter="embeddings_client")

@@ -156,12 +156,6 @@ class ChatClient:
         if response_format is not None:
             kwargs["response_format"] = response_format
         kwargs.update(extra)
-        # Force temperature=1.0 across all callers. Newer Azure OpenAI models
-        # (gpt-5.x family, o-series reasoning models) only accept the default
-        # value (1.0) and reject any other; older models (gpt-4o, gpt-4o-mini)
-        # accept 1.0 as a valid value. Hardcoding to 1.0 keeps behavior uniform
-        # across the deployment matrix and lets prompt engineering — not a
-        # sampling knob — be the sole control for output determinism.
         kwargs["temperature"] = 1.0
         return kwargs
 
@@ -180,7 +174,7 @@ class ChatClient:
         exponential backoff.
 
         Any additional keyword arguments (e.g. ``top_p``, ``seed``) are
-        forwarded directly to ``client.chat.completions.create`` — this lets
+        forwarded directly to ``client.chat.completions.create`` - this lets
         callers pass through ``model.parameters`` from a prompty file without
         modification.
 
@@ -236,7 +230,7 @@ class ChatClient:
             except openai.APIError as exc:
                 status = getattr(exc, "status_code", None)
                 # Reasoning models (gpt-5, o-series) reject custom sampling
-                # parameters with 400. Strip the offending param and retry —
+                # parameters with 400. Strip the offending param and retry -
                 # this does NOT consume a retry slot since it's a request-shape
                 # repair, not a transient failure.
                 bad_param = unsupported_param(exc) if status == 400 else None

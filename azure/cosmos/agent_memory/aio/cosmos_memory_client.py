@@ -563,7 +563,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
         For ``memory_type='turn'`` this also bumps the auto-trigger counter and
         schedules cadence-aware processing (extract / reconcile / procedural /
-        thread_summary / user_summary) as a background ``asyncio.Task`` — the
+        thread_summary / user_summary) as a background ``asyncio.Task`` - the
         same pattern :meth:`push_to_cosmos` uses for buffered turns. The await
         returns after the Cosmos write completes; cadence runs out-of-band so
         it does not block the caller.
@@ -744,6 +744,31 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             created_before=created_before,
         )
 
+    async def get_memory_history(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        *,
+        max_depth: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a memory's superseded predecessors, most-recently-superseded first.
+
+        AMT supersedes rather than deletes, so the full history of a fact - how a
+        preference, decision, or attribute changed over time - is preserved. This
+        walks the ``superseded_by`` chain backwards from *memory_id* and returns
+        every version it replaced (transitively), each carrying its
+        ``superseded_at`` / ``supersede_reason`` audit fields. Useful for
+        answering "what changed?" / "what was it before?" questions that a
+        current-value-only view cannot.
+        """
+        return await self._get_store().get_memory_history(
+            memory_id,
+            user_id,
+            thread_id,
+            max_depth=max_depth,
+        )
+
     async def get_thread(
         self,
         thread_id: str,
@@ -904,9 +929,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
         from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
-        return await self._get_pipeline().reconcile_memories(
-            user_id, n if n is not None else get_dedup_pool_size(), full_rebuild=True
-        )
+        return await self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
 
     async def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         """Force the processor to run the full pipeline RIGHT NOW for one thread.
@@ -921,7 +944,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         caught and logged as warnings so the per-thread work already
         persisted by the prior steps is not erased. Permanent failures
         (config bugs, auth errors, 4xx Cosmos errors, Python builtins like
-        ``KeyError`` / ``TypeError``) are re-raised — silencing them turns
+        ``KeyError`` / ``TypeError``) are re-raised - silencing them turns
         operational issues into invisible ``WARNING`` lines.
         """
         _BaseMemoryClient._require_cosmos(self)

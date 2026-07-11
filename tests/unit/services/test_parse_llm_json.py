@@ -1,4 +1,4 @@
-"""Unit tests for parse_llm_json — resilient LLM JSON decoding (Issue A)."""
+"""Unit tests for parse_llm_json - resilient LLM JSON decoding (Issue A)."""
 
 from __future__ import annotations
 

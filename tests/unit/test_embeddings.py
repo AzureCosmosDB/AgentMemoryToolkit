@@ -193,7 +193,7 @@ class TestGenerateBatch:
 
 
 # ---------------------------------------------------------------------------
-# generate_batch() — N=16 chunk guard
+# generate_batch() - N=16 chunk guard
 # ---------------------------------------------------------------------------
 
 
@@ -250,7 +250,7 @@ class TestGenerateBatchChunking:
 
         assert result == []
         assert mock_client.embeddings.create.call_count == 0
-        # Lazy-init must not even fire — empty short-circuit comes first.
+        # Lazy-init must not even fire - empty short-circuit comes first.
         MockAOAI.assert_not_called()
 
     @patch("openai.AzureOpenAI")

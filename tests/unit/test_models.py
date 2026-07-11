@@ -32,7 +32,7 @@ from azure.cosmos.agent_memory.models import (
 )
 
 # ---------------------------------------------------------------------------
-# Helpers — minimal valid kwargs per typed subclass
+# Helpers - minimal valid kwargs per typed subclass
 # ---------------------------------------------------------------------------
 
 

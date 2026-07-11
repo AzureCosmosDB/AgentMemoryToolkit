@@ -131,7 +131,7 @@ def ai_foundry_endpoint():
 
 @pytest.fixture(scope="session")
 def ai_foundry_api_key():
-    """Azure OpenAI API key from env vars (optional — Entra ID is preferred)."""
+    """Azure OpenAI API key from env vars (optional - Entra ID is preferred)."""
     return os.environ.get("AI_FOUNDRY_API_KEY", "")
 
 

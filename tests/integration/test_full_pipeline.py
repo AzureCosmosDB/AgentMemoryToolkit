@@ -5,7 +5,7 @@ Cosmos DB, running the ProcessingPipeline (summarisation, fact / procedural /
 episodic extraction, deduplication) inline, and reading back results via
 Cosmos DB queries and vector / hybrid search.
 
-The Azure Function host is **not** required — the same ProcessingPipeline
+The Azure Function host is **not** required - the same ProcessingPipeline
 that the change-feed trigger invokes is also exposed directly on
 ``CosmosMemoryClient`` (``extract_memories``, ``generate_thread_summary``,
 ``generate_user_summary``, ``reconcile``).
@@ -135,7 +135,7 @@ def _seed_fact_with_embedding(
     ``add_cosmos`` generates the embedding synchronously; a transient
     embedding-service blip logs "proceeding without embedding" and stores the doc
     without a vector, which would leave the extract-time vector floor with no
-    neighbour to match. Retry until an embedded copy exists (indexing is fast —
+    neighbour to match. Retry until an embedded copy exists (indexing is fast -
     the doc is vector-searchable within ~2s), and skip honestly if the embedding
     service is genuinely unavailable rather than reporting a false failure."""
     check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
@@ -157,7 +157,7 @@ def _seed_fact_with_embedding(
         if embedded:
             return
         time.sleep(1)
-    pytest.skip(f"embedding service unavailable — could not seed an embedded fact for {content!r}")
+    pytest.skip(f"embedding service unavailable - could not seed an embedded fact for {content!r}")
 
 
 def _wait_vector_searchable(
@@ -199,7 +199,7 @@ class TestThreadSummary:
                     ("user", "What are some good restaurants in Paris?"),
                     ("agent", "Le Comptoir du Panthéon is a classic bistro in the 5th arrondissement."),
                     ("user", "What kind of cuisine do they serve?"),
-                    ("agent", "Traditional French bistro fare — confit de canard, steak frites, etc."),
+                    ("agent", "Traditional French bistro fare - confit de canard, steak frites, etc."),
                 ],
             )
             time.sleep(1)
@@ -585,7 +585,7 @@ class TestExtractTimeVectorDedup:
     ):
         try:
             # Seed a stored fact (embedded + vector-indexed) to dedup against.
-            # Concrete, minimally-reworded facts embed ~0.93-0.98 cosine — well
+            # Concrete, minimally-reworded facts embed ~0.93-0.98 cosine - well
             # inside the DEDUP_SIM_LOW (0.80) / DEDUP_SIM_HIGH (0.97) bands.
             _seed_fact_with_embedding(
                 agent_memory, unique_user_id, unique_thread_id, "The user has a cat named Whiskers."

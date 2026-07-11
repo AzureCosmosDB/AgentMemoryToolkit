@@ -302,6 +302,10 @@ class PipelineService:
             # uncached cosine default lets the next call self-heal; caching it would
             # pin cosine for the instance's life and silently mis-handle a euclidean
             # container (cosine bands applied to euclidean distances → data loss).
+            # Flag the failure so the *destructive* in-place fold path can skip
+            # entirely (a defaulted cosine on a euclidean container would fold and
+            # overwrite unrelated memories).
+            self._distance_function_read_failed = True
             logger.debug(
                 "vector dedup: could not read container vector policy; defaulting to cosine (not cached)",
                 exc_info=True,
@@ -309,6 +313,7 @@ class PipelineService:
             return "cosine"
         fn = distance_function_from_container_properties(props)
         self._distance_function_cache = fn
+        self._distance_function_read_failed = False
         return fn
 
     def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
@@ -327,6 +332,17 @@ class PipelineService:
             "Duplicate detection falls back to borderline tagging + LLM reconcile. "
             "Use cosine/dotproduct embeddings for vector-floor auto-dedup.",
             distance_function,
+        )
+
+    def _warn_distance_policy_unavailable_once(self) -> None:
+        """One-shot WARN that in-place folding was skipped (policy unreadable)."""
+        if getattr(self, "_warned_distance_policy_unavailable", False):
+            return
+        self._warned_distance_policy_unavailable = True
+        logger.warning(
+            "vector dedup: container vector policy could not be read; skipping in-place "
+            "near-duplicate folding this run to avoid mis-calibrated folds. Memories are "
+            "written as-is and deduped on a later run once the policy is readable."
         )
 
     def _vector_candidates(
@@ -807,6 +823,13 @@ class PipelineService:
         document rather than minting a new one that a later reconcile sweep must
         merge and supersede. There is no ``sys:dup-candidate`` tagging and no
         clustering — reconcile only resolves contradictions.
+
+        In-place folds commit here, before ``persist_extracted_memories`` writes
+        the novel docs. A crash between the two leaves some memories folded and
+        some novel docs unwritten, but the source turns are not stamped
+        ``extracted_at`` until persist completes, so the whole turn set is simply
+        re-extracted on the next run (folds are idempotent and re-ADDs hit
+        exact-hash/vector dedup) — no data is lost, only repeated.
         """
         if not threshold_config.get_dedup_vector_enabled():
             return extracted
@@ -817,8 +840,16 @@ class PipelineService:
 
         high = threshold_config.get_dedup_sim_high()
         distance_function = self._vector_distance_function()
-        similarity_ok = vector_autodrop_supported(distance_function)
-        if not similarity_ok:
+        read_failed = getattr(self, "_distance_function_read_failed", False)
+        # Skip destructive in-place folding when the container's distance policy
+        # could not be read: a defaulted cosine on a euclidean container would
+        # apply cosine thresholds to unbounded euclidean distances and fold
+        # unrelated memories. Everything ADDs; the next run (policy readable)
+        # dedups normally.
+        similarity_ok = (not read_failed) and vector_autodrop_supported(distance_function)
+        if read_failed:
+            self._warn_distance_policy_unavailable_once()
+        elif not similarity_ok:
             self._warn_euclidean_autodrop_once(distance_function)
 
         result: dict[str, list[dict[str, Any]]] = {
@@ -934,12 +965,22 @@ class PipelineService:
     def _apply_inplace_update(self, neighbor: dict[str, Any], new_doc: dict[str, Any]) -> bool:
         """Refresh an existing memory in place with a near-duplicate's content.
 
+        Uses ETag optimistic concurrency: the update is applied with
+        ``IfNotModified`` against the neighbor's ``_etag`` so a concurrent
+        supersede/refresh cannot be clobbered (which would resurrect a
+        soft-deleted memory or lose an update). On an ETag conflict — or any
+        other failure — returns False and the caller keeps the new doc as a
+        novel ADD, so nothing is lost.
+
         Recency wins: the neighbor keeps its id / created_at / partition but takes
         the new doc's content + embedding, unions tags, and takes the max
-        salience/confidence. Returns True on a successful upsert; False otherwise
-        (the caller then keeps the new doc as a novel ADD, so nothing is lost).
+        salience/confidence.
         """
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
         try:
+            old_etag = neighbor.get("_etag")
             updated = dict(neighbor)
             for sys_prop in ("_rid", "_self", "_etag", "_attachments", "_ts"):
                 updated.pop(sys_prop, None)
@@ -964,8 +1005,22 @@ class PipelineService:
             if merged_tags:
                 updated["tags"] = merged_tags
 
-            self._memories_container.upsert_item(body=updated)
+            if old_etag and hasattr(self._memories_container, "replace_item"):
+                self._memories_container.replace_item(
+                    item=updated["id"],
+                    body=updated,
+                    match_condition=MatchConditions.IfNotModified,
+                    etag=old_etag,
+                )
+            else:
+                self._memories_container.upsert_item(body=updated)
             return True
+        except CosmosAccessConditionFailedError:
+            logger.info(
+                "in-place dedup update skipped (concurrent writer won) target_id=%s; keeping new doc as novel",
+                neighbor.get("id"),
+            )
+            return False
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "in-place dedup update failed target_id=%s err=%s (keeping new doc as novel)",
@@ -1724,6 +1779,16 @@ class PipelineService:
                 logger.warning(
                     "reconcile_memories: hallucinated winner_id=%s not in pool; skipping pair %r",
                     winner_id,
+                    pair,
+                )
+                continue
+            # Guard chained contradictions: never point a loser at a winner that
+            # was itself already superseded earlier this pass (A>B then B>C would
+            # tombstone C in favor of a now-dead B), and never re-supersede a loser.
+            if winner_id in consumed_loser_ids or loser_id in consumed_loser_ids:
+                logger.info(
+                    "reconcile_memories: skipping chained/duplicate contradiction pair %r "
+                    "(winner or loser already superseded this pass)",
                     pair,
                 )
                 continue

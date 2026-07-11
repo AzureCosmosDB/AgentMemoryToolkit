@@ -273,6 +273,10 @@ class AsyncPipelineService:
         try:
             props = await self._memories_container.read()
         except Exception:
+            # See sync pipeline: don't cache a defaulted cosine, and flag the
+            # failure so the destructive in-place fold path skips this run rather
+            # than mis-applying cosine bands to (possibly euclidean) distances.
+            self._distance_function_read_failed = True
             logger.debug(
                 "vector dedup: could not read container vector policy; defaulting to cosine (not cached)",
                 exc_info=True,
@@ -280,7 +284,19 @@ class AsyncPipelineService:
             return "cosine"
         fn = distance_function_from_container_properties(props)
         self._distance_function_cache = fn
+        self._distance_function_read_failed = False
         return fn
+
+    def _warn_distance_policy_unavailable_once(self) -> None:
+        """One-shot WARN that in-place folding was skipped (policy unreadable)."""
+        if getattr(self, "_warned_distance_policy_unavailable", False):
+            return
+        self._warned_distance_policy_unavailable = True
+        logger.warning(
+            "vector dedup: container vector policy could not be read; skipping in-place "
+            "near-duplicate folding this run to avoid mis-calibrated folds. Memories are "
+            "written as-is and deduped on a later run once the policy is readable."
+        )
 
     def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
         """One-shot WARN that the near-exact vector auto-drop is disabled.
@@ -738,8 +754,11 @@ class AsyncPipelineService:
 
         high = get_dedup_sim_high()
         distance_function = await self._vector_distance_function()
-        similarity_ok = vector_autodrop_supported(distance_function)
-        if not similarity_ok:
+        read_failed = getattr(self, "_distance_function_read_failed", False)
+        similarity_ok = (not read_failed) and vector_autodrop_supported(distance_function)
+        if read_failed:
+            self._warn_distance_policy_unavailable_once()
+        elif not similarity_ok:
             self._warn_euclidean_autodrop_once(distance_function)
 
         result = {
@@ -843,7 +862,11 @@ class AsyncPipelineService:
 
     async def _apply_inplace_update(self, neighbor: dict[str, Any], new_doc: dict[str, Any]) -> bool:
         """Async mirror of the sync in-place refresh (recency-wins content+embedding)."""
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
         try:
+            old_etag = neighbor.get("_etag")
             updated = dict(neighbor)
             for sys_prop in ("_rid", "_self", "_etag", "_attachments", "_ts"):
                 updated.pop(sys_prop, None)
@@ -868,8 +891,23 @@ class AsyncPipelineService:
             if merged_tags:
                 updated["tags"] = merged_tags
 
-            await self._upsert_item(self._memories_container, body=updated)
+            if old_etag and hasattr(self._memories_container, "replace_item"):
+                await self._replace_item(
+                    self._memories_container,
+                    item=updated["id"],
+                    body=updated,
+                    match_condition=MatchConditions.IfNotModified,
+                    etag=old_etag,
+                )
+            else:
+                await self._upsert_item(self._memories_container, body=updated)
             return True
+        except CosmosAccessConditionFailedError:
+            logger.info(
+                "in-place dedup update skipped (concurrent writer won) target_id=%s; keeping new doc as novel",
+                neighbor.get("id"),
+            )
+            return False
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "in-place dedup update failed target_id=%s err=%s (keeping new doc as novel)",
@@ -1645,6 +1683,14 @@ class AsyncPipelineService:
                 logger.warning(
                     "reconcile_memories: hallucinated winner_id=%s not in pool; skipping pair %r",
                     winner_id,
+                    pair,
+                )
+                continue
+            # Guard chained contradictions (A>B then B>C) and re-supersession.
+            if winner_id in consumed_loser_ids or loser_id in consumed_loser_ids:
+                logger.info(
+                    "reconcile_memories: skipping chained/duplicate contradiction pair %r "
+                    "(winner or loser already superseded this pass)",
                     pair,
                 )
                 continue

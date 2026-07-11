@@ -3,22 +3,15 @@
 ## [0.3.0b1] (Unreleased)
 
 #### Features Added
-* Contradiction-aware vector dedup and reconciliation. Extraction now runs a
-  vector-similarity dedup ladder: near-exact duplicates are auto-dropped and
-  borderline matches are tagged for review before they are written. A periodic
-  LLM reconcile pass (driven by `dedup.prompty` for facts and
-  `dedup_episodic.prompty` for episodic memories) then merges duplicate groups
-  and resolves contradictions, soft-deleting the losers with a supersede reason.
-  Reconciliation is distance-function aware (the destructive near-exact
-  auto-drop is disabled for `euclidean` containers). In-process reconcile now
-  covers both facts and episodic memories, matching the Durable backend, and its
-  cadence is derived from the persisted message counter. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Write-time in-place deduplication: near-duplicate memories fold into the existing record (same id, newer content) instead of creating a new doc. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Reconciliation now resolves contradictions only, soft-deleting the loser with `superseded_by`; `get_memory_history()` walks that chain. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+
+#### Bugs Fixed
+* Fixed a re-extraction loop that re-extracted the whole conversation every cycle (turns were never stamped `extracted_at` when vector dedup was on). See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 #### Other Changes
-* `search_cosmos` and `search_turns` now always fuse vector similarity with
-  BM25 (full-text) ranking, falling back to vector-only for all-stopword
-  queries. The `hybrid_search` flag has been removed — hybrid ranking is the
-  default and requires no opt-in. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Reworked the extraction prompt (anti-inference, preserve specifics, topic-grouped memories) and simplified the schema to `fact`/`episodic` with fixed fact categories. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Token-bounded extraction batches with per-batch failure isolation; embedding inputs truncated to the model token budget. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 ## [0.2.0b3] (2026-07-08)
 

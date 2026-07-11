@@ -52,34 +52,6 @@ DEDUP_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# dedup_episodic.prompty - reconcile a pool of active episodic memories
-# (MERGE-ONLY: same-event duplicates collapse; no contradiction/deletion)
-# ---------------------------------------------------------------------------
-DEDUP_EPISODIC_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "duplicate_groups": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "merged_content": {"type": "string"},
-                    "source_ids": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": ["number", "null"]},
-                    "salience": {"type": ["number", "null"]},
-                },
-                "required": ["merged_content", "source_ids", "confidence", "salience"],
-                "additionalProperties": False,
-            },
-        },
-        "kept_ids": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["duplicate_groups", "kept_ids"],
-    "additionalProperties": False,
-}
-
-
-# ---------------------------------------------------------------------------
 # extract_memories.prompty - extract facts + episodic + unclassified
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
@@ -267,7 +239,6 @@ SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
     "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),
-    "dedup_episodic.prompty": ("DedupEpisodicOutput", DEDUP_EPISODIC_SCHEMA),
     "extract_memories.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
     "summarize.prompty": ("SummarizeOutput", SUMMARIZE_SCHEMA),
     "summarize_update.prompty": ("SummarizeUpdateOutput", SUMMARIZE_UPDATE_SCHEMA),

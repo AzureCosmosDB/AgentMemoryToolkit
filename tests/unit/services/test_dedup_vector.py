@@ -248,9 +248,12 @@ def test_apply_inplace_update_recency_wins_and_unions() -> None:
     ok = p._apply_inplace_update(neighbor, new_doc)
 
     assert ok is True
-    written = p._memories_container.upsert_item.call_args.kwargs["body"]
+    # ETag optimistic concurrency: goes through replace_item with IfNotModified.
+    call = p._memories_container.replace_item.call_args
+    assert call.kwargs["etag"] == "etag-xyz"
+    written = call.kwargs["body"]
     assert written["id"] == "existing-1"
-    assert written["content"] == "new richer content"
+    assert written["content"] == "new richer content"  # recency wins
     assert written["embedding"] == [0.5, 0.5]
     assert written["salience"] == 0.8
     assert written["confidence"] == 0.9
@@ -258,6 +261,19 @@ def test_apply_inplace_update_recency_wins_and_unions() -> None:
     assert "sys:dup-candidate" not in written["tags"]
     assert "_etag" not in written
     assert written["updated_at"] != neighbor["updated_at"]
+
+
+def test_apply_inplace_update_etag_conflict_returns_false() -> None:
+    # F1: a concurrent writer (ETag mismatch) must NOT clobber; caller ADDs novel.
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+    p = _make_pipeline()
+    p._memories_container.replace_item.side_effect = CosmosAccessConditionFailedError(message="etag")
+    neighbor = _doc("existing-1", "old", tags=["sys:fact"])
+    neighbor["_etag"] = "stale"
+    new_doc = _doc("f-new", "old restated", embedding=[0.5, 0.5], tags=["sys:fact"])
+
+    assert p._apply_inplace_update(neighbor, new_doc) is False
 
 
 def test_nearest_active_full_returns_full_doc_and_skips_excluded() -> None:
@@ -335,3 +351,28 @@ def test_reconcile_fact_contradiction_only() -> None:
     assert p._mark_superseded.call_args.args[1] == "f2"
     assert p._mark_superseded.call_args.kwargs["reason"] == "contradict"
     assert p._run_prompty.call_args.args[0] == "dedup.prompty"
+
+
+def test_reconcile_skips_chained_contradiction() -> None:
+    # F5: (A>B) then (B>C) must not tombstone C in favor of an already-dead B.
+    p = _make_pipeline()
+    facts = [_doc("A", "a"), _doc("B", "b"), _doc("C", "c")]
+    p._memories_container.query_items.return_value = iter(facts)
+    p._run_prompty = MagicMock(
+        return_value=json.dumps(
+            {
+                "contradicted_pairs": [
+                    {"winner_id": "A", "loser_id": "B", "reason": "x"},
+                    {"winner_id": "B", "loser_id": "C", "reason": "y"},
+                ],
+                "kept_ids": [],
+            }
+        )
+    )
+
+    result = p.reconcile_memories("u1", memory_type="fact")
+
+    # Only the first pair applies; the chained (B>C) is skipped since B is dead.
+    assert result["contradicted"] == 1
+    assert p._mark_superseded.call_count == 1
+    assert p._mark_superseded.call_args.args[0]["id"] == "B"

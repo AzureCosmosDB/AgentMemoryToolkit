@@ -187,7 +187,7 @@ async def test_euclidean_disables_inplace_folding():
 @pytest.mark.asyncio
 async def test_apply_inplace_update_recency_wins_and_unions():
     p = _service()
-    p._upsert_item = AsyncMock()
+    p._replace_item = AsyncMock()
     neighbor = _fact("existing-1", "old content", tags=["sys:fact", "topic:a"])
     neighbor["confidence"] = 0.6
     neighbor["salience"] = 0.5
@@ -202,15 +202,30 @@ async def test_apply_inplace_update_recency_wins_and_unions():
     ok = await p._apply_inplace_update(neighbor, new_doc)
 
     assert ok is True
-    written = p._upsert_item.call_args.kwargs["body"]
+    call = p._replace_item.call_args
+    assert call.kwargs["etag"] == "etag-xyz"
+    written = call.kwargs["body"]
     assert written["id"] == "existing-1"
-    assert written["content"] == "new richer content"
+    assert written["content"] == "new richer content"  # recency wins
     assert written["embedding"] == [0.5, 0.5]
     assert written["salience"] == 0.8
     assert written["confidence"] == 0.9
     assert "topic:a" in written["tags"] and "topic:b" in written["tags"]
     assert "sys:dup-candidate" not in written["tags"]
     assert "_etag" not in written
+
+
+@pytest.mark.asyncio
+async def test_apply_inplace_update_etag_conflict_returns_false():
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+    p = _service()
+    p._replace_item = AsyncMock(side_effect=CosmosAccessConditionFailedError(message="etag"))
+    neighbor = _fact("existing-1", "old", tags=["sys:fact"])
+    neighbor["_etag"] = "stale"
+    new_doc = _fact("f-new", "old restated", embedding=[0.5, 0.5], tags=["sys:fact"])
+
+    assert await p._apply_inplace_update(neighbor, new_doc) is False
 
 
 @pytest.mark.asyncio

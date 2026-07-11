@@ -403,7 +403,6 @@ class TestExtractEarlyReturnShape:
         for key in (
             "fact_count",
             "episodic_count",
-            "unclassified_count",
             "updated_count",
             "exact_dedup_skipped",
         ):

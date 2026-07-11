@@ -242,7 +242,6 @@ def test_extract_memories_without_procedural_bucket_returns_new_count_shape():
 
     assert result["fact_count"] == 1
     assert result["episodic_count"] == 1
-    assert result["unclassified_count"] == 0
     assert legacy_fact_count_key not in result
     assert legacy_proc_key not in result
     assert all(doc["type"] != "procedural" for doc in upserted)

@@ -458,7 +458,6 @@ class AsyncPipelineService:
         return {
             "fact_count": 0,
             "episodic_count": 0,
-            "unclassified_count": 0,
             "updated_count": 0,
             "contradicted_count": 0,
             "exact_dedup_skipped": 0,
@@ -871,10 +870,12 @@ class AsyncPipelineService:
             for sys_prop in ("_rid", "_self", "_etag", "_attachments", "_ts"):
                 updated.pop(sys_prop, None)
             new_content = str(new_doc.get("content") or "")
-            updated["content"] = new_content
-            updated["content_hash"] = compute_content_hash(new_content)
-            if new_doc.get("embedding"):
-                updated["embedding"] = new_doc["embedding"]
+            old_content = str(neighbor.get("content") or "")
+            if len(new_content) >= len(old_content):
+                updated["content"] = new_content
+                updated["content_hash"] = compute_content_hash(new_content)
+                if new_doc.get("embedding"):
+                    updated["embedding"] = new_doc["embedding"]
             updated["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             new_sal = _max_or_none([neighbor.get("salience"), new_doc.get("salience")])
@@ -951,11 +952,8 @@ class AsyncPipelineService:
                 logger.info("persist_extracted_memories skipped existing id=%s", validated.get("id"))
                 continue
 
-            tags = validated.get("tags", [])
             if doc_type == "episodic":
                 result["episodic_count"] += 1
-            elif "sys:unclassified" in tags:
-                result["unclassified_count"] += 1
             elif doc_type == "fact":
                 result["fact_count"] += 1
 

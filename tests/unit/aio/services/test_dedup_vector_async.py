@@ -216,6 +216,31 @@ async def test_apply_inplace_update_recency_wins_and_unions():
 
 
 @pytest.mark.asyncio
+async def test_apply_inplace_update_shorter_restatement_keeps_richer_content():
+    p = _service()
+    p._replace_item = AsyncMock()
+    neighbor = _fact(
+        "existing-1", "March 1, room 204, deluxe suite", embedding=[0.1, 0.2], tags=["sys:fact", "topic:a"]
+    )
+    neighbor["confidence"] = 0.6
+    neighbor["salience"] = 0.5
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _fact("f-new", "March 1", embedding=[0.5, 0.5], tags=["sys:fact", "topic:b"])
+    new_doc["confidence"] = 0.9
+    new_doc["salience"] = 0.8
+
+    ok = await p._apply_inplace_update(neighbor, new_doc)
+
+    assert ok is True
+    written = p._replace_item.call_args.kwargs["body"]
+    assert written["content"] == "March 1, room 204, deluxe suite"  # richer content kept
+    assert written["embedding"] == [0.1, 0.2]  # matching embedding kept
+    assert written["salience"] == 0.8  # metadata still recency-wins
+    assert written["confidence"] == 0.9
+    assert "topic:a" in written["tags"] and "topic:b" in written["tags"]
+
+
+@pytest.mark.asyncio
 async def test_apply_inplace_update_etag_conflict_returns_false():
     from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 

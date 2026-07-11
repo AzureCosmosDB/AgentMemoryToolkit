@@ -349,6 +349,38 @@ class TestRequireCosmos:
             mem._require_cosmos()
 
 
+class TestUserAgent:
+    def _connect_with_mock(self, **client_kwargs):
+        mock_cosmos_cls = MagicMock()
+        mock_client = MagicMock()
+        mock_db = MagicMock()
+        mock_cosmos_cls.return_value = mock_client
+        mock_client.get_database_client.return_value = mock_db
+
+        mem = _make_client(**client_kwargs)
+        with patch.dict(
+            "sys.modules",
+            {"azure.cosmos": MagicMock(CosmosClient=mock_cosmos_cls)},
+        ):
+            mem.connect_cosmos(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+            )
+        return mock_cosmos_cls
+
+    def test_default_user_agent_forwarded_to_cosmos_client(self):
+        mock_cosmos_cls = self._connect_with_mock()
+        ua = mock_cosmos_cls.call_args.kwargs["user_agent"]
+        assert ua == "azsdk-python-cosmos-agent-memory/" + ua.split("/", 1)[1]
+        assert ua.startswith("azsdk-python-cosmos-agent-memory/")
+
+    def test_custom_user_agent_is_prefixed_before_toolkit(self):
+        mock_cosmos_cls = self._connect_with_mock(user_agent="MyApp/1.2.3")
+        ua = mock_cosmos_cls.call_args.kwargs["user_agent"]
+        assert ua.startswith("MyApp/1.2.3 ")
+        assert ua.endswith("azsdk-python-cosmos-agent-memory/" + ua.rsplit("/", 1)[1])
+
+
 class TestValidateTopology:
     def test_validate_topology_succeeds_on_healthy_deploy(self):
         mem = _make_client()
@@ -1062,3 +1094,59 @@ def test_list_tags_delegates_to_store():
     kwargs = container.query_items.call_args.kwargs
     assert "SELECT VALUE c.tags" in kwargs["query"]
     assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]
+
+
+class TestSyncCadenceThresholdsForwarding:
+    """A ``cadence_thresholds`` mapping on the sync client is forwarded to the auto-trigger.
+
+    This lets callers set per-turn cadence in-process instead of mutating ``os.environ``.
+    """
+
+    def test_cadence_thresholds_forwarded(self):
+        thresholds = {"FACT_EXTRACTION_EVERY_N": 3, "DEDUP_EVERY_N": 2}
+        mem = CosmosMemoryClient(use_default_credential=False, cadence_thresholds=thresholds)
+        mem._get_processor = MagicMock(return_value=MagicMock())
+        mem._get_counter_container = MagicMock(return_value=MagicMock())
+
+        with patch("azure.cosmos.agent_memory.cosmos_memory_client.maybe_trigger_steps") as mock_trigger:
+            mem._maybe_auto_trigger({("u1", "t1"): 1})
+
+        mock_trigger.assert_called_once()
+        assert mock_trigger.call_args.kwargs["thresholds"] == thresholds
+
+    def test_defaults_to_none_when_unset(self):
+        mem = CosmosMemoryClient(use_default_credential=False)
+        mem._get_processor = MagicMock(return_value=MagicMock())
+        mem._get_counter_container = MagicMock(return_value=MagicMock())
+
+        with patch("azure.cosmos.agent_memory.cosmos_memory_client.maybe_trigger_steps") as mock_trigger:
+            mem._maybe_auto_trigger({("u1", "t1"): 1})
+
+        # None preserves the env-only behavior (the auto-trigger treats None as defaults).
+        assert mock_trigger.call_args.kwargs["thresholds"] is None
+
+
+class TestSyncCadenceThresholdsNormalization:
+    """The sync client normalizes ``cadence_thresholds`` at construction time."""
+
+    def test_defensive_copy_isolates_later_mutation(self):
+        thresholds = {"FACT_EXTRACTION_EVERY_N": 3}
+        mem = CosmosMemoryClient(use_default_credential=False, cadence_thresholds=thresholds)
+        thresholds["FACT_EXTRACTION_EVERY_N"] = 99
+        assert mem._cadence_thresholds == {"FACT_EXTRACTION_EVERY_N": 3}
+
+    def test_string_values_are_coerced_to_int(self):
+        mem = CosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": "5"})
+        assert mem._cadence_thresholds == {"DEDUP_EVERY_N": 5}
+
+    def test_negative_value_rejected(self):
+        with pytest.raises(ValueError):
+            CosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": -1})
+
+    def test_non_int_value_rejected(self):
+        with pytest.raises(ValueError):
+            CosmosMemoryClient(use_default_credential=False, cadence_thresholds={"DEDUP_EVERY_N": "x"})
+
+    def test_non_mapping_rejected(self):
+        with pytest.raises(TypeError):
+            CosmosMemoryClient(use_default_credential=False, cadence_thresholds=[("DEDUP_EVERY_N", 5)])

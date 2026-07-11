@@ -13,10 +13,6 @@
   auto-drop is disabled for `euclidean` containers). In-process reconcile now
   covers both facts and episodic memories, matching the Durable backend, and its
   cadence is derived from the persisted message counter. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
-* Extraction watermark. The window of recent turns sent to extraction is sized
-  from a persisted per-thread watermark (`last_extract_count`) that only advances
-  after a successful extract, so under normal operation no turns are skipped when
-  extraction lags or transiently fails. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 #### Other Changes
 * `search_cosmos` and `search_turns` now always fuse vector similarity with
@@ -24,6 +20,21 @@
   queries. The `hybrid_search` flag has been removed — hybrid ranking is the
   default and requires no opt-in. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
+## [0.2.0b3] (2026-07-08)
+
+#### Features Added
+* A custom user-agent can now be supplied via the new `user_agent` constructor
+  argument on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`. The toolkit's
+  own user-agent (`azsdk-python-cosmos-agent-memory/<version>`) is always sent to
+  Azure Cosmos DB so usage can be tracked; when a custom value is provided it is prefixed and
+  the toolkit's user-agent is suffixed behind it (`"<custom> <toolkit>"`). See [PR:#30](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/30)
+* Per-turn processing cadence can now be set in-process via the new
+  `cadence_thresholds` constructor argument on `CosmosMemoryClient` and
+  `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a
+  mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,
+  `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
+  present falls back to the environment/defaults, and `None` preserves today's
+  env-only behavior. See [PR:#29](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/29)
 ## [0.2.0b2] (2026-07-01)
 
 #### Features Added

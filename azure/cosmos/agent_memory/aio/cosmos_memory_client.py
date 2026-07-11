@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory._base import _BaseMemoryClient
 from azure.cosmos.agent_memory._base.base_client import is_transient_tail_step_error
@@ -29,7 +29,10 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, CosmosOperationError, ValidationError
 from azure.cosmos.agent_memory.logging import get_logger
-from azure.cosmos.agent_memory.services._pipeline_helpers import _normalize_metadata_keys
+from azure.cosmos.agent_memory.services._pipeline_helpers import (
+    _normalize_cadence_thresholds,
+    _normalize_metadata_keys,
+)
 from azure.cosmos.agent_memory.thresholds import DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -86,10 +89,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
         enable_turn_embeddings: Optional[bool] = None,
+        user_agent: Optional[str] = None,
         embeddings_client: Optional[Any] = None,
         chat_client: Optional[Any] = None,
         processor: Optional[AsyncMemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
+        cadence_thresholds: Optional[Mapping[str, int]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -111,6 +116,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             chat_deployment_name=chat_deployment_name,
             use_default_credential=use_default_credential,
             enable_turn_embeddings=enable_turn_embeddings,
+            user_agent=user_agent,
             default_credential_module="azure.identity.aio",
         )
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -146,6 +152,14 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._processor: Optional[AsyncMemoryProcessor] = processor
         self._processor_explicit = processor is not None
         self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
+        # Optional per-turn cadence override, keyed by the same names as the env vars (e.g.
+        # ``FACT_EXTRACTION_EVERY_N``, ``DEDUP_EVERY_N``, ``THREAD_SUMMARY_EVERY_N``,
+        # ``USER_SUMMARY_EVERY_N``). When provided, the auto-trigger uses these values instead of
+        # reading ``os.environ``; any key not present falls back to the environment/defaults.
+        # ``None`` preserves the env-only behavior. Normalized to a defensive ``dict[str, int]``
+        # so later mutation of the caller's mapping cannot change client behavior, and invalid
+        # values fail fast at construction rather than deep inside the trigger path.
+        self._cadence_thresholds: Optional[dict[str, int]] = _normalize_cadence_thresholds(cadence_thresholds)
         logger.info("AsyncCosmosMemoryClient initialized")
 
     async def __aenter__(self) -> "AsyncCosmosMemoryClient":
@@ -234,7 +248,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             from azure.cosmos.aio import CosmosClient
 
             await self._drain_cosmos_client()
-            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            client = CosmosClient(
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
+            )
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
             self._memories_container_client = db.get_container_client(self._cosmos_container)
@@ -307,7 +325,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             from azure.cosmos.aio import CosmosClient
 
             await self._drain_cosmos_client()
-            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            client = CosmosClient(
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
+            )
             db = await client.create_database_if_not_exists(id=self._cosmos_database)
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
             offer = _cosmos_container_offer_throughput(
@@ -539,7 +561,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def _maybe_auto_trigger(self, turn_counts: dict[tuple[str, str], int]) -> None:
         if not turn_counts:
             return
-        await maybe_trigger_steps(self._get_processor(), self._get_counter_container(), turn_counts)
+        await maybe_trigger_steps(
+            self._get_processor(),
+            self._get_counter_container(),
+            turn_counts,
+            thresholds=self._cadence_thresholds,
+        )
 
     def _container_for_type(self, memory_type: str) -> Any:
         """Return the Cosmos container client that owns ``memory_type``."""

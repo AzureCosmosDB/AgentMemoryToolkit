@@ -3,6 +3,7 @@
 import pytest
 
 from azure.cosmos.agent_memory._utils import (
+    COSMOS_USER_AGENT,
     DEFAULT_TTL_BY_TYPE,
     MAX_FULLTEXT_TERMS,
     _build_container_kwargs,
@@ -12,6 +13,7 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_embedding_data_type,
     _resolve_full_text_language,
     _resolve_vector_index_type,
+    build_cosmos_user_agent,
     compute_content_hash,
     distance_function_from_container_properties,
     extract_keywords,
@@ -420,3 +422,29 @@ def test_normalize_ai_foundry_endpoint_leaves_openai_host_with_project_path():
         normalize_ai_foundry_endpoint("https://my-res.openai.azure.com/api/projects/my-project")
         == "https://my-res.openai.azure.com/api/projects/my-project"
     )
+
+
+# ---------------------------------------------------------------------------
+# User-agent helpers
+# ---------------------------------------------------------------------------
+
+
+def test_cosmos_user_agent_follows_azure_sdk_convention():
+    assert COSMOS_USER_AGENT.startswith("azsdk-python-cosmos-agent-memory/")
+
+
+def test_build_cosmos_user_agent_defaults_to_toolkit_only():
+    assert build_cosmos_user_agent() == COSMOS_USER_AGENT
+    assert build_cosmos_user_agent(None) == COSMOS_USER_AGENT
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_build_cosmos_user_agent_treats_blank_as_unset(blank):
+    assert build_cosmos_user_agent(blank) == COSMOS_USER_AGENT
+
+
+def test_build_cosmos_user_agent_suffixes_toolkit_behind_custom():
+    result = build_cosmos_user_agent("MyApp/1.2.3")
+    assert result == f"MyApp/1.2.3 {COSMOS_USER_AGENT}"
+    assert result.startswith("MyApp/1.2.3 ")
+    assert result.endswith(COSMOS_USER_AGENT)

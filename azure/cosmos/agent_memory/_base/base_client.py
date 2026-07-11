@@ -14,6 +14,7 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_cosmos_provisioning_autoscale_max_ru,
     _resolve_cosmos_throughput_mode,
     _resolve_embedding_dimensions,
+    build_cosmos_user_agent,
     normalize_ai_foundry_endpoint,
 )
 from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
@@ -48,6 +49,7 @@ class _BaseMemoryClient:
         chat_deployment_name: str,
         use_default_credential: bool,
         enable_turn_embeddings: Optional[bool] = None,
+        user_agent: Optional[str] = None,
         default_credential_module: str = "azure.identity",
     ) -> None:
         """Initialize shared local state, config values, and default credentials."""
@@ -81,6 +83,7 @@ class _BaseMemoryClient:
         self._enable_turn_embeddings = (
             enable_turn_embeddings if enable_turn_embeddings is not None else get_enable_turn_embeddings()
         )
+        self._cosmos_user_agent = build_cosmos_user_agent(user_agent)
 
         self._owns_cosmos_credential = False
         self._owns_ai_foundry_credential = False

@@ -11,6 +11,7 @@ from typing import Any
 from azure.cosmos.agent_memory.chat import resolve_api_version
 from azure.cosmos.agent_memory.logging import get_logger
 
+from ._embedding_tokens import truncate_text_to_token_budget
 from .exceptions import ConfigurationError
 
 logger = get_logger(__name__)
@@ -94,6 +95,7 @@ class EmbeddingsClient:
 
     def _build_kwargs(self, input_: str | list[str]) -> dict[str, Any]:
         texts = [input_] if isinstance(input_, str) else input_
+        texts = [truncate_text_to_token_budget(t, self._model) for t in texts]
         logger.debug(
             "Embedding request: model=%s, dimensions=%s, texts=%d",
             self._model,
@@ -144,7 +146,7 @@ class EmbeddingsClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         openai.OpenAIError
-            Propagated from the SDK on API failure (no retry — see module
+            Propagated from the SDK on API failure (no retry - see module
             docstring).
         """
         if not texts:

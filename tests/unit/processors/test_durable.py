@@ -1,4 +1,4 @@
-"""Tests for DurableFunctionProcessor — verifies all methods are no-ops."""
+"""Tests for DurableFunctionProcessor - verifies all methods are no-ops."""
 
 from __future__ import annotations
 

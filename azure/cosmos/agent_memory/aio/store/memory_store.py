@@ -17,8 +17,8 @@ from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
     _build_memory_query_builder,
     _coerce_datetime_iso,
-    _validate_hybrid_search,
     compute_content_hash,
+    extract_keywords,
     new_id,
 )
 from azure.cosmos.agent_memory.exceptions import (
@@ -32,6 +32,7 @@ from azure.cosmos.agent_memory.exceptions import (
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.models import MemoryRecord
 from azure.cosmos.agent_memory.store._search_helpers import (
+    MEMORY_PROJECTION,
     add_salience_filter,
     add_tag_filters,
     build_search_sql,
@@ -460,7 +461,7 @@ class AsyncMemoryStore:
             raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
         except CosmosAccessConditionFailedError as exc:
             raise MemoryConflictError(
-                f"delete conflicted for memory_id={memory_id!r} — document was modified after the type check"
+                f"delete conflicted for memory_id={memory_id!r} - document was modified after the type check"
             ) from exc
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"async delete failed for {memory_id}: {exc}") from exc
@@ -804,7 +805,6 @@ class AsyncMemoryStore:
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -823,9 +823,9 @@ class AsyncMemoryStore:
         :meth:`search_turns` to vector-search the raw conversation log instead.
         """
         terms = require_search_terms(search_terms, query)
-        _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
         query_vector = await self._embed(terms)
+        keywords = extract_keywords(terms)
 
         qb = _build_memory_query_builder(
             memory_id=memory_id,
@@ -845,11 +845,16 @@ class AsyncMemoryStore:
         )
         add_salience_filter(qb, min_salience)
 
-        sql = build_search_sql(qb=qb, top=top, hybrid_search=hybrid_search, include_superseded=include_superseded)
+        sql = build_search_sql(
+            qb=qb,
+            top=top,
+            keyword_count=len(keywords),
+            include_superseded=include_superseded,
+        )
         parameters = qb.get_parameters()
         parameters.append({"name": "@embedding", "value": query_vector})
-        if hybrid_search:
-            parameters.append({"name": "@key_terms", "value": terms})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
 
         partition_key, _ = query_scope(user_id, thread_id)
         if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
@@ -862,13 +867,71 @@ class AsyncMemoryStore:
             partition_key=partition_key,
         )
 
+    async def get_memory_history(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        *,
+        max_depth: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a memory's superseded predecessors, most-recently-superseded first.
+
+        When a fact is updated or
+        contradicted, the prior document is retained with ``superseded_by``
+        pointing at its replacement (see :meth:`mark_superseded`). This walks
+        that chain backwards from *memory_id* so callers can reason about how a
+        fact evolved - knowledge updates, preference reversals, relocations -
+        instead of seeing only the current value.
+
+        The document identified by *memory_id* is not itself included; the return
+        value is everything it superseded, transitively, bounded by *max_depth*
+        to guard against cycles. Each entry carries the ``superseded_at`` /
+        ``supersede_reason`` audit fields so callers can order and explain the
+        transitions.
+        """
+        if not memory_id:
+            raise ValidationError("memory_id is required")
+        if not user_id:
+            raise ValidationError("user_id is required")
+        partition_key, _ = query_scope(user_id, thread_id)
+        history: list[dict[str, Any]] = []
+        seen: set[str] = {memory_id}
+        frontier: list[str] = [memory_id]
+        for _ in range(max(1, max_depth)):
+            id_params = [{"name": f"@sid{i}", "value": sid} for i, sid in enumerate(frontier)]
+            placeholders = ", ".join(param["name"] for param in id_params)
+            parameters: list[dict[str, Any]] = [*id_params, {"name": "@user_id", "value": user_id}]
+            where = f"c.superseded_by IN ({placeholders}) AND c.user_id = @user_id"
+            if thread_id is not None:
+                where += " AND c.thread_id = @thread_id"
+                parameters.append({"name": "@thread_id", "value": thread_id})
+            sql = f"SELECT {MEMORY_PROJECTION} FROM c WHERE {where}"
+            rows = await self.query(
+                sql,
+                parameters,
+                container_key=ContainerKey.MEMORIES,
+                partition_key=partition_key,
+            )
+            frontier = []
+            for doc in rows:
+                doc_id = doc.get("id")
+                if not doc_id or doc_id in seen:
+                    continue
+                seen.add(doc_id)
+                history.append(doc)
+                frontier.append(doc_id)
+            if not frontier:
+                break
+        history.sort(key=lambda d: d.get("superseded_at") or d.get("created_at") or "", reverse=True)
+        return history
+
     async def search_turns(
         self,
         search_terms: Optional[str] = None,
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -878,7 +941,7 @@ class AsyncMemoryStore:
         *,
         query: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Search raw conversation turns using vector similarity with optional hybrid ranking.
+        """Search raw conversation turns using vector similarity with hybrid ranking.
 
         Only vector-searchable when turn embeddings were enabled at write time
         (see ``enable_turn_embeddings``). ``user_id`` is required and always
@@ -890,9 +953,9 @@ class AsyncMemoryStore:
         if not user_id:
             raise ValidationError("user_id is required for search_turns")
         terms = require_search_terms(search_terms, query)
-        _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
         query_vector = await self._embed(terms)
+        keywords = extract_keywords(terms)
 
         qb = _QueryBuilder()
         qb.add_filter("c.user_id", "@user_id", user_id)
@@ -907,11 +970,11 @@ class AsyncMemoryStore:
             before_param="@created_before",
         )
 
-        sql = build_search_sql(qb=qb, top=top, hybrid_search=hybrid_search, include_superseded=False)
+        sql = build_search_sql(qb=qb, top=top, keyword_count=len(keywords), include_superseded=False)
         parameters = qb.get_parameters()
         parameters.append({"name": "@embedding", "value": query_vector})
-        if hybrid_search:
-            parameters.append({"name": "@key_terms", "value": terms})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
 
         partition_key, _ = query_scope(user_id, thread_id)
         logger.debug("AsyncMemoryStore.search_turns query: %s", sql)

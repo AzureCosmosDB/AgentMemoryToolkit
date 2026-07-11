@@ -5,7 +5,7 @@ Cosmos DB, running the ProcessingPipeline (summarisation, fact / procedural /
 episodic extraction, deduplication) inline, and reading back results via
 Cosmos DB queries and vector / hybrid search.
 
-The Azure Function host is **not** required — the same ProcessingPipeline
+The Azure Function host is **not** required - the same ProcessingPipeline
 that the change-feed trigger invokes is also exposed directly on
 ``CosmosMemoryClient`` (``extract_memories``, ``generate_thread_summary``,
 ``generate_user_summary``, ``reconcile``).
@@ -122,6 +122,67 @@ def _cleanup(mem: CosmosMemoryClient, user_id: str) -> None:
             _delete(container, doc)
 
 
+def _seed_fact_with_embedding(
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
+    content: str,
+    *,
+    retries: int = 4,
+) -> None:
+    """Seed a fact and confirm it was stored *with* an embedding.
+
+    ``add_cosmos`` generates the embedding synchronously; a transient
+    embedding-service blip logs "proceeding without embedding" and stores the doc
+    without a vector, which would leave the extract-time vector floor with no
+    neighbour to match. Retry until an embedded copy exists (indexing is fast -
+    the doc is vector-searchable within ~2s), and skip honestly if the embedding
+    service is genuinely unavailable rather than reporting a false failure."""
+    check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
+    params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
+    for _ in range(retries):
+        mem.add_cosmos(
+            user_id=user_id,
+            role="user",
+            content=content,
+            memory_type="fact",
+            thread_id=thread_id,
+            salience=0.7,
+        )
+        embedded = list(
+            mem._memories_container_client.query_items(
+                query=check, parameters=params, enable_cross_partition_query=True
+            )
+        )
+        if embedded:
+            return
+        time.sleep(1)
+    pytest.skip(f"embedding service unavailable - could not seed an embedded fact for {content!r}")
+
+
+def _wait_vector_searchable(
+    mem: CosmosMemoryClient,
+    user_id: str,
+    search_terms: str,
+    *,
+    timeout: float = 20.0,
+) -> None:
+    """Poll vector search until the user's seeded fact is retrievable.
+
+    ``add_cosmos`` stores the embedding synchronously, but Cosmos's DiskANN vector
+    index catches up asynchronously (~1-2s). Gating on a real vector search makes
+    the subsequent ``_vector_candidates`` lookup deterministic instead of racing
+    the index."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if mem.search_cosmos(search_terms=search_terms, user_id=user_id, top_k=5):
+                return
+        except Exception:
+            pass
+        time.sleep(1)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -138,7 +199,7 @@ class TestThreadSummary:
                     ("user", "What are some good restaurants in Paris?"),
                     ("agent", "Le Comptoir du Panthéon is a classic bistro in the 5th arrondissement."),
                     ("user", "What kind of cuisine do they serve?"),
-                    ("agent", "Traditional French bistro fare — confit de canard, steak frites, etc."),
+                    ("agent", "Traditional French bistro fare - confit de canard, steak frites, etc."),
                 ],
             )
             time.sleep(1)
@@ -243,7 +304,7 @@ class TestUserSummary:
 
 
 class TestSearchAfterExtraction:
-    def test_vector_and_hybrid_search(self, agent_memory, unique_user_id, unique_thread_id):
+    def test_search_after_extraction(self, agent_memory, unique_user_id, unique_thread_id):
         try:
             _add_turns(
                 agent_memory,
@@ -268,13 +329,12 @@ class TestSearchAfterExtraction:
             )
             assert len(vec) >= 1, "Vector search should return at least 1 result"
 
-            hyb = agent_memory.search_cosmos(
+            hybrid = agent_memory.search_cosmos(
                 search_terms="Buddy the dog park",
                 user_id=unique_user_id,
-                hybrid_search=True,
                 top_k=5,
             )
-            assert len(hyb) >= 1, "Hybrid search should return at least 1 result"
+            assert len(hybrid) >= 1, "Hybrid search should return at least 1 result"
         finally:
             _cleanup(agent_memory, unique_user_id)
 
@@ -502,5 +562,62 @@ class TestReconciliation:
             survivor_id = sample_loser["superseded_by"]
             live = [m for m in all_facts if not m.get("superseded_by")]
             assert any(m["id"] == survivor_id for m in live), "supersede_by must point at a live record"
+        finally:
+            _cleanup(agent_memory, unique_user_id)
+
+
+class TestExtractTimeVectorDedup:
+    """Extract-time vector floor (``dedup_extracted_memories``), distinct from the
+    ``reconcile`` path. A freshly-extracted fact that near-duplicates an
+    *already-stored* fact is either auto-dropped (``vector_dedup_skipped``,
+    sim >= DEDUP_SIM_HIGH) or tagged ``sys:dup-candidate``
+    (``dup_candidates_tagged``, DEDUP_SIM_LOW <= sim < DEDUP_SIM_HIGH).
+
+    The ladder is driven directly with a controlled extracted fact rather than
+    through the LLM: extraction phrasing varies run-to-run and often lands the
+    fact below the 0.80 floor (or produces unrelated facts), which is a property
+    of the model, not the dedup code. Feeding a fixed near-duplicate keeps the
+    assertion deterministic while still exercising the real embedding call, the
+    live Cosmos ``VectorDistance`` query, and the similarity bands."""
+
+    def test_dedup_extracted_memories_flags_near_duplicate_of_stored_fact(
+        self, agent_memory, unique_user_id, unique_thread_id
+    ):
+        try:
+            # Seed a stored fact (embedded + vector-indexed) to dedup against.
+            # Concrete, minimally-reworded facts embed ~0.93-0.98 cosine - well
+            # inside the DEDUP_SIM_LOW (0.80) / DEDUP_SIM_HIGH (0.97) bands.
+            _seed_fact_with_embedding(
+                agent_memory, unique_user_id, unique_thread_id, "The user has a cat named Whiskers."
+            )
+            _wait_vector_searchable(agent_memory, unique_user_id, "cat named Whiskers")
+
+            # A controlled "extracted" near-duplicate (not byte-identical to the
+            # seed, so this is the vector floor rather than an exact-hash match).
+            extracted = {
+                "facts": [
+                    {
+                        "id": f"fact_{uuid.uuid4().hex}",
+                        "type": "fact",
+                        "user_id": unique_user_id,
+                        "thread_id": unique_thread_id,
+                        "content": "The user's cat is called Whiskers.",
+                        "tags": [],
+                    }
+                ],
+                "episodic": [],
+                "updates": [],
+            }
+            result = agent_memory._get_pipeline().dedup_extracted_memories(unique_user_id, extracted)
+
+            stats = next((op for op in result.get("updates", []) if op.get("op") == "stats"), {})
+            suppressed = int(stats.get("vector_dedup_skipped", 0)) + int(stats.get("dup_candidates_tagged", 0))
+            surviving = result.get("facts", [])
+            was_dropped = len(surviving) == 0
+            was_tagged = any("sys:dup-candidate" in (f.get("tags") or []) for f in surviving)
+            assert suppressed >= 1 and (was_dropped or was_tagged), (
+                "Vector floor should drop or tag the near-duplicate of the stored "
+                f"'cat named Whiskers' fact; surviving={surviving} stats={stats}"
+            )
         finally:
             _cleanup(agent_memory, unique_user_id)

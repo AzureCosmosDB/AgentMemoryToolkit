@@ -590,7 +590,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
         For ``memory_type='turn'`` this also bumps the auto-trigger counter and
         schedules cadence-aware processing (extract / reconcile / procedural /
-        thread_summary / user_summary) as a background ``asyncio.Task`` — the
+        thread_summary / user_summary) as a background ``asyncio.Task`` - the
         same pattern :meth:`push_to_cosmos` uses for buffered turns. The await
         returns after the Cosmos write completes; cadence runs out-of-band so
         it does not block the caller.
@@ -708,7 +708,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -726,7 +725,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             role=role,
             memory_types=memory_types,
             thread_id=thread_id,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -744,7 +742,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         user_id: str,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -766,13 +763,37 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             user_id=user_id,
             thread_id=thread_id,
             role=role,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
             exclude_tags=exclude_tags,
             created_after=created_after,
             created_before=created_before,
+        )
+
+    async def get_memory_history(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        *,
+        max_depth: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a memory's superseded predecessors, most-recently-superseded first.
+
+        AMT supersedes rather than deletes, so the full history of a fact - how a
+        preference, decision, or attribute changed over time - is preserved. This
+        walks the ``superseded_by`` chain backwards from *memory_id* and returns
+        every version it replaced (transitively), each carrying its
+        ``superseded_at`` / ``supersede_reason`` audit fields. Useful for
+        answering "what changed?" / "what was it before?" questions that a
+        current-value-only view cannot.
+        """
+        return await self._get_store().get_memory_history(
+            memory_id,
+            user_id,
+            thread_id,
+            max_depth=max_depth,
         )
 
     async def get_thread(
@@ -881,12 +902,23 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        return await self._get_store().search_episodic(user_id, search_terms, top_k, min_salience, include_superseded)
+        return await self._get_store().search_episodic(
+            user_id,
+            search_terms,
+            top_k,
+            min_salience,
+            include_superseded,
+        )
 
     async def build_procedural_context(self, user_id: str) -> str:
         return await self._get_pipeline().build_procedural_context(user_id)
 
-    async def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
+    async def build_episodic_context(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 3,
+    ) -> str:
         return await self._get_store().build_episodic_context(user_id, query, top_k)
 
     async def extract_memories(self, user_id: str, thread_id: str, recent_k: Optional[int] = None) -> dict[str, int]:
@@ -939,7 +971,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         caught and logged as warnings so the per-thread work already
         persisted by the prior steps is not erased. Permanent failures
         (config bugs, auth errors, 4xx Cosmos errors, Python builtins like
-        ``KeyError`` / ``TypeError``) are re-raised — silencing them turns
+        ``KeyError`` / ``TypeError``) are re-raised - silencing them turns
         operational issues into invisible ``WARNING`` lines.
         """
         _BaseMemoryClient._require_cosmos(self)

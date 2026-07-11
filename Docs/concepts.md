@@ -8,17 +8,17 @@ Agent Memory Toolkit stores conversation data as memory documents and builds hig
 
 Every memory uses the same base shape:
 
-| Field | Description |
-|-------|-------------|
-| `id` | Unique identifier |
-| `user_id` | User the memory belongs to |
-| `thread_id` | Conversation thread |
-| `role` | `user`, `agent`, `tool`, or `system` |
-| `type` | `turn`, `summary`, `fact`, or `user_summary` |
-| `content` | Main text payload |
-| `embedding` | Vector used for semantic search |
-| `metadata` | Extra context (e.g. `tool_name`, `tool_call_id`, edit reasons) |
-| `created_at` | ISO 8601 timestamp |
+| Field        | Description                                                    |
+|--------------|----------------------------------------------------------------|
+| `id`         | Unique identifier                                              |
+| `user_id`    | User the memory belongs to                                     |
+| `thread_id`  | Conversation thread                                            |
+| `role`       | `user`, `agent`, `tool`, or `system`                           |
+| `type`       | `turn`, `summary`, `fact`, or `user_summary`                   |
+| `content`    | Main text payload                                              |
+| `embedding`  | Vector used for semantic search                                |
+| `metadata`   | Extra context (e.g. `tool_name`, `tool_call_id`, edit reasons) |
+| `created_at` | ISO 8601 timestamp                                             |
 
 ---
 
@@ -64,12 +64,12 @@ Like thread summaries, user summaries update incrementally by merging the existi
 
 ## Short-Term vs. Long-Term Memory
 
-| | Short-Term | Long-Term |
-|---|---|---|
-| **What** | Turn messages | Summaries, facts, user summaries |
-| **Granularity** | Per message | Per thread, per fact, or per user |
-| **Created by** | `add_local()` / `add_cosmos()` / `push_to_cosmos()` | `generate_thread_summary()` / `extract_facts()` / `generate_user_summary()` |
-| **Purpose** | Replay recent context | Compact recall and semantic retrieval |
+|                 | Short-Term                                          | Long-Term                                                                   |
+|-----------------|-----------------------------------------------------|-----------------------------------------------------------------------------|
+| **What**        | Turn messages                                       | Summaries, facts, user summaries                                            |
+| **Granularity** | Per message                                         | Per thread, per fact, or per user                                           |
+| **Created by**  | `add_local()` / `add_cosmos()` / `push_to_cosmos()` | `generate_thread_summary()` / `extract_facts()` / `generate_user_summary()` |
+| **Purpose**     | Replay recent context                               | Compact recall and semantic retrieval                                       |
 
 Common pattern: keep turns during an active conversation, then generate summaries or facts when the thread gets long or is complete.
 
@@ -79,12 +79,12 @@ Common pattern: keep turns during an active conversation, then generate summarie
 
 A thread is the unit of conversation. `get_thread()` returns the memories for one `thread_id`, optionally limited to the most recent `k` entries. `get_memories()` also supports a `thread_id` filter to retrieve memories from a specific thread.
 
-| Role | Meaning |
-|------|---------|
-| `user` | Human message |
-| `agent` | Assistant message |
-| `tool` | Tool output (metadata can include `tool_name` and `tool_call_id`) |
-| `system` | Generated artifacts such as summaries and facts |
+| Role     | Meaning                                                           |
+|----------|-------------------------------------------------------------------|
+| `user`   | Human message                                                     |
+| `agent`  | Assistant message                                                 |
+| `tool`   | Tool output (metadata can include `tool_name` and `tool_call_id`) |
+| `system` | Generated artifacts such as summaries and facts                   |
 
 ---
 
@@ -118,26 +118,53 @@ Prompts for summarization and fact extraction live in `azure_functions/prompts/`
 
 ## Memory Reconciliation
 
-The `reconcile_memories(user_id, n=50)` pipeline step reads up to N most-recent active facts for a user and asks the LLM to identify two orthogonal outcomes in one pass:
+Two independent mechanisms keep the fact pool clean and convergent: a cheap, LLM-free **write-time in-place dedup** that folds near-duplicate restatements into their existing record before they persist, and a periodic **LLM contradiction pass** that resolves opposing claims. Paraphrases are handled entirely at write time, so the LLM pass never merges duplicates — it only adjudicates contradictions.
 
-- **Duplicates** — two or more facts that restate the same claim in different words. Resolution: collapse into one merged fact; the originals are soft-deleted with `supersede_reason="duplicate"` and `superseded_by` set to the merged fact's id.
-- **Contradictions** — two facts that assert opposing claims about the same subject. Resolution: keep the winner (more recent first, higher confidence as tiebreaker), soft-delete the loser with `supersede_reason="contradict"` and `superseded_by` set to the winner.
+### Write-time in-place dedup (LLM-free)
 
-### Why one pass
+Between extraction and persist, `dedup_extracted_memories` compares each newly extracted fact/episodic doc against its single nearest active same-type memory using Cosmos `VectorDistance` (pure vector, no hybrid):
 
-Detecting contradictions semantically requires the LLM to see the candidate pool as a whole — paraphrased ("user prefers aisle seats") and contradictory ("user is vegetarian" vs "user loves steak") facts often have very different embedding vectors and would never co-occur in any cosine cluster. Putting all N candidates into one prompt lets the LLM do the semantic reasoning across both axes simultaneously. The pipeline returns `{"kept": int, "merged": int, "contradicted": int}`.
+| condition (cosine)          | action                                                                            |
+|-----------------------------|-----------------------------------------------------------------------------------|
+| `content_hash` hit          | skip — identical re-extraction, no vector query, no write (`exact_dedup_skipped`) |
+| `s ≥ DEDUP_SIM_HIGH` (0.97) | **fold in place** into the existing neighbor (no LLM)                             |
+| `s < DEDUP_SIM_HIGH`        | persist as a novel record                                                         |
+
+A **fold** refreshes the existing neighbor rather than minting a new doc: it keeps the neighbor's `id` / `created_at` / partition, unions tags, takes the max salience/confidence, and bumps `updated_at`. Content and embedding are recency-wins **except** that a shorter restatement never overwrites longer content, so specifics captured by the richer record aren't dropped. The write is applied with ETag optimistic concurrency (`IfNotModified`); on an ETag conflict the fold is abandoned and the new doc is added as novel, so a concurrent supersede/refresh is never clobbered. This makes the write path convergent — a restatement updates one document instead of creating a duplicate that a later sweep must merge and supersede.
+
+The threshold is calibrated for **cosine/dotproduct** on normalized embeddings. On a container whose `distanceFunction` is **euclidean** — or when the distance policy can't be read — the destructive in-place fold is **disabled** (one-shot warning) and every extracted doc persists as novel, because cosine thresholds don't translate to unbounded euclidean distances.
+
+### LLM contradiction reconcile
+
+`reconcile_memories(user_id, n=50, *, memory_type="fact")` loads up to `n` active (non-superseded) facts, most recent first, and asks the dedup prompt to identify **contradicted pairs** — opposing claims about the same subject (e.g. "deadline March 1" vs "March 15"). Each loser is soft-deleted with `supersede_reason="contradict"` and `superseded_by` set to the winner (more recent wins, higher confidence as tiebreaker). Chained contradictions are guarded, so a fact already superseded in this pass can't be used to tombstone a third.
+
+Near-duplicate **paraphrases are not merged here** — write-time in-place dedup already folds them before they land — so reconcile is a single, bounded, convergent pass: no clustering, no candidate/full-pool modes, no synthesized merged documents, and no re-merge churn. `episodic` and `procedural` types are no-ops (episodic has no contradiction semantics; its near-dups fold at write time). The pass runs over one flat pool of the most-recent active facts and returns `{"kept": int, "merged": int, "contradicted": int}` — `merged` is always `0`, retained for backward-compatible callers.
 
 ### Loser preservation
 
-Soft-deleted facts stay in the container with their `supersede_reason`, `superseded_at`, and `superseded_by` fields populated. Default reads (`get_memories`, `search_cosmos`) filter them out via `superseded_by IS NULL`. To inspect the audit trail (e.g. "show everything that ever applied to this user"), opt out of the filter at the query level.
+Soft-deleted facts stay in the container with their `supersede_reason`, `superseded_at`, and `superseded_by` fields populated. Default reads (`get_memories`, `search_cosmos`) filter them out via `superseded_by IS NULL`. To inspect the audit trail, opt out of the filter at the query level.
 
 ### Write-time exact dedup
 
 Each fact written by `extract_memories` carries a `content_hash` (SHA-256 of normalized content, truncated to 32 hex chars; lowercase, whitespace-collapsed). Before upserting a freshly-extracted fact, the pipeline checks the hash against existing active facts and short-circuits if a match exists, incrementing the `exact_dedup_skipped` metric. This catches identical re-extractions cheaply without an LLM call.
 
+### Extraction gating (`extracted_at` + `recent_k`)
+
+Extraction only ever reads turns not yet stamped `extracted_at`; `persist` stamps every turn it consumed once the extracted memories are durably written. This `extracted_at` gate is the authoritative "what's left to extract" signal and is shared by both backends — a failed or lagging extract leaves its turns unstamped, so the full backlog is retried on the next run and no turns are skipped.
+
+- **In-process SDK auto-trigger** — calls extraction with `recent_k=None`, so it drains the entire unextracted backlog each run and relies purely on the `extracted_at` gate.
+- **Change-feed / Durable Function App** — additionally **sizes** `recent_k` from a per-thread **watermark** (`last_extract_count` on the counter doc): `recent_k = current_count − last_extract_count` (with `last_extract_count` treated as `0` before the first successful extract), then still applies the `extracted_at` filter. The watermark advances **only after a successful extract**. The window is deliberately **not** capped by `DEDUP_POOL_SIZE` (that knob governs the reconcile pool, not the extraction window) — capping would extract only the newest N and silently strand the oldest backlog turns.
+
+> **Caveat (rare, change-feed path):** the counter increment is best-effort — under sustained optimistic-concurrency contention it can drop an increment rather than block the user's write path (see `increment_counter_sync`). A dropped increment leaves `current_count` lagging the true turn count, which can under-size the watermark-derived `recent_k`. The Function App backend avoids stranding turns by raising to force change-feed redelivery; the in-process path is unaffected because it uses `recent_k=None` and the `extracted_at` gate, not the counter, to decide what to extract.
+
 ### Tunable
 
-`DEDUP_EVERY_N` (default 5) controls how often `reconcile_memories` runs in the auto-trigger path. Set to `0` to disable. The candidate cap `n` (default 50) is tunable per call; larger values give the LLM a wider view at higher token cost.
+Only two reconcile knobs are operator-configurable:
+
+- `DEDUP_EVERY_N` (default `5`) — how often reconcile runs in the auto-trigger path (every Nth **extract**, not every Nth turn). Set to `0` to disable.
+- `DEDUP_POOL_SIZE` (default `50`, hard cap `500`) — the pool size `n` passed to `reconcile_memories`; also overridable per call. Larger values give the LLM a wider view at higher token cost.
+
+The similarity threshold (`DEDUP_SIM_HIGH`, `0.97`) and the vector-fold on/off switch (`DEDUP_VECTOR_ENABLED`) ship as **fixed internal constants** in `azure.cosmos.agent_memory.thresholds` — they have no env plumbing and ignore any environment variable, so the write-time fold behavior is not operator-tunable today.
 
 > **Indexing note.** The reconcile pool query orders by `created_at` (matching the prompt's "more recent first" tiebreaker). Cosmos's default indexing policy includes every property, so this works out of the box. If you customize the indexing policy to reduce write RU, ensure `/created_at/?` remains indexed or the query will fail with a 400 (`Order-by over a non-indexed path`).
 
@@ -169,23 +196,23 @@ on_memory_change trigger
 
 ### Threshold settings
 
-| Setting | Scope | Default |
-|---------|-------|---------|
-| `THREAD_SUMMARY_EVERY_N` | Per `(user_id, thread_id)` | `0` (disabled) |
-| `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)` | `0` (disabled) |
-| `USER_SUMMARY_EVERY_N` | Per `user_id` (across all threads) | `0` (disabled) |
+| Setting                   | Scope                              | Default        |
+|---------------------------|------------------------------------|----------------|
+| `THREAD_SUMMARY_EVERY_N`  | Per `(user_id, thread_id)`         | `0` (disabled) |
+| `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)`         | `0` (disabled) |
+| `USER_SUMMARY_EVERY_N`    | Per `user_id` (across all threads) | `0` (disabled) |
 
 Set any value to `0` to disable that processing type. For example, setting `THREAD_SUMMARY_EVERY_N=5` generates a thread summary every 5 new turns in each thread.
 
 ### Required containers
 
-| Container | Partition Key | Purpose |
-|-----------|---------------|---------|
-| `memories` | `/user_id`, `/thread_id` (hierarchical) | Durable derived memories (`fact`, `episodic`, `procedural`) |
-| `memories_turns` | `/user_id`, `/thread_id` (hierarchical) | Raw conversation turns (`turn`) — append-only, TTL-pruned |
-| `memories_summaries` | `/user_id`, `/thread_id` (hierarchical) | Thread + user summaries (`thread_summary`, `user_summary`) |
-| `counter` | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing |
-| `leases` | `/id` | Change feed checkpointing container created by `create_memory_store()` |
+| Container            | Partition Key                           | Purpose                                                                |
+|----------------------|-----------------------------------------|------------------------------------------------------------------------|
+| `memories`           | `/user_id`, `/thread_id` (hierarchical) | Durable derived memories (`fact`, `episodic`, `procedural`)            |
+| `memories_turns`     | `/user_id`, `/thread_id` (hierarchical) | Raw conversation turns (`turn`) — append-only, TTL-pruned              |
+| `memories_summaries` | `/user_id`, `/thread_id` (hierarchical) | Thread + user summaries (`thread_summary`, `user_summary`)             |
+| `counter`            | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing                        |
+| `leases`             | `/id`                                   | Change feed checkpointing container created by `create_memory_store()` |
 
 ### Throughput configuration
 
@@ -198,10 +225,10 @@ This keeps the change feed dependencies aligned with the main memory store inste
 
 ### Push vs. pull
 
-| Mode | Trigger | Use case |
-|------|---------|----------|
-| **On-demand (pull)** | SDK call (`generate_thread_summary()`, etc.) | Explicit control over when processing happens |
-| **Automatic (push)** | Change feed trigger | Fire-and-forget — processing happens in the background as turns are written |
+| Mode                 | Trigger                                      | Use case                                                                    |
+|----------------------|----------------------------------------------|-----------------------------------------------------------------------------|
+| **On-demand (pull)** | SDK call (`generate_thread_summary()`, etc.) | Explicit control over when processing happens                               |
+| **Automatic (push)** | Change feed trigger                          | Fire-and-forget — processing happens in the background as turns are written |
 
 Both modes use the same Durable Functions orchestrator and activities, so prompts, incremental update logic, and stored outputs are identical.
 
@@ -209,10 +236,10 @@ Both modes use the same Durable Functions orchestrator and activities, so prompt
 
 ## Local vs. Cloud Storage
 
-| Backend | Use Case | Persistence |
-|---------|----------|-------------|
-| **Local (in-memory)** | Development and quick testing | Lost on process exit |
-| **Cosmos DB** | Production, shared access, semantic search | Durable |
+| Backend               | Use Case                                   | Persistence          |
+|-----------------------|--------------------------------------------|----------------------|
+| **Local (in-memory)** | Development and quick testing              | Lost on process exit |
+| **Cosmos DB**         | Production, shared access, semantic search | Durable              |
 
 Local storage is enough for CRUD testing. Cosmos DB is required for persistence, vector search, and the processing pipeline.
 

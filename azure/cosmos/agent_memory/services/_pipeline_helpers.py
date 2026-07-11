@@ -16,7 +16,58 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
+from azure.cosmos.agent_memory._embedding_tokens import count_tokens
 from azure.cosmos.agent_memory.exceptions import LLMError
+from azure.cosmos.agent_memory.logging import get_logger
+
+logger = get_logger(__name__)
+
+_NON_RETRYABLE_LLM_MARKERS = (
+    "content_filter",
+    "content management policy",
+    "context_length_exceeded",
+    "maximum context length",
+)
+
+
+def is_retryable_llm_error(exc: BaseException) -> bool:
+    """Classify an extraction LLM failure as retryable (transient) or not."""
+    text = str(exc).lower()
+    return not any(marker in text for marker in _NON_RETRYABLE_LLM_MARKERS)
+
+
+def batch_turns_by_tokens(
+    items: list[dict[str, Any]],
+    max_tokens: int,
+    *,
+    model: str = "gpt-5.4",
+) -> list[list[dict[str, Any]]]:
+    """Greedily pack ordered *items* into batches whose combined content stays
+    within *max_tokens*.
+
+    Token-bounded batching keeps each extraction call small enough that (a) the
+    model can attend to every turn (more complete extraction - smaller windows
+    extract more faithfully) and (b) a single poisoned turn fails only its own
+    batch instead of the whole backlog. A turn larger than *max_tokens* on its
+    own becomes a singleton batch (never dropped).
+    """
+    if not items:
+        return []
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_tokens = 0
+    for item in items:
+        item_tokens = count_tokens(str(item.get("content") or ""), model)
+        if current and current_tokens + item_tokens > max_tokens:
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(item)
+        current_tokens += item_tokens
+    if current:
+        batches.append(current)
+    return batches
+
 
 # Separator for deterministic id seeds. Using NUL ensures user_id /
 # thread_id values can never collide with literal section markers
@@ -267,7 +318,7 @@ def build_transcript(
         If *True*, group messages under ``=== Thread <id> ===`` headers.
     metadata_keys:
         Allow-list of metadata keys to surface in each transcript line.
-        Defaults to ``None`` (no metadata serialized — only ``[role]:
+        Defaults to ``None`` (no metadata serialized - only ``[role]:
         content`` lines). When provided, only the listed keys are emitted,
         in iteration order. Keys absent from a given turn's metadata are
         silently skipped.
@@ -276,7 +327,7 @@ def build_transcript(
         ``TurnRecord.metadata`` that the extraction LLM should see
         (e.g. ``["agent_id", "timestamp"]``). Leaving it unset keeps free-form
         metadata blobs (raw tool calls, IDE schema, etc.) out of every
-        prompt — they're often 10-100x larger than the dialog itself and
+        prompt - they're often 10-100x larger than the dialog itself and
         dilute extraction quality.
 
         Accepts any iterable of strings except ``str`` itself (which would
@@ -307,47 +358,6 @@ def build_transcript(
             parts.append(f"[{role}]: {content}{meta_str}")
         parts.append("")
     return "\n".join(parts)
-
-
-def format_existing_episodics(memories: list[dict[str, Any]]) -> str:
-    """Render existing episodic memories for the extract_memories prompt.
-
-    Groups by ``(scope_type, scope_value)`` so the LLM can see, per-scope,
-    which intent is already captured. Episodics use **scope-as-identity**:
-    the deterministic id is seeded from ``(user_id, scope_type, scope_value)``,
-    so any re-emission for the same scope (paraphrased intent, added detail,
-    or a reversal) collides and overwrites the prior record via upsert. The
-    LLM does NOT make ``ADD``/``UPDATE``/``CONTRADICT`` decisions on
-    episodics — that vocabulary is not in the episodic schema.
-
-    What this rendering gives the model is per-scope context so it can:
-
-    1. Emit a single coherent ``text`` that reflects the *current* intent
-       for the scope (the upsert will overwrite the prior one).
-    2. Avoid re-emitting an episodic when the new turn carries no
-       additional signal beyond what the existing one already records.
-
-    Distinct events under the same umbrella (e.g. hotel booking vs lost
-    wallet, both under a Tokyo trip) belong under distinct ``scope_value``
-    strings so they don't collide on the deterministic id.
-    """
-    if not memories:
-        return "(none)"
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for mem in memories:
-        meta = mem.get("metadata") or {}
-        scope_type = (meta.get("scope_type") or "(none)").strip() or "(none)"
-        scope_value = (meta.get("scope_value") or "(none)").strip() or "(none)"
-        grouped[(scope_type, scope_value)].append(mem)
-    lines: list[str] = []
-    for (scope_type, scope_value), bucket in grouped.items():
-        lines.append(f"- {scope_type} = {scope_value} ({len(bucket)} episodic{'s' if len(bucket) != 1 else ''})")
-        for mem in bucket:
-            mem_id = mem.get("id", "(no-id)")
-            salience = mem.get("salience", "N/A")
-            content = (mem.get("content") or "").strip() or "(empty content)"
-            lines.append(f"  - [ID: {mem_id}] (salience {salience}) {content}")
-    return "\n".join(lines)
 
 
 # Stopwords stripped from grounding checks. Keep this list short and focused
@@ -407,6 +417,46 @@ _GROUNDING_STOPWORDS = frozenset(
         "may",
         "might",
         "must",
+        "say",
+        "says",
+        "said",
+        "saying",
+        "tell",
+        "tells",
+        "told",
+        "ask",
+        "asks",
+        "asked",
+        "mention",
+        "mentions",
+        "mentioned",
+        "stated",
+        "noted",
+        "added",
+        "replied",
+        "want",
+        "wants",
+        "wanted",
+        "decide",
+        "decides",
+        "decided",
+        "propose",
+        "proposes",
+        "proposed",
+        "suggest",
+        "suggests",
+        "suggested",
+        "planned",
+        "choose",
+        "chooses",
+        "chose",
+        "like",
+        "likes",
+        "liked",
+        "later",
+        "then",
+        "also",
+        "again",
     }
 )
 
@@ -433,7 +483,7 @@ def check_extracted_fact_grounding(
 
     Catches two known LLM failure modes that previously corrupted the fact store:
 
-    1. **Synthesis from existing facts** — the LLM emits an ADD whose content
+    1. **Synthesis from existing facts** - the LLM emits an ADD whose content
        paraphrase-merges two or more existing facts (e.g. existing
        "user eats meat" + "user loves steak" → emitted "user loves steak,
        indicating they eat meat") even though the new user turn says nothing
@@ -441,7 +491,7 @@ def check_extracted_fact_grounding(
        but the visible artefact is a chain of "duplicate" supersedes that the
        user never triggered.
 
-    2. **Phantom explicit-negation** — the LLM emits a second CONTRADICT fact
+    2. **Phantom explicit-negation** - the LLM emits a second CONTRADICT fact
        alongside the literal user statement (e.g. user says "I love steak and
        seafood"; LLM emits both "user loves steak and seafood" and an invented
        "user eats meat" CONTRADICT) when the supersedes_id on the literal fact
@@ -453,8 +503,8 @@ def check_extracted_fact_grounding(
     facts → strong synthesis signal. If they come from a single existing
     fact with >=50%% overlap → weaker phantom-negation signal.
 
-    Logs a WARNING for each suspected fact. Does NOT drop facts — downstream
-    reconciliation remains the dedup authority — but the WARNING is the
+    Logs a WARNING for each suspected fact. Does NOT drop facts - downstream
+    reconciliation remains the dedup authority - but the WARNING is the
     deterministic test signal that catches regressions.
     """
     if not fact_docs or not turn_items:
@@ -488,7 +538,7 @@ def check_extracted_fact_grounding(
         if len(contributors) >= 2:
             logger.warning(
                 "extract_memories: emitted fact appears synthesized from %d existing facts "
-                "(ungrounded in user turns) — extract should ground only in this turn's [user] lines. "
+                "(ungrounded in user turns) - extract should ground only in this turn's [user] lines. "
                 "doc_id=%s content=%r ungrounded_tokens=%s contributor_ids=%s "
                 "user_id=%s thread_id=%s",
                 len(contributors),
@@ -505,7 +555,7 @@ def check_extracted_fact_grounding(
             if overlap_ratio >= 0.5:
                 logger.warning(
                     "extract_memories: emitted fact has ungrounded tokens overlapping a single existing fact "
-                    "(possible phantom-negation/restatement) — extract should ground only in this turn's "
+                    "(possible phantom-negation/restatement) - extract should ground only in this turn's "
                     "[user] lines. doc_id=%s content=%r ungrounded_tokens=%s overlap_existing_id=%s "
                     "overlap_ratio=%.2f user_id=%s thread_id=%s",
                     doc.get("id"),
@@ -531,11 +581,38 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
             cleaned = cleaned.lstrip("`").lstrip()
     if cleaned.endswith("```"):
         cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
     try:
-        return json.loads(cleaned.strip())
+        obj, end = json.JSONDecoder().raw_decode(cleaned)
     except json.JSONDecodeError as exc:
         preview = (text or "")[:200].replace("\n", " ")
+        if _looks_truncated(cleaned, exc):
+            raise LLMError(
+                "LLM JSON output appears TRUNCATED (decode error at the very end of a "
+                f"{len(cleaned)}-char body - the model almost certainly hit its output-token "
+                "cap mid-object). Increase 'maxOutputTokens' in the calling prompty, or reduce "
+                "the amount of input per call (e.g. lower the fact-extraction batch size / "
+                f"recent_k, or split oversized turns). Decode error: {exc}. preview={preview!r}"
+            ) from exc
         raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
+    trailing = cleaned[end:].strip()
+    if trailing:
+        logger.warning(
+            "LLM response had %d chars of extra data after the first JSON object; using the "
+            "first object and ignoring the remainder (trailing_preview=%r)",
+            len(trailing),
+            trailing[:120].replace("\n", " "),
+        )
+    return obj
+
+
+def _looks_truncated(cleaned: str, exc: json.JSONDecodeError) -> bool:
+    """Heuristic: did the JSON fail because the model ran out of output tokens?"""
+    if not cleaned:
+        return False
+    unbalanced = cleaned.count("{") > cleaned.count("}") or cleaned.count("[") > cleaned.count("]")
+    unterminated_string = "Unterminated string" in str(exc)
+    return unbalanced or unterminated_string
 
 
 def default_prompts_dir() -> str:
@@ -604,7 +681,7 @@ class PromptyLoader:
         return messages, params
 
 
-# Allowed values for the EpisodicRecord ``outcome_valence`` field — mirrors
+# Allowed values for the EpisodicRecord ``outcome_valence`` field - mirrors
 # ``azure.cosmos.agent_memory.models._EPISODIC_ALLOWED_VALENCES`` but kept inline
 # to avoid an import cycle (helpers must not import models).
 VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})

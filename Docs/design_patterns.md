@@ -170,7 +170,6 @@ facts = await mem.search_cosmos(
 results = await mem.search_cosmos(
     search_terms="PostgreSQL to Cosmos DB",
     user_id="user-1",
-    hybrid_search=True,
     top_k=5,
 )
 ```

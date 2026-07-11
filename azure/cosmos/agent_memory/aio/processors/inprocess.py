@@ -2,7 +2,7 @@
 
 The underlying :class:`azure.cosmos.agent_memory.aio.services.pipeline.AsyncPipelineService`
 exposes native ``async def`` methods, so every call here is a direct
-``await`` — no ``asyncio.to_thread`` adapter, no sync sub-clients.
+``await`` - no ``asyncio.to_thread`` adapter, no sync sub-clients.
 """
 
 from __future__ import annotations
@@ -70,9 +70,7 @@ class AsyncInProcessProcessor:
 
         thread_summary = await self._pipeline.generate_thread_summary(user_id, thread_id)
         extracted = await self._pipeline.extract_memories(user_id, thread_id)
-        reconciled = await self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
-
-        deduped_count = self._extract_reconcile_count(reconciled)
+        deduped_count = await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
 
         extracted_counts: dict[str, int] = (
             {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
@@ -91,8 +89,9 @@ class AsyncInProcessProcessor:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
-        extracted = await self._pipeline.extract_memories(user_id, thread_id)
+        extracted = await self._pipeline.extract_memories(user_id, thread_id, recent_k=recent_k)
         return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
 
     async def process_thread_summary(
@@ -116,15 +115,26 @@ class AsyncInProcessProcessor:
     async def process_reconcile(self, *, user_id: str) -> int:
         from ...thresholds import get_dedup_pool_size
 
-        reconciled = await self._pipeline.reconcile_memories(user_id, get_dedup_pool_size())
-        return self._extract_reconcile_count(reconciled)
+        return await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
+
+    async def _reconcile_fact_and_episodic(self, user_id: str, n: int) -> int:
+        """Reconcile facts and episodic memories; sum contradicted counts.
+
+        SDK in-process processing reconciles both types (matching the Durable
+        backend) so contradictions are resolved for each.
+        """
+        total = 0
+        for memory_type in ("fact", "episodic"):
+            reconciled = await self._pipeline.reconcile_memories(user_id, n=n, memory_type=memory_type)
+            total += self._extract_reconcile_count(reconciled)
+        return total
 
     @staticmethod
     def _extract_reconcile_count(reconciled: Any) -> int:
         """Sum ``merged + contradicted`` from a ``reconcile_memories`` result.
 
         ``ProcessingPipeline.reconcile_memories`` returns a dict with
-        ``{"kept", "merged", "contradicted"}`` — both ``merged`` and
+        ``{"kept", "merged", "contradicted"}`` - both ``merged`` and
         ``contradicted`` represent facts that were consolidated or retired,
         so they contribute to the dedup-count metric.
         """

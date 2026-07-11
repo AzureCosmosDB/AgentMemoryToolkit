@@ -6,18 +6,18 @@ backends can be swapped without losing per-thread / per-user counts.
 
 Counter document shape::
 
-    # thread-scoped — id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
+    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "last_batch_lsn": int|None, "last_batch_old_count": int,
       "last_failure_at": str|None, "last_failure_reason": str|None,
       "last_owner": str|None }
 
-    # user-scoped — id = "user:{user_id}", PK = [user_id, "__counters__"]
+    # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
     { ... same fields ... }
 
 Unlike the FA-side helper, the SDK clients drive these counters without LSN
 replay protection because each ``push_to_cosmos()`` call is its own atomic
-boundary — there is no change-feed redelivery to defend against. We
+boundary - there is no change-feed redelivery to defend against. We
 **preserve any existing ``last_batch_lsn``** the FA may have written so the
 FA's monotonicity assumption stays valid even on shared deployments.
 
@@ -79,7 +79,7 @@ def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], o
 
     Operators run with either ``MEMORY_PROCESSOR_OWNER=inprocess`` or
     ``=durable``. If the same counter doc keeps getting touched by both
-    backends, that's a misconfiguration — both pipelines are extracting
+    backends, that's a misconfiguration - both pipelines are extracting
     against the same memories container.
     """
     if not existing_owner or not observer_owner or existing_owner == observer_owner:
@@ -90,7 +90,7 @@ def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], o
     _warned_owner_mismatch.add(key)
     logger.warning(
         "Counter doc %s was last written by owner=%r but this process is "
-        "owner=%r — both backends appear to be processing the same container. "
+        "owner=%r - both backends appear to be processing the same container. "
         "Set MEMORY_PROCESSOR_OWNER consistently across all clients and the "
         "Function App to avoid double-extraction. Further mismatches for this "
         "counter will be logged at DEBUG level.",
@@ -121,7 +121,7 @@ def increment_counter_sync(
     on shared deployments. Stamps ``last_owner`` (advisory) when *owner*
     is provided.
 
-    Returns ``(0, 0)`` and logs a warning if the container is unreachable —
+    Returns ``(0, 0)`` and logs a warning if the container is unreachable -
     auto-trigger failures must never block the user's primary write path.
     """
     partition_key = [user_id, thread_id]
@@ -170,7 +170,7 @@ def increment_counter_sync(
             if exc.status_code == 412 and attempt < MAX_RETRIES - 1:
                 continue
             logger.warning(
-                "Counter increment failed counter_id=%s status=%s — auto-trigger skipped",
+                "Counter increment failed counter_id=%s status=%s - auto-trigger skipped (increment dropped)",
                 counter_id,
                 exc.status_code,
             )
@@ -235,7 +235,7 @@ async def increment_counter_async(
             if exc.status_code == 412 and attempt < MAX_RETRIES - 1:
                 continue
             logger.warning(
-                "Counter increment failed counter_id=%s status=%s — auto-trigger skipped",
+                "Counter increment failed counter_id=%s status=%s - auto-trigger skipped",
                 counter_id,
                 exc.status_code,
             )
@@ -277,6 +277,10 @@ def _build_counter_doc(
         doc["last_batch_old_count"] = existing.get("last_batch_old_count", old_count)
     else:
         doc["last_batch_lsn"] = None
+    # Preserve the extraction watermark (count value at the last successful
+    # extract) so recent_k can cover every turn since, not just this batch.
+    if existing is not None and "last_extract_count" in existing:
+        doc["last_extract_count"] = existing.get("last_extract_count")
     # Carry over auto-trigger failure breadcrumbs so they aren't blown away
     # by a successful write. ``stamp_failure_*`` helpers refresh them on
     # failure; operators can monitor ``last_failure_at`` directly.
@@ -303,7 +307,7 @@ def stamp_failure_sync(
 ) -> None:
     """Best-effort stamp ``last_failure_at`` / ``last_failure_reason`` on the counter doc.
 
-    Uses Cosmos ``patch_item`` so only the failure fields are touched —
+    Uses Cosmos ``patch_item`` so only the failure fields are touched -
     concurrent counter increments cannot lose updates here. Failures are
     logged and swallowed; we never want failure-stamping itself to break
     the user's write path.

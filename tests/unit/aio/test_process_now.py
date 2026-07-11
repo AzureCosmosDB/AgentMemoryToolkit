@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -50,7 +50,13 @@ async def test_process_now_with_inprocess_invokes_full_pipeline():
     assert isinstance(client._processor, AsyncInProcessProcessor)
     pipeline.generate_thread_summary.assert_awaited_once_with("u", "t")
     pipeline.extract_memories.assert_awaited_once_with("u", "t")
-    pipeline.reconcile_memories.assert_awaited_once_with("u", 50)
+    assert pipeline.reconcile_memories.await_count == 2
+    pipeline.reconcile_memories.assert_has_awaits(
+        [
+            call("u", n=50, memory_type="fact"),
+            call("u", n=50, memory_type="episodic"),
+        ]
+    )
     pipeline.synthesize_procedural.assert_awaited_once_with("u", force=False)
     pipeline.generate_user_summary.assert_awaited_once_with("u", None)
     assert result.procedural == {"id": "proc1", "type": "procedural"}
@@ -170,7 +176,7 @@ async def test_process_now_propagates_permanent_user_summary_failure():
 
 @pytest.mark.asyncio
 async def test_process_now_with_durable_skips_tail_steps():
-    """Durable mode must NOT call synthesize_procedural or generate_user_summary —
+    """Durable mode must NOT call synthesize_procedural or generate_user_summary -
     those are driven by the change-feed-fed sibling Function app."""
     client = _connected(processor=AsyncDurableFunctionProcessor())
     pipeline = AsyncMock()

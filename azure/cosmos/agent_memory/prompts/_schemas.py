@@ -13,7 +13,7 @@ OpenAI's strict schema rules require:
   There are no truly optional fields; "optional" is expressed with
   ``"type": ["string", "null"]`` so the field is always present but may
   be ``null``.
-* ``additionalProperties: false`` on every object — the model cannot
+* ``additionalProperties: false`` on every object - the model cannot
   invent extra keys (e.g. ``reasoning`` or ``confidence`` siblings to
   the real payload that gpt-5.x was leaking into json_object outputs).
 
@@ -26,25 +26,11 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# dedup.prompty — reconcile a pool of active facts
+# dedup.prompty - reconcile a pool of active facts
 # ---------------------------------------------------------------------------
 DEDUP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "duplicate_groups": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "merged_content": {"type": "string"},
-                    "source_ids": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": ["number", "null"]},
-                    "salience": {"type": ["number", "null"]},
-                },
-                "required": ["merged_content", "source_ids", "confidence", "salience"],
-                "additionalProperties": False,
-            },
-        },
         "contradicted_pairs": {
             "type": "array",
             "items": {
@@ -60,13 +46,13 @@ DEDUP_SCHEMA: dict[str, Any] = {
         },
         "kept_ids": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["duplicate_groups", "contradicted_pairs", "kept_ids"],
+    "required": ["contradicted_pairs", "kept_ids"],
     "additionalProperties": False,
 }
 
 
 # ---------------------------------------------------------------------------
-# extract_memories.prompty — extract facts + episodic + unclassified
+# extract_memories.prompty - extract facts + episodic + unclassified
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
     "type": "object",
@@ -77,35 +63,22 @@ _FACT_ITEM = {
             "enum": [
                 "preference",
                 "requirement",
-                "decision",
                 "biographical",
-                "temporal",
-                "relational",
-                "action_item",
+                "other",
             ],
         },
-        "subject": {"type": ["string", "null"]},
-        "predicate": {"type": ["string", "null"]},
-        "object": {"type": ["string", "null"]},
         "confidence": {"type": "number"},
         "salience": {"type": "number"},
         "temporal_context": {"type": ["string", "null"]},
         "tags": {"type": "array", "items": {"type": "string"}},
-        "action": {"type": "string", "enum": ["ADD", "UPDATE", "CONTRADICT"]},
-        "supersedes_id": {"type": ["string", "null"]},
     },
     "required": [
         "text",
         "category",
-        "subject",
-        "predicate",
-        "object",
         "confidence",
         "salience",
         "temporal_context",
         "tags",
-        "action",
-        "supersedes_id",
     ],
     "additionalProperties": False,
 }
@@ -115,7 +88,6 @@ _EPISODIC_ITEM = {
     "properties": {
         "scope_type": {"type": "string"},
         "scope_value": {"type": "string"},
-        "text": {"type": "string"},
         "situation": {"type": ["string", "null"]},
         "action_taken": {"type": ["string", "null"]},
         "outcome": {"type": ["string", "null"]},
@@ -133,7 +105,6 @@ _EPISODIC_ITEM = {
     "required": [
         "scope_type",
         "scope_value",
-        "text",
         "situation",
         "action_taken",
         "outcome",
@@ -148,33 +119,19 @@ _EPISODIC_ITEM = {
     "additionalProperties": False,
 }
 
-_UNCLASSIFIED_ITEM = {
-    "type": "object",
-    "properties": {
-        "text": {"type": "string"},
-        "confidence": {"type": "number"},
-        "salience": {"type": "number"},
-        "tags": {"type": "array", "items": {"type": "string"}},
-        "reason": {"type": "string"},
-    },
-    "required": ["text", "confidence", "salience", "tags", "reason"],
-    "additionalProperties": False,
-}
-
 EXTRACT_MEMORIES_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "facts": {"type": "array", "items": _FACT_ITEM},
         "episodic": {"type": "array", "items": _EPISODIC_ITEM},
-        "unclassified": {"type": "array", "items": _UNCLASSIFIED_ITEM},
     },
-    "required": ["facts", "episodic", "unclassified"],
+    "required": ["facts", "episodic"],
     "additionalProperties": False,
 }
 
 
 # ---------------------------------------------------------------------------
-# summarize.prompty — first-pass thread summary
+# summarize.prompty - first-pass thread summary
 #
 # Mirrors the 6-field shape the prompty actually instructs the model to emit
 # (see ``summarize.prompty`` lines ~69-88). Strict mode would silently drop
@@ -216,14 +173,14 @@ SUMMARIZE_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# summarize_update.prompty — incremental thread summary update
+# summarize_update.prompty - incremental thread summary update
 # Same shape as the first-pass schema; both prompties emit the same payload.
 # ---------------------------------------------------------------------------
 SUMMARIZE_UPDATE_SCHEMA: dict[str, Any] = SUMMARIZE_SCHEMA
 
 
 # ---------------------------------------------------------------------------
-# user_summary.prompty — first-pass user profile
+# user_summary.prompty - first-pass user profile
 #
 # Mirrors the 8 sections the prompty body documents (see
 # ``user_summary.prompty`` lines ~35-86 and the JSON example block). Each
@@ -258,14 +215,14 @@ USER_SUMMARY_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# user_summary_update.prompty — incremental user profile update
+# user_summary_update.prompty - incremental user profile update
 # Same shape as the first-pass schema.
 # ---------------------------------------------------------------------------
 USER_SUMMARY_UPDATE_SCHEMA: dict[str, Any] = USER_SUMMARY_SCHEMA
 
 
 # ---------------------------------------------------------------------------
-# synthesize_procedural.prompty — agent self-improvement / procedural prompt
+# synthesize_procedural.prompty - agent self-improvement / procedural prompt
 # ---------------------------------------------------------------------------
 SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -278,7 +235,7 @@ SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# Registry — maps prompty filename → (schema_name, schema_dict)
+# Registry - maps prompty filename → (schema_name, schema_dict)
 # ---------------------------------------------------------------------------
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
     "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),

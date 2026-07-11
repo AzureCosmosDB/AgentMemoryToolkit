@@ -1,8 +1,8 @@
 """Pydantic data models for the Agent Memory Toolkit.
 
-Six concrete record types — :class:`TurnRecord`, :class:`ThreadSummaryRecord`,
+Six concrete record types - :class:`TurnRecord`, :class:`ThreadSummaryRecord`,
 :class:`UserSummaryRecord`, :class:`FactRecord`, :class:`EpisodicRecord`,
-:class:`ProceduralRecord` — share :class:`MemoryRecordBase` and serialize
+:class:`ProceduralRecord` - share :class:`MemoryRecordBase` and serialize
 to/from Cosmos DB-compatible dicts.
 
 ``MemoryRecord`` is exported as the union type for return-signature use and
@@ -331,7 +331,7 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
 
 
 class TurnRecord(MemoryRecordBase):
-    """A single conversation turn — raw user/agent/tool/system message."""
+    """A single conversation turn - raw user/agent/tool/system message."""
 
     memory_type: Literal[MemoryType.turn] = Field(  # type: ignore[assignment]
         alias="type", default=MemoryType.turn
@@ -392,11 +392,8 @@ class UserSummaryRecord(MemoryRecordBase):
 _FACT_ALLOWED_CATEGORIES = {
     "preference",
     "requirement",
-    "decision",
     "biographical",
-    "temporal",
-    "relational",
-    "action_item",
+    "other",
 }
 
 

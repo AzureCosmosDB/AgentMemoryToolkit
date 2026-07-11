@@ -1,7 +1,7 @@
 """Unit-test conftest: install lightweight stubs for Azure Functions packages.
 
 ``azure-functions`` and ``azure-durable-functions`` are Azure Functions
-runtime packages that are not installed in the library's dev dependencies —
+runtime packages that are not installed in the library's dev dependencies -
 they're only needed when *running* the function app, not when testing the
 helper logic inside it.  This conftest inserts minimal stubs into
 ``sys.modules`` before any test module is imported so that
@@ -15,7 +15,7 @@ import types
 
 def _install_azure_functions_stubs() -> None:
     # Inject stub sub-modules directly into sys.modules.  Do NOT create or
-    # overwrite the top-level ``azure`` entry — that is a real namespace
+    # overwrite the top-level ``azure`` entry - that is a real namespace
     # package provided by azure-cosmos (a core dependency), and replacing it
     # with a plain module breaks its sub-package imports.
 

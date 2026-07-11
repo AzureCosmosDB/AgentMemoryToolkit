@@ -16,7 +16,7 @@ from azure.cosmos.agent_memory._utils import _build_memory_query_builder
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 
 # ---------------------------------------------------------------------------
-# Helpers — a small replica of the patterns used in test_cosmos_memory_client.
+# Helpers - a small replica of the patterns used in test_cosmos_memory_client.
 # ---------------------------------------------------------------------------
 
 
@@ -162,7 +162,7 @@ def test_no_thread_id_no_or_clause():
 
 
 # ---------------------------------------------------------------------------
-# Sync client surface — verifies the list reaches the generated SQL.
+# Sync client surface - verifies the list reaches the generated SQL.
 # ---------------------------------------------------------------------------
 
 

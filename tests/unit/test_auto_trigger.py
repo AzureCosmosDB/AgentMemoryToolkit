@@ -10,8 +10,48 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.processors import DurableFunctionProcessor, InProcessProcessor
+
+
+class _FakeCounterContainer:
+    """Minimal in-memory stand-in for the Cosmos counter container.
+
+    Exercises the REAL increment / watermark-read / watermark-advance helpers
+    end-to-end (no mocking of counter math), so a watermark/recent_k regression
+    can't slip through behind constant mocks.
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[str, dict] = {}
+        self._etag = 0
+
+    def read_item(self, *, item, partition_key):
+        if item not in self.store:
+            raise CosmosResourceNotFoundError(message="404")
+        return dict(self.store[item])
+
+    def create_item(self, *, body):
+        self._etag += 1
+        body = dict(body)
+        body["_etag"] = f"e{self._etag}"
+        self.store[body["id"]] = body
+        return dict(body)
+
+    def upsert_item(self, *, body, **_kwargs):
+        self._etag += 1
+        body = dict(body)
+        body["_etag"] = f"e{self._etag}"
+        self.store[body["id"]] = body
+        return dict(body)
+
+    def patch_item(self, *, item, partition_key, patch_operations):
+        doc = self.store.setdefault(item, {"id": item})
+        for op in patch_operations:
+            doc[op["path"].lstrip("/")] = op["value"]
+        return dict(doc)
 
 
 def _connected(processor=None) -> CosmosMemoryClient:
@@ -43,7 +83,7 @@ def test_push_to_cosmos_fires_inprocess_trigger_per_turn(monkeypatch):
         client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
         client.push_to_cosmos()
 
-    pipeline.extract_memories.assert_called_once_with("u1", "t1")
+    pipeline.extract_memories.assert_called_once_with("u1", "t1", recent_k=None)
 
 
 def test_push_to_cosmos_durable_does_not_fire_trigger(monkeypatch):
@@ -114,7 +154,7 @@ def test_push_to_cosmos_skips_when_counter_container_unavailable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Per-step trigger gating — each *_EVERY_N fires its own pipeline step
+# Per-step trigger gating - each *_EVERY_N fires its own pipeline step
 # independently. The InProcess backend mirrors the function-app
 # split-orchestrator behavior so the two backends produce the same memory
 # contents for the same chat history.
@@ -146,6 +186,57 @@ class TestPerStepAutoTrigger:
         processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1")
         processor.process_thread_summary.assert_not_called()
         processor.process_user_summary.assert_not_called()
+
+    def test_extract_fires_without_recent_k_or_watermark(self, monkeypatch):
+        """Extraction now covers all un-extracted turns (gated per-turn by
+        extracted_at) and batches internally, so the auto-trigger fires it with
+        NO recent_k and tracks NO success-gated watermark."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(return_value={})
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        with patch(
+            "azure.cosmos.agent_memory._counters.increment_counter_sync",
+            return_value=(0, 1),
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.push_to_cosmos()
+
+        processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1")
+
+    def test_extract_failure_stamps_failure(self, monkeypatch):
+        """A total extract failure is recorded via stamp_failure (telemetry); there
+        is no watermark to (not) advance - per-batch failures are handled inside
+        the pipeline, so this outer path only sees unexpected total failures."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(side_effect=RuntimeError("llm down"))
+
+        client = _connected(processor=processor)
+        client._counter_container_client = MagicMock()
+
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_sync",
+                return_value=(0, 1),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.stamp_failure_sync",
+            ) as stamp,
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            client.push_to_cosmos()
+
+        stamp.assert_called_once()
 
     def test_summary_fires_independently_when_threshold_crossed(self, monkeypatch):
         """N_summary=10 boundary fires summary; N_facts=0 prevents extract."""
@@ -195,7 +286,7 @@ class TestPerStepAutoTrigger:
 
 
 # ---------------------------------------------------------------------------
-# Owner exclusivity — MEMORY_PROCESSOR_OWNER ensures only one of
+# Owner exclusivity - MEMORY_PROCESSOR_OWNER ensures only one of
 # {SDK auto-trigger, FA change-feed processor} runs against a shared
 # container, preventing double-extraction / double-dedup.
 # ---------------------------------------------------------------------------

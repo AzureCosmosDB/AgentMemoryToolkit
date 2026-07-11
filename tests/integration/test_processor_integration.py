@@ -1,7 +1,7 @@
 """Integration-style tests for the processor protocol surface.
 
 Exercises ``CosmosMemoryClient.process_now`` / ``process_now_and_wait`` end-to-end with
-a fully mocked Cosmos container — no live Azure calls — to validate that
+a fully mocked Cosmos container - no live Azure calls - to validate that
 the SDK wires the active :class:`MemoryProcessor` correctly through the
 public API.
 """
@@ -9,6 +9,7 @@ public API.
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from unittest.mock import call as mock_call
 
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.processors import (
@@ -70,7 +71,13 @@ class TestInProcessProcessNowEndToEnd:
         client.get_thread.assert_called_once_with(thread_id="thread-paris", user_id="u-paris")
         pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
-        pipeline.reconcile_memories.assert_called_once_with("u-paris", 50)
+        assert pipeline.reconcile_memories.call_count == 2
+        pipeline.reconcile_memories.assert_has_calls(
+            [
+                mock_call("u-paris", n=50, memory_type="fact", full_rebuild=False),
+                mock_call("u-paris", n=50, memory_type="episodic", full_rebuild=False),
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------

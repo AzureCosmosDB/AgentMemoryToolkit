@@ -1,10 +1,10 @@
-"""Advanced memory lifecycle — create → process → archive (delete raw turns).
+"""Advanced memory lifecycle - create → process → archive (delete raw turns).
 
 Demonstrates the typical long-term-memory flow:
   1. Add raw conversation turns
   2. Extract structured memories (facts / procedural / episodic)
   3. Generate a thread summary
-  4. Delete raw turns — keeping only the compact derived memories
+  4. Delete raw turns - keeping only the compact derived memories
 
 Uses the in-process ProcessingPipeline (same code as the Azure Function
 change-feed trigger). No Function deployment required.
@@ -72,7 +72,7 @@ def main() -> None:
         ("user", "Hybrid. I want to use embeddings on book descriptions and reviews."),
         ("agent", "Cosmos DB for NoSQL with the vector index works well for that."),
         ("user", "I prefer Python and want to use FastAPI for the API layer."),
-        ("agent", "FastAPI is a great choice — fast, type-safe, async-native."),
+        ("agent", "FastAPI is a great choice - fast, type-safe, async-native."),
         ("user", "Last quarter I tried doing this with Pinecone and the costs blew up."),
     ]:
         mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
@@ -97,7 +97,7 @@ def main() -> None:
         deleted += 1
     print(f"  deleted {deleted} raw turn(s)")
 
-    _header(6, "Final inventory — only compact long-term memory remains")
+    _header(6, "Final inventory - only compact long-term memory remains")
     _print_memories(mem, user_id, thread_id)
 
     _header(7, "Search still works against the archived knowledge")

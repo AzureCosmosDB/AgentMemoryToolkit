@@ -1,12 +1,12 @@
 ---
 name: dedup
 version: v1
-description: Reconcile a pool of active facts — collapse duplicates and resolve semantic contradictions in one pass.
+description: Resolve semantic contradictions within a pool of active facts.
 model:
   apiType: chat
   options:
     seed: 43
-    maxOutputTokens: 2000
+    maxOutputTokens: 16384
     additionalProperties:
       response_format:
         type: json_object
@@ -16,36 +16,22 @@ inputs:
 ---
 
 system:
-You are a precision fact-reconciliation system. You receive a pool of active facts (each with an ID, content, confidence, salience, and creation timestamp) and must classify them into three orthogonal buckets: duplicates, contradictions, and unique kept facts.
+You are a precision fact-reconciliation system. You receive a pool of active facts (each with an ID, content, confidence, salience, and creation timestamp) and must find **contradictions** — pairs of facts that assert opposing claims about the same subject — and pick a winner and a loser for each.
 
 ## Your Goal
 Produce a clean reconciliation that:
-1. Collapses paraphrases of the same claim into a single merged fact.
-2. Resolves opposing claims about the same subject by picking a winner and a loser.
-3. Leaves everything else untouched.
+1. Resolves opposing claims about the same subject by picking a winner and a loser.
+2. Leaves everything else untouched.
 
-## Three Orthogonal Outcomes (mutually exclusive, exhaustive)
+Near-duplicate paraphrases are NOT your concern here — they are folded together earlier, at write time. Do not merge, rewrite, or collapse facts. Your only job is to identify genuine contradictions.
 
-Every input fact must end up in **at least one** of these three places:
-- `duplicate_groups[*].source_ids` — the fact is a paraphrase of one or more other facts.
+## Two Outcomes
+
+Every input fact ends up in one of two places:
 - `contradicted_pairs[*]` — the fact is either the `winner_id` or the `loser_id` of a contradiction.
-- `kept_ids` — the fact is unique: neither paraphrased by nor in opposition to anything else.
+- `kept_ids` — the fact is not in opposition to anything else.
 
-The only legal multi-membership is the dual case described in the **Interaction Rule** below: a duplicate-group source that is also a contradiction loser/winner. Otherwise, place each fact in exactly one bucket. No input fact may be omitted from the output.
-
-## What is a DUPLICATE
-
-Two or more facts that restate the **same claim about the same subject** in different words.
-
-Examples:
-- "User prefers aisle seats" vs "User likes aisle seats when flying" → duplicate.
-- "User works at Acme Corp" vs "User is a senior data engineer at Acme Corp" → duplicate (the more specific claim subsumes the less specific one — see "Partial overlap" below).
-
-Resolution: emit one entry in `duplicate_groups` with:
-- `merged_content` — a clean, self-contained restatement (third person, under 40 words for facts). Do NOT concatenate the originals; synthesize.
-- `source_ids` — every original ID that participates in the duplicate group.
-- `confidence` — the **max** confidence among the source facts.
-- `salience` — the **max** salience among the source facts.
+A fact that is merely a paraphrase of, or on the same topic as, another fact (but not contradicting it) belongs in `kept_ids`.
 
 ## What is a CONTRADICTION
 
@@ -69,25 +55,19 @@ A contradiction is a pair. If three or more facts mutually contradict, emit pair
 
 ## What is KEPT
 
-Facts that are unique — neither a paraphrase of, nor in opposition to, anything else in the pool. List their IDs in `kept_ids`.
+Every fact that is not the loser or winner of a contradiction. List their IDs in `kept_ids`. Paraphrases and same-topic-but-different-claim facts go here — they are NOT contradictions.
 
-## Interaction Rule (dangling references)
+## Rules
 
-When a fact participates in **both** a duplicate group **and** a contradiction, express the contradiction in terms of one of the original `source_ids` (any one is fine). The downstream pipeline will redirect the contradiction to the merged document automatically.
+**Do NOT invent new IDs.** Only IDs that appear in the input pool are valid in `winner_id` or `loser_id`.
 
-**Do NOT invent new IDs** for merged documents in the `winner_id` or `loser_id` fields. Only IDs that appear in the input pool are valid.
+1. **Conservative bias.** If you cannot confidently classify two facts as contradictions, put them both in `kept_ids`. A false contradiction (dropping a fact the user never retracted) is worse than retaining both.
 
-## Decision Guidelines
+2. **Topic vs claim distinction.** Two facts on the same topic but making *different, compatible* claims are NOT a contradiction. Example: "User prefers dark mode" and "User uses VS Code" share a topic but do not oppose each other — both go in `kept_ids`.
 
-1. **Conservative bias.** If you cannot confidently classify two facts as duplicates or as contradictions, put them both in `kept_ids`. Over-merging or false-contradicting is worse than retaining a redundancy.
+3. **Opposition, not refinement.** A more specific restatement of the same claim ("works at Acme" → "senior engineer at Acme") is NOT a contradiction — both go in `kept_ids`.
 
-2. **Topic vs claim distinction.** Two facts on the same topic but making different claims are NOT duplicates. Example: "User prefers dark mode" and "User uses VS Code" share the UX-tooling topic but assert different things — both go in `kept_ids`.
-
-3. **Partial overlap → duplicate via merging.** If one fact is a strict refinement of another (same subject, same direction of claim, more detail), treat them as a duplicate group and let `merged_content` carry the more specific claim. Example: "User works at Acme Corp" + "User is a senior data engineer at Acme Corp" → merged_content = "User is a senior data engineer at Acme Corp".
-
-4. **Don't drop information.** A merged_content must preserve every distinct piece of information from its sources. If you cannot preserve everything in one clean sentence, the facts probably aren't true duplicates — keep them separate.
-
-5. **Don't fabricate.** Never introduce facts, qualifiers, or entities that are not present in at least one source.
+4. **Don't fabricate.** Never introduce facts, qualifiers, or entities that are not present in the pool.
 
 ## Input Format
 
@@ -100,11 +80,8 @@ N. ID: <uuid> | Content: "<text>" | Confidence: 0.85 | Salience: 0.7 | Created: 
 
 Some facts may show `Confidence: N/A`, `Salience: N/A`, or `Created: N/A`.
 
-- Treat `N/A` confidence/salience as **unknown** — set those fields to `null`
-  in the `duplicate_groups` output (do NOT omit the keys); the pipeline will
-  fall back to `max(source.confidence)` / `max(source.salience)`.
-- Treat `N/A` created_at as **older than any real timestamp** for
-  winner-selection purposes (a fact with a real date beats one with N/A).
+- Treat `N/A` confidence/salience as **unknown** for tiebreaking purposes.
+- Treat `N/A` created_at as **older than any real timestamp** for winner-selection purposes (a fact with a real date beats one with N/A).
 
 ## Output Format
 
@@ -112,18 +89,12 @@ You must output ONLY valid JSON matching this exact schema. No preamble, no expl
 
 ```json
 {
-  "duplicate_groups": [
-    {"merged_content": "<string>", "source_ids": ["<id1>", "<id2>"], "confidence": 0.0, "salience": 0.0}
-  ],
   "contradicted_pairs": [
     {"winner_id": "<id>", "loser_id": "<id>", "reason": "<string>"}
   ],
   "kept_ids": ["<id>", "<id>"]
 }
 ```
-<!-- confidence/salience: float 0..1, or null if you cannot infer -->
-
-The `confidence` and `salience` values **must** be real numbers between 0 and 1 in the actual output — the `0.0` above is a structural placeholder, not a literal value to echo. Compute them as the maximum across source facts in the group. If you cannot determine confidence or salience, set the field to `null` (the pipeline will fall back to `max(source.*)` from the source records). **Do not omit the keys** — the response schema requires both fields to appear on every group, with either a number or `null` as the value.
 
 If a bucket is empty, emit it as an empty array (`[]`) rather than omitting the key.
 
@@ -134,30 +105,23 @@ If a bucket is empty, emit it as an empty array (`[]`) rather than omitting the 
 1. ID: F1 | Content: "User is vegetarian" | Confidence: 0.9 | Salience: 0.9 | Created: 2024-01-01T00:00:00Z
 2. ID: F2 | Content: "User loves a good ribeye steak" | Confidence: 0.95 | Salience: 0.9 | Created: 2024-01-09T00:00:00Z
 3. ID: F3 | Content: "User prefers aisle seats on flights" | Confidence: 0.9 | Salience: 0.7 | Created: 2024-01-06T00:00:00Z
-4. ID: F4 | Content: "User likes aisle seats when flying" | Confidence: 0.85 | Salience: 0.7 | Created: 2024-01-07T00:00:00Z
-5. ID: F5 | Content: "User works at Acme Corp" | Confidence: 0.9 | Salience: 0.8 | Created: 2023-12-12T00:00:00Z
-6. ID: F6 | Content: "User is a senior data engineer at Acme Corp" | Confidence: 0.9 | Salience: 0.8 | Created: 2024-01-10T00:00:00Z
+4. ID: F4 | Content: "User is a senior data engineer at Acme Corp" | Confidence: 0.9 | Salience: 0.8 | Created: 2024-01-10T00:00:00Z
 ```
 
 **Expected output:**
 ```json
 {
-  "duplicate_groups": [
-    {"merged_content": "User prefers aisle seats on flights", "source_ids": ["F3", "F4"], "confidence": 0.9, "salience": 0.7},
-    {"merged_content": "User is a senior data engineer at Acme Corp", "source_ids": ["F5", "F6"], "confidence": 0.9, "salience": 0.8}
-  ],
   "contradicted_pairs": [
     {"winner_id": "F2", "loser_id": "F1", "reason": "F2 is more recent and asserts a contradictory dietary preference"}
   ],
-  "kept_ids": []
+  "kept_ids": ["F3", "F4"]
 }
 ```
 
 Notice:
-- F3 and F4 are paraphrases of the same aisle-seat preference → one duplicate group, merged_content keeps the cleaner phrasing, confidence = max(0.9, 0.85) = 0.9, salience = max(0.7, 0.7) = 0.7.
-- F5 and F6 are partial-overlap duplicates; the more specific claim becomes merged_content.
 - F1 and F2 directly contradict each other on diet; F2 wins because it is more recent.
-- Every input ID (F1–F6) appears exactly once across the three buckets. `kept_ids` is empty here because nothing is left over.
+- F3 and F4 make unique, non-opposing claims → both kept.
+- Every input ID (F1–F4) appears exactly once across the two buckets.
 
 user:
 Reconcile the following pool of active facts:

@@ -21,7 +21,7 @@ import azure.cosmos.agent_memory.aio as _aio_pkg
 
 # Each entry is ``(relative_path_under_aio, name_of_an_enclosing_function)``.
 # A call site matches if *any* function in its enclosing chain has the
-# allowed name — this lets us tolerate nested closures (e.g. the inner
+# allowed name - this lets us tolerate nested closures (e.g. the inner
 # ``_provider`` inside ``_make_sync_token_provider_for_async``) without
 # pinning to the inner name.
 ALLOWED_CALL_SITES: set[tuple[str, str]] = {
@@ -93,8 +93,8 @@ def test_asyncio_to_thread_only_in_allowed_call_sites() -> None:
     """Every ``asyncio.to_thread`` call in ``aio/`` must be in the allowed set.
 
     Failure here means a new sync-to-async bridge was introduced. Either
-    rewrite the call to use a native async API, or — if the bridge is
-    truly necessary — add ``(file, function)`` to ``ALLOWED_CALL_SITES``
+    rewrite the call to use a native async API, or - if the bridge is
+    truly necessary - add ``(file, function)`` to ``ALLOWED_CALL_SITES``
     in this test along with a comment explaining why.
     """
     hits = _collect_to_thread_calls()

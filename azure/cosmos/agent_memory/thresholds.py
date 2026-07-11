@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 DEFAULT_FACT_EXTRACTION_EVERY_N = 1
 DEFAULT_THREAD_SUMMARY_EVERY_N = 10
 DEFAULT_USER_SUMMARY_EVERY_N = 20
-# Dedup runs on its own cadence — every Nth extract (NOT every Nth turn),
+# Dedup runs on its own cadence - every Nth extract (NOT every Nth turn),
 # because dedup is O(N²) over all active facts and dominates per-push cost
 # when FACT_EXTRACTION_EVERY_N=1. Default 5 = one dedup sweep per 5 extracts.
 # Set to 1 to dedup on every extract; set to 0 to disable entirely.
@@ -27,6 +27,17 @@ DEFAULT_DEDUP_EVERY_N = 5
 # parameter of :py:meth:`ProcessingPipeline.reconcile_memories`. Hard cap
 # of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
+
+# ---------------------------------------------------------------------------
+# INTERNAL dedup/search tuning - NOT customer-configurable.
+# These ship as fixed feature constants (no env vars, not in any settings
+# template). They are maintainer-tunable here in code only; if a knob ever
+# needs to become operator-facing we add the env plumbing back deliberately.
+# The dedup + hybrid-search features ship ON via these values.
+# ---------------------------------------------------------------------------
+EXTRACTION_BATCH_MAX_TOKENS = 7000
+DEDUP_VECTOR_ENABLED = True  # write-time in-place near-dup folding
+DEDUP_SIM_HIGH = 0.97  # >= -> fold new memory into existing canonical in place
 
 DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "turn": 2_592_000,
@@ -48,7 +59,7 @@ DEFAULT_PROCEDURAL_SYNTHESIS_AUTO = True
 # vector index, so this only governs whether vectors are generated/searched.
 DEFAULT_ENABLE_TURN_EMBEDDINGS = False
 
-# Owner exclusivity — declares which backend is authoritative for the shared
+# Owner exclusivity - declares which backend is authoritative for the shared
 # memories + counter container. When set, the *other* backend skips its
 # auto-trigger and logs a loud warning. Default unset preserves today's
 # behavior (no enforcement) for backward compatibility.
@@ -126,7 +137,7 @@ def get_dedup_pool_size() -> int:
     the pipeline; values above are clamped to 500 with a WARN."""
     raw = _parse_threshold("DEDUP_POOL_SIZE", DEFAULT_DEDUP_POOL_SIZE)
     if raw == 0:
-        # 0 isn't meaningful for a pool size — fall back to default.
+        # 0 isn't meaningful for a pool size - fall back to default.
         logger.warning(
             "DEDUP_POOL_SIZE=0 is invalid for a pool size; using default %d",
             DEFAULT_DEDUP_POOL_SIZE,
@@ -136,6 +147,27 @@ def get_dedup_pool_size() -> int:
         logger.warning("DEDUP_POOL_SIZE=%d exceeds hard cap; clamping to 500", raw)
         return 500
     return raw
+
+
+# ---------------------------------------------------------------------------
+# Internal dedup/search feature accessors - return fixed constants (no env).
+# Kept as thin functions so call sites stay stable and the values can be
+# changed in one place; NOT customer-configurable.
+# ---------------------------------------------------------------------------
+def get_extraction_batch_max_tokens() -> int:
+    """Token budget per extraction batch (internal; see EXTRACTION_BATCH_MAX_TOKENS)."""
+    return EXTRACTION_BATCH_MAX_TOKENS
+
+
+def get_dedup_vector_enabled() -> bool:
+    """Whether Stage-3 vector deduplication is enabled (internal; on)."""
+    return DEDUP_VECTOR_ENABLED
+
+
+def get_dedup_sim_high() -> float:
+    """Similarity at/above which a new memory is folded into its existing
+    canonical record in place (internal)."""
+    return DEDUP_SIM_HIGH
 
 
 def get_procedural_synthesis_auto() -> bool:
@@ -164,7 +196,7 @@ def get_processor_owner() -> Optional[str]:
     """Return the configured ``MEMORY_PROCESSOR_OWNER`` or ``None``.
 
     Each side reads this to decide whether to run its auto-trigger. The
-    contract is **asymmetric** by design — there is no cross-process lock,
+    contract is **asymmetric** by design - there is no cross-process lock,
     so the two sides default differently to avoid double-firing:
 
       * **SDK** (in-process) fires when the value is ``None`` (unset) or
@@ -180,7 +212,7 @@ def get_processor_owner() -> Optional[str]:
     . note::
        This is **operator-configured exclusivity, not enforced**. Counter
        writes still stamp ``last_owner`` and emit a one-shot WARN when the
-       observed owner disagrees with the writer — treat that as a
+       observed owner disagrees with the writer - treat that as a
        configuration audit signal, not a guarantee.
     """
     raw = os.environ.get("MEMORY_PROCESSOR_OWNER")
@@ -214,6 +246,9 @@ __all__ = [
     "get_user_summary_every_n",
     "get_dedup_every_n",
     "get_dedup_pool_size",
+    "get_extraction_batch_max_tokens",
+    "get_dedup_vector_enabled",
+    "get_dedup_sim_high",
     "get_procedural_synthesis_auto",
     "get_enable_turn_embeddings",
     "get_processor_owner",

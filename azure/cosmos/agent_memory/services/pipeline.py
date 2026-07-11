@@ -17,13 +17,20 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Literal, Optional
 
 from azure.cosmos.exceptions import (
-    CosmosHttpResponseError,
     CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
 
+from azure.cosmos.agent_memory import thresholds as threshold_config
 from azure.cosmos.agent_memory._container_routing import ContainerKey
-from azure.cosmos.agent_memory._utils import DEFAULT_TTL_BY_TYPE, compute_content_hash
+from azure.cosmos.agent_memory._utils import (
+    DEFAULT_TTL_BY_TYPE,
+    compute_content_hash,
+    distance_function_from_container_properties,
+    vector_autodrop_supported,
+    vector_order_direction,
+    vector_similarity_at_least,
+)
 from azure.cosmos.agent_memory.exceptions import (
     LLMError,
     MemoryConflictError,
@@ -47,16 +54,15 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     VALID_VALENCES,
     PromptyLoader,
     _normalize_metadata_keys,
+    batch_turns_by_tokens,
     build_topic_tags,
     build_transcript,
     cap_structured_summary,
     chat_text,
     check_extracted_fact_grounding,
     coerce_valence,
+    is_retryable_llm_error,
     parse_llm_json,
-)
-from azure.cosmos.agent_memory.services._pipeline_helpers import (
-    format_existing_episodics as _format_existing_episodics,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
@@ -206,7 +212,7 @@ class PipelineService:
         """Return ``{prompt_id, prompt_version}`` for stamping a doc.
 
         Safe no-op fallback (``prompt_version="v1"``) when the loader was
-        never initialised — happens in unit tests that build the service
+        never initialised - happens in unit tests that build the service
         via ``__new__`` to bypass real LLM/embedding clients.
         """
         loader = getattr(self, "_prompty", None)
@@ -248,7 +254,7 @@ class PipelineService:
         """Query active (non-superseded) memories for reconciliation context.
 
         Results are ordered by ``c._ts DESC`` so the most recently written
-        memories survive the cap — without ORDER BY, Cosmos returns rows
+        memories survive the cap - without ORDER BY, Cosmos returns rows
         in implementation-defined order and the dedup comparison set is
         non-deterministic.
         """
@@ -276,6 +282,180 @@ class PipelineService:
         )
         return items
 
+    def _vector_distance_function(self) -> str:
+        """Return the container's configured Cosmos ``distanceFunction`` (cached).
+
+        Read from the container's vector embedding policy (``container.read()``) -
+        the authoritative, immutable source set when the container was created.
+        Drives the ORDER BY direction and similarity-threshold comparisons so dedup
+        never silently assumes cosine. Falls back to cosine when the policy can't be
+        read (e.g. ``__new__``-built test instances with mocked containers).
+        """
+        fn = getattr(self, "_distance_function_cache", None)
+        if fn is not None:
+            return fn
+        try:
+            props = self._memories_container.read()
+        except Exception:
+            # Transient read failure (429/503/connection) is indistinguishable from
+            # "no policy" once we drop to None - so DON'T cache here. Returning an
+            # uncached cosine default lets the next call self-heal; caching it would
+            # pin cosine for the instance's life and silently mis-handle a euclidean
+            # container (cosine bands applied to euclidean distances → data loss).
+            # Flag the failure so the *destructive* in-place fold path can skip
+            # entirely (a defaulted cosine on a euclidean container would fold and
+            # overwrite unrelated memories).
+            self._distance_function_read_failed = True
+            logger.debug(
+                "vector dedup: could not read container vector policy; defaulting to cosine (not cached)",
+                exc_info=True,
+            )
+            return "cosine"
+        fn = distance_function_from_container_properties(props)
+        self._distance_function_cache = fn
+        self._distance_function_read_failed = False
+        return fn
+
+    def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
+        """One-shot WARN that the near-exact vector auto-drop is disabled.
+
+        The ``DEDUP_SIM_HIGH`` thresholds are cosine-calibrated; on euclidean
+        the destructive auto-drop is skipped (borderline tagging + LLM reconcile
+        still run). Logged once per pipeline instance to avoid hot-path spam.
+        """
+        if getattr(self, "_warned_euclidean_autodrop", False):
+            return
+        self._warned_euclidean_autodrop = True
+        logger.warning(
+            "Container distanceFunction=%r: near-exact vector auto-drop is "
+            "cosine-calibrated and has been DISABLED for this distance function. "
+            "Duplicate detection falls back to borderline tagging + LLM reconcile. "
+            "Use cosine/dotproduct embeddings for vector-floor auto-dedup.",
+            distance_function,
+        )
+
+    def _warn_distance_policy_unavailable_once(self) -> None:
+        """One-shot WARN that in-place folding was skipped (policy unreadable)."""
+        if getattr(self, "_warned_distance_policy_unavailable", False):
+            return
+        self._warned_distance_policy_unavailable = True
+        logger.warning(
+            "vector dedup: container vector policy could not be read; skipping in-place "
+            "near-duplicate folding this run to avoid mis-calibrated folds. Memories are "
+            "written as-is and deduped on a later run once the policy is readable."
+        )
+
+    def _vector_candidates(
+        self,
+        *,
+        user_id: str,
+        embedding: list[float],
+        memory_type: str,
+        top_k: int,
+        exclude_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Return nearest active same-type memories using Cosmos VectorDistance."""
+        if not user_id or not embedding or top_k < 1:
+            return []
+        capped_top_k = top_literal(top_k, name="_vector_candidates.top_k")
+        distance_function = self._vector_distance_function()
+        order_direction = vector_order_direction(distance_function)
+        field = "embedding"
+        query = (
+            f"SELECT TOP {capped_top_k} c.id, c.content, c.type, "
+            f"VectorDistance(c.{field}, @vec) AS score "
+            "FROM c WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            f"AND IS_DEFINED(c.{field}) "
+            # Cosmos orders ORDER BY VectorDistance() most-similar-first per the
+            # container's distanceFunction; an explicit ASC/DESC is rejected (BadRequest).
+            f"ORDER BY VectorDistance(c.{field}, @vec)"
+        )
+        rows = list(
+            self._memories_container.query_items(
+                query=query,
+                parameters=[
+                    {"name": "@user_id", "value": user_id},
+                    {"name": "@memory_type", "value": memory_type},
+                    {"name": "@vec", "value": embedding},
+                ],
+                enable_cross_partition_query=True,
+            )
+        )
+        excluded = set(exclude_ids or set())
+        candidates = [
+            {
+                "id": row.get("id"),
+                "content": row.get("content"),
+                "type": row.get("type"),
+                "score": float(row.get("score") or 0.0),
+            }
+            for row in rows
+            if row.get("id") and row.get("id") not in excluded
+        ]
+        # Most-similar-first: descending score for cosine/dotproduct, ascending for euclidean.
+        candidates.sort(
+            key=lambda row: row.get("score", 0.0),
+            reverse=order_direction == "DESC",
+        )
+        return candidates
+
+    def _query_active_memories(
+        self,
+        user_id: str,
+        memory_type: str,
+        *,
+        limit: int | None = None,
+        tagged_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        top_clause = f"TOP {top_literal(limit, name='_query_active_memories.limit')} " if limit else ""
+        tag_clause = "AND ARRAY_CONTAINS(c.tags, @tag) " if tagged_only else ""
+        query = (
+            f"SELECT {top_clause}* FROM c WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            f"{tag_clause}"
+            "ORDER BY c.created_at DESC"
+        )
+        parameters = [
+            {"name": "@user_id", "value": user_id},
+            {"name": "@memory_type", "value": memory_type},
+        ]
+        if tagged_only:
+            parameters.append({"name": "@tag", "value": "sys:dup-candidate"})
+        return list(
+            self._memories_container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
+            )
+        )
+
+    def _load_memories_by_ids(self, user_id: str, memory_type: str, ids: Iterable[str]) -> list[dict[str, Any]]:
+        ids = [mid for mid in dict.fromkeys(ids) if mid]
+        if not ids:
+            return []
+        placeholders = ", ".join(f"@id{i}" for i in range(len(ids)))
+        parameters = [
+            {"name": "@user_id", "value": user_id},
+            {"name": "@memory_type", "value": memory_type},
+        ]
+        parameters.extend({"name": f"@id{i}", "value": mid} for i, mid in enumerate(ids))
+        query = (
+            "SELECT * FROM c WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND c.id IN ({placeholders}) "
+            f"AND {_ACTIVE_DOC_FILTER}"
+        )
+        return list(
+            self._memories_container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True,
+            )
+        )
+
     def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Upsert a fact, episodic, or procedural document to the memories container."""
         response = self._memories_container.upsert_item(body=doc)
@@ -300,11 +480,11 @@ class PipelineService:
         return {
             "fact_count": 0,
             "episodic_count": 0,
-            "unclassified_count": 0,
             "updated_count": 0,
             "contradicted_count": 0,
             "exact_dedup_skipped": 0,
             "dropped_episodic_count": 0,
+            "inplace_updated": 0,
         }
 
     @staticmethod
@@ -313,56 +493,6 @@ class PipelineService:
         if timestamps:
             return max(timestamps)
         return datetime.now(timezone.utc).isoformat()
-
-    def _mark_extracted_superseded(
-        self,
-        *,
-        user_id: str,
-        thread_id: str,
-        supersedes_id: str,
-        superseder_id: str,
-        reason: Literal["update", "contradict"],
-    ) -> bool:
-        try:
-            old_mem = self._memories_container.read_item(item=supersedes_id, partition_key=[user_id, thread_id])
-            if old_mem.get("superseded_by"):
-                logger.debug(
-                    "extract_memories: skipping UPDATE — target %s already superseded by %s",
-                    supersedes_id,
-                    old_mem.get("superseded_by"),
-                )
-                return False
-            return self._mark_superseded(old_mem, superseder_id, reason=reason)
-        except CosmosResourceNotFoundError:
-            logger.debug(
-                "extract_memories: %s not found at (user_id, thread_id) — retrying cross-partition",
-                supersedes_id,
-            )
-        except Exception as exc:
-            # Includes 429s, 503s, transient connection errors — surface at WARNING
-            # so they're not masked by the silent cross-partition fallback below.
-            logger.warning(
-                "extract_memories: read_item failed for %s (%s); retrying cross-partition",
-                supersedes_id,
-                type(exc).__name__,
-            )
-        try:
-            q = f"SELECT * FROM c WHERE c.id = @id AND c.user_id = @uid AND {_ACTIVE_DOC_FILTER}"
-            results = list(
-                self._memories_container.query_items(
-                    query=q,
-                    parameters=[
-                        {"name": "@id", "value": supersedes_id},
-                        {"name": "@uid", "value": user_id},
-                    ],
-                    enable_cross_partition_query=True,
-                )
-            )
-            if results and not results[0].get("superseded_by"):
-                return self._mark_superseded(results[0], superseder_id, reason=reason)
-        except CosmosHttpResponseError as exc:
-            logger.warning("Failed to mark superseded memory %s: %s", supersedes_id, exc)
-        return False
 
     def _mark_superseded(
         self,
@@ -462,33 +592,55 @@ class PipelineService:
             logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
             return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
-        existing_facts = self._load_existing_memories(user_id, ["fact"])
-        existing_episodics = self._load_existing_memories(user_id, ["episodic"])
+        existing_for_hashes = self._load_existing_memories(user_id, ["fact"])
         existing_fact_hashes: set[str] = {
-            m["content_hash"] for m in existing_facts if m.get("type") == "fact" and m.get("content_hash")
+            m["content_hash"] for m in existing_for_hashes if m.get("type") == "fact" and m.get("content_hash")
         }
-        if existing_facts:
-            existing_text = "\n".join(
-                f"- [ID: {mem['id']}] {mem.get('content', '')} (type=fact, salience={mem.get('salience', 'N/A')})"
-                for mem in existing_facts
-            )
-        else:
-            existing_text = "(none)"
-        existing_episodics_text = _format_existing_episodics(existing_episodics)
 
-        transcript = self._build_transcript(items)
-        response_text = self._run_prompty(
-            "extract_memories.prompty",
-            inputs={
-                "existing_facts": existing_text,
-                "existing_episodics": existing_episodics_text,
-                "transcript": transcript,
-            },
-        )
-        parsed = self._parse_llm_json(response_text)
-        facts = parsed.get("facts", [])
-        episodic = parsed.get("episodic", [])
-        unclassified = parsed.get("unclassified", [])
+        # Token-bounded, per-batch extraction. Each batch is an independent LLM
+        # call, so (a) each stays small enough to extract faithfully and (b) a
+        # single poisoned turn fails only its own batch. Turns from succeeded and
+        # quarantined (non-retryable, e.g. content-filter) batches go into
+        # ``processed_turns`` and will be stamped ``extracted_at`` by persist so
+        # they are never re-processed; turns from batches that fail with a
+        # *retryable* error are left un-stamped and retried on the next run.
+        batches = batch_turns_by_tokens(items, threshold_config.get_extraction_batch_max_tokens())
+        facts: list[dict[str, Any]] = []
+        episodic: list[dict[str, Any]] = []
+        processed_turns: list[dict[str, Any]] = []
+        deferred_turn_count = 0
+        quarantined_turn_count = 0
+        for batch in batches:
+            batch_transcript = self._build_transcript(batch)
+            try:
+                response_text = self._run_prompty("extract_memories.prompty", inputs={"transcript": batch_transcript})
+                parsed = self._parse_llm_json(response_text)
+                facts.extend(parsed.get("facts", []))
+                episodic.extend(parsed.get("episodic", []))
+                processed_turns.extend(batch)
+            except Exception as exc:  # noqa: BLE001
+                if is_retryable_llm_error(exc):
+                    deferred_turn_count += len(batch)
+                    logger.warning(
+                        "extract_memories: deferring %d turns after retryable extraction error "
+                        "(will retry next run) user_id=%s thread_id=%s err=%s",
+                        len(batch),
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                else:
+                    processed_turns.extend(batch)
+                    quarantined_turn_count += len(batch)
+                    logger.warning(
+                        "extract_memories: quarantining %d turns after non-retryable extraction error "
+                        "(e.g. content filter) - marking extracted so they do not re-poison future runs "
+                        "user_id=%s thread_id=%s err=%s",
+                        len(batch),
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
 
         doc_timestamp = self._stable_source_timestamp(items)
         fact_docs: list[dict[str, Any]] = []
@@ -498,14 +650,13 @@ class PipelineService:
         dropped_episodic_count = 0
 
         for fact in facts:
-            action = fact.get("action", "ADD").upper()
             text = fact.get("text")
             if not text:
                 logger.warning("extract_memories: dropping malformed fact (missing 'text'): %r", fact)
                 continue
 
             new_content_hash = compute_content_hash(text)
-            if action == "ADD" and new_content_hash in existing_fact_hashes:
+            if new_content_hash in existing_fact_hashes:
                 logger.debug(
                     "extract_memories: skipping exact-dup fact hash=%s user_id=%s thread_id=%s",
                     new_content_hash,
@@ -530,10 +681,7 @@ class PipelineService:
                 "confidence": 0.5 if confidence is None else confidence,
                 **self._prompt_lineage("extract_memories.prompty"),
                 "metadata": {
-                    "category": fact.get("category") or "general",
-                    "subject": fact.get("subject"),
-                    "predicate": fact.get("predicate"),
-                    "object": fact.get("object"),
+                    "category": fact.get("category") or "other",
                     "temporal_context": fact.get("temporal_context"),
                 },
                 "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
@@ -541,22 +689,6 @@ class PipelineService:
                 "created_at": doc_timestamp,
                 "updated_at": doc_timestamp,
             }
-
-            if action in {"UPDATE", "CONTRADICT"} and fact.get("supersedes_id"):
-                reason: Literal["update", "contradict"] = "contradict" if action == "CONTRADICT" else "update"
-                if det_id == fact["supersedes_id"]:
-                    logger.debug("extract_memories: skipping UPDATE — det_id == supersedes_id (%s)", det_id)
-                    continue
-                doc["supersedes_ids"] = [fact["supersedes_id"]]
-                updates.append(
-                    {
-                        "op": "supersede",
-                        "supersedes_id": fact["supersedes_id"],
-                        "superseder_id": det_id,
-                        "thread_id": thread_id,
-                        "reason": reason,
-                    }
-                )
 
             fact_docs.append(self._validate_extracted_doc(doc))
             existing_fact_hashes.add(new_content_hash)
@@ -577,28 +709,16 @@ class PipelineService:
                 dropped_episodic_count += 1
                 continue
 
-            text_raw = ep.get("text")
-            text = text_raw.strip() if isinstance(text_raw, str) else None
-            if not text:
-                logger.error(
-                    "extract_memories: dropping episodic with empty/missing text field "
-                    "(LLM extraction did not populate the required `text` field — likely a "
-                    "weaker extraction model that needs upgrading or a prompt-compliance issue). "
-                    "scope_type=%s scope_value=%s user_id=%s thread_id=%s reason=missing_text",
-                    scope_type,
-                    scope_value,
-                    user_id,
-                    thread_id,
-                )
-                dropped_episodic_count += 1
-                continue
-
             situation = ep.get("situation")
             action_taken = ep.get("action_taken")
             outcome = ep.get("outcome")
+            if situation and action_taken and outcome:
+                text = f"{situation} → {action_taken} → {outcome}"
+            else:
+                text = f"For the user's {scope_value} {scope_type}, intent recorded."
 
             content_hash = compute_content_hash(text)
-            seed = _ID_SEED_SEP.join((user_id, scope_type, scope_value))
+            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
             det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(ep.get("tags", []))
             confidence = ep.get("confidence")
@@ -615,7 +735,7 @@ class PipelineService:
             doc = {
                 "id": det_id,
                 "user_id": user_id,
-                "thread_id": "__episodic__",
+                "thread_id": thread_id,
                 "role": "system",
                 "type": "episodic",
                 "content": text,
@@ -626,7 +746,6 @@ class PipelineService:
                 "metadata": {
                     "scope_type": scope_type,
                     "scope_value": scope_value,
-                    "originating_thread_id": thread_id,
                     "situation": situation,
                     "action_taken": action_taken,
                     "outcome": outcome,
@@ -645,52 +764,23 @@ class PipelineService:
             }
             episodic_docs.append(self._validate_extracted_doc(doc))
 
-        for item in unclassified:
-            text = item.get("text")
-            if not text:
-                continue
-            content_hash = compute_content_hash(text)
-            if content_hash in existing_fact_hashes:
-                logger.debug(
-                    "extract_memories: skipping exact-dup unclassified hash=%s user_id=%s thread_id=%s",
-                    content_hash,
-                    user_id,
-                    thread_id,
-                )
-                exact_dedup_skipped += 1
-                continue
-            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
-            det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
-            topic_tags = build_topic_tags(item.get("tags", []))
-            confidence = item.get("confidence")
-            doc = {
-                "id": det_id,
-                "user_id": user_id,
-                "thread_id": thread_id,
-                "role": "system",
-                "type": "fact",
-                "content": text,
-                "content_hash": content_hash,
-                "confidence": 0.5 if confidence is None else confidence,
-                **self._prompt_lineage("extract_memories.prompty"),
-                "metadata": {"category": "unclassified", "unclassified_reason": item.get("reason")},
-                "salience": item.get("salience") if item.get("salience") is not None else 0.5,
-                "tags": ["sys:fact", "sys:auto-extracted", "sys:unclassified"] + topic_tags,
-                "created_at": doc_timestamp,
-                "updated_at": doc_timestamp,
-            }
-            fact_docs.append(self._validate_extracted_doc(doc))
-            existing_fact_hashes.add(content_hash)
-
         if exact_dedup_skipped:
             updates.append({"op": "stats", "exact_dedup_skipped": exact_dedup_skipped})
         if dropped_episodic_count:
             updates.append({"op": "stats", "dropped_episodic_count": dropped_episodic_count})
+        if deferred_turn_count or quarantined_turn_count:
+            updates.append(
+                {
+                    "op": "stats",
+                    "deferred_turn_count": deferred_turn_count,
+                    "quarantined_turn_count": quarantined_turn_count,
+                }
+            )
 
         check_extracted_fact_grounding(
             fact_docs,
-            items,
-            existing_facts,
+            processed_turns,
+            existing_for_hashes,
             user_id=user_id,
             thread_id=thread_id,
             logger=logger,
@@ -700,7 +790,7 @@ class PipelineService:
             "facts": fact_docs,
             "episodic": episodic_docs,
             "updates": updates,
-            "processed_turn_docs": items,
+            "processed_turn_docs": processed_turns,
         }
         logger.info(
             "extract_memories_dry completed user_id=%s thread_id=%s fact_docs=%d episodic_docs=%d updates=%d",
@@ -711,6 +801,234 @@ class PipelineService:
             len(updates),
         )
         return result
+
+    def dedup_extracted_memories(
+        self,
+        user_id: str,
+        extracted: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Fold near-duplicate extracted docs into their existing canonical
+        memory *in place*, instead of tagging them for an async merge sweep.
+
+        For each newly extracted fact/episodic doc we find its single nearest
+        active same-type neighbor. If similarity is at/above ``SIM_HIGH`` the new
+        doc is a near-duplicate: we refresh the existing neighbor in place -
+        recency-wins content + embedding, unioned tags, max salience/confidence,
+        bumped ``updated_at`` - keeping its id, and drop the new doc so it is not
+        written as a fresh record. Everything below the threshold is novel and
+        flows through to ``persist_extracted_memories`` unchanged.
+
+        This makes the write path convergent: a restatement updates one existing
+        document rather than minting a new one that a later reconcile sweep must
+        merge and supersede. There is no ``sys:dup-candidate`` tagging and no
+        clustering - reconcile only resolves contradictions.
+
+        In-place folds commit here, before ``persist_extracted_memories`` writes
+        the novel docs. A crash between the two leaves some memories folded and
+        some novel docs unwritten, but the source turns are not stamped
+        ``extracted_at`` until persist completes, so the whole turn set is simply
+        re-extracted on the next run (folds are idempotent and re-ADDs hit
+        exact-hash/vector dedup) - no data is lost, only repeated.
+        """
+        if not threshold_config.get_dedup_vector_enabled():
+            return extracted
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not isinstance(extracted, dict):
+            raise ValidationError("extracted must be a dict")
+
+        high = threshold_config.get_dedup_sim_high()
+        distance_function = self._vector_distance_function()
+        read_failed = getattr(self, "_distance_function_read_failed", False)
+        # Skip destructive in-place folding when the container's distance policy
+        # could not be read: a defaulted cosine on a euclidean container would
+        # apply cosine thresholds to unbounded euclidean distances and fold
+        # unrelated memories. Everything ADDs; the next run (policy readable)
+        # dedups normally.
+        similarity_ok = (not read_failed) and vector_autodrop_supported(distance_function)
+        if read_failed:
+            self._warn_distance_policy_unavailable_once()
+        elif not similarity_ok:
+            self._warn_euclidean_autodrop_once(distance_function)
+
+        result: dict[str, list[dict[str, Any]]] = {
+            "facts": [dict(doc) for doc in extracted.get("facts", [])],
+            "episodic": [dict(doc) for doc in extracted.get("episodic", [])],
+            "updates": [dict(op) for op in extracted.get("updates", [])],
+        }
+        # Carry through any non-bucket keys (e.g. ``processed_turn_docs``) so this
+        # transform never silently drops caller state.
+        for _carry_key, _carry_value in extracted.items():
+            if _carry_key not in result:
+                result[_carry_key] = _carry_value
+
+        docs = [doc for bucket in ("facts", "episodic") for doc in result[bucket] if doc.get("content")]
+        # Similarity comparison is only meaningful for cosine/dotproduct; on a
+        # euclidean container we skip in-place folding and let everything ADD.
+        if not docs or not similarity_ok:
+            return result
+
+        missing_embeddings = [doc for doc in docs if not doc.get("embedding")]
+        if missing_embeddings:
+            embeddings = self._embed_batch([str(doc["content"]) for doc in missing_embeddings])
+            for doc, embedding in zip(missing_embeddings, embeddings):
+                doc["embedding"] = embedding
+
+        inplace_updated = 0
+        folded_ids: set[str] = set()
+        updated_target_ids: set[str] = set()
+        for doc in docs:
+            doc_id = str(doc.get("id") or "")
+            memory_type = str(doc.get("type") or "")
+            embedding = doc.get("embedding") or []
+            if not doc_id or memory_type not in {"fact", "episodic"} or not embedding:
+                continue
+
+            neighbor, score = self._nearest_active_full(
+                user_id=user_id,
+                embedding=embedding,
+                memory_type=memory_type,
+                exclude_ids={doc_id} | set(doc.get("supersedes_ids") or []),
+            )
+            if not neighbor or not vector_similarity_at_least(score, high, distance_function):
+                continue  # novel - leave in result for persist to ADD
+
+            neighbor_id = str(neighbor.get("id") or "")
+            if not neighbor_id:
+                continue
+            if neighbor_id in updated_target_ids:
+                # A prior near-dup in this batch already refreshed this target;
+                # drop this one too rather than re-writing the same document.
+                folded_ids.add(doc_id)
+                continue
+            if self._apply_inplace_update(neighbor, doc):
+                updated_target_ids.add(neighbor_id)
+                inplace_updated += 1
+                folded_ids.add(doc_id)
+            # If the in-place update failed, leave the doc in result so persist
+            # ADDs it as a novel record - never silently lose an extraction.
+
+        if folded_ids:
+            for bucket in ("facts", "episodic"):
+                result[bucket] = [doc for doc in result[bucket] if str(doc.get("id") or "") not in folded_ids]
+        if inplace_updated:
+            result["updates"].append({"op": "stats", "inplace_updated": inplace_updated})
+        return result
+
+    def _nearest_active_full(
+        self,
+        *,
+        user_id: str,
+        embedding: list[float],
+        memory_type: str,
+        exclude_ids: set[str],
+    ) -> tuple[Optional[dict[str, Any]], float]:
+        """Return the single nearest active same-type memory as a *full* doc.
+
+        Unlike ``_vector_candidates`` (which projects only id/content/score),
+        this returns the complete stored document so the caller can refresh it in
+        place. Pulls a small TOP-k and returns the first not in ``exclude_ids``.
+        """
+        if not user_id or not embedding:
+            return None, 0.0
+        query = (
+            "SELECT TOP 5 c AS doc, VectorDistance(c.embedding, @vec) AS score "
+            "FROM c WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            "AND IS_DEFINED(c.embedding) "
+            "ORDER BY VectorDistance(c.embedding, @vec)"
+        )
+        try:
+            rows = list(
+                self._memories_container.query_items(
+                    query=query,
+                    parameters=[
+                        {"name": "@user_id", "value": user_id},
+                        {"name": "@memory_type", "value": memory_type},
+                        {"name": "@vec", "value": embedding},
+                    ],
+                    enable_cross_partition_query=True,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_nearest_active_full query failed user_id=%s err=%s", user_id, exc)
+            return None, 0.0
+        for row in rows:
+            doc = row.get("doc") or {}
+            rid = str(doc.get("id") or "")
+            if rid and rid not in exclude_ids:
+                return doc, float(row.get("score") or 0.0)
+        return None, 0.0
+
+    def _apply_inplace_update(self, neighbor: dict[str, Any], new_doc: dict[str, Any]) -> bool:
+        """Refresh an existing memory in place with a near-duplicate's content.
+
+        Uses ETag optimistic concurrency: the update is applied with
+        ``IfNotModified`` against the neighbor's ``_etag`` so a concurrent
+        supersede/refresh cannot be clobbered (which would resurrect a
+        soft-deleted memory or lose an update). On an ETag conflict - or any
+        other failure - returns False and the caller keeps the new doc as a
+        novel ADD, so nothing is lost.
+
+        Recency wins: the neighbor keeps its id / created_at / partition but takes
+        the new doc's content + embedding, unions tags, and takes the max
+        salience/confidence.
+        """
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        try:
+            old_etag = neighbor.get("_etag")
+            updated = dict(neighbor)
+            for sys_prop in ("_rid", "_self", "_etag", "_attachments", "_ts"):
+                updated.pop(sys_prop, None)
+            new_content = str(new_doc.get("content") or "")
+            old_content = str(neighbor.get("content") or "")
+            if len(new_content) >= len(old_content):
+                updated["content"] = new_content
+                updated["content_hash"] = compute_content_hash(new_content)
+                if new_doc.get("embedding"):
+                    updated["embedding"] = new_doc["embedding"]
+            updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            new_sal = _max_or_none([neighbor.get("salience"), new_doc.get("salience")])
+            if new_sal is not None:
+                updated["salience"] = new_sal
+            new_conf = _max_or_none([neighbor.get("confidence"), new_doc.get("confidence")])
+            if new_conf is not None:
+                updated["confidence"] = new_conf
+
+            merged_tags: list[str] = []
+            for t in list(neighbor.get("tags") or []) + list(new_doc.get("tags") or []):
+                if t and t != "sys:dup-candidate" and t not in merged_tags:
+                    merged_tags.append(t)
+            if merged_tags:
+                updated["tags"] = merged_tags
+
+            if old_etag and hasattr(self._memories_container, "replace_item"):
+                self._memories_container.replace_item(
+                    item=updated["id"],
+                    body=updated,
+                    match_condition=MatchConditions.IfNotModified,
+                    etag=old_etag,
+                )
+            else:
+                self._memories_container.upsert_item(body=updated)
+            return True
+        except CosmosAccessConditionFailedError:
+            logger.info(
+                "in-place dedup update skipped (concurrent writer won) target_id=%s; keeping new doc as novel",
+                neighbor.get("id"),
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "in-place dedup update failed target_id=%s err=%s (keeping new doc as novel)",
+                neighbor.get("id"),
+                exc,
+            )
+            return False
 
     def persist_extracted_memories(
         self,
@@ -752,11 +1070,8 @@ class PipelineService:
                 logger.info("persist_extracted_memories skipped existing id=%s", validated.get("id"))
                 continue
 
-            tags = validated.get("tags", [])
             if doc_type == "episodic":
                 result["episodic_count"] += 1
-            elif "sys:unclassified" in tags:
-                result["unclassified_count"] += 1
             elif doc_type == "fact":
                 result["fact_count"] += 1
 
@@ -764,39 +1079,11 @@ class PipelineService:
             if op.get("op") == "stats":
                 result["exact_dedup_skipped"] += int(op.get("exact_dedup_skipped") or 0)
                 result["dropped_episodic_count"] += int(op.get("dropped_episodic_count") or 0)
-                continue
-            if op.get("op") != "supersede":
-                continue
-            reason = op.get("reason")
-            op_thread_id = op.get("thread_id")
-            supersedes_id = op.get("supersedes_id")
-            superseder_id = op.get("superseder_id")
-            if reason not in {"update", "contradict"} or not op_thread_id or not supersedes_id or not superseder_id:
-                continue
-            marked = self._mark_extracted_superseded(
-                user_id=user_id,
-                thread_id=op_thread_id,
-                supersedes_id=supersedes_id,
-                superseder_id=superseder_id,
-                reason=reason,
-            )
-            if marked:
-                if reason == "contradict":
-                    result["contradicted_count"] += 1
-                else:
-                    result["updated_count"] += 1
+                for key in ("inplace_updated",):
+                    if key in op:
+                        result[key] = result.get(key, 0) + int(op.get(key) or 0)
 
         logger.info("persist_extracted_memories completed user_id=%s counts=%s", user_id, result)
-
-        processed_turns = extracted.get("processed_turn_docs") or []
-        if processed_turns:
-            marked = self._mark_turns_extracted(processed_turns)
-            logger.info(
-                "persist_extracted_memories marked turns as extracted user_id=%s marked=%d/%d",
-                user_id,
-                marked,
-                len(processed_turns),
-            )
 
         return result
 
@@ -805,7 +1092,7 @@ class PipelineService:
 
         We upsert the full doc (rather than patch) because the container
         adapter only exposes upsert. Per-turn failures are logged but do
-        not raise — the worst case is one turn gets re-extracted on the
+        not raise - the worst case is one turn gets re-extracted on the
         next call, which is bounded and recoverable.
         """
         if not turn_docs:
@@ -839,7 +1126,33 @@ class PipelineService:
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread and persist them."""
         extracted = self.extract_memories_dry(user_id, thread_id, recent_k, turns=turns)
-        return self.persist_extracted_memories(user_id, extracted)
+        # Capture the processed turns from the DRY output as the single source of
+        # truth for stamping. Stamping happens here (not inside persist) so no
+        # intermediate transform (e.g. dedup) can drop ``processed_turn_docs``
+        # and cause the same turns to be re-extracted forever.
+        processed_turns = extracted.get("processed_turn_docs") or []
+        if threshold_config.get_dedup_vector_enabled():
+            extracted = self.dedup_extracted_memories(user_id, extracted)
+        counts = self.persist_extracted_memories(user_id, extracted)
+        if processed_turns:
+            marked = self._mark_turns_extracted(processed_turns)
+            if marked < len(processed_turns):
+                logger.warning(
+                    "extract_memories stamped only %d/%d processed turns as extracted user_id=%s "
+                    "thread_id=%s (unstamped turns will be re-extracted next run)",
+                    marked,
+                    len(processed_turns),
+                    user_id,
+                    thread_id,
+                )
+            else:
+                logger.info(
+                    "extract_memories stamped %d processed turns as extracted user_id=%s thread_id=%s",
+                    marked,
+                    user_id,
+                    thread_id,
+                )
+        return counts
 
     def synthesize_procedural(
         self,
@@ -954,40 +1267,12 @@ class PipelineService:
 
         if not current_source_ids:
             logger.info(
-                "synthesize_procedural skipping LLM user_id=%s — no behavioral facts or episodic lessons",
+                "synthesize_procedural skipping LLM user_id=%s - no behavioral facts or episodic lessons",
                 user_id,
             )
             return {"status": "unchanged", "procedural": prior_doc}
 
-        name_docs = list(
-            self._memories_container.query_items(
-                query=(
-                    "SELECT TOP 1 * FROM c WHERE c.user_id = @uid "
-                    "AND c.type = @type "
-                    f"AND {_ACTIVE_DOC_FILTER} "
-                    "AND IS_DEFINED(c.metadata.category) "
-                    "AND c.metadata.category = @category "
-                    "AND IS_DEFINED(c.metadata.predicate) "
-                    "AND c.metadata.predicate = @predicate "
-                    "ORDER BY c._ts DESC"
-                ),
-                parameters=[
-                    {"name": "@uid", "value": user_id},
-                    {"name": "@type", "value": "fact"},
-                    {"name": "@category", "value": "biographical"},
-                    {"name": "@predicate", "value": "name"},
-                ],
-                enable_cross_partition_query=True,
-            )
-        )
         user_name = "the user"
-        if name_docs:
-            metadata = name_docs[0].get("metadata") or {}
-            name_candidate = metadata.get("object")
-            if not isinstance(name_candidate, str) or not name_candidate.strip():
-                name_candidate = name_docs[0].get("content")
-            if isinstance(name_candidate, str) and name_candidate.strip():
-                user_name = name_candidate.strip()
 
         def _render_bullets(values: list[str]) -> str:
             cleaned = [value.strip() for value in values if isinstance(value, str) and value.strip()]
@@ -1006,7 +1291,7 @@ class PipelineService:
         # Retry loop: LLM call lives inside so that on a race-induced 409
         # we (a) check whether the winner already covers our source set and
         # short-circuit if so, and (b) re-call the LLM with the winner as
-        # the new prior if not — keeping synthesized content monotonic in
+        # the new prior if not - keeping synthesized content monotonic in
         # source coverage, not just version number.
         written_doc: Optional[dict[str, Any]] = None
         for attempt in range(1, _PROCEDURAL_MAX_CREATE_ATTEMPTS + 1):
@@ -1049,7 +1334,7 @@ class PipelineService:
                 break
             except CosmosResourceExistsError:
                 logger.info(
-                    "synthesize_procedural id collision user_id=%s seq=%d attempt=%d/%d — re-reading",
+                    "synthesize_procedural id collision user_id=%s seq=%d attempt=%d/%d - re-reading",
                     user_id,
                     new_seq,
                     attempt,
@@ -1403,24 +1688,24 @@ class PipelineService:
             },
         )
 
-    def reconcile_memories(self, user_id: str, n: int = 50) -> dict[str, int]:
-        """Reconcile a user's active facts in a single LLM pass.
+    def reconcile_memories(self, user_id: str, n: int = 50, *, memory_type: str = "fact") -> dict[str, int]:
+        """Resolve contradictions among a user's most-recent active memories.
 
-        Loads the most recent ``n`` active (non-superseded) facts for
-        ``user_id``, asks the dedup prompt to classify them into
-        ``duplicate_groups``, ``contradicted_pairs``, and ``kept_ids``, then
-        applies both kinds of resolutions:
+        Loads up to ``n`` active (non-superseded) ``memory_type`` records and
+        asks the dedup prompt to identify ``contradicted_pairs`` - opposing
+        claims about the same subject (e.g. "deadline March 1" vs "March 15").
+        Each loser is soft-deleted with ``supersede_reason="contradict"`` and
+        ``superseded_by`` set to the winner.
 
-        * **Duplicates** — a fresh merged fact is upserted; every source is
-          soft-deleted with ``supersede_reason="duplicate"``.
-        * **Contradictions** — the loser is soft-deleted with
-          ``supersede_reason="contradict"`` and ``superseded_by`` set to
-          the winner. Dangling references are resolved transparently when a
-          contradicted id was just absorbed into a duplicate group.
+        Near-duplicate *paraphrases* are no longer merged here: the write-time
+        in-place dedup (:meth:`dedup_extracted_memories`) folds restatements into
+        their canonical record before they land, so reconcile is a bounded,
+        convergent contradiction pass - no clustering, no synthesized merged
+        documents, no re-merge churn. Episodic and procedural types are no-ops
+        (episodic has no contradiction semantics; its near-dups fold at write
+        time).
 
-        Returns ``{"kept": int, "merged": int, "contradicted": int}`` where
-        ``merged`` and ``contradicted`` count the *losers* that were
-        soft-deleted (duplicates and contradictions respectively).
+        Returns ``{"kept", "merged", "contradicted"}``; ``merged`` is always 0.
         """
         if not user_id:
             raise ValidationError("user_id is required")
@@ -1428,54 +1713,40 @@ class PipelineService:
             raise ValidationError(f"n must be a positive integer, got {n!r}")
         if n > 500:
             raise ValidationError(f"n must be <= 500 to bound prompt size and LLM cost, got {n}")
+        if memory_type not in {"fact", "episodic", "procedural"}:
+            raise ValidationError(f"memory_type must be one of fact, episodic, procedural; got {memory_type!r}")
+        if memory_type in {"episodic", "procedural"}:
+            result = {"kept": 0, "merged": 0, "contradicted": 0}
+            logger.info("reconcile_memories %s no-op user_id=%s result=%s", memory_type, user_id, result)
+            return result
 
         started_at = time.monotonic()
-        logger.info("reconcile_memories started user_id=%s n=%d", user_id, n)
+        logger.info("reconcile_memories started user_id=%s n=%d memory_type=%s", user_id, n, memory_type)
 
-        # ---- 1. Load up to N most recent active facts ----
-        # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
-        # physical partitions and matches the dedup prompt's tiebreaker
-        # ("more recent created_at first"). Cosmos's _ts is the last-write
-        # timestamp, which would diverge from created_at after any UPDATE.
-        query = (
-            f"SELECT TOP {n} * FROM c "
-            "WHERE c.user_id = @user_id "
-            "AND c.type = 'fact' "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            "ORDER BY c.created_at DESC"
+        facts = self._active_memories_for_reconcile(user_id, memory_type, n)
+        result = self._reconcile_contradictions(user_id, memory_type, facts)
+        self._emit_reconcile_outcome(
+            started_at=started_at,
+            user_id=user_id,
+            candidates=len(facts),
+            result=result,
         )
-        parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
-        ]
-        facts = list(
-            self._memories_container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
-        )
+        return result
 
+    def _reconcile_contradictions(self, user_id: str, memory_type: str, facts: list[dict[str, Any]]) -> dict[str, int]:
+        """Resolve contradictions within an explicit pool of same-type memories.
+
+        Runs the dedup prompt over the pool and applies its
+        ``contradicted_pairs`` - the loser of each pair is soft-deleted with
+        ``superseded_by`` set to the winner. Paraphrases are not merged here;
+        the dedup prompt/schema no longer emits duplicate groups because
+        write-time in-place dedup already folds them, so no merged documents are
+        minted and the pass is convergent. Returns
+        ``{"kept", "merged": 0, "contradicted"}``.
+        """
         if len(facts) <= 1:
-            logger.info(
-                "reconcile_memories: %d facts, nothing to reconcile",
-                len(facts),
-            )
-            early_result = {"kept": len(facts), "merged": 0, "contradicted": 0}
-            self._emit_reconcile_outcome(
-                started_at=started_at,
-                user_id=user_id,
-                candidates=len(facts),
-                result=early_result,
-            )
-            return early_result
+            return {"kept": len(facts), "merged": 0, "contradicted": 0}
 
-        # ---- 2. Format the facts pool for the prompt ----
-        # ``json.dumps`` escapes embedded quotes and pipes inside content so
-        # the visual grammar (`| Field:` separators, `"<text>"` quoting)
-        # stays unambiguous even on adversarial inputs like
-        # ``She said "hi" | weird``. IDs are kept raw because they're
-        # deterministic alphanumerics — quoting them risks the LLM copying
-        # the quotes back into ``source_ids``.
         lines: list[str] = []
         for i, cf in enumerate(facts, 1):
             content_quoted = json.dumps(cf.get("content", ""), ensure_ascii=False)
@@ -1487,359 +1758,79 @@ class PipelineService:
             created_str = created_raw if created_raw else "N/A"
             lines.append(
                 f"{i}. ID: {cf['id']} | Content: {content_quoted} | "
-                f"Confidence: {conf_str} | "
-                f"Salience: {sal_str} | "
-                f"Created: {created_str}"
+                f"Confidence: {conf_str} | Salience: {sal_str} | Created: {created_str}"
             )
         facts_text = "\n".join(lines)
 
-        # ---- 3. Single LLM call over the entire pool ----
-        response_text = self._run_prompty(
-            "dedup.prompty",
-            inputs={"facts_text": facts_text},
-        )
+        response_text = self._run_prompty("dedup.prompty", inputs={"facts_text": facts_text})
         parsed = self._parse_llm_json(response_text)
-
-        duplicate_groups = parsed.get("duplicate_groups", []) or []
         contradicted_pairs = parsed.get("contradicted_pairs", []) or []
-        # ``kept_ids`` from the LLM is used below as a cross-check for
-        # accounting drift (hallucinated IDs, double-counting). The actual
-        # kept count is computed from facts minus consumed losers.
-        llm_kept_ids = list(parsed.get("kept_ids", []) or [])
 
         facts_by_id: dict[str, dict[str, Any]] = {f["id"]: f for f in facts}
-
-        merged = 0
         contradicted = 0
-        # Tracks source_id -> merged_id rewrites so contradictions whose
-        # winner/loser landed in a duplicate group can be redirected to
-        # the surviving merged document. Only updated on *successful*
-        # supersede so stale redirects don't survive ETag races.
-        source_to_merged_id: dict[str, str] = {}
-        # Cache of merged docs we just upserted, keyed by merged_id. Lets
-        # the contradiction redirector reuse the in-memory dict instead of
-        # a cross-partition Cosmos round-trip for a doc we own. Also keeps
-        # the chain ETag-stable when the same merged doc absorbs both a
-        # duplicate group and a contradiction redirect in the same call.
-        merged_docs_by_id: dict[str, dict[str, Any]] = {}
-        # Set of source IDs that were *actually* superseded (counts toward
-        # ``merged``). Used by the kept-count cross-check below — earlier
-        # versions counted attempts and undercounted on ETag races.
-        consumed_source_ids: set[str] = set()
-        # Set of contradiction loser IDs that were *actually* superseded.
         consumed_loser_ids: set[str] = set()
-        # Original-pool winner IDs from successfully-applied contradictions.
-        # The LLM emits winners under ``contradicted_pairs``, never under
-        # ``kept_ids`` — so the kept-cross-check at the end must subtract
-        # them from the expected-kept set or every clean run looks like a
-        # mismatch.
-        contradiction_winner_ids_in_pool: set[str] = set()
-
-        # ---- 4. Apply duplicate_groups FIRST ----
-        for group in duplicate_groups:
-            source_ids = list(group.get("source_ids") or [])
-            merged_content = group.get("merged_content")
-            if not merged_content or not source_ids:
-                logger.debug(
-                    "reconcile_memories: skipping malformed duplicate_group %r",
-                    group,
-                )
-                continue
-
-            source_docs = [facts_by_id[sid] for sid in source_ids if sid in facts_by_id]
-            if not source_docs:
-                logger.debug(
-                    "reconcile_memories: duplicate_group references unknown ids %r",
-                    source_ids,
-                )
-                continue
-
-            # Filtered, hallucination-free view of the source ids that
-            # actually exist in the pool. Used both for ``supersedes_ids``
-            # on the merged record and for the deterministic merged-id
-            # below so the merged doc faithfully represents reality.
-            valid_source_ids = [sid for sid in source_ids if sid in facts_by_id]
-
-            if len(valid_source_ids) < 2:
-                logger.debug(
-                    "reconcile_memories: skipping single-source duplicate_group %r",
-                    source_ids,
-                )
-                continue
-
-            # Sort source_docs by Cosmos _ts DESC so the merged record's
-            # partition (thread_id) is picked deterministically from the
-            # newest source — independent of the LLM's source_ids order.
-            source_docs.sort(key=lambda d: d.get("_ts", 0), reverse=True)
-
-            # Union tags across all source docs (preserve order, dedupe).
-            merged_tags: list[str] = []
-            seen_tags: set[str] = set()
-            for src in source_docs:
-                for t in src.get("tags", []) or []:
-                    if t not in seen_tags:
-                        seen_tags.add(t)
-                        merged_tags.append(t)
-            if not merged_tags:
-                merged_tags = ["sys:fact"]
-
-            # Union source_memory_ids across all source docs (provenance chain).
-            merged_source_memory_ids: list[str] = []
-            seen_smi: set[str] = set()
-            for src in source_docs:
-                for smi in src.get("source_memory_ids", []) or []:
-                    if smi not in seen_smi:
-                        seen_smi.add(smi)
-                        merged_source_memory_ids.append(smi)
-
-            # Transitive supersedes_ids: include any prior chain hops the
-            # source docs already absorbed so the merged record carries
-            # the full provenance, not just the immediate parent layer.
-            merged_supersedes: list[str] = []
-            seen_sup: set[str] = set()
-            for sid in valid_source_ids:
-                if sid not in seen_sup:
-                    seen_sup.add(sid)
-                    merged_supersedes.append(sid)
-            for src in source_docs:
-                for prior in src.get("supersedes_ids", []) or []:
-                    if prior and prior not in seen_sup:
-                        seen_sup.add(prior)
-                        merged_supersedes.append(prior)
-
-            # Newest source's thread_id wins (after _ts-desc sort above).
-            recent_thread_id = source_docs[0].get("thread_id", "")
-
-            # If LLM omitted confidence/salience, returned a non-positive
-            # placeholder, returned a JSON ``true`` masquerading as numeric,
-            # or returned an out-of-range value (e.g. 1.05 — common when
-            # models confuse percent with [0,1]), fall back to max across
-            # the source docs. Out-of-range without a fallback would let
-            # ``MemoryRecord(...)`` raise on Pydantic validation and the
-            # blanket except below would silently drop the entire group.
-            llm_conf = group.get("confidence")
-            confidence_val = (
-                float(llm_conf)
-                if _is_real_number(llm_conf) and 0 < llm_conf <= 1
-                else _max_or_none(src.get("confidence") for src in source_docs)
-            )
-            llm_sal = group.get("salience")
-            salience_val = (
-                float(llm_sal)
-                if _is_real_number(llm_sal) and 0 < llm_sal <= 1
-                else _max_or_none(src.get("salience") for src in source_docs)
-            )
-
-            # Deterministic merged id keyed on (user, "merged", content_hash)
-            # so re-running reconcile on the same merged content produces an
-            # idempotent upsert instead of a fresh UUID each cycle. Stable
-            # ids also keep the supersede chain shallow: a future paraphrase
-            # that gets folded into the same canonical merged content will
-            # see the same id rather than chaining through a new UUID.
-            merged_content_hash = compute_content_hash(merged_content)
-            merged_id_seed = _ID_SEED_SEP.join((user_id, "merged", merged_content_hash))
-            merged_id = "fact_" + hashlib.sha256(merged_id_seed.encode()).hexdigest()[:32]
-
-            try:
-                merged_record = construct_internal(
-                    FactRecord,
-                    {
-                        "id": merged_id,
-                        "user_id": user_id,
-                        "role": "system",
-                        "type": "fact",
-                        "content": merged_content,
-                        "thread_id": recent_thread_id or f"__reconciled__:{user_id}",
-                        "confidence": confidence_val if confidence_val is not None else 0.5,
-                        "salience": salience_val if salience_val is not None else 0.5,
-                        "supersedes_ids": merged_supersedes,
-                        "source_memory_ids": merged_source_memory_ids,
-                        "tags": merged_tags,
-                        "content_hash": merged_content_hash,
-                        "metadata": {
-                            "category": "preference",
-                            "merged_via": "reconcile",
-                            "merged_from_count": len(valid_source_ids),
-                        },
-                        **self._prompt_lineage("dedup.prompty"),
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                )
-            except Exception:
-                logger.exception(
-                    "reconcile_memories: failed to build merged record for group %r",
-                    group,
-                )
-                continue
-
-            # Generate embedding for the merged content so retrieval can
-            # rank it against future queries from the moment it lands.
-            # If embedding fails, abort this duplicate group entirely:
-            # writing a merged doc with no embedding and then superseding
-            # the sources would create a search-index hole until the next
-            # reconcile retried. Better to leave the duplicates in place.
-            try:
-                merged_record.embedding = self._embed_one(merged_content)
-            except Exception:
-                logger.exception(
-                    "reconcile_memories: embedding failed for merged id=%s; "
-                    "aborting duplicate group to avoid search-index hole",
-                    merged_record.id,
-                )
-                continue
-
-            merged_doc = merged_record.to_doc()
-            try:
-                merged_doc = self._upsert_memory(merged_doc)
-            except Exception:
-                logger.exception(
-                    "reconcile_memories: upsert failed for merged id=%s; aborting duplicate group",
-                    merged_record.id,
-                )
-                continue
-            merged_docs_by_id[merged_record.id] = merged_doc
-
-            group_supersede_count = 0
-            for sid in valid_source_ids:
-                src_doc = facts_by_id.get(sid)
-                if src_doc is None:
-                    # Defensive — already filtered above, kept for clarity.
-                    continue
-                # Only update redirect/consumed-set on *successful* supersede.
-                # Losing the ETag race means another writer beat us; the
-                # source doc is still active from our perspective and should
-                # not be treated as consumed.
-                if self._mark_superseded(src_doc, merged_record.id, reason="duplicate"):
-                    merged += 1
-                    group_supersede_count += 1
-                    source_to_merged_id[sid] = merged_record.id
-                    consumed_source_ids.add(sid)
-
-            # If every supersede attempt for this group failed (typically
-            # an ETag race against a concurrent reconcile that already
-            # superseded the same sources to the *same* deterministic
-            # merged id), do NOT delete the merged doc. A delete here
-            # would orphan the sources whose ``superseded_by`` already
-            # points at this merged id — they'd become invisible to
-            # default reads (filter ``superseded_by IS NULL``) and to the
-            # reconcile pool, causing permanent data loss. The merged doc
-            # is idempotent (deterministic id), so leaving it in place is
-            # consistent with whatever the winning concurrent writer
-            # produced.
-            if group_supersede_count == 0:
-                logger.info(
-                    "reconcile_memories: no sources superseded for merged id=%s "
-                    "(likely ETag race with concurrent reconcile); leaving "
-                    "merged doc in place — idempotent upsert is self-healing",
-                    merged_record.id,
-                )
-
-        # ---- 5. Apply contradicted_pairs SECOND with dangling-id resolution ----
         for pair in contradicted_pairs:
             winner_id = pair.get("winner_id")
             loser_id = pair.get("loser_id")
-            if not winner_id or not loser_id:
-                logger.debug(
-                    "reconcile_memories: skipping malformed contradicted_pair %r",
-                    pair,
-                )
+            if not winner_id or not loser_id or winner_id == loser_id:
                 continue
-
-            # Redirect through any duplicate-merge that absorbed the id.
-            resolved_winner = source_to_merged_id.get(winner_id, winner_id)
-            resolved_loser_id = source_to_merged_id.get(loser_id, loser_id)
-
-            # Validate the (resolved) winner. The LLM is instructed never to
-            # invent IDs — if it does, refuse to write a dangling
-            # ``superseded_by`` pointer that breaks the audit trail.
-            if resolved_winner not in facts_by_id and resolved_winner not in merged_docs_by_id:
+            if winner_id not in facts_by_id:
                 logger.warning(
-                    "reconcile_memories: hallucinated winner_id=%s (resolved=%s) "
-                    "not in pool or merged set; skipping pair %r",
+                    "reconcile_memories: hallucinated winner_id=%s not in pool; skipping pair %r",
                     winner_id,
-                    resolved_winner,
                     pair,
                 )
                 continue
-
-            if resolved_winner == resolved_loser_id:
-                # Both sides collapsed into the same merged doc — the
-                # contradiction is moot. Drop it silently.
-                logger.debug(
-                    "reconcile_memories: contradiction collapsed into duplicate group "
-                    "(winner=%s loser=%s -> %s); skipping",
-                    winner_id,
-                    loser_id,
-                    resolved_winner,
+            # Guard chained contradictions: never point a loser at a winner that
+            # was itself already superseded earlier this pass (A>B then B>C would
+            # tombstone C in favor of a now-dead B), and never re-supersede a loser.
+            if winner_id in consumed_loser_ids or loser_id in consumed_loser_ids:
+                logger.info(
+                    "reconcile_memories: skipping chained/duplicate contradiction pair %r "
+                    "(winner or loser already superseded this pass)",
+                    pair,
                 )
                 continue
-
-            loser_doc = facts_by_id.get(resolved_loser_id)
-            if loser_doc is None and resolved_loser_id != loser_id:
-                # The original loser was just merged. Reuse the in-memory
-                # merged doc so we skip a cross-partition re-fetch — we
-                # own the (user_id, thread_id) partition and just wrote
-                # it. This in-memory copy carries the ``_etag`` returned
-                # by ``_upsert_memory``'s captured upsert response, so
-                # the supersede below takes the ETag-protected
-                # ``replace_item`` branch — concurrency-safe against any
-                # other reconcile that may have touched the same merged
-                # id in parallel.
-                loser_doc = merged_docs_by_id.get(resolved_loser_id)
-
+            loser_doc = facts_by_id.get(loser_id)
             if loser_doc is None:
-                logger.warning(
-                    "reconcile_memories: loser doc not found for pair %r (resolved_loser=%s)",
-                    pair,
-                    resolved_loser_id,
-                )
                 continue
-
-            if self._mark_superseded(loser_doc, resolved_winner, reason="contradict"):
+            if self._mark_superseded(loser_doc, winner_id, reason="contradict"):
                 contradicted += 1
-                # Track the *original* loser_id from the LLM so the kept
-                # cross-check below can reconcile against the input pool.
-                if loser_id in facts_by_id:
-                    consumed_loser_ids.add(loser_id)
-                # If the winner is an original pool member (not a freshly
-                # minted merged doc), record it so the kept-cross-check
-                # doesn't flag a clean run.
-                if winner_id in facts_by_id:
-                    contradiction_winner_ids_in_pool.add(winner_id)
+                consumed_loser_ids.add(loser_id)
 
-        # The pipeline's "kept" semantic = facts that survive as live
-        # records in the pool. The LLM's ``kept_ids`` semantic =
-        # everything *not* mentioned in duplicate_groups or
-        # contradicted_pairs. They differ by exactly the contradiction
-        # winners (winners survive but are listed under contradicted_pairs).
-        consumed_ids = consumed_source_ids | consumed_loser_ids
-        kept_actual = {fid for fid in facts_by_id.keys() if fid not in consumed_ids}
-        kept = len(kept_actual)
-        # Cross-check: the LLM's kept_ids set should equal kept_actual
-        # minus the contradiction winners. Mismatch usually means the LLM
-        # hallucinated an id or double-counted a fact across categories.
-        expected_llm_kept = kept_actual - contradiction_winner_ids_in_pool
-        llm_kept_set = {kid for kid in llm_kept_ids if kid in facts_by_id}
-        if llm_kept_set != expected_llm_kept:
-            symdiff = sorted(llm_kept_set ^ expected_llm_kept)[:10]
-            logger.info(
-                "reconcile_memories: kept_ids mismatch (llm=%d valid=%d, expected=%d). "
-                "Likely a hallucinated or double-counted fact id. Sample diff (≤10): %s",
-                len(llm_kept_ids),
-                len(llm_kept_set),
-                len(expected_llm_kept),
-                symdiff,
-            )
-        result = {"kept": kept, "merged": merged, "contradicted": contradicted}
-        logger.info("reconcile_memories completed: %s", result)
-        self._emit_reconcile_outcome(
-            started_at=started_at,
-            user_id=user_id,
-            candidates=len(facts),
-            result=result,
+        kept = len([fid for fid in facts_by_id if fid not in consumed_loser_ids])
+        result = {"kept": kept, "merged": 0, "contradicted": contradicted}
+        logger.info(
+            "reconcile_memories contradiction pass user_id=%s memory_type=%s result=%s",
+            user_id,
+            memory_type,
+            result,
         )
         return result
+
+    def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
+        # ---- Load up to N most recent active memories ----
+        # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
+        # physical partitions and matches the dedup prompt's tiebreaker
+        # ("more recent created_at first"). Cosmos's _ts is the last-write
+        # timestamp, which would diverge from created_at after any UPDATE.
+        query = (
+            f"SELECT TOP {top_literal(n, name='reconcile_memories.n')} * FROM c "
+            "WHERE c.user_id = @user_id "
+            "AND c.type = @memory_type "
+            f"AND {_ACTIVE_DOC_FILTER} "
+            "ORDER BY c.created_at DESC"
+        )
+        return list(
+            self._memories_container.query_items(
+                query=query,
+                parameters=[
+                    {"name": "@user_id", "value": user_id},
+                    {"name": "@memory_type", "value": memory_type},
+                ],
+                enable_cross_partition_query=True,
+            )
+        )
 
     def build_procedural_context(self, user_id: str) -> str:
         """Return the active synthesized procedural prompt for system injection."""

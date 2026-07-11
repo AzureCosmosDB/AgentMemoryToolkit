@@ -6,13 +6,13 @@ This guide covers the minimum Azure resources, deployment steps, throughput sett
 
 ## Required Azure Services
 
-| Service | Purpose |
-|---------|---------|
-| **Azure Cosmos DB for NoSQL** | Persistent memory store with vector and full-text indexes |
-| **Azure OpenAI / AI Services** | Embeddings and chat generation |
-| **Azure Functions** | Durable Functions orchestrator and activities |
-| **Azure Storage Account** | Required by Azure Functions |
-| **Application Insights** | Recommended for monitoring |
+| Service                        | Purpose                                                   |
+|--------------------------------|-----------------------------------------------------------|
+| **Azure Cosmos DB for NoSQL**  | Persistent memory store with vector and full-text indexes |
+| **Azure OpenAI / AI Services** | Embeddings and chat generation                            |
+| **Azure Functions**            | Durable Functions orchestrator and activities             |
+| **Azure Storage Account**      | Required by Azure Functions                               |
+| **Application Insights**       | Recommended for monitoring                                |
 
 ---
 
@@ -277,7 +277,7 @@ Bring the environment up in this order:
 9. write a few turns and verify a thread `summary` memory appears
 10. write more turns and verify `fact`, `procedural`, and `episodic` memories appear
 11. verify a per-user `user_summary` memory appears once `USER_SUMMARY_EVERY_N` turns have accumulated for that user
-12. test deduplication by writing two near-duplicate facts and confirming the dedup orchestrator merges them
+12. test deduplication by writing two near-duplicate facts and confirming the second folds into the first in place (one active record remains, its `updated_at` bumped) rather than creating a duplicate
 
 This keeps failures isolated and easier to diagnose.
 
@@ -367,15 +367,15 @@ az functionapp log tail \
 
 Common issues:
 
-| Symptom | Likely Cause |
-|---------|--------------|
-| 401 / 403 from Cosmos DB | Missing Cosmos DB RBAC |
-| 401 / 403 from Azure OpenAI | Missing OpenAI RBAC |
-| Durable Function starts but fails | Missing app settings or downstream RBAC |
-| `No memories found` | No turn memories exist, or all candidate turns predate the existing summary |
-| Search is slow | Embedding latency, index choice, or region mismatch |
-| Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
-| Auto-processing not starting | Check threshold settings are > 0 in Function App configuration |
+| Symptom                           | Likely Cause                                                                                                                     |
+|-----------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| 401 / 403 from Cosmos DB          | Missing Cosmos DB RBAC                                                                                                           |
+| 401 / 403 from Azure OpenAI       | Missing OpenAI RBAC                                                                                                              |
+| Durable Function starts but fails | Missing app settings or downstream RBAC                                                                                          |
+| `No memories found`               | No turn memories exist, or all candidate turns predate the existing summary                                                      |
+| Search is slow                    | Embedding latency, index choice, or region mismatch                                                                              |
+| Change feed trigger not firing    | Verify `COSMOS_DB__accountEndpoint` is set and the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
+| Auto-processing not starting      | Check threshold settings are > 0 in Function App configuration                                                                   |
 
 Recommended checks:
 

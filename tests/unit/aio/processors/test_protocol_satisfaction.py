@@ -32,6 +32,7 @@ class _FullAsyncDummy:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
         return {}
 

@@ -10,7 +10,7 @@ Both sync and async clients are exposed:
 * ``get_counter_container_async()`` returns an *async* AsyncContainerProxy
   used by the change-feed trigger to update counters.
 
-Clients are lazily constructed and cached at module level — Azure Functions
+Clients are lazily constructed and cached at module level - Azure Functions
 re-uses the same Python worker across invocations, so we want one client
 per worker instead of one per invocation.
 """
@@ -113,7 +113,7 @@ async def get_counter_container_async():
 async def close_async_clients() -> None:
     """Close the cached async Cosmos client and credential.
 
-    Idempotent — safe to call multiple times. Exposed so tests and explicit
+    Idempotent - safe to call multiple times. Exposed so tests and explicit
     shutdown hooks can release the underlying ``aiohttp`` session cleanly.
     """
     global _async_cosmos_client, _async_counter_container, _async_credential

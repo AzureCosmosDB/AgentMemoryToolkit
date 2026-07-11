@@ -49,7 +49,7 @@ def test_default_retry_options_uses_two_second_first_interval():
 
 
 def test_default_retry_options_only_passes_supported_kwargs():
-    """The real SDK constructor accepts only two kwargs — pinning that here
+    """The real SDK constructor accepts only two kwargs - pinning that here
     so a future change cannot silently re-introduce the original bug."""
     with _patch_retry_ctor() as ctor:
         default_retry_options()
@@ -61,7 +61,7 @@ def test_default_retry_options_only_passes_supported_kwargs():
 
 
 def test_default_retry_options_is_called_freshly_each_time():
-    """No caching — each call constructs a new RetryOptions."""
+    """No caching - each call constructs a new RetryOptions."""
     with _patch_retry_ctor(side_effect=lambda **kw: MagicMock()) as ctor:
         a = default_retry_options()
         b = default_retry_options()

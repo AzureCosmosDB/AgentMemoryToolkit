@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,10 +15,12 @@ class _SyncChat:
     def __init__(self, responses: list[dict[str, Any]]):
         self.responses = list(responses)
         self.calls = 0
+        self.messages: list[list[dict[str, Any]]] = []
 
     def generate(self, messages: list[dict[str, Any]], **opts: Any) -> str:
-        del messages, opts
+        del opts
         self.calls += 1
+        self.messages.append(messages)
         return json.dumps(self.responses.pop(0))
 
 
@@ -58,6 +61,8 @@ class _AsyncEmbeddings(_SyncEmbeddings):
 class _Store:
     def __init__(self, docs: list[dict[str, Any]]):
         self.docs = [dict(doc) for doc in docs]
+        self.search_calls: list[dict[str, Any]] = []
+        self.search_results: list[dict[str, Any]] = []
 
     def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
         del partition_key, cross_partition
@@ -100,6 +105,26 @@ class _Store:
     def mark_superseded(self, old_doc: dict[str, Any], superseder_id: str, *, reason: str) -> bool:
         del old_doc, superseder_id, reason
         return True
+
+    def search(
+        self,
+        *,
+        search_terms: str,
+        user_id: str,
+        memory_types: list[str],
+        top_k: int,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        self.search_calls.append(
+            {
+                "search_terms": search_terms,
+                "user_id": user_id,
+                "memory_types": memory_types,
+                "top_k": top_k,
+                "include_superseded": include_superseded,
+            }
+        )
+        return [dict(doc) for doc in self.search_results]
 
 
 class _AsyncStore(_Store):
@@ -221,6 +246,23 @@ def test_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> N
     )
 
 
+def test_extract_memories_dry_does_not_call_store_search() -> None:
+    """Extraction is single-pass and existing-memory-free: it must not issue a
+    dedup-context vector search (dedup is handled by hash + reconciliation)."""
+    memories_store = _Store([])
+    memories_store.search_results = [{"id": "should-not-appear", "content": "x", "type": "fact"}]
+    service = PipelineService(
+        memories_store,
+        _SyncChat([_response()]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
+    )
+
+    service.extract_memories_dry("u1", "t1")
+
+    assert memories_store.search_calls == []
+
+
 @pytest.mark.asyncio
 async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
     chat = _AsyncChat([_response()])
@@ -261,258 +303,63 @@ async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_res
     )
 
 
-def test_dry_returns_processed_turn_docs_for_watermarking() -> None:
-    """``extract_memories_dry`` must surface the turn docs it processed so
-    ``persist_extracted_memories`` can stamp ``extracted_at`` on them and
-    the next extraction call doesn't reprocess them."""
-    chat = _SyncChat([_response()])
-    memories_store = _Store([])
-    turns_store = _Store([_turn(i) for i in range(3)])
-    service = PipelineService(
-        memories_store,
-        chat,
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    output = service.extract_memories_dry("u1", "t1")
-
-    assert "processed_turn_docs" in output
-    assert {d["id"] for d in output["processed_turn_docs"]} == {"turn-0", "turn-1", "turn-2"}
-
-
-def test_dry_alone_does_not_mark_turns_as_extracted() -> None:
-    """A dry run is read-only: it must NOT stamp ``extracted_at`` on any
-    turn (the wet ``extract_memories`` orchestrator handles marking only
-    after a successful persist)."""
-    chat = _SyncChat([_response()])
-    memories_store = _Store([])
-    turns_store = _Store([_turn(i) for i in range(3)])
-    service = PipelineService(
-        memories_store,
-        chat,
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    service.extract_memories_dry("u1", "t1")
-
-    for doc in turns_store.docs:
-        assert "extracted_at" not in doc or doc["extracted_at"] is None
-
-
-def test_extract_memories_marks_turns_after_successful_persist() -> None:
-    """The wet ``extract_memories`` must stamp ``extracted_at`` on each
-    turn it processed. Without this, the next extraction call re-loads
-    the same turns and the LLM re-decides UPDATE/CONTRADICT — which is
-    the runaway-extraction bug this fix is designed to prevent."""
-    chat = _SyncChat([_response()])
-    memories_store = _Store([])
-    turns_store = _Store([_turn(i) for i in range(3)])
-    service = PipelineService(
-        memories_store,
-        chat,
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    service.extract_memories("u1", "t1")
-
-    marked_turns = [doc for doc in turns_store.docs if doc.get("extracted_at")]
-    assert len(marked_turns) == 3
-    marked_ids = {doc["id"] for doc in marked_turns}
-    assert marked_ids == {"turn-0", "turn-1", "turn-2"}
-
-
-def test_second_extract_call_does_not_reprocess_already_extracted_turns() -> None:
-    """End-to-end watermarking proof: after a first ``extract_memories``
-    marks the turns, a second call with no NEW turns must produce zero
-    work — no second LLM call, no second persist. This is the property
-    that prevents reversed-supersede / hallucinated-meta-fact bugs."""
-    chat = _SyncChat([_response(), _response()])  # second response should never be consumed
-    memories_store = _Store([])
-    turns_store = _Store([_turn(i) for i in range(3)])
-    service = PipelineService(
-        memories_store,
-        chat,
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    service.extract_memories("u1", "t1")
-    calls_after_first = chat.calls
-
-    # Second invocation with no new turns: watermarked turns are filtered
-    # out by the query and the dry early-returns with empty items.
-    service.extract_memories("u1", "t1")
-    assert chat.calls == calls_after_first
-
-
 @pytest.mark.asyncio
-async def test_async_extract_memories_marks_turns_after_successful_persist() -> None:
-    chat = _AsyncChat([_response()])
-    memories_store = _AsyncStore([])
-    turns_store = _AsyncStore([_turn(i) for i in range(3)])
+async def test_async_extract_memories_dry_does_not_call_store_search() -> None:
+    store = _AsyncStore([])
+
+    store.search = AsyncMock(return_value=[])
     service = AsyncPipelineService(
-        memories_store,
-        chat,
+        store,
+        _AsyncChat([_response()]),
         _AsyncEmbeddings(),
-        containers=_async_containers_for_store(memories_store, turns_store=turns_store),
+        containers=_async_containers_for_store(store, turns_store=_AsyncStore([_turn(1)])),
     )
 
-    await service.extract_memories("u1", "t1")
+    await service.extract_memories_dry("u1", "t1")
 
-    marked_turns = [doc for doc in turns_store.docs if doc.get("extracted_at")]
-    assert len(marked_turns) == 3
-
-
-# ---------------------------------------------------------------------------
-# Grounding-check regression tests
-#
-# These tests pin down the two known LLM extraction-time failure modes that
-# previously corrupted the fact store and required a wheel hotfix:
-#
-#   1. The LLM synthesizes an ADD by paraphrase-merging 2+ existing facts
-#      (e.g. "user eats meat" + "user loves steak" → "user loves steak,
-#      indicating they eat meat") even though the new user turn said nothing
-#      on the topic.
-#   2. The LLM emits a second invented CONTRADICT fact alongside the literal
-#      user statement (e.g. user says "I love steak"; LLM emits both
-#      "loves steak" AND "user eats meat" — the second is a phantom
-#      explicit-negation that polluted the store with claims the user
-#      didn't make).
-#
-# The fix is a prompt change that forbids both patterns. Because we can't
-# directly test prompt-following at the unit-test level (no real LLM in
-# the test loop), we test the structural safety net:
-# ``check_extracted_fact_grounding`` logs a WARNING when these patterns
-# slip through. The four scenarios below pair a "buggy" LLM response with
-# a "clean" one for each pattern, asserting the WARNING fires (or not)
-# accordingly. If a future change ever regresses the prompt and the LLM
-# starts emitting these patterns, the WARNING in production telemetry
-# becomes the visible signal.
-# ---------------------------------------------------------------------------
+    store.search.assert_not_awaited()
 
 
-def _existing_fact(fid: str, content: str) -> dict[str, Any]:
-    """Build a minimal existing-fact doc shaped like what
-    ``_load_existing_memories`` returns from Cosmos."""
-    return {
-        "id": fid,
-        "user_id": "u1",
-        "type": "fact",
-        "content": content,
-        "content_hash": fid,
-        "salience": 0.8,
-        "confidence": 0.9,
-        "metadata": {"category": "preference"},
-        "tags": ["sys:fact"],
-    }
+class _BatchChat:
+    """Returns a unique fact per call; optionally raises on a chosen call index."""
 
+    def __init__(self, fail_on_call=None, error=None):
+        self.calls = 0
+        self.fail_on_call = fail_on_call
+        self.error = error
 
-def _moderate_hotels_turn() -> dict[str, Any]:
-    return {
-        "id": "turn-new",
-        "user_id": "u1",
-        "thread_id": "t1",
-        "role": "user",
-        "type": "turn",
-        "content": "Normally, I prefer moderate hotels.",
-        "created_at": "2026-06-02T19:00:00+00:00",
-    }
-
-
-def _steak_seafood_turn() -> dict[str, Any]:
-    return {
-        "id": "turn-new",
-        "user_id": "u1",
-        "thread_id": "t1",
-        "role": "user",
-        "type": "turn",
-        "content": "Actually, I love steak and seafood.",
-        "created_at": "2026-06-02T18:00:00+00:00",
-    }
-
-
-def test_grounding_check_warns_when_add_synthesizes_from_multiple_existing_facts(caplog) -> None:
-    """Scenario 1 (buggy): the LLM emits a synthesized ADD whose tokens come
-    from 2+ existing facts but not from the new user turn. The grounding
-    check must emit a WARNING naming the offending fact."""
-    existing = [
-        _existing_fact("fact_meat", "The user eats meat."),
-        _existing_fact("fact_steak", "The user loves steak and seafood."),
-    ]
-    buggy_response = {
-        "facts": [
+    def generate(self, messages, **opts):
+        del messages, opts
+        self.calls += 1
+        if self.fail_on_call and self.calls == self.fail_on_call:
+            raise self.error
+        return json.dumps(
             {
-                "text": "The user normally prefers moderate hotels.",
-                "action": "ADD",
-                "category": "preference",
-                "confidence": 0.9,
-                "salience": 0.7,
-            },
-            {
-                # synthesized — tokens come from existing fact_steak + fact_meat,
-                # not from the new "moderate hotels" turn
-                "text": "The user loves steak and seafood, indicating they eat meat.",
-                "action": "ADD",
-                "category": "preference",
-                "confidence": 0.9,
-                "salience": 0.7,
-            },
-        ],
-        "episodic": [],
-    }
-    chat = _SyncChat([buggy_response])
-    memories_store = _Store(existing)
-    turns_store = _Store([_moderate_hotels_turn()])
-    service = PipelineService(
-        memories_store,
-        chat,
-        _SyncEmbeddings(),
-        containers=_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        service.extract_memories_dry("u1", "t1")
-
-    synthesis_warnings = [
-        rec
-        for rec in caplog.records
-        if "synthesized from" in rec.getMessage() and "steak and seafood, indicating they eat meat" in rec.getMessage()
-    ]
-    assert synthesis_warnings, (
-        f"expected a WARNING flagging the synthesized fact; got: {[rec.getMessage() for rec in caplog.records]}"
-    )
-    # The grounded "moderate hotels" fact must NOT trigger a warning.
-    assert not any(
-        "moderate hotels" in rec.getMessage() and "synthesized from" in rec.getMessage() for rec in caplog.records
-    )
-
-
-def test_grounding_check_silent_when_add_is_grounded_in_user_turn(caplog) -> None:
-    """Scenario 2 (clean): with the same existing-facts context, a single
-    grounded ADD (only the new "moderate hotels" claim) must NOT trigger
-    any synthesis WARNING. This is the post-fix expected behaviour."""
-    existing = [
-        _existing_fact("fact_meat", "The user eats meat."),
-        _existing_fact("fact_steak", "The user loves steak and seafood."),
-    ]
-    clean_response = {
-        "facts": [
-            {
-                "text": "The user normally prefers moderate hotels.",
-                "action": "ADD",
-                "category": "preference",
-                "confidence": 0.9,
-                "salience": 0.7,
+                "facts": [
+                    {
+                        "text": f"Fact from call {self.calls}.",
+                        "category": "other",
+                        "confidence": 0.9,
+                        "salience": 0.8,
+                        "temporal_context": None,
+                        "tags": [],
+                    }
+                ],
+                "episodic": [],
             }
-        ],
-        "episodic": [],
-    }
-    chat = _SyncChat([clean_response])
-    memories_store = _Store(existing)
-    turns_store = _Store([_moderate_hotels_turn()])
+        )
+
+
+def _one_turn_per_batch(monkeypatch):
+    # Force each small turn into its own extraction batch.
+    monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_extraction_batch_max_tokens", lambda: 5)
+
+
+def test_extract_batches_run_independently_one_call_per_batch(monkeypatch) -> None:
+    _one_turn_per_batch(monkeypatch)
+    chat = _BatchChat()
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(3)])
     service = PipelineService(
         memories_store,
         chat,
@@ -520,53 +367,18 @@ def test_grounding_check_silent_when_add_is_grounded_in_user_turn(caplog) -> Non
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_dry("u1", "t1")
 
-    grounding_warnings = [
-        rec
-        for rec in caplog.records
-        if "synthesized from" in rec.getMessage() or "phantom-negation/restatement" in rec.getMessage()
-    ]
-    assert grounding_warnings == [], (
-        f"clean output must not emit grounding warnings; got: {[rec.getMessage() for rec in grounding_warnings]}"
-    )
+    assert chat.calls == 3  # one LLM call per batch
+    assert len(out["facts"]) == 3
+    assert len(out["processed_turn_docs"]) == 3
 
 
-def test_grounding_check_warns_on_phantom_explicit_negation_fact(caplog) -> None:
-    """Scenario 3 (buggy): user said "Actually, I love steak and seafood";
-    LLM emits both a literal-paraphrase fact AND a phantom "user eats meat"
-    fact (an invented explicit-negation of the prior vegetarian fact).
-    The phantom fact's tokens are NOT in the user turn and they overlap
-    a single existing fact ("does not eat meat") — the single-contributor
-    branch of the grounding heuristic must fire a WARNING."""
-    existing = [_existing_fact("fact_veg", "The user does not eat meat.")]
-    buggy_response = {
-        "facts": [
-            {
-                # legitimate literal paraphrase of the user turn
-                "text": "The user loves steak and seafood.",
-                "action": "CONTRADICT",
-                "supersedes_id": "fact_veg",
-                "category": "preference",
-                "confidence": 0.95,
-                "salience": 0.8,
-            },
-            {
-                # phantom — user never said this; tokens come from existing fact_veg
-                "text": "The user eats meat.",
-                "action": "CONTRADICT",
-                "supersedes_id": "fact_veg",
-                "category": "preference",
-                "confidence": 0.95,
-                "salience": 0.8,
-            },
-        ],
-        "episodic": [],
-    }
-    chat = _SyncChat([buggy_response])
-    memories_store = _Store(existing)
-    turns_store = _Store([_steak_seafood_turn()])
+def test_extract_quarantines_non_retryable_batch_but_keeps_others(monkeypatch) -> None:
+    _one_turn_per_batch(monkeypatch)
+    chat = _BatchChat(fail_on_call=2, error=Exception("Error code: 400 content_filter"))
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(3)])
     service = PipelineService(
         memories_store,
         chat,
@@ -574,45 +386,21 @@ def test_grounding_check_warns_on_phantom_explicit_negation_fact(caplog) -> None
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_dry("u1", "t1")
 
-    phantom_warnings = [
-        rec for rec in caplog.records if "phantom-negation" in rec.getMessage() and "eats meat" in rec.getMessage()
-    ]
-    assert phantom_warnings, (
-        f"expected a WARNING flagging the phantom-negation fact; got: {[rec.getMessage() for rec in caplog.records]}"
-    )
-    # The legitimate "loves steak and seafood" fact must NOT trigger a warning;
-    # its tokens are grounded in the user turn.
-    assert not any(
-        "loves steak and seafood" in rec.getMessage()
-        and ("phantom-negation" in rec.getMessage() or "synthesized from" in rec.getMessage())
-        for rec in caplog.records
-    )
+    # Batches 1 and 3 produced facts; batch 2 was quarantined (no fact) ...
+    assert len(out["facts"]) == 2
+    # ... but ALL 3 turns are stamped (quarantined turn included) so it never re-poisons.
+    assert len(out["processed_turn_docs"]) == 3
+    stats = [u for u in out["updates"] if u.get("op") == "stats" and "quarantined_turn_count" in u]
+    assert stats and stats[0]["quarantined_turn_count"] == 1
 
 
-def test_grounding_check_silent_on_clean_implicit_contradict(caplog) -> None:
-    """Scenario 4 (clean): the post-fix expected behaviour for an implicit
-    contradiction — ONE fact with literal user text and a CONTRADICT
-    supersedes_id. No phantom-negation fact, no WARNING."""
-    existing = [_existing_fact("fact_veg", "The user does not eat meat.")]
-    clean_response = {
-        "facts": [
-            {
-                "text": "The user loves steak and seafood.",
-                "action": "CONTRADICT",
-                "supersedes_id": "fact_veg",
-                "category": "preference",
-                "confidence": 0.95,
-                "salience": 0.8,
-            }
-        ],
-        "episodic": [],
-    }
-    chat = _SyncChat([clean_response])
-    memories_store = _Store(existing)
-    turns_store = _Store([_steak_seafood_turn()])
+def test_extract_defers_retryable_batch_leaving_turns_unstamped(monkeypatch) -> None:
+    _one_turn_per_batch(monkeypatch)
+    chat = _BatchChat(fail_on_call=2, error=Exception("Error code: 429 rate limit"))
+    memories_store = _Store([])
+    turns_store = _Store([_turn(i) for i in range(3)])
     service = PipelineService(
         memories_store,
         chat,
@@ -620,65 +408,11 @@ def test_grounding_check_silent_on_clean_implicit_contradict(caplog) -> None:
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_dry("u1", "t1")
 
-    grounding_warnings = [
-        rec
-        for rec in caplog.records
-        if "synthesized from" in rec.getMessage() or "phantom-negation/restatement" in rec.getMessage()
-    ]
-    assert grounding_warnings == [], (
-        "clean implicit-contradict must not emit grounding warnings; got: "
-        f"{[rec.getMessage() for rec in grounding_warnings]}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_async_grounding_check_warns_on_synthesis(caplog) -> None:
-    """Async-path mirror of scenario 1: confirms the grounding heuristic
-    is wired into both sync and async extract pipelines."""
-    existing = [
-        _existing_fact("fact_meat", "The user eats meat."),
-        _existing_fact("fact_steak", "The user loves steak and seafood."),
-    ]
-    buggy_response = {
-        "facts": [
-            {
-                "text": "The user normally prefers moderate hotels.",
-                "action": "ADD",
-                "category": "preference",
-                "confidence": 0.9,
-                "salience": 0.7,
-            },
-            {
-                "text": "The user loves steak and seafood, indicating they eat meat.",
-                "action": "ADD",
-                "category": "preference",
-                "confidence": 0.9,
-                "salience": 0.7,
-            },
-        ],
-        "episodic": [],
-    }
-    chat = _AsyncChat([buggy_response])
-    memories_store = _AsyncStore(existing)
-    turns_store = _AsyncStore([_moderate_hotels_turn()])
-    service = AsyncPipelineService(
-        memories_store,
-        chat,
-        _AsyncEmbeddings(),
-        containers=_async_containers_for_store(memories_store, turns_store=turns_store),
-    )
-
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline.aio"):
-        await service.extract_memories_dry("u1", "t1")
-
-    synthesis_warnings = [
-        rec
-        for rec in caplog.records
-        if "synthesized from" in rec.getMessage() and "steak and seafood, indicating they eat meat" in rec.getMessage()
-    ]
-    assert synthesis_warnings, (
-        f"expected an async WARNING flagging the synthesized fact; got: {[rec.getMessage() for rec in caplog.records]}"
-    )
+    # Batches 1 and 3 produced facts; batch 2 deferred (retryable) ...
+    assert len(out["facts"]) == 2
+    # ... its turn is NOT in processed_turn_docs, so it stays un-extracted and retries.
+    assert len(out["processed_turn_docs"]) == 2
+    stats = [u for u in out["updates"] if u.get("op") == "stats" and "deferred_turn_count" in u]
+    assert stats and stats[0]["deferred_turn_count"] == 1

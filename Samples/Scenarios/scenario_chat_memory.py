@@ -97,7 +97,7 @@ SESSION_2_TURNS = [
     ("user", "Does caffeine really affect sleep that much?"),
     (
         "agent",
-        "Yes — caffeine has a half-life of about 5-6 hours, so a coffee at "
+        "Yes - caffeine has a half-life of about 5-6 hours, so a coffee at "
         "3 PM still has half its caffeine at 9 PM. Limit caffeine to mornings.",
     ),
 ]
@@ -169,14 +169,14 @@ def main() -> None:
     time.sleep(1)
 
     # ── Simulate reconnect: retrieve full thread ──────────────
-    banner("Reconnect — Retrieve travel thread")
+    banner("Reconnect - Retrieve travel thread")
     print(f"  Fetching thread_id = {thread_1}\n")
     thread = mem.get_thread(thread_id=thread_1, user_id=user_id)
     print_thread(thread)
     print(f"\n  Retrieved {len(thread)} turns from Cosmos DB.")
 
     # ── Cross-session search: recall relevant context ─────────
-    banner("Cross-session search — 'vegetarian food recommendations'")
+    banner("Cross-session search - 'vegetarian food recommendations'")
     results = mem.search_cosmos(
         search_terms="vegetarian food recommendations",
         user_id=user_id,
@@ -184,7 +184,7 @@ def main() -> None:
     )
     print_search_results(results)
 
-    banner("Cross-session search — 'caffeine and sleep'")
+    banner("Cross-session search - 'caffeine and sleep'")
     results = mem.search_cosmos(
         search_terms="caffeine and sleep",
         user_id=user_id,
@@ -193,7 +193,7 @@ def main() -> None:
     print_search_results(results)
 
     # ── Show how a new session can build on old context ───────
-    banner("New session — using recalled context")
+    banner("New session - using recalled context")
     thread_3 = str(uuid.uuid4())
     print(f"  thread_id = {thread_3}\n")
 

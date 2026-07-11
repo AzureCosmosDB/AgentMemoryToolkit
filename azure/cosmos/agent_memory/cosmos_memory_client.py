@@ -543,7 +543,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         For ``memory_type='turn'`` this also bumps the auto-trigger counter and
         schedules cadence-aware processing (extract / reconcile / procedural /
         thread_summary / user_summary) via :func:`maybe_trigger_steps`, exactly
-        like :meth:`push_to_cosmos` does for buffered turns — so the
+        like :meth:`push_to_cosmos` does for buffered turns - so the
         ``FACT_EXTRACTION_EVERY_N`` / ``THREAD_SUMMARY_EVERY_N`` /
         ``USER_SUMMARY_EVERY_N`` / ``DEDUP_EVERY_N`` knobs apply uniformly
         whether the caller uses the buffer or writes through directly.
@@ -663,7 +663,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         role: Optional[str] = None,
         memory_types: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -686,7 +685,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
             role=role,
             memory_types=memory_types,
             thread_id=thread_id,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -704,7 +702,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         user_id: str,
         thread_id: Optional[str] = None,
         role: Optional[str] = None,
-        hybrid_search: bool = False,
         top_k: int = 5,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -726,13 +723,37 @@ class CosmosMemoryClient(_BaseMemoryClient):
             user_id=user_id,
             thread_id=thread_id,
             role=role,
-            hybrid_search=hybrid_search,
             top_k=top_k,
             tags_all=tags_all,
             tags_any=tags_any,
             exclude_tags=exclude_tags,
             created_after=created_after,
             created_before=created_before,
+        )
+
+    def get_memory_history(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        *,
+        max_depth: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a memory's superseded predecessors, most-recently-superseded first.
+
+        AMT supersedes rather than deletes, so the full history of a fact - how a
+        preference, decision, or attribute changed over time - is preserved. This
+        walks the ``superseded_by`` chain backwards from *memory_id* and returns
+        every version it replaced (transitively), each carrying its
+        ``superseded_at`` / ``supersede_reason`` audit fields. Useful for
+        answering "what changed?" / "what was it before?" questions that a
+        current-value-only view cannot.
+        """
+        return self._get_store().get_memory_history(
+            memory_id,
+            user_id,
+            thread_id,
+            max_depth=max_depth,
         )
 
     def get_thread(
@@ -843,15 +864,30 @@ class CosmosMemoryClient(_BaseMemoryClient):
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
         """Semantic search across episodic memories for a user."""
-        return self._get_store().search_episodic(user_id, search_terms, top_k, min_salience, include_superseded)
+        return self._get_store().search_episodic(
+            user_id=user_id,
+            search_terms=search_terms,
+            top_k=top_k,
+            min_salience=min_salience,
+            include_superseded=include_superseded,
+        )
 
     def build_procedural_context(self, user_id: str) -> str:
         """Build formatted procedural context for prompt injection."""
         return self._get_pipeline().build_procedural_context(user_id)
 
-    def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
+    def build_episodic_context(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 3,
+    ) -> str:
         """Build formatted context of relevant past experiences."""
-        return self._get_store().build_episodic_context(user_id, query, top_k)
+        return self._get_store().build_episodic_context(
+            user_id=user_id,
+            query=query,
+            top_k=top_k,
+        )
 
     def extract_memories(
         self,
@@ -912,7 +948,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         caught and logged as warnings so the per-thread work already
         persisted by the prior steps is not erased. Permanent failures
         (config bugs, auth errors, 4xx Cosmos errors, Python builtins like
-        ``KeyError`` / ``TypeError``) are re-raised — silencing them turns
+        ``KeyError`` / ``TypeError``) are re-raised - silencing them turns
         operational issues into invisible ``WARNING`` lines.
         """
         self._require_cosmos()

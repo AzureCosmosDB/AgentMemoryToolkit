@@ -73,9 +73,16 @@ def _make_counter_container_starting_at(start_count: int = 0) -> MagicMock:
         state[body["id"]] = dict(body)
         return body
 
+    async def patch_item(*, item, partition_key, patch_operations):
+        doc = state.setdefault(item, {"id": item})
+        for op in patch_operations:
+            doc[op["path"].lstrip("/")] = op["value"]
+        return dict(doc)
+
     container.read_item = AsyncMock(side_effect=read_item)
     container.create_item = AsyncMock(side_effect=create_item)
     container.upsert_item = AsyncMock(side_effect=upsert_item)
+    container.patch_item = AsyncMock(side_effect=patch_item)
     container._state = state  # exposed for assertions
     return container
 
@@ -409,7 +416,7 @@ def test_per_thread_grouping_is_correct():
         _turn(user_id="u1", thread_id="t1"),
         _turn(user_id="u1", thread_id="t1"),  # t1 crosses 4
         _turn(user_id="u1", thread_id="t2"),
-        _turn(user_id="u1", thread_id="t2"),  # t2 only at 2 — no cross
+        _turn(user_id="u1", thread_id="t2"),  # t2 only at 2 - no cross
     ]
 
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
@@ -418,7 +425,7 @@ def test_per_thread_grouping_is_correct():
     # t1 crossed → summary + extract started for t1 only.
     assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
     assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
-    # t2 below threshold — no orchestrators for t2.
+    # t2 below threshold - no orchestrators for t2.
     assert not any("t2" in iid for _, iid in started)
 
 
@@ -478,16 +485,16 @@ def test_lsn_replay_does_not_double_increment():
 
     # Layer 2 (deterministic instance ID): on replay the counter helper still
     # reports the same ``(old, new)`` it returned the first time, so the
-    # threshold is "crossed" again — but with the IDENTICAL deterministic
+    # threshold is "crossed" again - but with the IDENTICAL deterministic
     # instance id. Azure Durable Functions then dedups the duplicate
     # ``start_new`` server-side. We assert the determinism here.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
-    assert len(summary_starts) == 2  # same id sent twice — durable dedups
+    assert len(summary_starts) == 2  # same id sent twice - durable dedups
     assert all(c.kwargs["instance_id"] == "thread_summary:u1:t1:4" for c in summary_starts)
 
 
 # ---------------------------------------------------------------------------
-# MEMORY_PROCESSOR_OWNER exclusivity — the change-feed trigger must
+# MEMORY_PROCESSOR_OWNER exclusivity - the change-feed trigger must
 # respect the owner env var the same way the SDK auto-trigger does, so a
 # shared Cosmos container is processed by exactly one backend.
 # ---------------------------------------------------------------------------
@@ -546,7 +553,7 @@ def test_runs_normally_when_owner_durable():
 
     # Counter was written.
     assert container._state["thread:u1:t1"]["count"] == 2
-    # Threshold (2) crossed — orchestrator started.
+    # Threshold (2) crossed - orchestrator started.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 1
 
@@ -565,7 +572,7 @@ def test_skips_when_owner_unset(monkeypatch):
 
     This is the protection against the day-one footgun where a customer
     deploys the Function App next to an existing SDK install without
-    configuring the env var — without this guard both backends would
+    configuring the env var - without this guard both backends would
     race on the same writes.
     """
     monkeypatch.delenv("MEMORY_PROCESSOR_OWNER", raising=False)
@@ -609,8 +616,8 @@ def _extract_payload(call):
 def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     """Reconcile threshold = FACT_EXTRACTION_EVERY_N * DEDUP_EVERY_N
     (here 1 * 5 = 5). The change-feed signals reconcile via the
-    ``reconcile`` flag on the orchestrator payload — never as a separate
-    dispatch — so DEDUP_EVERY_N is honored on the FA path."""
+    ``reconcile`` flag on the orchestrator payload - never as a separate
+    dispatch - so DEDUP_EVERY_N is honored on the FA path."""
     starter = _make_starter()
     container = _make_counter_container_starting_at()
 
@@ -618,10 +625,19 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     asyncio.run(process_changefeed_batch([_turn() for _ in range(4)], starter, counter_container=container))
     extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
     assert len(extract_calls) == 1
-    assert _extract_payload(extract_calls[0]).get("reconcile") is False
+    first_payload = _extract_payload(extract_calls[0])
+    assert first_payload.get("reconcile") is False
+    # Bootstrap: no watermark yet -> recent_k spans all 4 turns so far.
+    assert first_payload.get("recent_k") == 4
+
+    # Simulate the extract orchestrator's em_AdvanceExtractWatermark activity
+    # advancing the watermark to the processed count (4) after batch 1.
+    from shared.counters import advance_extract_watermark, thread_counter_id
+
+    asyncio.run(advance_extract_watermark(container, thread_counter_id("u1", "t1"), "u1", "t1", 4))
 
     # Next batch: counter 4 -> 5. Reconcile threshold crossed, so the same
-    # extract dispatch carries reconcile=True.
+    # extract dispatch carries reconcile=True, and recent_k = 5 - watermark(4) = 1.
     starter.start_new.reset_mock()
     asyncio.run(process_changefeed_batch([_turn()], starter, counter_container=container))
     extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
@@ -629,6 +645,29 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     payload = _extract_payload(extract_calls[0])
     assert payload.get("reconcile") is True
     assert payload.get("user_id") == "u1"
+    assert payload.get("recent_k") == 1
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "USER_SUMMARY_EVERY_N": "0",
+        "DEDUP_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_extract_payload_recent_k_uses_max_threshold_and_batch_delta():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(process_changefeed_batch([_turn() for _ in range(3)], starter, counter_container=container))
+
+    extract_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractMemoriesOrchestrator"]
+    assert len(extract_calls) == 1
+    payload = _extract_payload(extract_calls[0])
+    assert payload["recent_k"] == 3
 
 
 @patch.dict(

@@ -5,7 +5,7 @@ Covers:
 * ``increment_counter_by`` first-write path, happy path, ETag retry path,
   ETag exhaustion (skip), and LSN-based replay detection.
 
-The Cosmos container is mocked — no Azure dependency is required at test time.
+The Cosmos container is mocked - no Azure dependency is required at test time.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_counter_id_helpers():
 
 
 # ---------------------------------------------------------------------------
-# increment_counter_by — fixtures
+# increment_counter_by - fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ def _http_error(status_code: int) -> CosmosHttpResponseError:
 
 
 # ---------------------------------------------------------------------------
-# increment_counter_by — first-write path
+# increment_counter_by - first-write path
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +138,7 @@ class TestIncrementFirstWrite:
 
 
 # ---------------------------------------------------------------------------
-# increment_counter_by — happy / etag-retry / replay paths
+# increment_counter_by - happy / etag-retry / replay paths
 # ---------------------------------------------------------------------------
 
 
@@ -180,7 +180,7 @@ class TestIncrementExisting:
 
         old, new = asyncio.run(increment_counter_by(container, "thread:u1:t1", "u1", "t1", 2))
 
-        # We restart from the *latest* read — count went 7 → 9.
+        # We restart from the *latest* read - count went 7 → 9.
         assert (old, new) == (7, 9)
         assert container.read_item.await_count == 2
         assert container.upsert_item.await_count == 2
@@ -190,7 +190,7 @@ class TestIncrementExisting:
         batch retries (at-least-once redelivery + LSN replay protection make
         this safe). Silently returning ``(old, old)`` would advance the lease
         without ever firing the orchestrator the increment was supposed to
-        trigger — a permanent threshold-miss bug."""
+        trigger - a permanent threshold-miss bug."""
         from azure.cosmos.exceptions import CosmosHttpResponseError
 
         container = _make_container()
@@ -263,7 +263,7 @@ class TestIncrementExisting:
     def test_out_of_order_replay_is_noop(self):
         """When the redelivered batch's LSN is *less than* the stored LSN
         (lease re-balance / host crash redelivering an old batch after a
-        newer one already landed), the increment is a no-op — return
+        newer one already landed), the increment is a no-op - return
         (current, current) so threshold-crossing logic doesn't fire a
         spurious extract/dedup. We use ``>=`` not
         ``==`` for replay detection."""

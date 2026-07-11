@@ -110,6 +110,7 @@ async def _trigger_thread_steps(
             counter_id,
             user_id,
             thread_id,
+            new_count=new_count,
             fire_extract=n_facts > 0 and _counters.crosses_threshold(old_count, new_count, n_facts),
             fire_summary=n_summary > 0 and _counters.crosses_threshold(old_count, new_count, n_summary),
             fire_dedup=n_dedup_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_dedup_turns),
@@ -125,6 +126,7 @@ async def _fire_thread_steps(
     user_id: str,
     thread_id: str,
     *,
+    new_count: int,
     fire_extract: bool,
     fire_summary: bool,
     fire_dedup: bool,
@@ -138,14 +140,21 @@ async def _fire_thread_steps(
             default=True,
         )
     )
+    if fire_extract:
+        try:
+            await _call_async_compatible(processor.process_extract_memories, user_id=user_id, thread_id=thread_id)
+        except Exception as exc:
+            logger.warning("Async auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, exc)
+            await _counters.stamp_failure_async(
+                counter_container, counter_id, user_id, thread_id, f"process_extract_memories: {exc!r}"
+            )
     calls = (
         (
-            fire_extract,
-            "process_extract_memories",
-            processor.process_extract_memories,
-            {"user_id": user_id, "thread_id": thread_id},
+            fire_dedup,
+            "process_reconcile",
+            processor.process_reconcile,
+            {"user_id": user_id},
         ),
-        (fire_dedup, "process_reconcile", processor.process_reconcile, {"user_id": user_id}),
         (
             fire_procedural,
             "synthesize_procedural",

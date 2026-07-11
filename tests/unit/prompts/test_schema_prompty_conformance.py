@@ -72,7 +72,7 @@ def _walk_required(data: object, schema: object, path: str) -> list[str]:
 
     Walks into object ``properties`` and array ``items`` (validating only the
     first item, since examples are illustrative not exhaustive). Returns a
-    flat list of human-readable error strings — empty list ⇒ conformant.
+    flat list of human-readable error strings - empty list ⇒ conformant.
     """
     if not isinstance(schema, dict):
         return []
@@ -167,7 +167,7 @@ def test_prompty_nested_required_fields_present(filename: str, schema_entry: tup
             pytest.fail(f"\n{filename}: nested required keys missing in example JSON:\n  " + "\n  ".join(errors))
         return
 
-    pytest.skip(f"{filename}: no top-level matching block — covered by shape test")
+    pytest.skip(f"{filename}: no top-level matching block - covered by shape test")
 
 
 def test_every_registered_prompty_file_exists() -> None:
@@ -181,6 +181,6 @@ def test_every_prompty_file_has_a_registered_schema() -> None:
     prompty_files = {path.name for path in _PROMPTS_DIR.glob("*.prompty") if not path.name.startswith("_")}
     unregistered = prompty_files - set(PROMPTY_SCHEMAS)
     assert not unregistered, (
-        f"These prompty files have no entry in PROMPTY_SCHEMAS — "
+        f"These prompty files have no entry in PROMPTY_SCHEMAS - "
         f"strict response_format will not be applied: {sorted(unregistered)}"
     )

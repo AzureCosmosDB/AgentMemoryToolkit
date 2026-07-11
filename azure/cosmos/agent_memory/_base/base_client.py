@@ -279,7 +279,7 @@ def is_transient_tail_step_error(exc: BaseException) -> bool:
     become silent ``WARNING`` lines).
 
     Transient (swallow):
-      * ``LLMError`` — LLM-side defensive raises (no-choices, no-content).
+      * ``LLMError`` - LLM-side defensive raises (no-choices, no-content).
       * ``openai.RateLimitError`` / ``APITimeoutError`` / ``APIConnectionError``.
       * Any exception with ``status_code`` in
         :data:`_TRANSIENT_HTTP_STATUS_CODES` (covers ``CosmosHttpResponseError``
@@ -291,7 +291,7 @@ def is_transient_tail_step_error(exc: BaseException) -> bool:
         ``BadRequestError`` (status 400/401/403).
       * ``CosmosHttpResponseError`` with status 400/401/403/404/409.
       * Python builtins (``KeyError``, ``TypeError``, ``AttributeError``,
-        ``NameError`` …) — these are programmer bugs, not infra hiccups.
+        ``NameError`` …) - these are programmer bugs, not infra hiccups.
     """
     from azure.cosmos.agent_memory.exceptions import LLMError
 

@@ -46,6 +46,7 @@ class DurableFunctionProcessor:
         *,
         user_id: str,
         thread_id: str,
+        recent_k: Optional[int] = None,
     ) -> dict[str, int]:
         logger.debug(
             "DurableFunctionProcessor.process_extract_memories no-op user_id=%s thread_id=%s",

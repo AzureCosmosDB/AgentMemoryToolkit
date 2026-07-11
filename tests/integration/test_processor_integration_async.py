@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import call as mock_call
 
 import pytest
 
@@ -29,9 +30,9 @@ class TestAsyncInProcessProcessNowEndToEnd:
     @pytest.mark.asyncio
     async def test_process_now_invokes_pipeline_with_correct_args(self):
         pipeline = MagicMock()
-        # ``AsyncInProcessProcessor`` awaits these three pipeline methods,
-        # so the mocks must be ``AsyncMock`` — a plain ``MagicMock`` returns
-        # the dict synchronously, which ``await`` cannot consume.
+        # ``AsyncInProcessProcessor`` awaits these pipeline methods, so the
+        # mocks must be ``AsyncMock`` - a plain ``MagicMock`` returns the dict
+        # synchronously, which ``await`` cannot consume.
         pipeline.generate_thread_summary = AsyncMock(
             return_value={
                 "id": "summary-1",
@@ -47,6 +48,8 @@ class TestAsyncInProcessProcessNowEndToEnd:
             }
         )
         pipeline.reconcile_memories = AsyncMock(return_value={"kept": 0, "merged": 0, "contradicted": 0})
+        pipeline.synthesize_procedural = AsyncMock(return_value={"id": "proc-1", "type": "procedural"})
+        pipeline.generate_user_summary = AsyncMock(return_value={"id": "us-1", "type": "user_summary"})
 
         processor = AsyncInProcessProcessor(pipeline=pipeline)
         client = _build_client(processor=processor)
@@ -73,7 +76,13 @@ class TestAsyncInProcessProcessNowEndToEnd:
         client.get_thread.assert_awaited_once_with(thread_id="thread-paris", user_id="u-paris")
         pipeline.generate_thread_summary.assert_awaited_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_awaited_once_with("u-paris", "thread-paris")
-        pipeline.reconcile_memories.assert_awaited_once_with("u-paris", 50)
+        assert pipeline.reconcile_memories.await_count == 2
+        pipeline.reconcile_memories.assert_has_awaits(
+            [
+                mock_call("u-paris", n=50, memory_type="fact", full_rebuild=False),
+                mock_call("u-paris", n=50, memory_type="episodic", full_rebuild=False),
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +167,7 @@ class TestAsyncDurableProcessNowAndWaitTimeout:
 
         monkeypatch.setattr("asyncio.sleep", _no_sleep)
 
-        # Tiny timeout — loop.time() advances normally, so this expires fast.
+        # Tiny timeout - loop.time() advances normally, so this expires fast.
         ok = await client.process_now_and_wait(user_id="u-to", thread_id="th-to", timeout=0.001)
 
         assert ok is False

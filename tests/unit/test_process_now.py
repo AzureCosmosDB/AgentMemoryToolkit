@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -50,7 +50,13 @@ def test_process_now_with_inprocess_invokes_full_pipeline():
     assert isinstance(client._processor, InProcessProcessor)
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.reconcile_memories.assert_called_once_with("u1", 50)
+    assert pipeline.reconcile_memories.call_count == 2
+    pipeline.reconcile_memories.assert_has_calls(
+        [
+            call("u1", n=50, memory_type="fact"),
+            call("u1", n=50, memory_type="episodic"),
+        ]
+    )
     pipeline.synthesize_procedural.assert_called_once_with(user_id="u1", force=False)
     pipeline.generate_user_summary.assert_called_once_with("u1", None)
     assert result.procedural == {"id": "proc1", "type": "procedural"}
@@ -103,7 +109,7 @@ def test_process_now_swallows_user_summary_failure():
 
 def test_process_now_swallows_transient_http_error_by_status_code():
     """Cosmos / HTTP exceptions with transient status codes (429, 503) must be
-    swallowed — they're infrastructure hiccups, not bugs."""
+    swallowed - they're infrastructure hiccups, not bugs."""
 
     class _FakeHttpExc(Exception):
         def __init__(self, status_code):
@@ -130,7 +136,7 @@ def test_process_now_swallows_transient_http_error_by_status_code():
 
 def test_process_now_propagates_permanent_procedural_failure():
     """A non-transient failure (e.g. ``KeyError`` from a schema bug) must NOT
-    be silently swallowed — it should surface to the caller so config /
+    be silently swallowed - it should surface to the caller so config /
     programmer bugs do not turn into invisible ``WARNING`` lines."""
     client = _connected()
     pipeline = MagicMock()
@@ -151,7 +157,7 @@ def test_process_now_propagates_permanent_procedural_failure():
 
 def test_process_now_propagates_permanent_user_summary_failure():
     """ValidationError from generate_user_summary (e.g. schema bug) must
-    surface to the caller — silencing config bugs is a bug."""
+    surface to the caller - silencing config bugs is a bug."""
     client = _connected()
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
@@ -169,7 +175,7 @@ def test_process_now_propagates_permanent_user_summary_failure():
 
 
 def test_process_now_with_durable_skips_tail_steps():
-    """Durable mode must NOT call synthesize_procedural or generate_user_summary —
+    """Durable mode must NOT call synthesize_procedural or generate_user_summary -
     those are driven by the change-feed-fed sibling Function app."""
     client = _connected(processor=DurableFunctionProcessor())
     pipeline = MagicMock()
@@ -250,7 +256,7 @@ def test_process_now_and_wait_durable_swallows_search_errors_until_timeout():
 
 
 def test_process_now_and_wait_durable_propagates_non_cosmos_errors():
-    """Non-Cosmos errors must NOT be silently swallowed in the polling loop —
+    """Non-Cosmos errors must NOT be silently swallowed in the polling loop -
     operators would otherwise wait the full timeout with no signal."""
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])

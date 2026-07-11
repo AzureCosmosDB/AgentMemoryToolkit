@@ -1,4 +1,4 @@
-"""Scenario: Memory reconciliation — duplicate merging and contradiction resolution.
+"""Scenario: Memory reconciliation - duplicate merging and contradiction resolution.
 
 Demonstrates how `reconcile_memories` collapses paraphrased facts and resolves
 semantic contradictions in a single LLM pass:
@@ -6,8 +6,8 @@ semantic contradictions in a single LLM pass:
 1. Seed paraphrased facts about a user (will be merged).
 2. Seed contradicting facts about the same subject (one will win, one will lose).
 3. Run reconcile() and print the {kept, merged, contradicted} stats.
-4. Show the live state — paraphrased duplicates collapsed, contradiction loser hidden.
-5. Show the audit trail (include_superseded=True) — soft-deleted records carry
+4. Show the live state - paraphrased duplicates collapsed, contradiction loser hidden.
+5. Show the audit trail (include_superseded=True) - soft-deleted records carry
    supersede_reason, superseded_at, and superseded_by pointing at the survivor.
 
 Requirements:

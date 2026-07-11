@@ -1,6 +1,17 @@
 ## Release History
 
-## [Unreleased]
+## [0.3.0b1] (Unreleased)
+
+#### Features Added
+* Write-time in-place deduplication: near-duplicate memories fold into the existing record (same id, newer content) instead of creating a new doc. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Reconciliation now resolves contradictions only, soft-deleting the loser with `superseded_by`; `get_memory_history()` walks that chain. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+
+#### Bugs Fixed
+* Fixed a re-extraction loop that re-extracted the whole conversation every cycle (turns were never stamped `extracted_at` when vector dedup was on). See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+
+#### Other Changes
+* Reworked the extraction prompt (anti-inference, preserve specifics, topic-grouped memories) and simplified the schema to `fact`/`episodic` with fixed fact categories. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Token-bounded extraction batches with per-batch failure isolation; embedding inputs truncated to the model token budget. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 ## [0.2.0b3] (2026-07-08)
 
@@ -17,7 +28,6 @@
   `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
   present falls back to the environment/defaults, and `None` preserves today's
   env-only behavior. See [PR:#29](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/29)
-
 ## [0.2.0b2] (2026-07-01)
 
 #### Features Added

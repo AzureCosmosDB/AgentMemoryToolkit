@@ -4,9 +4,9 @@ This sample showcases the tagging + filtering surface as a first-class
 feature. Tags are arbitrary string labels attached to a memory at write
 time; at read time you can filter retrieval with three composable predicates:
 
-* ``tags_all=[...]``    — AND filter: every listed tag must be present
-* ``tags_any=[...]``    — OR filter: at least one listed tag must be present
-* ``exclude_tags=[...]`` — NOT filter: none of these tags may be present
+* ``tags_all=[...]``    - AND filter: every listed tag must be present
+* ``tags_any=[...]``    - OR filter: at least one listed tag must be present
+* ``exclude_tags=[...]`` - NOT filter: none of these tags may be present
 
 Tags are stored in Cosmos as a JSON array on the memory document. They work
 across every memory type (``turn``, ``fact``, ``episodic``, ``procedural``,
@@ -90,10 +90,10 @@ def main() -> None:
         print(f"  + {mem_type:>10}  tags={tags}")
 
     # ------------------------------------------------------------------
-    # 2. AND filter: tags_all=[...] — every listed tag must be present
+    # 2. AND filter: tags_all=[...] - every listed tag must be present
     #    Use get_memories() for filter-only retrieval (no vector search).
     # ------------------------------------------------------------------
-    print_section("AND filter — tags_all=['workflow', 'important']")
+    print_section("AND filter - tags_all=['workflow', 'important']")
     results = client.get_memories(
         user_id=user_id,
         tags_all=["workflow", "important"],
@@ -102,9 +102,9 @@ def main() -> None:
     # Expected: only the "Always confirm before purging" procedural memory.
 
     # ------------------------------------------------------------------
-    # 3. OR filter: tags_any=[...] — any listed tag may match
+    # 3. OR filter: tags_any=[...] - any listed tag may match
     # ------------------------------------------------------------------
-    print_section("OR filter — tags_any=['diet', 'travel']")
+    print_section("OR filter - tags_any=['diet', 'travel']")
     results = client.get_memories(
         user_id=user_id,
         tags_any=["diet", "travel"],
@@ -113,23 +113,23 @@ def main() -> None:
     # Expected: the peanut allergy fact and the PyCon episodic memory.
 
     # ------------------------------------------------------------------
-    # 4. NOT filter: exclude_tags=[...] — drop anything carrying these tags
+    # 4. NOT filter: exclude_tags=[...] - drop anything carrying these tags
     # ------------------------------------------------------------------
-    print_section("NOT filter — exclude_tags=['ops']  (memory_types=['procedural'])")
+    print_section("NOT filter - exclude_tags=['ops']  (memory_types=['procedural'])")
     results = client.get_memories(
         user_id=user_id,
         memory_types=["procedural"],
         exclude_tags=["ops"],
     )
     print_results(results)
-    # Expected: empty — both procedural memories carry the 'ops' tag.
+    # Expected: empty - both procedural memories carry the 'ops' tag.
 
     # ------------------------------------------------------------------
     # 5. Combine tag filters with semantic search
     #    search_cosmos() runs vector similarity against search_terms and
     #    composes naturally with structural / tag filters.
     # ------------------------------------------------------------------
-    print_section("Semantic + tag filter — search_terms='shipping a service' tags_all=['work']")
+    print_section("Semantic + tag filter - search_terms='shipping a service' tags_all=['work']")
     results = client.search_cosmos(
         search_terms="shipping a service",
         user_id=user_id,
@@ -143,7 +143,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 6. Compose AND + NOT filters across types
     # ------------------------------------------------------------------
-    print_section("AND + NOT — tags_all=['preference']  exclude_tags=['health']")
+    print_section("AND + NOT - tags_all=['preference']  exclude_tags=['health']")
     results = client.get_memories(
         user_id=user_id,
         tags_all=["preference"],

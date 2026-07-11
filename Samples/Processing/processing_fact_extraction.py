@@ -60,7 +60,7 @@ def main() -> None:
         ("agent", "8 years of Python experience is impressive!"),
         ("user", "I'm currently working on a project involving large language models and RAG."),
         ("agent", "That's a great area! LLMs combined with RAG can unlock powerful applications."),
-        ("user", "Last spring I went hiking on Mount Rainier with my dog — best trip ever."),
+        ("user", "Last spring I went hiking on Mount Rainier with my dog - best trip ever."),
         ("user", "When debugging an LLM, always check the prompt first then the response format."),
     ]
 

@@ -11,9 +11,44 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor
+
+
+class _AsyncFakeCounterContainer:
+    """Async in-memory counter container exercising the REAL increment /
+    watermark-read / watermark-advance helpers end-to-end (no constant mocks)."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, dict] = {}
+        self._etag = 0
+
+    async def read_item(self, *, item, partition_key):
+        if item not in self.store:
+            raise CosmosResourceNotFoundError(message="404")
+        return dict(self.store[item])
+
+    async def create_item(self, *, body):
+        self._etag += 1
+        body = dict(body)
+        body["_etag"] = f"e{self._etag}"
+        self.store[body["id"]] = body
+        return dict(body)
+
+    async def upsert_item(self, *, body, **_kwargs):
+        self._etag += 1
+        body = dict(body)
+        body["_etag"] = f"e{self._etag}"
+        self.store[body["id"]] = body
+        return dict(body)
+
+    async def patch_item(self, *, item, partition_key, patch_operations):
+        doc = self.store.setdefault(item, {"id": item})
+        for op in patch_operations:
+            doc[op["path"].lstrip("/")] = op["value"]
+        return dict(doc)
 
 
 class TestAsyncAutoTriggerNonBlocking:
@@ -25,7 +60,7 @@ class TestAsyncAutoTriggerNonBlocking:
 
         processor = AsyncInProcessProcessor(pipeline=MagicMock())
 
-        async def slow_trigger(user_id, thread_id):
+        async def slow_trigger(user_id, thread_id, recent_k=None):
             # If push_to_cosmos awaited the trigger inline, the test would
             # block here for half a second before returning.
             await asyncio.sleep(0.5)
@@ -61,6 +96,69 @@ class TestAsyncAutoTriggerNonBlocking:
             # Drain the background task so pytest doesn't warn about a
             # destroyed-but-pending task at teardown.
             await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+
+class TestAsyncExtractRecentK:
+    @pytest.mark.asyncio
+    async def test_extract_fires_without_recent_k_or_watermark(self, monkeypatch):
+        """Async: extraction covers all un-extracted turns (extracted_at gated) and
+        batches internally, so it fires with NO recent_k and NO success watermark."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(return_value={})
+
+        client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
+        client._memories_container_client = MagicMock()
+        client._memories_container_client.upsert_item = AsyncMock(side_effect=lambda body: body)
+        client._turns_container_client = client._memories_container_client
+        client._summaries_container_client = client._memories_container_client
+        client._counter_container_client = MagicMock()
+
+        with patch(
+            "azure.cosmos.agent_memory._counters.increment_counter_async",
+            return_value=(0, 1),
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            await client.push_to_cosmos()
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+        processor.process_extract_memories.assert_called_once_with(user_id="u1", thread_id="t1")
+
+    @pytest.mark.asyncio
+    async def test_extract_failure_stamps_failure(self, monkeypatch):
+        """A total async extract failure is recorded via stamp_failure_async."""
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(side_effect=RuntimeError("llm down"))
+
+        client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
+        client._memories_container_client = MagicMock()
+        client._memories_container_client.upsert_item = AsyncMock(side_effect=lambda body: body)
+        client._turns_container_client = client._memories_container_client
+        client._summaries_container_client = client._memories_container_client
+        client._counter_container_client = MagicMock()
+
+        with (
+            patch(
+                "azure.cosmos.agent_memory._counters.increment_counter_async",
+                return_value=(0, 1),
+            ),
+            patch(
+                "azure.cosmos.agent_memory._counters.stamp_failure_async",
+                new=AsyncMock(),
+            ) as stamp,
+        ):
+            client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+            await client.push_to_cosmos()
+            await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+        stamp.assert_called_once()
 
 
 class TestPushToCosmosUnflushedDelta:

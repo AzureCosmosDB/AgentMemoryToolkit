@@ -6,11 +6,11 @@ than fetched via a module-level singleton) so unit tests can mock it cleanly.
 
 Counter document shape::
 
-    # thread-scoped — id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
+    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "last_batch_lsn": int|None, "last_batch_old_count": int }
 
-    # user-scoped — id = "user:{user_id}", PK = [user_id, "__counters__"]
+    # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
     { "id": ..., "user_id": ..., "thread_id": "__counters__",
       "count": int, "last_batch_lsn": int|None, "last_batch_old_count": int }
 """
@@ -41,7 +41,7 @@ def _maybe_warn_owner_mismatch(
 ) -> None:
     """Log a one-shot WARN when the counter's previous writer differs from us.
 
-    Advisory-only — the FA still runs the orchestration. ``MEMORY_PROCESSOR_OWNER``
+    Advisory-only - the FA still runs the orchestration. ``MEMORY_PROCESSOR_OWNER``
     is operator-configured exclusivity, not a server-side lock; this just
     surfaces accidental double-deployment so it shows up in App Insights.
     """
@@ -116,7 +116,7 @@ async def increment_counter_by(
             old_count = existing_doc.get("count", 0)
             etag = existing_doc.get("_etag")
         except CosmosResourceNotFoundError:
-            pass  # first time — will create
+            pass  # first time - will create
 
         # Owner-mismatch detection (advisory only).
         if existing_doc is not None:
@@ -131,7 +131,7 @@ async def increment_counter_by(
         # re-balance, host crash → checkpoint regression where another
         # batch landed in between) also short-circuit. For the exact
         # match we replay the cached result; for the strict-greater case
-        # we return (current, current) — no threshold crossing — because
+        # we return (current, current) - no threshold crossing - because
         # the batch's effect is already absorbed in a later state we have
         # no cached pre-batch value for.
         if (
@@ -177,7 +177,9 @@ async def increment_counter_by(
                 new_doc["last_failure_at"] = existing_doc.get("last_failure_at")
             if "last_failure_reason" in existing_doc:
                 new_doc["last_failure_reason"] = existing_doc.get("last_failure_reason")
-        # Stamp the writing backend (advisory only — not enforced server-side).
+            if "last_extract_count" in existing_doc:
+                new_doc["last_extract_count"] = existing_doc.get("last_extract_count")
+        # Stamp the writing backend (advisory only - not enforced server-side).
         if owner is not None:
             new_doc["last_owner"] = owner
         elif existing_doc is not None and "last_owner" in existing_doc:
@@ -220,7 +222,7 @@ async def increment_counter_by(
                 )
                 continue
             if exc.status_code == 412:
-                # Exhausted ETag retries — RAISE so the change-feed batch retries
+                # Exhausted ETag retries - RAISE so the change-feed batch retries
                 # via at-least-once redelivery. The last_batch_lsn replay-protection
                 # ensures the next attempt won't double-increment. Silently
                 # returning (old, old) here would advance the lease without ever
@@ -233,7 +235,7 @@ async def increment_counter_by(
                 raise
             raise
 
-    # Should never reach here — the loop either returns or raises every iteration.
+    # Should never reach here - the loop either returns or raises every iteration.
     raise RuntimeError(f"increment_counter_by({counter_id}) exhausted MAX_RETRIES without resolution")
 
 
@@ -253,9 +255,46 @@ def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:
 
     Raises:
         ValueError: if ``n <= 0``. Callers should gate on ``n > 0`` instead of
-            relying on a "disabled" sentinel here — keeping this strict makes
+            relying on a "disabled" sentinel here - keeping this strict makes
             misuse loud.
     """
     if n <= 0:
         raise ValueError("n must be > 0")
     return old_count // n != new_count // n
+
+
+async def read_extract_watermark(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+) -> int | None:
+    """Return the count value at the last successful extract, or ``None``.
+
+    Lets recent_k cover every turn since the previous extract succeeded so
+    turns are never skipped when extraction lags or transiently fails.
+    Best-effort: returns ``None`` on any read error so callers fall back to a
+    batch-based recent_k.
+    """
+    try:
+        doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+        value = doc.get("last_extract_count")
+        return int(value) if value is not None else None
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("read_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        return None
+
+
+async def advance_extract_watermark(
+    container: Any,
+    counter_id: str,
+    user_id: str,
+    thread_id: str,
+    count: int,
+) -> None:
+    """Stamp ``last_extract_count=count`` after a successful extract."""
+    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
+    try:
+        await container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)

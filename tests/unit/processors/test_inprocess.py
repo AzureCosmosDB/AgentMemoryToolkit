@@ -1,4 +1,4 @@
-"""Tests for InProcessProcessor — verifies pipeline delegation order."""
+"""Tests for InProcessProcessor - verifies pipeline delegation order."""
 
 from __future__ import annotations
 
@@ -16,20 +16,23 @@ def test_process_thread_calls_summarize_extract_reconcile_in_order():
     proc = InProcessProcessor(pipeline=pipeline)
     result = proc.process_thread(user_id="u1", thread_id="t1", turns=[])
 
-    # Order of calls: summary -> extract -> reconcile
+    # Order of calls: summary -> extract -> reconcile (fact) -> reconcile (episodic)
     method_order = [c[0] for c in pipeline.method_calls]
     assert method_order == [
         "generate_thread_summary",
         "extract_memories",
         "reconcile_memories",
+        "reconcile_memories",
     ]
     pipeline.generate_thread_summary.assert_called_once_with("u1", "t1")
     pipeline.extract_memories.assert_called_once_with("u1", "t1")
-    pipeline.reconcile_memories.assert_called_once_with("u1", 50)
+    assert pipeline.reconcile_memories.call_count == 2
+    assert pipeline.reconcile_memories.call_args_list[0].kwargs["memory_type"] == "fact"
+    assert pipeline.reconcile_memories.call_args_list[1].kwargs["memory_type"] == "episodic"
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary_u_t", "type": "thread_summary"}
-    assert result.reconciled_count == 3
+    assert result.reconciled_count == 6
     assert result.elapsed_ms >= 0
 
 
@@ -63,6 +66,20 @@ def test_generate_user_summary_no_summaries():
     res = proc.generate_user_summary(user_id="u1", thread_summaries=[])
     pipeline.generate_user_summary.assert_called_once_with("u1", None)
     assert res.summary is None
+
+
+def test_process_extract_memories_passes_recent_k_and_filters_to_ints():
+    pipeline = MagicMock()
+    pipeline.extract_memories.return_value = {
+        "fact_count": 2,
+        "non_int_field": "skip me",
+    }
+
+    proc = InProcessProcessor(pipeline=pipeline)
+    result = proc.process_extract_memories(user_id="u", thread_id="t", recent_k=3)
+
+    pipeline.extract_memories.assert_called_once_with("u", "t", recent_k=3)
+    assert result == {"fact_count": 2}
 
 
 def test_close_is_noop():

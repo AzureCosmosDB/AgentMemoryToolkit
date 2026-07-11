@@ -2,7 +2,7 @@
 
 This sample demonstrates the *operational* surface of the
 :class:`DurableFunctionProcessor` deployment: the SDK never invokes an LLM
-locally — instead, the sibling Azure Function app reads the Cosmos change
+locally - instead, the sibling Azure Function app reads the Cosmos change
 feed and decides which orchestrator(s) to fire based on per-(user,thread)
 counters.
 
@@ -72,7 +72,7 @@ def main() -> None:
         ("agent", "Great choice! Hoh Rainforest and Hurricane Ridge are must-sees."),
         ("user",      "I'd like to camp 2 nights. Any permit guidance?"),
         ("agent", "You'll need a wilderness permit from recreation.gov for the Hoh."),
-        ("user",      "Thanks — also, I'm vegetarian, please remember that."),
+        ("user",      "Thanks - also, I'm vegetarian, please remember that."),
     ]
     print(f"Writing {len(transcript)} turns to Cosmos (thread={thread_id})...")
     for role, content in transcript:
@@ -85,7 +85,7 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # In durable mode .process_now() is a no-op locally — the function app's
+    # In durable mode .process_now() is a no-op locally - the function app's
     # change-feed trigger has already begun work asynchronously. Use
     # process_now_and_wait() to *poll* for the summary doc; it's RU-costly so
     # use it only in demos/tests.

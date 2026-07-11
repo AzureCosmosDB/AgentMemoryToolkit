@@ -153,7 +153,7 @@ class TestPipelineServicePlumbing:
 
 
 class TestStringInputRejected:
-    """A bare ``str`` is iterable char-by-char — passing it would silently
+    """A bare ``str`` is iterable char-by-char - passing it would silently
     produce a per-character allow-list. Reject with a clear ``TypeError``."""
 
     def test_build_transcript_rejects_str(self) -> None:
@@ -211,7 +211,7 @@ class TestStringInputRejected:
 
 
 class TestCompactJsonSerialization:
-    """Token-reduction is the whole point — emit compact JSON, not pretty."""
+    """Token-reduction is the whole point - emit compact JSON, not pretty."""
 
     def test_no_whitespace_between_separators(self) -> None:
         items = [_turn("user", "Hi", a=1, b=2)]
@@ -231,7 +231,7 @@ class TestCompactJsonSerialization:
 
 
 class TestNonSerializableMetadataCoerced:
-    """Real-world metadata carries datetimes, UUIDs, etc. — ``default=str``
+    """Real-world metadata carries datetimes, UUIDs, etc. - ``default=str``
     keeps a single bad value from blowing up the entire extraction."""
 
     def test_datetime_value_does_not_crash(self) -> None:

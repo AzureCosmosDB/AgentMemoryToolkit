@@ -24,6 +24,42 @@ VALID_ROLES = {"agent", "user", "tool", "system"}
 VALID_TYPES = {"turn", "thread_summary", "fact", "user_summary", "procedural", "episodic"}
 
 
+def _sdk_user_agent() -> str:
+    """Return the SDK user-agent suffix used to tag Cosmos DB telemetry.
+
+    The suffix is appended to the azure-cosmos SDK's default user-agent and
+    surfaces in Cosmos DB backend telemetry (e.g. the ``userAgent`` column in
+    Kusto), enabling usage tracking of the Agent Memory Toolkit.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            pkg_version = version("azure-cosmos-agent-memory")
+        except PackageNotFoundError:
+            pkg_version = "unknown"
+    except Exception:
+        pkg_version = "unknown"
+    return f"azsdk-python-cosmos-agent-memory/{pkg_version}"
+
+
+COSMOS_USER_AGENT = _sdk_user_agent()
+
+
+def build_cosmos_user_agent(custom_user_agent: Optional[str] = None) -> str:
+    """Return the user-agent to pass to the Cosmos client.
+
+    When ``custom_user_agent`` is provided, the toolkit's user-agent is
+    suffixed behind it (``"<custom> <toolkit>"``) so callers can attribute
+    telemetry to their application while still tracking toolkit usage.
+    Otherwise, only the toolkit's user-agent is returned.
+    """
+    custom = (custom_user_agent or "").strip()
+    if custom:
+        return f"{custom} {COSMOS_USER_AGENT}"
+    return COSMOS_USER_AGENT
+
+
 def new_id(memory_type: str) -> str:
     """Return a fresh, type-prefixed UUID-backed memory id."""
     prefix_map = {

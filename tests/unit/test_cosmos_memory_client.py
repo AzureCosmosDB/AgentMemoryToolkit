@@ -349,6 +349,38 @@ class TestRequireCosmos:
             mem._require_cosmos()
 
 
+class TestUserAgent:
+    def _connect_with_mock(self, **client_kwargs):
+        mock_cosmos_cls = MagicMock()
+        mock_client = MagicMock()
+        mock_db = MagicMock()
+        mock_cosmos_cls.return_value = mock_client
+        mock_client.get_database_client.return_value = mock_db
+
+        mem = _make_client(**client_kwargs)
+        with patch.dict(
+            "sys.modules",
+            {"azure.cosmos": MagicMock(CosmosClient=mock_cosmos_cls)},
+        ):
+            mem.connect_cosmos(
+                endpoint="https://fake.documents.azure.com:443/",
+                credential="fake-key",
+            )
+        return mock_cosmos_cls
+
+    def test_default_user_agent_forwarded_to_cosmos_client(self):
+        mock_cosmos_cls = self._connect_with_mock()
+        ua = mock_cosmos_cls.call_args.kwargs["user_agent"]
+        assert ua == "azsdk-python-cosmos-agent-memory/" + ua.split("/", 1)[1]
+        assert ua.startswith("azsdk-python-cosmos-agent-memory/")
+
+    def test_custom_user_agent_is_prefixed_before_toolkit(self):
+        mock_cosmos_cls = self._connect_with_mock(user_agent="MyApp/1.2.3")
+        ua = mock_cosmos_cls.call_args.kwargs["user_agent"]
+        assert ua.startswith("MyApp/1.2.3 ")
+        assert ua.endswith("azsdk-python-cosmos-agent-memory/" + ua.rsplit("/", 1)[1])
+
+
 class TestValidateTopology:
     def test_validate_topology_succeeds_on_healthy_deploy(self):
         mem = _make_client()

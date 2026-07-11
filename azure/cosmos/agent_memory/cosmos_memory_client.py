@@ -81,6 +81,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         chat_deployment_name: str = "gpt-4o-mini",
         use_default_credential: bool = True,
         enable_turn_embeddings: Optional[bool] = None,
+        user_agent: Optional[str] = None,
         embeddings_client: Optional[Any] = None,
         chat_client: Optional[Any] = None,
         processor: Optional[MemoryProcessor] = None,
@@ -107,6 +108,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             chat_deployment_name=chat_deployment_name,
             use_default_credential=use_default_credential,
             enable_turn_embeddings=enable_turn_embeddings,
+            user_agent=user_agent,
         )
         # Embeddings/chat clients may be injected (e.g. an OpenAI-compatible backend, a
         # caller-configured client, or a deterministic fake for offline tests). When a client
@@ -219,7 +221,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
             from azure.cosmos import CosmosClient
 
             self._drain_cosmos_client()
-            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            client = CosmosClient(
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
+            )
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
             self._memories_container_client = db.get_container_client(self._cosmos_container)
@@ -287,7 +293,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
             from azure.cosmos import CosmosClient, PartitionKey, ThroughputProperties
 
             self._drain_cosmos_client()
-            client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
+            client = CosmosClient(
+                self._cosmos_endpoint,
+                credential=self._cosmos_credential,
+                user_agent=self._cosmos_user_agent,
+            )
             db = client.create_database_if_not_exists(id=self._cosmos_database)
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
             offer = _cosmos_container_offer_throughput(

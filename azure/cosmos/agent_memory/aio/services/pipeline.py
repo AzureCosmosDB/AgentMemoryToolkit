@@ -398,6 +398,7 @@ class AsyncPipelineService:
         items: list[dict[str, Any]],
         *,
         group_by_thread: bool = False,
+        include_timestamp: bool = False,
     ) -> str:
         # getattr fallback covers unit tests that build AsyncPipelineService
         # via __new__ to bypass __init__ (and therefore the metadata-keys stash).
@@ -405,6 +406,7 @@ class AsyncPipelineService:
             items,
             group_by_thread=group_by_thread,
             metadata_keys=getattr(self, "_transcript_metadata_keys", None),
+            include_timestamp=include_timestamp,
         )
 
     async def _load_existing_memories(
@@ -547,7 +549,7 @@ class AsyncPipelineService:
         deferred_turn_count = 0
         quarantined_turn_count = 0
         for batch in batches:
-            batch_transcript = self._build_transcript(batch)
+            batch_transcript = self._build_transcript(batch, include_timestamp=True)
             try:
                 response_text = await self._run_prompty(
                     "extract_memories.prompty", inputs={"transcript": batch_transcript}
@@ -607,6 +609,8 @@ class AsyncPipelineService:
             seed = _ID_SEED_SEP.join((user_id, thread_id, new_content_hash))
             det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(fact.get("tags", []))
+            fact_source = fact.get("source") if fact.get("source") in ("user", "agent") else "user"
+            source_tags = ["sys:agent-fact"] if fact_source == "agent" else []
             confidence = fact.get("confidence")
             doc: dict[str, Any] = {
                 "id": det_id,
@@ -621,9 +625,10 @@ class AsyncPipelineService:
                 "metadata": {
                     "category": fact.get("category") or "other",
                     "temporal_context": fact.get("temporal_context"),
+                    "source": fact_source,
                 },
                 "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
-                "tags": ["sys:fact", "sys:auto-extracted"] + topic_tags,
+                "tags": ["sys:fact", "sys:auto-extracted"] + source_tags + topic_tags,
                 "created_at": doc_timestamp,
                 "updated_at": doc_timestamp,
             }

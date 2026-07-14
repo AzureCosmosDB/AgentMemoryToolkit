@@ -307,6 +307,7 @@ def build_transcript(
     *,
     group_by_thread: bool = False,
     metadata_keys: Optional[Iterable[str]] = None,
+    include_timestamp: bool = False,
 ) -> str:
     """Build a formatted transcript from memory documents.
 
@@ -333,16 +334,25 @@ def build_transcript(
         Accepts any iterable of strings except ``str`` itself (which would
         be interpreted char-by-char). Generators are coerced to a tuple so
         the allow-list is reusable across turns.
+    include_timestamp:
+        If *True*, prefix each line with the turn's top-level ``created_at``
+        (its event time) as ``[<created_at> | role]: content``. This lets the
+        extraction LLM anchor relative time expressions ("3 weeks ago", "last
+        June") to absolute dates instead of leaving them unresolved. Turns
+        without a ``created_at`` fall back to the plain ``[role]:`` form.
     """
     keys = _normalize_metadata_keys(metadata_keys)
+
+    def _line(m: dict[str, Any]) -> str:
+        role = m.get("role", "unknown")
+        content = m.get("content", "")
+        meta_str = _format_metadata_segment(m.get("metadata", {}), keys)
+        created_at = m.get("created_at") if include_timestamp else None
+        prefix = f"[{created_at} | {role}]" if created_at else f"[{role}]"
+        return f"{prefix}: {content}{meta_str}"
+
     if not group_by_thread:
-        lines: list[str] = []
-        for m in items:
-            role = m.get("role", "unknown")
-            content = m.get("content", "")
-            meta_str = _format_metadata_segment(m.get("metadata", {}), keys)
-            lines.append(f"[{role}]: {content}{meta_str}")
-        return "\n".join(lines)
+        return "\n".join(_line(m) for m in items)
 
     threads: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for m in items:
@@ -352,10 +362,7 @@ def build_transcript(
     for tid, thread_items in threads.items():
         parts.append(f"=== Thread {tid} ===")
         for m in thread_items:
-            role = m.get("role", "unknown")
-            content = m.get("content", "")
-            meta_str = _format_metadata_segment(m.get("metadata", {}), keys)
-            parts.append(f"[{role}]: {content}{meta_str}")
+            parts.append(_line(m))
         parts.append("")
     return "\n".join(parts)
 

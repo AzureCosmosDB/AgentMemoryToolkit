@@ -179,9 +179,18 @@ def test_processor_owner_invalid_uses_default(monkeypatch: pytest.MonkeyPatch) -
 
 def test_internalized_getters_return_fixed_constants_and_ignore_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXTRACTION_BATCH_MAX_TOKENS", "999")
-    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "false")
     monkeypatch.setenv("DEDUP_SIM_HIGH", "0.50")
 
     assert thresholds.get_extraction_batch_max_tokens() == 7000
-    assert thresholds.get_dedup_vector_enabled() is True
     assert thresholds.get_dedup_sim_high() == 0.97
+
+
+def test_dedup_vector_enabled_defaults_false_and_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEDUP_VECTOR_ENABLED", raising=False)
+    assert thresholds.get_dedup_vector_enabled() is False
+
+    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "true")
+    assert thresholds.get_dedup_vector_enabled() is True
+
+    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "false")
+    assert thresholds.get_dedup_vector_enabled() is False

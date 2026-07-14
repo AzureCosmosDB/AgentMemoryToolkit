@@ -52,7 +52,7 @@ DEDUP_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# extract_memories.prompty - extract facts + episodic + unclassified
+# extract_memories.prompty - extract facts (user- or agent-sourced) + episodic
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
     "type": "object",
@@ -67,6 +67,10 @@ _FACT_ITEM = {
                 "other",
             ],
         },
+        "source": {
+            "type": "string",
+            "enum": ["user", "agent"],
+        },
         "confidence": {"type": "number"},
         "salience": {"type": "number"},
         "temporal_context": {"type": ["string", "null"]},
@@ -75,6 +79,7 @@ _FACT_ITEM = {
     "required": [
         "text",
         "category",
+        "source",
         "confidence",
         "salience",
         "temporal_context",

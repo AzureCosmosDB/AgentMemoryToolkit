@@ -27,16 +27,21 @@ DEFAULT_DEDUP_EVERY_N = 5
 # parameter of :py:meth:`ProcessingPipeline.reconcile_memories`. Hard cap
 # of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
+# Write-time in-place near-duplicate folding. When enabled, a freshly
+# extracted memory that is >= DEDUP_SIM_HIGH similar to an existing active
+# memory is folded into that record in place instead of persisting as a new
+# doc. Default OFF (add-only): keeping every extracted memory preserves the
+# retrieval surface, which benchmarked better than folding. Operators set
+# ``DEDUP_VECTOR_ENABLED=true`` to turn folding back on.
+DEFAULT_DEDUP_VECTOR_ENABLED = False
 
 # ---------------------------------------------------------------------------
 # INTERNAL dedup/search tuning - NOT customer-configurable.
 # These ship as fixed feature constants (no env vars, not in any settings
 # template). They are maintainer-tunable here in code only; if a knob ever
 # needs to become operator-facing we add the env plumbing back deliberately.
-# The dedup + hybrid-search features ship ON via these values.
 # ---------------------------------------------------------------------------
 EXTRACTION_BATCH_MAX_TOKENS = 7000
-DEDUP_VECTOR_ENABLED = True  # write-time in-place near-dup folding
 DEDUP_SIM_HIGH = 0.97  # >= -> fold new memory into existing canonical in place
 
 DEFAULT_TTL_BY_TYPE: dict[str, int] = {
@@ -160,8 +165,8 @@ def get_extraction_batch_max_tokens() -> int:
 
 
 def get_dedup_vector_enabled() -> bool:
-    """Whether Stage-3 vector deduplication is enabled (internal; on)."""
-    return DEDUP_VECTOR_ENABLED
+    """Whether write-time vector deduplication (in-place folding) is enabled."""
+    return _parse_bool("DEDUP_VECTOR_ENABLED", DEFAULT_DEDUP_VECTOR_ENABLED)
 
 
 def get_dedup_sim_high() -> float:
@@ -235,6 +240,7 @@ __all__ = [
     "DEFAULT_USER_SUMMARY_EVERY_N",
     "DEFAULT_DEDUP_EVERY_N",
     "DEFAULT_DEDUP_POOL_SIZE",
+    "DEFAULT_DEDUP_VECTOR_ENABLED",
     "DEFAULT_TTL_BY_TYPE",
     "DEFAULT_PROCEDURAL_SYNTHESIS_AUTO",
     "DEFAULT_ENABLE_TURN_EMBEDDINGS",

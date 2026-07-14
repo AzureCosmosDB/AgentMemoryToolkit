@@ -56,13 +56,16 @@ def test_loader_prompt_version_is_cached(tmp_path: Path) -> None:
 
 def test_all_shipped_prompts_declare_version() -> None:
     loader = PromptyLoader()
-    for filename in (
-        "extract_memories.prompty",
-        "dedup.prompty",
-        "summarize.prompty",
-        "summarize_update.prompty",
-        "user_summary.prompty",
-        "user_summary_update.prompty",
-        "synthesize_procedural.prompty",
-    ):
-        assert loader.prompt_version(filename) == "v1"
+    # extract_memories bumped to v2 when agent-sourced fact extraction landed;
+    # the rest remain v1. Every shipped prompt must declare *some* version.
+    expected = {
+        "extract_memories.prompty": "v2",
+        "dedup.prompty": "v1",
+        "summarize.prompty": "v1",
+        "summarize_update.prompty": "v1",
+        "user_summary.prompty": "v1",
+        "user_summary_update.prompty": "v1",
+        "synthesize_procedural.prompty": "v1",
+    }
+    for filename, version in expected.items():
+        assert loader.prompt_version(filename) == version

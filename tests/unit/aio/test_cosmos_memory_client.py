@@ -985,3 +985,50 @@ async def test_list_tags_delegates_to_store():
     kwargs = container.query_items.call_args.kwargs
     assert "SELECT VALUE c.tags" in kwargs["query"]
     assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]
+
+
+class TestAsyncSearchCosmosUnifiedRetrieval:
+    def _stub_store(self, mem, *, memories, turns=None, turns_raises=False):
+        store = MagicMock()
+        store.search = AsyncMock(return_value=list(memories))
+        if turns_raises:
+            store.search_turns = AsyncMock(side_effect=RuntimeError("turns not embedded"))
+        else:
+            store.search_turns = AsyncMock(return_value=list(turns or []))
+        mem._get_store = MagicMock(return_value=store)
+        return store
+
+    async def test_default_does_not_search_turns(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}])
+
+        out = await mem.search_cosmos("q", user_id="u1")
+
+        assert out == [{"content": "fact A", "type": "fact"}]
+        store.search_turns.assert_not_called()
+
+    async def test_include_turns_appends_and_dedups(self):
+        mem, _ = _connected_client()
+        self._stub_store(
+            mem,
+            memories=[{"content": "fact A", "type": "fact"}],
+            turns=[
+                {"content": "fact A", "type": "turn"},  # dup -> skipped
+                {"content": "raw dialogue B", "type": "turn"},
+            ],
+        )
+
+        out = await mem.search_cosmos("q", user_id="u1", include_turns=True)
+
+        assert out == [
+            {"content": "fact A", "type": "fact"},
+            {"content": "raw dialogue B", "type": "turn"},
+        ]
+
+    async def test_include_turns_failure_returns_memories_only(self):
+        mem, _ = _connected_client()
+        self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}], turns_raises=True)
+
+        out = await mem.search_cosmos("q", user_id="u1", include_turns=True)
+
+        assert out == [{"content": "fact A", "type": "fact"}]

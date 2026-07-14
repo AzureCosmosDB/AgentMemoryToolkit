@@ -416,3 +416,111 @@ def test_extract_defers_retryable_batch_leaving_turns_unstamped(monkeypatch) -> 
     assert len(out["processed_turn_docs"]) == 2
     stats = [u for u in out["updates"] if u.get("op") == "stats" and "deferred_turn_count" in u]
     assert stats and stats[0]["deferred_turn_count"] == 1
+
+
+def _agent_source_response() -> dict[str, Any]:
+    # One agent-sourced fact, one user-sourced fact, one with source omitted
+    # (must default to "user"). Mirrors the extract_memories.prompty schema.
+    return {
+        "facts": [
+            {
+                "text": "The agent booked the user on flight TP204 to Lisbon.",
+                "category": "other",
+                "source": "agent",
+                "confidence": 0.95,
+                "salience": 0.8,
+                "temporal_context": None,
+                "tags": ["travel"],
+            },
+            {
+                "text": "The user prefers window seats.",
+                "category": "preference",
+                "source": "user",
+                "confidence": 0.9,
+                "salience": 0.7,
+                "temporal_context": None,
+                "tags": ["travel"],
+            },
+            {
+                "text": "The user lives in Seattle.",
+                "category": "biographical",
+                "confidence": 0.9,
+                "salience": 0.7,
+                "temporal_context": None,
+                "tags": ["identity"],
+            },
+        ],
+        "episodic": [],
+    }
+
+
+def _fact_by_text(facts: list[dict[str, Any]], needle: str) -> dict[str, Any]:
+    for doc in facts:
+        if needle in doc["content"]:
+            return doc
+    raise AssertionError(f"no fact containing {needle!r}")
+
+
+def test_agent_sourced_fact_is_tagged_and_stamped() -> None:
+    memories_store = _Store([])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([_agent_source_response()]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
+    )
+
+    out = service.extract_memories_dry("u1", "t1")
+
+    agent_fact = _fact_by_text(out["facts"], "booked the user on flight")
+    assert agent_fact["metadata"]["source"] == "agent"
+    assert "sys:agent-fact" in agent_fact["tags"]
+
+    user_fact = _fact_by_text(out["facts"], "prefers window seats")
+    assert user_fact["metadata"]["source"] == "user"
+    assert "sys:agent-fact" not in user_fact["tags"]
+
+    # Source omitted by the model must default to user (no agent tag).
+    defaulted = _fact_by_text(out["facts"], "lives in Seattle")
+    assert defaulted["metadata"]["source"] == "user"
+    assert "sys:agent-fact" not in defaulted["tags"]
+
+
+@pytest.mark.asyncio
+async def test_async_agent_sourced_fact_is_tagged_and_stamped() -> None:
+    memories_store = _AsyncStore([])
+    service = AsyncPipelineService(
+        memories_store,
+        _AsyncChat([_agent_source_response()]),
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(memories_store, turns_store=_AsyncStore([_turn(1)])),
+    )
+
+    out = await service.extract_memories_dry("u1", "t1")
+
+    agent_fact = _fact_by_text(out["facts"], "booked the user on flight")
+    assert agent_fact["metadata"]["source"] == "agent"
+    assert "sys:agent-fact" in agent_fact["tags"]
+
+    defaulted = _fact_by_text(out["facts"], "lives in Seattle")
+    assert defaulted["metadata"]["source"] == "user"
+    assert "sys:agent-fact" not in defaulted["tags"]
+
+
+def test_extraction_transcript_includes_turn_timestamps() -> None:
+    # The extraction prompt must carry each turn's event time so the LLM can
+    # resolve relative dates. _turn(i) stamps created_at=2025-01-01T00:0i:00.
+    chat = _SyncChat([_response()])
+    memories_store = _Store([])
+    turns_store = _Store([_turn(1)])
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    service.extract_memories_dry("u1", "t1")
+
+    prompt_text = json.dumps(chat.messages)
+    assert "2025-01-01T00:01:00+00:00 | user" in prompt_text

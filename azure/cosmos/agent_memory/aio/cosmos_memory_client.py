@@ -585,6 +585,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         salience: Optional[float] = None,
         embedding: Optional[list[float]] = None,
         embed: Optional[bool] = None,
+        created_at: Optional[str | datetime] = None,
     ) -> str:
         """Add a memory directly to Cosmos DB, bypassing the local buffer.
 
@@ -612,6 +613,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             salience,
             embedding,
             embed,
+            created_at,
         )
         if memory_type == "turn" and thread_id:
             task = asyncio.create_task(self._maybe_auto_trigger({(user_id, thread_id): 1}))
@@ -717,8 +719,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         min_confidence: Optional[float] = None,
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
+        include_turns: bool = False,
+        turn_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        return await self._get_store().search(
+        """Search memories in Cosmos DB using vector similarity."""
+        results = await self._get_store().search(
             search_terms=search_terms,
             memory_id=memory_id,
             user_id=user_id,
@@ -735,6 +740,30 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             created_after=created_after,
             created_before=created_before,
         )
+        if not include_turns or not user_id:
+            return results
+
+        seen_content = {str(r.get("content") or "").strip() for r in results}
+        try:
+            turns = await self._get_store().search_turns(
+                search_terms=search_terms,
+                user_id=user_id,
+                thread_id=thread_id,
+                role=role,
+                top_k=turn_top_k if turn_top_k is not None else top_k,
+                exclude_tags=exclude_tags,
+                created_after=created_after,
+                created_before=created_before,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
+            return results
+        for turn in turns:
+            content = str(turn.get("content") or "").strip()
+            if content and content not in seen_content:
+                seen_content.add(content)
+                results.append(turn)
+        return results
 
     async def search_turns(
         self,

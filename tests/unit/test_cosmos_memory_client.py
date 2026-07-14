@@ -602,6 +602,20 @@ class TestAddCosmos:
         assert body["user_id"] == "u1"
         assert body["role"] == "user"
 
+    def test_add_cosmos_threads_explicit_created_at(self):
+        mem, container = _connected_client()
+        mem._maybe_auto_trigger = MagicMock()
+        mem.add_cosmos(
+            user_id="u1",
+            role="user",
+            content="hello",
+            thread_id="t1",
+            created_at="2024-03-01T12:00:00+00:00",
+        )
+
+        body = mem._turns_container_client.upsert_item.call_args.kwargs["body"]
+        assert body["created_at"] == "2024-03-01T12:00:00+00:00"
+
     def test_add_cosmos_not_connected(self):
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
@@ -646,6 +660,62 @@ class TestAddCosmos:
 
         assert isinstance(result_id, str)
         mem._turns_container_client.upsert_item.assert_called_once()
+
+
+class TestSearchCosmosUnifiedRetrieval:
+    def _stub_store(self, mem, *, memories, turns=None, turns_raises=False):
+        store = MagicMock()
+        store.search.return_value = list(memories)
+        if turns_raises:
+            store.search_turns.side_effect = RuntimeError("turns not embedded")
+        else:
+            store.search_turns.return_value = list(turns or [])
+        mem._get_store = MagicMock(return_value=store)
+        return store
+
+    def test_default_does_not_search_turns(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}])
+
+        out = mem.search_cosmos("q", user_id="u1")
+
+        assert out == [{"content": "fact A", "type": "fact"}]
+        store.search_turns.assert_not_called()
+
+    def test_include_turns_appends_and_dedups(self):
+        mem, _ = _connected_client()
+        self._stub_store(
+            mem,
+            memories=[{"content": "fact A", "type": "fact"}],
+            turns=[
+                {"content": "fact A", "type": "turn"},  # dup of memory -> skipped
+                {"content": "raw dialogue B", "type": "turn"},
+            ],
+        )
+
+        out = mem.search_cosmos("q", user_id="u1", include_turns=True)
+
+        assert out == [
+            {"content": "fact A", "type": "fact"},
+            {"content": "raw dialogue B", "type": "turn"},
+        ]
+
+    def test_include_turns_failure_returns_memories_only(self):
+        mem, _ = _connected_client()
+        self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}], turns_raises=True)
+
+        out = mem.search_cosmos("q", user_id="u1", include_turns=True)
+
+        assert out == [{"content": "fact A", "type": "fact"}]
+
+    def test_include_turns_without_user_id_skips_turns(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}])
+
+        out = mem.search_cosmos("q", include_turns=True)
+
+        assert out == [{"content": "fact A", "type": "fact"}]
+        store.search_turns.assert_not_called()
 
 
 class TestPushToCosmos:

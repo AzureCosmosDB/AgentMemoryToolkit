@@ -327,3 +327,34 @@ class TestClientToPipelineWiring:
             mod.AsyncPipelineService = original
 
         assert captured.get("transcript_metadata_keys") == ("agent_id",)
+
+
+class TestIncludeTimestamp:
+    """include_timestamp prefixes lines with the turn's event time so the
+    extraction LLM can resolve relative time expressions to absolute dates."""
+
+    def test_timestamp_prefix_flat(self) -> None:
+        items = [
+            {"role": "user", "content": "Hello", "created_at": "2024-06-20T10:00:00+00:00"},
+            {"role": "assistant", "content": "Hi", "created_at": "2024-06-20T10:01:00+00:00"},
+        ]
+        out = build_transcript(items, include_timestamp=True)
+        assert out == ("[2024-06-20T10:00:00+00:00 | user]: Hello\n[2024-06-20T10:01:00+00:00 | assistant]: Hi")
+
+    def test_timestamp_absent_falls_back_to_plain_role(self) -> None:
+        items = [{"role": "user", "content": "Hello"}]  # no created_at
+        out = build_transcript(items, include_timestamp=True)
+        assert out == "[user]: Hello"
+
+    def test_timestamp_off_by_default(self) -> None:
+        items = [{"role": "user", "content": "Hello", "created_at": "2024-06-20T10:00:00+00:00"}]
+        out = build_transcript(items)
+        assert out == "[user]: Hello"
+
+    def test_timestamp_prefix_grouped(self) -> None:
+        items = [
+            {"role": "user", "content": "Q", "thread_id": "t1", "created_at": "2024-06-20T10:00:00+00:00"},
+        ]
+        out = build_transcript(items, group_by_thread=True, include_timestamp=True)
+        assert "[2024-06-20T10:00:00+00:00 | user]: Q" in out
+        assert "=== Thread t1 ===" in out

@@ -159,12 +159,13 @@ Extraction only ever reads turns not yet stamped `extracted_at`; `persist` stamp
 
 ### Tunable
 
-Only two reconcile knobs are operator-configurable:
+Only three reconcile knobs are operator-configurable:
 
 - `DEDUP_EVERY_N` (default `5`) — how often reconcile runs in the auto-trigger path (every Nth **extract**, not every Nth turn). Set to `0` to disable.
 - `DEDUP_POOL_SIZE` (default `50`, hard cap `500`) — the pool size `n` passed to `reconcile_memories`; also overridable per call. Larger values give the LLM a wider view at higher token cost.
+- `DEDUP_VECTOR_ENABLED` (default `false`) — write-time in-place near-duplicate folding. Default off = **add-only**. Set to `true` to fold near-duplicate restatements into their canonical record at write time.
 
-The similarity threshold (`DEDUP_SIM_HIGH`, `0.97`) and the vector-fold on/off switch (`DEDUP_VECTOR_ENABLED`) ship as **fixed internal constants** in `azure.cosmos.agent_memory.thresholds` — they have no env plumbing and ignore any environment variable, so the write-time fold behavior is not operator-tunable today.
+
 
 > **Indexing note.** The reconcile pool query orders by `created_at` (matching the prompt's "more recent first" tiebreaker). Cosmos's default indexing policy includes every property, so this works out of the box. If you customize the indexing policy to reduce write RU, ensure `/created_at/?` remains indexed or the query will fail with a 400 (`Order-by over a non-indexed path`).
 

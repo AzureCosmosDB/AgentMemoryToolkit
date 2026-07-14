@@ -47,6 +47,44 @@ def test_add_upserts_memory_document():
     assert body["ttl"] == 2_592_000
 
 
+def test_add_defaults_created_at_to_ingestion_time():
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+
+    store.add(user_id="u1", role="user", content="hello", thread_id="t1")
+
+    body = turns.upsert_item.call_args.kwargs["body"]
+    # No created_at passed -> defaulted (present, non-empty ISO string).
+    assert body["created_at"]
+
+
+def test_add_honors_explicit_created_at_string():
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+
+    store.add(
+        user_id="u1",
+        role="user",
+        content="hello",
+        thread_id="t1",
+        created_at="2024-03-01T12:00:00+00:00",
+    )
+
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["created_at"] == "2024-03-01T12:00:00+00:00"
+
+
+def test_add_normalizes_datetime_created_at():
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+
+    dt = datetime(2024, 3, 1, 12, 0, tzinfo=timezone.utc)
+    store.add(user_id="u1", role="user", content="hello", thread_id="t1", created_at=dt)
+
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["created_at"] == dt.isoformat()
+
+
 @pytest.mark.parametrize(
     ("memory_type", "expected_ttl"),
     [

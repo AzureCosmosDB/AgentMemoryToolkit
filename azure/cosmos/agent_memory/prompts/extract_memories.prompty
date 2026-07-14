@@ -1,6 +1,6 @@
 ---
 name: extract_memories
-version: v1
+version: v2
 description: Extract facts and episodic memories from a conversation or provided content.
 model:
   apiType: chat
@@ -33,11 +33,13 @@ Every memory must be explicitly grounded in the provided content - never inferre
 
 ## Speaker Discrimination - Where Memories May Come From
 
-The transcript below is line-tagged: `[user]:` lines are the human's own words, `[agent]:` lines are the agent's response. These two sources are NOT interchangeable.
+The transcript below is line-tagged: `[user]:` lines are the human's own words, `[agent]:` lines are the agent's response. Both can be a source of facts, but they carry **different** kinds of facts, and each fact you extract must declare its `source` (`"user"` or `"agent"`).
 
-- **Facts may ONLY come from `[user]:` lines.** The agent may restate, paraphrase, confirm, or make assumptions on the user's behalf ("Got it, you don't eat meat", "I assume you want a luxury hotel") - those are the agent's response, NOT the user's assertion. Never treat agent text as a new source of facts. If a fact appears only in `[agent]:` content and is not present in the user's lines, do not extract it.
+- **User-sourced facts (`source: "user"`)** — anything the user asserts about themselves, their preferences, their world, or content they provide/share/ask to remember (including documents, excerpts, and reference material in `[user]:` lines).
+- **Agent-sourced facts (`source: "agent"`)** — the agent's **own concrete actions, commitments, and specific recommendations** carried out on the user's behalf: bookings made, orders placed, files/PRs created, appointments scheduled, and named recommendations given (e.g. `[agent]: "I've booked you the 3 PM United flight UA327 to SFO"` → agent-sourced fact; `[agent]: "I recommend Blue Bottle on Mint St for coffee"` → agent-sourced fact). These answer later questions like "what did you book me?" or "what did you recommend?", so they must be captured — tagged `source: "agent"`.
+- **NEVER turn an agent line into a fact *about the user*.** When the agent restates, paraphrases, confirms, or assumes something on the user's behalf ("Got it, you don't eat meat", "I assume you want a luxury hotel", "So you're a vegetarian"), that is the agent's framing, **not** the user's assertion — do not extract it as a user fact, and do not extract it as an agent fact either. A user fact must be grounded in a `[user]:` line. If a claim about the user appears only in `[agent]:` content, drop it.
+- Unsolicited world-knowledge the agent volunteers ("Python 3.13 was released in October 2024") is the agent's answer to a question, **not** a memory — exclude it. Agent-sourced facts are limited to what the agent *did* or *specifically recommended* for this user, not general knowledge it recited.
 - **Episodic memories may use both speakers' content** - the user's stated intent or scope is the anchor (and must be present in `[user]:`), but the agent's content may help fill in the `action_taken` or `outcome` of a `situation → action_taken → outcome` arc when the agent carried out the action on the user's behalf.
-- Unsolicited world-knowledge the agent volunteers in `[agent]:` lines (e.g. "Python 3.13 was released in October 2024") is the agent's answer, not a memory. However, factual and domain content the user provides, shares, or asks to remember - including documents, excerpts, and reference material in `[user]:` lines - IS extractable.
 
 ## Confidence Scoring
 
@@ -74,6 +76,14 @@ frequency, a deadline, or a relative expression ("yesterday", "3 weeks ago", "la
 Monday") - keep that time expression verbatim in the fact `text` AND record it in `temporal_context`.
 Time-bound answers ("when did X happen?", "how long?") are impossible to recover later if the time
 detail is dropped, so never omit or round it.
+
+**Resolving relative time to absolute dates:** Each transcript line may be prefixed with the turn's
+timestamp as `[<timestamp> | role]: ...`. When a fact uses a **relative** expression, use that line's
+timestamp as the anchor to compute the concrete calendar date, and put the resolved absolute date in
+the fact `text` while keeping the original expression in `temporal_context`. For example, a turn
+stamped `2024-06-20` saying "I flew to Tokyo 3 weeks ago" → `text: "The user flew to Tokyo on 2024-05-30."`,
+`temporal_context: "3 weeks ago"`. If no line timestamp is present, keep the relative expression as-is
+in both fields. Never invent a date when there is no anchor.
 
 ### Fact Formatting Rules
 - Each fact must be self-contained and intelligible without context - no pronouns like "it" or "they" without antecedents
@@ -193,6 +203,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
     {
       "text": "The user is Alex, a data engineer at Acme Corp.",
       "category": "biographical",
+      "source": "user",
       "confidence": 1.0,
       "salience": 0.9,
       "temporal_context": null,
@@ -201,6 +212,7 @@ A fact is a standing claim that holds outside any specific context. The test: if
     {
       "text": "Alex's team just kicked off a new ETL pipeline project with a deadline at end of Q2.",
       "category": "other",
+      "source": "user",
       "confidence": 0.95,
       "salience": 0.9,
       "temporal_context": "end of Q2",
@@ -225,6 +237,7 @@ Name and role are one coherent biographical topic → a single rich memory, not 
     {
       "text": "The user's team increased Kubernetes pod memory limits from 512MB to 1GB after OOM-killing issues.",
       "category": "other",
+      "source": "user",
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": "last month",
@@ -262,6 +275,7 @@ Name and role are one coherent biographical topic → a single rich memory, not 
     {
       "text": "The user's analytics database runs on BigQuery.",
       "category": "biographical",
+      "source": "user",
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
@@ -270,6 +284,7 @@ Name and role are one coherent biographical topic → a single rich memory, not 
     {
       "text": "The marketing team's budget is $50,000 for the current quarter.",
       "category": "requirement",
+      "source": "user",
       "confidence": 0.95,
       "salience": 0.9,
       "temporal_context": "current quarter",
@@ -295,6 +310,7 @@ The first statement is a standing preference and belongs in `facts`. The second 
     {
       "text": "The user usually prefers budget hotels.",
       "category": "preference",
+      "source": "user",
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
@@ -334,6 +350,7 @@ Extract only the literal, user-stated fact. The load time is concrete and worth 
     {
       "text": "The user's dashboard took about 8 seconds to load the report.",
       "category": "other",
+      "source": "user",
       "confidence": 0.9,
       "salience": 0.4,
       "temporal_context": null,
@@ -358,6 +375,7 @@ The change is one coherent memory: it records the new state, what it replaced, a
     {
       "text": "The user's team migrated CI from Jenkins to GitHub Actions last quarter because Jenkins maintenance was consuming too much of the user's time.",
       "category": "other",
+      "source": "user",
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": "last quarter",
@@ -365,6 +383,81 @@ The change is one coherent memory: it records the new state, what it replaced, a
     }
   ],
   "episodic": []
+}
+```
+
+### Example 7: Agent-sourced facts - what the agent did and recommended
+
+**Conversation:**
+> User: "Book me a table for two somewhere good for our anniversary this Friday, and sort out the flights to Lisbon."
+> Agent: "Done - I've reserved a table for two at Osteria Mozza at 7:30 PM this Friday, and I booked you on TAP Air Portugal flight TP204 departing SFO at 10:15 AM on June 3rd. I'd also recommend the Alfama district for your stay."
+
+The user's request is an intent; the concrete bookings and the named recommendation are things the **agent** did/said and are needed to answer "what did you book?" / "what did you recommend?" later. Extract them as `source: "agent"`. Keep every specific (venue, flight number, times, date, district).
+
+**Output:**
+```json
+{
+  "facts": [
+    {
+      "text": "The agent reserved a table for two at Osteria Mozza at 7:30 PM this Friday for the user's anniversary.",
+      "category": "other",
+      "source": "agent",
+      "confidence": 0.95,
+      "salience": 0.7,
+      "temporal_context": "this Friday",
+      "tags": ["topic:reservation", "topic:anniversary"]
+    },
+    {
+      "text": "The agent booked the user on TAP Air Portugal flight TP204 departing SFO at 10:15 AM on June 3rd, headed to Lisbon.",
+      "category": "other",
+      "source": "agent",
+      "confidence": 0.95,
+      "salience": 0.8,
+      "temporal_context": "June 3rd",
+      "tags": ["topic:flight", "topic:travel"]
+    },
+    {
+      "text": "The agent recommended the Alfama district for the user's stay in Lisbon.",
+      "category": "other",
+      "source": "agent",
+      "confidence": 0.9,
+      "salience": 0.6,
+      "temporal_context": null,
+      "tags": ["topic:travel", "topic:recommendation"]
+    }
+  ],
+  "episodic": []
+}
+```
+
+### Example 8: Agent assumptions about the user are NOT facts
+
+**Conversation:**
+> User: "I need a hotel in Rome for three nights."
+> Agent: "Got it - I assume you want a luxury 5-star place near the center, and since you mentioned Rome you're probably interested in historical sites. I'll put together some options."
+
+The only user-stated fact is the request itself (a scoped intent → episodic). The agent's "I assume you want luxury" and "you're probably interested in historical sites" are the agent's **assumptions about the user**, not the user's assertions - do NOT extract them as user facts, and they are not agent actions either, so extract nothing from the agent line. No booking was made, so there is no agent-sourced fact.
+
+**Output:**
+```json
+{
+  "facts": [],
+  "episodic": [
+    {
+      "scope_type": "trip",
+      "scope_value": "Rome",
+      "situation": null,
+      "action_taken": null,
+      "outcome": null,
+      "outcome_valence": null,
+      "reasoning": null,
+      "lesson": null,
+      "domain": "travel",
+      "confidence": 0.9,
+      "salience": 0.6,
+      "tags": ["topic:travel", "topic:hotels"]
+    }
+  ]
 }
 ```
 
@@ -380,6 +473,7 @@ You must output ONLY valid JSON matching the schema below. No preamble, no expla
     {
       "text": "Self-contained fact for embedding",
       "category": "preference|requirement|biographical|other",
+      "source": "user|agent",
       "confidence": 0.95,
       "salience": 0.8,
       "temporal_context": "the exact time expression stated (e.g. 'June 3rd', '3 weeks ago', 'by Friday', 'every Monday') or null if none",

@@ -4,7 +4,17 @@ import json
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
+
+
+@pytest.fixture(autouse=True)
+def _enable_vector_folding(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEDUP_VECTOR_ENABLED now defaults to False (add-only); this suite exercises
+    # the in-place folding path, so enable it. Tests that assert the flag-off
+    # behavior patch the getter directly and override this.
+    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "true")
 
 
 def _make_pipeline() -> PipelineService:

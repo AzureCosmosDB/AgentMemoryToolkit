@@ -524,3 +524,25 @@ def test_extraction_transcript_includes_turn_timestamps() -> None:
 
     prompt_text = json.dumps(chat.messages)
     assert "2025-01-01T00:01:00+00:00 | user" in prompt_text
+
+
+def test_extraction_transcript_canonicalizes_speaker_role() -> None:
+    # A turn written with the OpenAI-style role="assistant" must reach the
+    # extraction prompt as the "agent" speaker, matching the prompt's rules.
+    chat = _SyncChat([_response()])
+    memories_store = _Store([])
+    assistant_turn = dict(_turn(1))
+    assistant_turn["role"] = "assistant"
+    turns_store = _Store([assistant_turn])
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    service.extract_memories_dry("u1", "t1")
+
+    prompt_text = json.dumps(chat.messages)
+    assert "| agent]" in prompt_text
+    assert "| assistant]" not in prompt_text

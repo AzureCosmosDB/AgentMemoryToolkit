@@ -344,7 +344,7 @@ def build_transcript(
     keys = _normalize_metadata_keys(metadata_keys)
 
     def _line(m: dict[str, Any]) -> str:
-        role = m.get("role", "unknown")
+        role = _canonical_speaker(m.get("role", "unknown"))
         content = m.get("content", "")
         meta_str = _format_metadata_segment(m.get("metadata", {}), keys)
         created_at = m.get("created_at") if include_timestamp else None
@@ -365,6 +365,35 @@ def build_transcript(
             parts.append(_line(m))
         parts.append("")
     return "\n".join(parts)
+
+
+# Map common role synonyms onto the toolkit's canonical speaker labels. Callers
+# may write turns with any role string (e.g. OpenAI's ``assistant``); the
+# extraction prompt reasons about ``user`` vs ``agent``, so synonyms are folded
+# onto those. ``tool`` and ``system`` are distinct roles and kept as-is;
+# unrecognized labels pass through unchanged rather than being misattributed.
+_SPEAKER_ALIASES = {
+    "user": "user",
+    "human": "user",
+    "customer": "user",
+    "end_user": "user",
+    "person": "user",
+    "agent": "agent",
+    "assistant": "agent",
+    "ai": "agent",
+    "bot": "agent",
+    "chatbot": "agent",
+    "model": "agent",
+    "copilot": "agent",
+    "tool": "tool",
+    "system": "system",
+}
+
+
+def _canonical_speaker(role: Any) -> str:
+    """Normalize a free-form role to the canonical speaker label for prompts."""
+    normalized = str(role or "").strip().lower()
+    return _SPEAKER_ALIASES.get(normalized, str(role or "unknown"))
 
 
 # Stopwords stripped from grounding checks. Keep this list short and focused

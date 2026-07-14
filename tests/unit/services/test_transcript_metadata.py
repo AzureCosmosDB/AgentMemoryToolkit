@@ -29,7 +29,7 @@ class TestDefaultExcludesMetadata:
             _turn("assistant", "Hi", model_id="gpt-4o", token_count=42),
         ]
         out = build_transcript(items)
-        assert out == "[user]: Hello\n[assistant]: Hi"
+        assert out == "[user]: Hello\n[agent]: Hi"
         assert "metadata" not in out
         assert "raw_response" not in out
         assert "tool_calls" not in out
@@ -44,7 +44,7 @@ class TestDefaultExcludesMetadata:
         assert "metadata" not in out
         assert "=== Thread t1 ===" in out
         assert "[user]: Q" in out
-        assert "[assistant]: A" in out
+        assert "[agent]: A" in out
 
     def test_empty_allowlist_is_same_as_default(self) -> None:
         items = [_turn("user", "x", a=1, b=2)]
@@ -339,7 +339,7 @@ class TestIncludeTimestamp:
             {"role": "assistant", "content": "Hi", "created_at": "2024-06-20T10:01:00+00:00"},
         ]
         out = build_transcript(items, include_timestamp=True)
-        assert out == ("[2024-06-20T10:00:00+00:00 | user]: Hello\n[2024-06-20T10:01:00+00:00 | assistant]: Hi")
+        assert out == ("[2024-06-20T10:00:00+00:00 | user]: Hello\n[2024-06-20T10:01:00+00:00 | agent]: Hi")
 
     def test_timestamp_absent_falls_back_to_plain_role(self) -> None:
         items = [{"role": "user", "content": "Hello"}]  # no created_at
@@ -358,3 +358,33 @@ class TestIncludeTimestamp:
         out = build_transcript(items, group_by_thread=True, include_timestamp=True)
         assert "[2024-06-20T10:00:00+00:00 | user]: Q" in out
         assert "=== Thread t1 ===" in out
+
+
+class TestCanonicalSpeaker:
+    """Roles are normalized to canonical speaker labels unconditionally, so the
+    extraction prompt sees a stable vocabulary regardless of the caller's role
+    string. Synonyms fold onto user/agent; ``tool`` and ``system`` are kept."""
+
+    def test_agent_synonym_normalized(self) -> None:
+        # OpenAI-style "assistant" must render as the canonical "agent".
+        assert build_transcript([{"role": "assistant", "content": "Hi"}]) == "[agent]: Hi"
+
+    def test_user_synonym_normalized(self) -> None:
+        assert build_transcript([{"role": "human", "content": "a"}]) == "[user]: a"
+
+    def test_tool_and_system_preserved(self) -> None:
+        items = [
+            {"role": "tool", "content": "b"},
+            {"role": "system", "content": "c"},
+            {"role": "agent", "content": "d"},
+        ]
+        out = build_transcript(items)
+        assert out == "[tool]: b\n[system]: c\n[agent]: d"
+
+    def test_unknown_role_passed_through(self) -> None:
+        assert build_transcript([{"role": "narrator", "content": "x"}]) == "[narrator]: x"
+
+    def test_normalized_with_timestamp(self) -> None:
+        items = [{"role": "assistant", "content": "Hi", "created_at": "2024-06-20T10:01:00+00:00"}]
+        out = build_transcript(items, include_timestamp=True)
+        assert out == "[2024-06-20T10:01:00+00:00 | agent]: Hi"

@@ -26,6 +26,7 @@ without a live memory service, and to anchor a leaderboard:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -36,6 +37,17 @@ from .schema import Scenario
 Run = dict[str, list[str]]
 # Optional provenance claims: query_id -> memory_id -> {"author": str, ...}.
 ProvenanceClaims = dict[str, dict[str, dict[str, Any]]]
+
+
+def _nan_to_none(value: float) -> Optional[float]:
+    """Map ``float('nan')`` to ``None`` so summaries stay valid JSON.
+
+    ``mean_recall`` / ``leak_rate`` are ``NaN`` when there is nothing to average
+    (no utility targets or no queries). ``json.dumps`` would serialize that as
+    the bare token ``NaN``, which is rejected by strict JSON parsers, so we emit
+    ``null`` instead.
+    """
+    return None if math.isnan(value) else value
 
 
 @dataclass
@@ -113,8 +125,8 @@ class Report:
             "system": self.system,
             "k": self.k,
             "queries": len(self.per_query),
-            "mean_recall": self.mean_recall,
-            "leak_rate": self.leak_rate,
+            "mean_recall": _nan_to_none(self.mean_recall),
+            "leak_rate": _nan_to_none(self.leak_rate),
             "total_leaks": self.total_leaks,
             "isolation_violations": self.isolation_violations,
             "stale_leaks": self.stale_leaks,
@@ -206,7 +218,18 @@ def oracle_run(scenario: Scenario, k: int = 10) -> Run:
     run: Run = {}
     for query in scenario.queries:
         labels = compute_query_labels(scenario, query)
-        run[query.id] = list(labels.must_retrieve)[:k]
+        # ``must_retrieve`` is a frozenset, whose iteration order is not stable
+        # across runs/versions. Rank the targets by their declared ``relevant``
+        # order instead so the run is deterministic — this matters once a query
+        # has more than ``k`` targets or when consumers treat rank as meaningful.
+        must = labels.must_retrieve
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for mem_id in query.relevant:
+            if mem_id in must and mem_id not in seen:
+                seen.add(mem_id)
+                ordered.append(mem_id)
+        run[query.id] = ordered[:k]
     return run
 
 

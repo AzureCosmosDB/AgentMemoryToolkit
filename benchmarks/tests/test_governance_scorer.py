@@ -1,7 +1,10 @@
 """Unit tests for the SMGB scorer and reference runners."""
 
+import json
+
 from benchmarks.governance.schema import Scenario
 from benchmarks.governance.scorer import (
+    Report,
     naive_global_run,
     naive_shared_run,
     oracle_provenance,
@@ -111,3 +114,41 @@ def test_k_cutoff_limits_retrieval():
     at_k2 = score_scenario(s, run, k=2)
     assert at_k2.per_query[0].recall == 0.0  # shared1 is at rank 3
     assert at_k2.per_query[0].leaked is True  # private1 leaked within k=2
+
+
+def test_empty_report_summary_is_json_safe():
+    # No queries -> mean_recall / leak_rate are NaN internally; the summary must
+    # emit None so the JSON output stays valid for strict parsers.
+    su = Report(system="empty", k=10).summary()
+    assert su["mean_recall"] is None
+    assert su["leak_rate"] is None
+    assert "NaN" not in json.dumps(su)
+
+
+def test_oracle_run_is_deterministic_and_ordered():
+    s = Scenario.from_dict(
+        {
+            "scenario_id": "order",
+            "tenants": ["t"],
+            "scopes": [{"id": "proj:x", "kind": "project", "tenant": "t",
+                        "members": ["a"]}],
+            "principals": [{"id": "a", "tenant": "t", "scopes": ["proj:x"]}],
+            "memories": [
+                {"id": "m1", "scope": "proj:x", "tenant": "t",
+                 "created_at": "2026-01-01T00:00:00Z", "provenance": {"author": "a"}},
+                {"id": "m2", "scope": "proj:x", "tenant": "t",
+                 "created_at": "2026-01-01T00:00:00Z", "provenance": {"author": "a"}},
+                {"id": "m3", "scope": "proj:x", "tenant": "t",
+                 "created_at": "2026-01-01T00:00:00Z", "provenance": {"author": "a"}},
+            ],
+            "events": [],
+            "queries": [
+                {"id": "q", "principal": "a", "as_of": "2026-02-01T00:00:00Z",
+                 "axis": "utility", "relevant": ["m3", "m1", "m2"]},
+            ],
+        }
+    )
+    # Ranking follows the declared ``relevant`` order, not frozenset iteration.
+    assert oracle_run(s)["q"] == ["m3", "m1", "m2"]
+    # Under a cutoff, the first-k relevant targets are kept deterministically.
+    assert oracle_run(s, k=2)["q"] == ["m3", "m1"]

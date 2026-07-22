@@ -64,6 +64,11 @@ def validate_scenario(scenario: Scenario) -> list[str]:
                 problems.append(
                     f"{sid}: principal {principal.id!r} references unknown scope {scope_id!r}"
                 )
+            elif scenario.scopes[scope_id].tenant != principal.tenant:
+                problems.append(
+                    f"{sid}: principal {principal.id!r} (tenant {principal.tenant!r}) references "
+                    f"scope {scope_id!r} owned by tenant {scenario.scopes[scope_id].tenant!r}"
+                )
 
     for mem in scenario.memories.values():
         if mem.scope not in scenario.scopes:
@@ -79,6 +84,7 @@ def validate_scenario(scenario: Scenario) -> list[str]:
         if ev.type == "supersede" and (not ev.by or ev.by not in scenario.memories):
             problems.append(f"{sid}: supersede event references unknown replacement {ev.by!r}")
 
+    known_memories = set(scenario.memories)
     for q in scenario.queries:
         if q.principal not in scenario.principals:
             problems.append(f"{sid}: query {q.id!r} unknown principal {q.principal!r}")
@@ -93,14 +99,24 @@ def validate_scenario(scenario: Scenario) -> list[str]:
         labels = compute_query_labels(scenario, q)
         if q.must_retrieve is not None:
             hand = set(q.must_retrieve)
-            if hand != set(labels.must_retrieve):
+            unknown = hand - known_memories
+            for mid in sorted(unknown):
+                problems.append(f"{sid}: query {q.id!r} must_retrieve id {mid!r} unknown")
+            # Compare only known ids: unknown ids can never appear in the
+            # policy-derived set, so leaving them in would just double-report.
+            if (hand - unknown) != set(labels.must_retrieve):
                 problems.append(
-                    f"{sid}: query {q.id!r} must_retrieve {sorted(hand)} != "
+                    f"{sid}: query {q.id!r} must_retrieve {sorted(hand - unknown)} != "
                     f"policy-derived {sorted(labels.must_retrieve)}"
                 )
         if q.must_not_retrieve is not None:
             hand_not = set(q.must_not_retrieve)
-            stray = hand_not - set(labels.forbidden)
+            unknown = hand_not - known_memories
+            for mid in sorted(unknown):
+                problems.append(f"{sid}: query {q.id!r} must_not_retrieve id {mid!r} unknown")
+            # Only real, known ids can be meaningfully "allowed"; excluding the
+            # unknown ones avoids the misleading "actually allowed" message.
+            stray = (hand_not - unknown) - set(labels.forbidden)
             if stray:
                 problems.append(
                     f"{sid}: query {q.id!r} must_not_retrieve {sorted(stray)} are actually allowed"

@@ -12,6 +12,12 @@ This folder contains the main project documentation for Agent Memory Toolkit.
 | [design_patterns.md](design_patterns.md) | Shows when and how to call CRUD operations, summarization, fact extraction, and memory retrieval in chat and multi-agent applications, including automatic processing via the change feed. |
 | [troubleshooting.md](troubleshooting.md) | Helps diagnose common setup, authentication, Cosmos DB, embeddings, Durable Functions, vector search, and change feed issues. |
 
+## Research & Benchmarks
+
+| Document | Purpose |
+|----------|---------|
+| [shared_memory_governance_benchmark.md](shared_memory_governance_benchmark.md) | Design for the **Shared-Memory Governance Benchmark (SMGB)**: a public, system-agnostic, policy-labeled benchmark for authorization-filtered retrieval, promotion, tenant isolation, supersession, deletion, and provenance. Backs the package in `benchmarks/governance/`. |
+
 ## Recommended Reading Order
 
 1. Start with [concepts.md](concepts.md) to understand the data model and memory lifecycle.

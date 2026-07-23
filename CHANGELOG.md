@@ -3,20 +3,22 @@
 ## [0.3.0b1] (Unreleased)
 
 #### Features Added
-* Write-time in-place deduplication: near-duplicate memories fold into the existing record (same id, newer content) instead of creating a new doc. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
-* Reconciliation now resolves contradictions only, soft-deleting the loser with `superseded_by`; `get_memory_history()` walks that chain. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Searchable summaries: the summaries container now carries a vector index, and `search_summaries()` / `search_cosmos(include_summaries=True)` vector-search across a user's thread + user summaries. See [PR:#34](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/34)
 * Agent-sourced facts: extraction can now capture the assistant's own actions and recommendations (not just user statements), tagged `source=agent` / `sys:agent-fact` so retrieval can include or exclude them. See [PR:#31](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/31)
 * Event time on write: `add_cosmos(..., created_at=...)` sets a memory's event time (falls back to ingestion time), enabling time-aware retrieval and temporal reasoning over backfilled conversations. See [PR:#31](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/31)
 * Unified retrieval: `search_cosmos(include_turns=True)` blends raw conversation turns into results alongside extracted memories. See [PR:#31](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/31)
 * `DEDUP_VECTOR_ENABLED` is now an environment knob (default `false` = add-only) instead of a fixed internal constant. See [PR:#31](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/31)
+* Write-time in-place deduplication: near-duplicate memories fold into the existing record (same id, newer content) instead of creating a new doc. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
+* Reconciliation now resolves contradictions only, soft-deleting the loser with `superseded_by`; `get_memory_history()` walks that chain. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 #### Bugs Fixed
 * Fixed a re-extraction loop that re-extracted the whole conversation every cycle (turns were never stamped `extracted_at` when vector dedup was on). See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 
 #### Other Changes
+* Extraction prompt v3: named attribution (use real names, not a generic "the user", so multi-speaker turns don't blur), stronger temporal grounding (resolve relative dates against the turn's time, never the current clock), and meaning/completeness rules. See [PR:#34](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/34)
+* Extraction now sees per-turn timestamps and resolves relative dates ("3 weeks ago") to absolute dates in the fact text (time-range filtering uses the memory's `created_at`). See [PR:#31](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/31)
 * Reworked the extraction prompt (anti-inference, preserve specifics, topic-grouped memories) and simplified the schema to `fact`/`episodic` with fixed fact categories. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
 * Token-bounded extraction batches with per-batch failure isolation; embedding inputs truncated to the model token budget. See [PR:#26](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/26)
-* Extraction now sees per-turn timestamps and resolves relative dates ("3 weeks ago") to absolute dates in the fact text (time-range filtering uses the memory's `created_at`). See [PR:#31](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/31)
 
 ## [0.2.0b3] (2026-07-08)
 

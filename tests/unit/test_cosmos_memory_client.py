@@ -473,8 +473,11 @@ class TestCreateMemoryStore:
         assert lease_call.kwargs["id"] == "leases"
         assert lease_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
         assert summaries_call.kwargs["id"] == "memories_summaries"
-        assert "vector_embedding_policy" not in summaries_call.kwargs
-        assert "full_text_policy" not in summaries_call.kwargs
+        # Summaries now carry the vector + full-text index (semantic search over
+        # summaries), while keeping the (user_id, thread_id, version) composite.
+        assert "vector_embedding_policy" in summaries_call.kwargs
+        assert "full_text_policy" in summaries_call.kwargs
+        assert summaries_call.kwargs["indexing_policy"]["vectorIndexes"][0]["path"] == "/embedding"
         assert summaries_call.kwargs["indexing_policy"]["compositeIndexes"][0][-1] == {
             "path": "/version",
             "order": "descending",
@@ -716,6 +719,54 @@ class TestSearchCosmosUnifiedRetrieval:
 
         assert out == [{"content": "fact A", "type": "fact"}]
         store.search_turns.assert_not_called()
+
+    def test_include_summaries_appends_after_facts_and_dedups(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}])
+        store.search_summaries.return_value = [
+            {"content": "session overview", "type": "thread_summary"},
+            {"content": "fact A", "type": "user_summary"},  # dup of memory -> skipped
+        ]
+
+        out = mem.search_cosmos("q", user_id="u1", include_summaries=True)
+
+        # Order is facts -> summaries.
+        assert out == [
+            {"content": "fact A", "type": "fact"},
+            {"content": "session overview", "type": "thread_summary"},
+        ]
+
+    def test_facts_summaries_turns_ordering(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(
+            mem,
+            memories=[{"content": "fact A", "type": "fact"}],
+            turns=[{"content": "raw turn C", "type": "turn"}],
+        )
+        store.search_summaries.return_value = [{"content": "summary B", "type": "thread_summary"}]
+
+        out = mem.search_cosmos("q", user_id="u1", include_summaries=True, include_turns=True)
+
+        assert [r["content"] for r in out] == ["fact A", "summary B", "raw turn C"]
+
+    def test_include_summaries_failure_returns_memories_only(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}])
+        store.search_summaries.side_effect = RuntimeError("no summaries index")
+
+        out = mem.search_cosmos("q", user_id="u1", include_summaries=True)
+
+        assert out == [{"content": "fact A", "type": "fact"}]
+
+    def test_search_summaries_delegates_to_store(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[])
+        store.search_summaries.return_value = [{"content": "s", "type": "user_summary"}]
+
+        out = mem.search_summaries("q", user_id="u1")
+
+        assert out == [{"content": "s", "type": "user_summary"}]
+        store.search_summaries.assert_called_once()
 
 
 class TestPushToCosmos:

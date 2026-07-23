@@ -37,25 +37,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
 
 logger = get_logger(__name__)
 
-_SUMMARIES_INDEXING_POLICY = {
-    "indexingMode": "consistent",
-    "automatic": True,
-    "includedPaths": [{"path": "/*"}],
-    "excludedPaths": [
-        {"path": "/embedding/?"},
-        {"path": "/source_memory_ids/*"},
-        {"path": "/supersedes_ids/*"},
-        {"path": '/"_etag"/?'},
-    ],
-    "compositeIndexes": [
-        [
-            {"path": "/user_id", "order": "ascending"},
-            {"path": "/thread_id", "order": "ascending"},
-            {"path": "/version", "order": "descending"},
-        ]
-    ],
-}
-
 
 class CosmosMemoryClient(_BaseMemoryClient):
     """Manages local and Cosmos-backed memories via store and service layers."""
@@ -342,13 +323,29 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 )
             )
             logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
+            # Summaries carry the vector + full-text index too, so summaries are
+            # semantically searchable (search_summaries). Keep the point-lookup
+            # composite (user_id, thread_id, version) get_*_summary relies on.
+            summaries_vec_policy, summaries_idx_policy, summaries_ft_policy = _container_policies(
+                **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
+                include_salience_composite=False,
+            )
+            summaries_idx_policy["compositeIndexes"] = [
+                [
+                    {"path": "/user_id", "order": "ascending"},
+                    {"path": "/thread_id", "order": "ascending"},
+                    {"path": "/version", "order": "descending"},
+                ]
+            ]
             self._summaries_container_client = db.create_container_if_not_exists(
                 **_build_container_kwargs(
                     container_id=self._cosmos_summaries_container,
                     partition_key=partition_key,
                     offer_throughput=offer,
                     default_ttl=-1,
-                    indexing_policy=_SUMMARIES_INDEXING_POLICY,
+                    indexing_policy=summaries_idx_policy,
+                    vector_embedding_policy=summaries_vec_policy,
+                    full_text_policy=summaries_ft_policy,
                 )
             )
             logger.info(
@@ -676,8 +673,14 @@ class CosmosMemoryClient(_BaseMemoryClient):
         created_before: Optional[str | datetime] = None,
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
+        include_summaries: bool = False,
+        summary_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories using vector similarity; optionally blend raw turns."""
+        """Search memories using vector similarity, with optional summary / raw-turn blending.
+
+        ``include_summaries`` / ``include_turns`` prepend matching summaries /
+        append matching raw turns (best-effort); see Docs/concepts.md.
+        """
         store = self._get_store()
         results = store.search(
             search_terms=search_terms,
@@ -696,30 +699,74 @@ class CosmosMemoryClient(_BaseMemoryClient):
             created_after=created_after,
             created_before=created_before,
         )
-        if not include_turns or not user_id:
+
+        if not user_id:
             return results
 
         seen_content = {str(r.get("content") or "").strip() for r in results}
-        try:
-            turns = store.search_turns(
-                search_terms=search_terms,
-                user_id=user_id,
-                thread_id=thread_id,
-                role=role,
-                top_k=turn_top_k if turn_top_k is not None else top_k,
-                exclude_tags=exclude_tags,
-                created_after=created_after,
-                created_before=created_before,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
-            return results
-        for turn in turns:
-            content = str(turn.get("content") or "").strip()
-            if content and content not in seen_content:
-                seen_content.add(content)
-                results.append(turn)
+        if include_summaries:
+            try:
+                summaries = store.search_summaries(
+                    search_terms=search_terms,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    top_k=summary_top_k if summary_top_k is not None else top_k,
+                    exclude_tags=exclude_tags,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
+                summaries = []
+            # Order is facts -> summaries -> raw turns: append summaries after the
+            # relevance-ranked memory hits (and before turns) so they neither jump
+            # the ranking nor evict facts under context-window truncation.
+            for s in summaries:
+                content = str(s.get("content") or "").strip()
+                if content and content not in seen_content:
+                    seen_content.add(content)
+                    results.append(s)
+
+        if include_turns:
+            try:
+                turns = store.search_turns(
+                    search_terms=search_terms,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    role=role,
+                    top_k=turn_top_k if turn_top_k is not None else top_k,
+                    exclude_tags=exclude_tags,
+                    created_after=created_after,
+                    created_before=created_before,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
+                turns = []
+            for turn in turns:
+                content = str(turn.get("content") or "").strip()
+                if content and content not in seen_content:
+                    seen_content.add(content)
+                    results.append(turn)
         return results
+
+    def search_summaries(
+        self,
+        search_terms: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+    ) -> list[dict[str, Any]]:
+        """Vector-search the user's thread + user summaries (see ``MemoryStore.search_summaries``)."""
+        return self._get_store().search_summaries(
+            search_terms=search_terms,
+            user_id=user_id,
+            thread_id=thread_id,
+            top_k=top_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+        )
 
     def search_turns(
         self,

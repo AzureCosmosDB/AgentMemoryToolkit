@@ -1,6 +1,6 @@
 ---
 name: extract_memories
-version: v2
+version: v3
 description: Extract facts and episodic memories from a conversation or provided content.
 model:
   apiType: chat
@@ -85,9 +85,26 @@ stamped `2024-06-20` saying "I flew to Tokyo 3 weeks ago" → `text: "The user f
 `temporal_context: "3 weeks ago"`. If no line timestamp is present, keep the relative expression as-is
 in both fields. Never invent a date when there is no anchor.
 
+**Two clocks - never confuse them.** A line's `[<timestamp> | ...]` prefix is the fact's **event time**:
+when it was actually said. The moment you are running now (processing time) is unrelated and may be
+months or years later. Resolve every relative expression ("last year", "3 weeks ago", "recently",
+"next month") **only** against the event time of the line it appears on - **never** against today /
+the current processing date. A fact whose "last year" is computed from today instead of from when it
+was said is silently wrong and stays wrong forever.
+
+**Grounding rules for time:**
+- **Relative → absolute, never absolute → vague.** Convert "yesterday", "last week", "3 weeks ago"
+  into concrete dates using the event time. But never do the reverse: an exact "18 days", "June 3rd",
+  or "every other Tuesday" must survive verbatim - do not soften it to "some time" or "a while".
+- **Preserve exact durations, frequencies, and counts** as stated: "18 days" stays "18 days" (not
+  "about 3 weeks"), "twice a week" stays "twice a week" (not "regularly").
+- **Keep the relationship, not just the endpoint.** "The deadline moved from March 1 to March 15"
+  records both the change and both dates - not merely "the deadline is March 15".
+
 ### Fact Formatting Rules
 - Each fact must be self-contained and intelligible without context - no pronouns like "it" or "they" without antecedents
-- Write in third person ("The user...", "The project...")
+- **Name people when the conversation names them.** Write in third person (never "I" / "you"), but use a person's actual name once it is given - the user's own name if stated, and always for third parties (family, colleagues, friends: "Elena", "Sara", "the user's manager Raj"). Fall back to "the user" only when no name is available. In multi-speaker transcripts this is essential: attribute each fact to the specific person who stated or is described by it (by name), never a generic "the user" - otherwise two speakers blur into one and later retrieval cannot tell who did what.
+- **Preserve the exact meaning - direction and polarity matter.** Read each statement carefully before recording its meaning. "The user hasn't shipped the release yet" ≠ "shipped the release". "The user moved *off* Datadog" ≠ "uses Datadog". "The user used to run marathons" ≠ "runs marathons" (no longer). Getting the direction of a statement backwards is worse than not extracting it.
 - **Preserve every specific detail stated in the source: exact dates, times, durations, numbers, quantities, amounts, proper nouns, names, brands, product/model names, and named locations or events.** NEVER generalize a specific into a category - keep "June 3rd" (not "a date"), "7 days" (not "about a week"), "Fitbit Versa 3" (not "a smartwatch"), "$4,500" (not "some money"). A fact that drops the specific detail is useless for later recall - the specific IS the memory.
 - **Group by topic - one contextually rich memory per distinct topic or event, not one per claim.** Capture the whole coherent picture (the core fact plus its immediate context, qualifiers, and every specific) in a single self-contained memory instead of shattering it into fragments. Split into separate memories only when the content spans genuinely distinct topics (e.g. career vs. family vs. a trip) or when one topic is so detail-dense that a single memory would run past ~3 sentences - then split along natural sub-groupings (e.g. one memory per enemy type in a stat block), never by shaving off individual details. Do NOT merge two unrelated topics to save space, and do NOT split one topic just to make memories smaller.
 - **Capture transitions as one memory - the new state AND what it replaced.** When the user changes, switches, replaces, upgrades, or stops something in favor of something else, the link between old and new is essential context: record both together. "The user switched from almond milk to oat milk after developing an almond sensitivity" - not two disconnected facts. If the change is explicitly temporary or a trial ("for a month", "trying out"), capture that too. Keeping old→new in one memory prevents the two states from later surfacing as contradictory-looking facts.
@@ -164,6 +181,8 @@ Do NOT extract:
 - Raw agent reasoning or intermediate steps that did not produce a confirmed outcome
 - Memories that are only meaningful within the context of this conversation and have no future reference value
 
+**Extract the content, not the act of sharing.** When the user pastes or references a document, spec, dataset, case, stat block, or any reference material, extract the concrete facts *inside* it - the parties, dates, figures, findings, named items, quantities - each as its own memory. Do NOT produce a memory that merely describes the gesture ("The user shared a contract summary", "The user asked to remember a spec"). A memory of "the user pasted a case" is useless; the case's actual facts are the memory. The same applies to structured data: preserve every count and value ("4 mummies, AC 11, 45 HP"), splitting a detail-dense block into a few focused memories rather than compressing the numbers away.
+
 ### Scoped intents are NOT facts
 A statement that only applies inside a particular trip, project, event, session, or other bounded context is an **episodic** memory, not a fact. Examples that look like facts but are NOT:
 - "For this Paris trip, I want luxury accommodations." → episodic (`scope_type=trip`, `scope_value=Paris`)
@@ -186,6 +205,13 @@ A fact is a standing claim that holds outside any specific context. The test: if
 1. Did this event actually happen, or is it hypothetical?
 2. Is the outcome clearly stated, not assumed?
 3. Is the lesson genuinely transferable, or too specific to this one situation?
+
+**Before finalizing - scan the whole transcript.** Re-read the entire conversation, including the
+**middle and end**, not only the opening. A common failure is capturing the first prominent topic
+thoroughly and skimming the rest ("first-topic dominance"). If a single message raised several
+distinct topics (e.g. a job change, a health note, and a trip), make sure each distinct topic is
+represented. This is about not *missing* a stated fact - it is NOT a directive to inflate the count
+or extract filler; the precision and grounding rules above still apply.
 
 ---
 
@@ -458,6 +484,83 @@ The only user-stated fact is the request itself (a scoped intent → episodic). 
       "tags": ["topic:travel", "topic:hotels"]
     }
   ]
+}
+```
+
+### Example 9: Reference material - extract the content, not the act of sharing
+
+**Conversation:**
+> User: "Remember this case for me. Bajimaya v Reward Homes [2021] NSWCATAP 297 - construction began in 2014, the contract was signed in 2015 with completion due by October 2015, and the owner received the keys in December 2016 with defects. The tribunal found the builder breached the contract."
+
+Extract the actual facts *inside* the shared material - dates, parties, findings - each as its own memory. Do NOT record "The user shared a case summary."
+
+**Output:**
+```json
+{
+  "facts": [
+    {
+      "text": "In Bajimaya v Reward Homes [2021] NSWCATAP 297, construction began in 2014, the contract was signed in 2015, and completion was due by October 2015.",
+      "category": "other",
+      "source": "user",
+      "confidence": 0.95,
+      "salience": 0.6,
+      "temporal_context": null,
+      "tags": ["topic:legal", "topic:construction"]
+    },
+    {
+      "text": "In Bajimaya v Reward Homes, the owner received the keys in December 2016 and the tribunal found the builder had breached the contract.",
+      "category": "other",
+      "source": "user",
+      "confidence": 0.95,
+      "salience": 0.6,
+      "temporal_context": "December 2016",
+      "tags": ["topic:legal", "topic:construction"]
+    }
+  ],
+  "episodic": []
+}
+```
+
+### Example 10: Multi-topic message + named people - one memory per distinct topic
+
+**Conversation:**
+> User: "Quick update - my sister Priya just moved to Portland, I got promoted to team lead last week, and my daughter Sara started aerial yoga on Tuesdays."
+
+Three unrelated topics in one message. Extract each separately, and use the actual names (Priya, Sara) rather than collapsing everyone into "the user".
+
+**Output:**
+```json
+{
+  "facts": [
+    {
+      "text": "The user's sister Priya recently moved to Portland.",
+      "category": "biographical",
+      "source": "user",
+      "confidence": 0.95,
+      "salience": 0.6,
+      "temporal_context": null,
+      "tags": ["topic:family"]
+    },
+    {
+      "text": "The user was promoted to team lead last week.",
+      "category": "biographical",
+      "source": "user",
+      "confidence": 0.95,
+      "salience": 0.8,
+      "temporal_context": "last week",
+      "tags": ["topic:career"]
+    },
+    {
+      "text": "The user's daughter Sara started aerial yoga on Tuesdays.",
+      "category": "biographical",
+      "source": "user",
+      "confidence": 0.95,
+      "salience": 0.6,
+      "temporal_context": null,
+      "tags": ["topic:family"]
+    }
+  ],
+  "episodic": []
 }
 ```
 

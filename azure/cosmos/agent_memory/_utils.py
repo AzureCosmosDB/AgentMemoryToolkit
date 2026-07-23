@@ -119,9 +119,7 @@ def normalize_created_at_iso(value: Optional[str | datetime]) -> Optional[str]:
         if not text:
             raise ValidationError("created_at must be a non-empty ISO-8601 string or datetime")
         try:
-            # ``fromisoformat`` doesn't accept a trailing 'Z' before 3.11 in all
-            # forms; normalize it to an explicit UTC offset first.
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(text)
         except ValueError as exc:
             raise ValidationError(f"created_at is not a valid ISO-8601 timestamp: {value!r}") from exc
     if dt.tzinfo is None:

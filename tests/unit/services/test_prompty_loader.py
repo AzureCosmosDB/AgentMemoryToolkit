@@ -59,7 +59,7 @@ def test_all_shipped_prompts_declare_version() -> None:
     # extract_memories bumped to v2 when agent-sourced fact extraction landed;
     # the rest remain v1. Every shipped prompt must declare *some* version.
     expected = {
-        "extract_memories.prompty": "v2",
+        "extract_memories.prompty": "v3",
         "dedup.prompty": "v1",
         "summarize.prompty": "v1",
         "summarize_update.prompty": "v1",

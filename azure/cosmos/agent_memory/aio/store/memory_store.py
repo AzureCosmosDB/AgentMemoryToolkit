@@ -989,6 +989,51 @@ class AsyncMemoryStore:
             partition_key=partition_key,
         )
 
+    async def search_summaries(
+        self,
+        search_terms: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        *,
+        query: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Vector-search the summaries container (thread_summary + user_summary).
+
+        Searches across *all* of the user's summary docs at once - the single
+        user_summary and every per-thread thread_summary - ranked by relevance.
+        ``user_id`` is required. Pass ``thread_id`` to narrow to one thread.
+        """
+        if not user_id:
+            raise ValidationError("user_id is required for search_summaries")
+        terms = require_search_terms(search_terms, query)
+        top = top_literal(top_k, name="top_k")
+        query_vector = await self._embed(terms)
+        keywords = extract_keywords(terms)
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+
+        sql = build_search_sql(qb=qb, top=top, keyword_count=len(keywords), include_superseded=False)
+        parameters = qb.get_parameters()
+        parameters.append({"name": "@embedding", "value": query_vector})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
+
+        partition_key, _ = query_scope(user_id, thread_id)
+        logger.debug("AsyncMemoryStore.search_summaries query: %s", sql)
+        return await self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.SUMMARIES,
+            partition_key=partition_key,
+        )
+
     async def search_episodic(
         self,
         user_id: str,

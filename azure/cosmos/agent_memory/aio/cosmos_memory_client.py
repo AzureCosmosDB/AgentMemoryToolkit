@@ -40,25 +40,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
 
 logger = get_logger(__name__)
 
-_SUMMARIES_INDEXING_POLICY = {
-    "indexingMode": "consistent",
-    "automatic": True,
-    "includedPaths": [{"path": "/*"}],
-    "excludedPaths": [
-        {"path": "/embedding/?"},
-        {"path": "/source_memory_ids/*"},
-        {"path": "/supersedes_ids/*"},
-        {"path": '/"_etag"/?'},
-    ],
-    "compositeIndexes": [
-        [
-            {"path": "/user_id", "order": "ascending"},
-            {"path": "/thread_id", "order": "ascending"},
-            {"path": "/version", "order": "descending"},
-        ]
-    ],
-}
-
 
 def _log_auto_trigger_task_failure(task: "asyncio.Task[Any]") -> None:
     if not task.cancelled() and (exc := task.exception()) is not None:
@@ -345,15 +326,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 vector_index_type=_resolve_vector_index_type(vector_index_type),
             )
             vec_policy, idx_policy, ft_policy = _container_policies(**_policy_kwargs)
-            # Turns always carry the vector index (primed for search) but skip the
-            # salience composite index, which only procedural synthesis needs. The
-            # turns vector index is pinned to quantizedFlat so search_turns() works
-            # on accounts without the DiskANN capability, independent of the
-            # memories container's configured vector_index_type.
-            turns_vec_policy, turns_idx_policy, turns_ft_policy = _container_policies(
-                **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
-                include_salience_composite=False,
-            )
             self._memories_container_client = await db.create_container_if_not_exists(
                 **_build_container_kwargs(
                     container_id=self._cosmos_container,
@@ -364,6 +336,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     vector_embedding_policy=vec_policy,
                     full_text_policy=ft_policy,
                 )
+            )
+
+            turns_vec_policy, turns_idx_policy, turns_ft_policy = _container_policies(
+                **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
+                include_salience_composite=False,
             )
             self._turns_container_client = await db.create_container_if_not_exists(
                 **_build_container_kwargs(
@@ -377,13 +354,26 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 )
             )
             logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
+            summaries_vec_policy, summaries_idx_policy, summaries_ft_policy = _container_policies(
+                **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
+                include_salience_composite=False,
+            )
+            summaries_idx_policy["compositeIndexes"] = [
+                [
+                    {"path": "/user_id", "order": "ascending"},
+                    {"path": "/thread_id", "order": "ascending"},
+                    {"path": "/version", "order": "descending"},
+                ]
+            ]
             self._summaries_container_client = await db.create_container_if_not_exists(
                 **_build_container_kwargs(
                     container_id=self._cosmos_summaries_container,
                     partition_key=partition_key,
                     offer_throughput=offer,
                     default_ttl=-1,
-                    indexing_policy=_SUMMARIES_INDEXING_POLICY,
+                    indexing_policy=summaries_idx_policy,
+                    vector_embedding_policy=summaries_vec_policy,
+                    full_text_policy=summaries_ft_policy,
                 )
             )
             logger.info(
@@ -721,8 +711,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         created_before: Optional[str | datetime] = None,
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
+        include_summaries: bool = False,
+        summary_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories using vector similarity; optionally blend raw turns."""
+        """Search memories using vector similarity, with optional summary / raw-turn
+        blending. See the sync client for details."""
         store = self._get_store()
         results = await store.search(
             search_terms=search_terms,
@@ -741,30 +734,72 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             created_after=created_after,
             created_before=created_before,
         )
-        if not include_turns or not user_id:
+        if not user_id:
             return results
 
         seen_content = {str(r.get("content") or "").strip() for r in results}
-        try:
-            turns = await store.search_turns(
-                search_terms=search_terms,
-                user_id=user_id,
-                thread_id=thread_id,
-                role=role,
-                top_k=turn_top_k if turn_top_k is not None else top_k,
-                exclude_tags=exclude_tags,
-                created_after=created_after,
-                created_before=created_before,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
-            return results
-        for turn in turns:
-            content = str(turn.get("content") or "").strip()
-            if content and content not in seen_content:
-                seen_content.add(content)
-                results.append(turn)
+        if include_summaries:
+            try:
+                summaries = await store.search_summaries(
+                    search_terms=search_terms,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    top_k=summary_top_k if summary_top_k is not None else top_k,
+                    exclude_tags=exclude_tags,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
+                summaries = []
+            # Order is facts -> summaries -> raw turns: append summaries after the
+            # relevance-ranked memory hits (and before turns).
+            for s in summaries:
+                content = str(s.get("content") or "").strip()
+                if content and content not in seen_content:
+                    seen_content.add(content)
+                    results.append(s)
+
+        if include_turns:
+            try:
+                turns = await store.search_turns(
+                    search_terms=search_terms,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    role=role,
+                    top_k=turn_top_k if turn_top_k is not None else top_k,
+                    exclude_tags=exclude_tags,
+                    created_after=created_after,
+                    created_before=created_before,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
+                turns = []
+            for turn in turns:
+                content = str(turn.get("content") or "").strip()
+                if content and content not in seen_content:
+                    seen_content.add(content)
+                    results.append(turn)
         return results
+
+    async def search_summaries(
+        self,
+        search_terms: str,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+    ) -> list[dict[str, Any]]:
+        """Vector-search the user's thread + user summaries (see ``AsyncMemoryStore.search_summaries``)."""
+        return await self._get_store().search_summaries(
+            search_terms=search_terms,
+            user_id=user_id,
+            thread_id=thread_id,
+            top_k=top_k,
+            tags_all=tags_all,
+            tags_any=tags_any,
+            exclude_tags=exclude_tags,
+        )
 
     async def search_turns(
         self,

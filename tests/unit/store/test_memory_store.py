@@ -634,6 +634,34 @@ def test_search_turns_queries_turns_container():
     assert "VectorDistance(c.embedding, @embedding)" in sql
 
 
+def test_search_summaries_queries_summaries_container_scoped_to_user():
+    summaries = MagicMock()
+    summaries.query_items.return_value = []
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(summaries=summaries, memories=memories),
+        embeddings_client=embeddings,
+    )
+
+    # No thread_id: fans across the user's summary partitions (user + all threads).
+    store.search_summaries(search_terms="summarize", user_id="u1")
+
+    summaries.query_items.assert_called_once()
+    memories.query_items.assert_not_called()
+    kwargs = summaries.query_items.call_args.kwargs
+    assert "VectorDistance(c.embedding, @embedding)" in kwargs["query"]
+    assert {"name": "@user_id", "value": "u1"} in kwargs["parameters"]
+
+
+def test_search_summaries_requires_user_id():
+    store = MemoryStore(containers=_containers(), embeddings_client=MagicMock())
+    with pytest.raises(ValidationError, match="user_id is required"):
+        store.search_summaries(search_terms="x")
+
+
 def test_search_turns_scopes_to_single_partition_with_thread_id():
     turns = MagicMock()
     turns.query_items.return_value = []

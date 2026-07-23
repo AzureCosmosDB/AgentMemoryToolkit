@@ -1064,6 +1064,15 @@ class TestAsyncSearchCosmosUnifiedRetrieval:
 
         assert [r["content"] for r in out] == ["fact A", "summary B", "raw turn C"]
 
+    async def test_include_summaries_failure_returns_memories_only(self):
+        mem, _ = _connected_client()
+        store = self._stub_store(mem, memories=[{"content": "fact A", "type": "fact"}])
+        store.search_summaries = AsyncMock(side_effect=RuntimeError("no summaries index"))
+
+        out = await mem.search_cosmos("q", user_id="u1", include_summaries=True)
+
+        assert out == [{"content": "fact A", "type": "fact"}]
+
     async def test_search_summaries_delegates_to_store(self):
         mem, _ = _connected_client()
         store = self._stub_store(mem, memories=[])

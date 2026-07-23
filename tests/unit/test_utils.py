@@ -484,6 +484,12 @@ class TestNormalizeCreatedAtIso:
         assert normalize_created_at_iso("2024-03-01T12:00:00Z") == "2024-03-01T12:00:00+00:00"
         assert normalize_created_at_iso("2024-03-01T09:00:00-03:00") == "2024-03-01T12:00:00+00:00"
 
+    def test_date_only_with_and_without_z_coerce_to_utc_midnight(self):
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+
+        assert normalize_created_at_iso("2024-03-01") == "2024-03-01T00:00:00+00:00"
+        assert normalize_created_at_iso("2024-03-01Z") == "2024-03-01T00:00:00+00:00"
+
     def test_invalid_string_raises(self):
         from azure.cosmos.agent_memory._utils import normalize_created_at_iso
         from azure.cosmos.agent_memory.exceptions import ValidationError

@@ -118,6 +118,8 @@ def normalize_created_at_iso(value: Optional[str | datetime]) -> Optional[str]:
         text = str(value).strip()
         if not text:
             raise ValidationError("created_at must be a non-empty ISO-8601 string or datetime")
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
         try:
             dt = datetime.fromisoformat(text)
         except ValueError as exc:

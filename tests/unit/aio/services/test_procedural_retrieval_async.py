@@ -50,19 +50,19 @@ async def test_async_retrieve_procedures_filters_active_procedures_by_default() 
     call_kwargs = memories.query_items.call_args.kwargs
     assert "TOP 2" in call_kwargs["query"]
     assert "c.type = @type" in call_kwargs["query"]
-    assert "c.user_id = @user_id" in call_kwargs["query"]
+    assert "c.scope_key = @scope_key" in call_kwargs["query"]
     assert "c.status = @status" in call_kwargs["query"]
     assert "VectorDistance(c.embedding, @embedding)" in call_kwargs["query"]
     assert "(NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
     assert params["@type"] == "procedural"
-    assert params["@user_id"] == "u1"
+    assert params["@scope_key"] == "user:u1"
     assert params["@status"] == "active"
     assert params["@embedding"] == [0.1, 0.2]
     assert params["@kw0"] == "cosmos"
 
 
-async def test_async_retrieve_procedures_status_none_drops_status_and_adds_scope_filters() -> None:
+async def test_async_retrieve_procedures_status_none_drops_status_filter() -> None:
     ranked_docs = [{"id": "proc-domain", "type": "procedural", "similarity_score": 0.1}]
     memories = MagicMock()
     memories.query_items.return_value = AsyncIterator(ranked_docs)
@@ -73,21 +73,18 @@ async def test_async_retrieve_procedures_status_none_drops_status_and_adds_scope
     result = await store.retrieve_procedures(
         "u1",
         "partition key",
-        scope_type="domain",
-        scope_value="cosmos-db",
+        procedure_kind="recovery_strategy",
         status=None,
     )
 
     assert result == ranked_docs
     call_kwargs = memories.query_items.call_args.kwargs
-    assert "c.scope_type = @scope_type" in call_kwargs["query"]
-    assert "c.scope_value = @scope_value" in call_kwargs["query"]
+    assert "c.procedure_kind = @procedure_kind" in call_kwargs["query"]
     assert "c.status = @status" not in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
     assert params["@type"] == "procedural"
-    assert params["@user_id"] == "u1"
-    assert params["@scope_type"] == "domain"
-    assert params["@scope_value"] == "cosmos-db"
+    assert params["@scope_key"] == "user:u1"
+    assert params["@procedure_kind"] == "recovery_strategy"
     assert "@status" not in params
 
 

@@ -7,9 +7,18 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory.logging import get_logger
 
+from ._authz import authorize_scope_write, resolve_read_scopes, resolve_scope_access
 from ._base import _BaseMemoryClient
 from ._base.base_client import is_transient_tail_step_error
 from ._container_routing import container_key_for_type
+from ._partitioning import (
+    USER_SUMMARY_THREAD_ID,
+    ensure_scope_fields,
+    private_scope_key_for_principal,
+    tenant_scope,
+    user_id_from_principal,
+)
+from ._security import SecurityContext
 from ._utils import (
     _build_container_kwargs,
     _container_policies,
@@ -36,6 +45,131 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from .processors import ProcessThreadResult, UserSummaryResult  # noqa: F401
 
 logger = get_logger(__name__)
+
+
+class _BoundCosmosMemoryClient:
+    """Lightweight scope-bound sync client view."""
+
+    def __init__(
+        self,
+        client: "CosmosMemoryClient",
+        ctx: SecurityContext,
+        *,
+        write_scope: str | None = None,
+        read_scopes: list[str] | None = None,
+        project_scope: str | None = None,
+    ) -> None:
+        self._client = client
+        self.ctx = ctx
+        self.write_scope = write_scope or private_scope_key_for_principal(ctx.principal)
+        # When read_scopes are not given, auto-resolve the caller's entitled scopes from
+        # the trusted context (own + agent + project + org + teams), capped. The LLM never
+        # declares scopes - the adapter does. (Docs/shared-memory-design.md §4.10d)
+        self.read_scopes = (
+            list(read_scopes) if read_scopes is not None else resolve_read_scopes(ctx, project_scope=project_scope)
+        )
+        principal = ctx.principal
+        # user_id is only meaningful for delegated ``user:`` principals. App-only
+        # ``agent:`` principals own an ``agent:<id>`` scope (already reflected in
+        # write_scope), so derive the id portion directly rather than through the
+        # user-only helper, which rejects non-user principals.
+        self.user_id = (
+            user_id_from_principal(principal)
+            if principal and principal.startswith("user:")
+            else (principal.split(":", 1)[1] if principal and ":" in principal else "")
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        # Establish the caller's tenant for any client method not explicitly wrapped
+        # above - notably the user-scoped getters (get_thread_summary, get_episodes,
+        # ...) whose reads resolve tenant via the request-scoped ContextVar - so a
+        # bound session operates entirely within ``ctx.tenant_id``.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        attr = getattr(self._client, name)
+        if not callable(attr):
+            return attr
+
+        def _tenant_bound(*args: Any, **kwargs: Any) -> Any:
+            with tenant_scope(self.ctx.tenant_id):
+                return attr(*args, **kwargs)
+
+        return _tenant_bound
+
+    def upsert_memory(self, *args: Any, **kwargs: Any) -> str:
+        kwargs.setdefault("user_id", self.user_id)
+        kwargs.setdefault("tenant_id", self.ctx.tenant_id)
+        kwargs.setdefault("scope_key", self.write_scope)
+        kwargs.setdefault("ctx", self.ctx)
+        if self.ctx.agent_id:
+            kwargs.setdefault("agent_id", self.ctx.agent_id)
+        return self._client.upsert_memory(*args, **kwargs)
+
+    def add_local(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("user_id", self.user_id)
+        # Authorize the buffered write at entry: add_local stamps ``self.write_scope`` and
+        # appends to the shared client buffer, which push_to_cosmos later flushes with no
+        # context. Gating here (not just at push) keeps an unauthorized scope from ever
+        # entering the buffer, closing the buffer-flush bypass regardless of which
+        # push_to_cosmos drains it.
+        authorize_scope_write(self.ctx, self.write_scope, self.user_id)
+        self._client.add_local(*args, **kwargs)
+        if self._client.local_memory:
+            record = self._client.local_memory[-1]
+            record.pop("acl", None)
+            ensure_scope_fields(
+                record,
+                tenant_id=self.ctx.tenant_id,
+                scope_key=self.write_scope,
+                principal=self.ctx.principal,
+                agent_id=self.ctx.agent_id,
+            )
+            if self.ctx.agent_id:
+                record.setdefault("provenance", {}).setdefault("agent_id", self.ctx.agent_id)
+
+    def search_cosmos(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        kwargs.setdefault("tenant_id", self.ctx.tenant_id)
+        kwargs.setdefault("scopes", self.read_scopes)
+        kwargs.setdefault("ctx", self.ctx)
+        kwargs.setdefault("user_id", None)
+        return self._client.search_cosmos(*args, **kwargs)
+
+    def put_shared_record(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("ctx", self.ctx)
+        kwargs.setdefault("scope_key", self.write_scope)
+        return self._client.put_shared_record(*args, **kwargs)
+
+    def get_shared_record(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("ctx", self.ctx)
+        kwargs.setdefault("scope_key", self.write_scope)
+        return self._client.get_shared_record(*args, **kwargs)
+
+    def compare_and_swap_shared_record(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("ctx", self.ctx)
+        kwargs.setdefault("scope_key", self.write_scope)
+        return self._client.compare_and_swap_shared_record(*args, **kwargs)
+
+    def update_shared_record(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("ctx", self.ctx)
+        kwargs.setdefault("scope_key", self.write_scope)
+        return self._client.update_shared_record(*args, **kwargs)
+
+    def pin_memory(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("ctx", self.ctx)
+        return self._client.pin_memory(*args, **kwargs)
+
+    def unpin_memory(self, *args: Any, **kwargs: Any) -> bool:
+        kwargs.setdefault("ctx", self.ctx)
+        return self._client.unpin_memory(*args, **kwargs)
+
+    def list_pins(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        kwargs.setdefault("ctx", self.ctx)
+        return self._client.list_pins(*args, **kwargs)
+
+    def reconcile(self, *args: Any, **kwargs: Any) -> dict[str, int]:
+        kwargs.setdefault("ctx", self.ctx)
+        kwargs.setdefault("scope_key", self.write_scope)
+        return self._client.reconcile(*args, **kwargs)
 
 
 class CosmosMemoryClient(_BaseMemoryClient):
@@ -280,7 +414,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 user_agent=self._cosmos_user_agent,
             )
             db = client.create_database_if_not_exists(id=self._cosmos_database)
-            partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
+            partition_key = PartitionKey(path=["/tenant_id", "/scope_key", "/thread_id"], kind="MultiHash")
             offer = _cosmos_container_offer_throughput(
                 throughput_mode=self._cosmos_throughput_mode,
                 autoscale_max_ru=self._cosmos_autoscale_max_ru,
@@ -371,25 +505,32 @@ class CosmosMemoryClient(_BaseMemoryClient):
         logger.info("Created memory store %s/%s", self._cosmos_database, self._cosmos_container)
 
     def validate_topology(self) -> None:
-        """Verify all three Cosmos containers exist and are reachable.
+        """Verify the Cosmos containers exist, are reachable, and use the expected key.
 
-        Reads container metadata for memories / memories_turns / memories_summaries.
-        Raises ``RuntimeError`` on the first failure with a clear message
-        instructing the customer to redeploy the infrastructure.
+        Reads metadata for memories / memories_turns / memories_summaries and the counter
+        container, and checks each partition key is exactly the hierarchical
+        ``[/tenant_id, /scope_key, /thread_id]``. Raises ``RuntimeError`` on the first
+        failure with a clear message instructing the customer to redeploy the
+        infrastructure.
 
-        Call this after ``connect_cosmos`` or ``create_memory_store`` to
-        diagnose topology mismatches before any data is written.
+        Call this after ``connect_cosmos`` or ``create_memory_store`` to diagnose topology
+        mismatches before any data is written.
         """
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         if self._memories_container_client is None:
             raise RuntimeError("validate_topology: Cosmos client is not connected; call connect_cosmos() first")
-        for key, client in self._containers.items():
+        expected_pk_paths = ["/tenant_id", "/scope_key", "/thread_id"]
+        checks: list[tuple[str, Any]] = [(key.value, client) for key, client in self._containers.items()]
+        counter_client = self._get_counter_container()
+        if counter_client is not None:
+            checks.append((self._cosmos_counter_container, counter_client))
+        for label, client in checks:
             if client is None:
-                raise RuntimeError(f"validate_topology: container for {key.value!r} is not connected")
-            container_id = getattr(client, "id", key.value)
+                raise RuntimeError(f"validate_topology: container for {label!r} is not connected")
+            container_id = getattr(client, "id", label)
             try:
-                client.read()
+                props = client.read()
             except CosmosResourceNotFoundError as exc:
                 raise RuntimeError(
                     f"validate_topology: container {container_id!r} does not exist; "
@@ -399,6 +540,18 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 raise RuntimeError(
                     f"validate_topology: cannot read container {container_id!r}: {type(exc).__name__}: {exc}"
                 ) from exc
+            # Only real container metadata (a dict) carries a partition key; test doubles
+            # that return a non-dict are skipped. When metadata is present the key must be
+            # exactly the hierarchical key - an empty/missing or 2-level key is rejected.
+            if isinstance(props, dict):
+                actual_pk_paths = list((props.get("partitionKey") or {}).get("paths") or [])
+                if actual_pk_paths != expected_pk_paths:
+                    raise RuntimeError(
+                        f"validate_topology: container {container_id!r} has partition key "
+                        f"{actual_pk_paths or 'none'} but this SDK requires {expected_pk_paths}. The partition key "
+                        f"is immutable in Cosmos; redeploy the container with the current hierarchical key "
+                        f"(tenant_id, scope_key, thread_id)"
+                    )
 
     def _build_store(self) -> MemoryStore:
         return MemoryStore(
@@ -518,6 +671,155 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Return the Cosmos container client that owns ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
 
+    def session(
+        self,
+        ctx: SecurityContext,
+        write_scope: str | None = None,
+        read_scopes: list[str] | None = None,
+        project_scope: str | None = None,
+    ) -> _BoundCosmosMemoryClient:
+        """Return a view bound to a trusted security context and scope set.
+
+        When ``read_scopes`` is omitted it is auto-resolved from ``ctx`` (own + agent +
+        optional ``project_scope`` + org + teams, capped at ``MAX_READ_SCOPES``).
+        """
+        return _BoundCosmosMemoryClient(
+            self, ctx, write_scope=write_scope, read_scopes=read_scopes, project_scope=project_scope
+        )
+
+    def put_shared_record(
+        self,
+        *,
+        ctx: SecurityContext,
+        scope_key: str,
+        key: str,
+        content: str = "",
+        data: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        read_only: bool = False,
+        created_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or replace a small live shared coordination record."""
+        return self._get_store().put_shared_record(
+            ctx=ctx,
+            scope_key=scope_key,
+            key=key,
+            content=content,
+            data=data,
+            metadata=metadata,
+            read_only=read_only,
+            created_by=created_by,
+        )
+
+    def get_shared_record(self, *, ctx: SecurityContext, scope_key: str, key: str) -> dict[str, Any]:
+        """Read a live shared coordination record using read authorization."""
+        return self._get_store().get_shared_record(ctx=ctx, scope_key=scope_key, key=key)
+
+    def compare_and_swap_shared_record(
+        self,
+        *,
+        ctx: SecurityContext,
+        scope_key: str,
+        key: str,
+        record: dict[str, Any],
+        etag: str,
+    ) -> dict[str, Any]:
+        """Replace a shared record only if the supplied Cosmos ETag still matches."""
+        return self._get_store().compare_and_swap_shared_record(
+            ctx=ctx, scope_key=scope_key, key=key, record=record, etag=etag
+        )
+
+    def update_shared_record(
+        self,
+        *,
+        ctx: SecurityContext,
+        scope_key: str,
+        key: str,
+        mutator: Any,
+        max_retries: int = 3,
+    ) -> dict[str, Any]:
+        """Apply ``mutator`` with ETag compare-and-swap retry semantics."""
+        return self._get_store().update_shared_record(
+            ctx=ctx, scope_key=scope_key, key=key, mutator=mutator, max_retries=max_retries
+        )
+
+    def pin_memory(
+        self,
+        agent_id: str,
+        resource: str,
+        injection_mode: str = "summary",
+        priority: int = 50,
+        ctx: SecurityContext | None = None,
+        resource_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind a memory id or scope key to an agent for selective injection."""
+        return self._get_store().pin_memory(
+            agent_id,
+            resource,
+            injection_mode=injection_mode,
+            priority=priority,
+            ctx=ctx,
+            resource_type=resource_type,
+        )
+
+    def unpin_memory(
+        self, agent_id: str, resource: str, ctx: SecurityContext | None = None, resource_type: str | None = None
+    ) -> bool:
+        """Remove a selective-injection pin for an agent/resource binding."""
+        return self._get_store().unpin_memory(agent_id, resource, ctx=ctx, resource_type=resource_type)
+
+    def list_pins(self, agent_id: str, ctx: SecurityContext | None = None) -> list[dict[str, Any]]:
+        """List selective-injection pins for an agent, highest priority first."""
+        return self._get_store().list_pins(agent_id, ctx=ctx)
+
+    def promote(self, memory_id: str, from_scope: str, to_scope: str, ctx: SecurityContext) -> dict[str, Any]:
+        """Copy a memory into a target scope, gated by share/assign on that scope."""
+        return self._get_store().promote(memory_id, from_scope, to_scope, ctx)
+
+    def list_promotion_candidates(
+        self,
+        ctx: SecurityContext,
+        *,
+        from_scope: str | None = None,
+        min_confidence: float | None = None,
+        top: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List private hinted records awaiting manual promotion review."""
+        return self._get_store().list_promotion_candidates(
+            ctx, from_scope=from_scope, min_confidence=min_confidence, top=top
+        )
+
+    def approve_promotion(
+        self,
+        memory_id: str,
+        *,
+        from_scope: str,
+        to_scope: str,
+        ctx: SecurityContext,
+    ) -> dict[str, Any]:
+        """Approve one promotion candidate into ``to_scope``."""
+        return self._get_store().approve_promotion(memory_id, from_scope=from_scope, to_scope=to_scope, ctx=ctx)
+
+    def auto_promote_candidates(
+        self,
+        ctx: SecurityContext,
+        *,
+        target_scopes_by_type: dict[str, str],
+        confidence_threshold: float = 0.95,
+        allow_memory_types: set[str] | None = None,
+        from_scope: str | None = None,
+        top: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Auto-promote eligible hinted records when policy guards pass."""
+        return self._get_store().auto_promote_candidates(
+            ctx,
+            target_scopes_by_type=target_scopes_by_type,
+            confidence_threshold=confidence_threshold,
+            allow_memory_types=allow_memory_types,
+            from_scope=from_scope,
+            top=top,
+        )
+
     def upsert_memory(
         self,
         user_id: str,
@@ -532,6 +834,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
         embedding: Optional[list[float]] = None,
         embed: Optional[bool] = None,
         created_at: Optional[str | datetime] = None,
+        tenant_id: Optional[str] = None,
+        scope_key: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        ctx: Optional[SecurityContext] = None,
     ) -> str:
         """Add a memory directly to Cosmos DB, bypassing the local buffer.
 
@@ -542,6 +848,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
         ``FACT_EXTRACTION_EVERY_N`` / ``THREAD_SUMMARY_EVERY_N`` /
         ``USER_SUMMARY_EVERY_N`` / ``DEDUP_EVERY_N`` knobs apply uniformly
         whether the caller uses the buffer or writes through directly.
+
+        ``agent_id`` is stamped on the record as provenance (which agent wrote it);
+        it does not affect scope/placement. When ``scope_key`` targets a scope other
+        than the caller's own ``user:<user_id>`` scope, ``ctx`` is required and must
+        hold write permission for that scope (bound sessions supply it automatically).
         """
         if memory_type == "turn" and not thread_id:
             raise ValidationError(
@@ -561,10 +872,15 @@ class CosmosMemoryClient(_BaseMemoryClient):
             embedding,
             embed,
             created_at,
+            tenant_id,
+            scope_key,
+            agent_id,
+            ctx=ctx,
         )
         if memory_type == "turn" and thread_id:
             try:
-                self._maybe_auto_trigger({(user_id, thread_id): 1})
+                with tenant_scope(tenant_id):
+                    self._maybe_auto_trigger({(user_id, thread_id): 1})
             except Exception as exc:
                 logger.warning("Auto-trigger after upsert_memory failed: %s", exc)
         return memory_id
@@ -686,7 +1002,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             self.delete_memory(
                 f"user_summary_{user_id}",
                 user_id=user_id,
-                thread_id="__user_summary__",
+                thread_id=USER_SUMMARY_THREAD_ID,
                 memory_type="user_summary",
             )
             return True
@@ -746,6 +1062,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
         turn_top_k: Optional[int] = None,
         include_summaries: bool = False,
         summary_top_k: Optional[int] = None,
+        tenant_id: Optional[str] = None,
+        scopes: Optional[list[str]] = None,
+        ctx: Optional[SecurityContext] = None,
+        agent_id: Optional[str] = None,
+        include_pins: bool = False,
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity, with optional retrieval blending.
 
@@ -774,38 +1095,65 @@ class CosmosMemoryClient(_BaseMemoryClient):
         if include_episodes:
             base_memory_types = [*base_memory_types, "episodic"]
         base_memory_types = base_memory_types or ["fact"]
-        base = store.search(
-            search_terms=search_terms,
-            memory_id=memory_id,
-            user_id=user_id,
-            role=role,
-            memory_types=base_memory_types,
-            thread_id=thread_id,
-            top_k=top_k,
-            tags_all=tags_all,
-            tags_any=tags_any,
-            exclude_tags=exclude_tags,
-            include_superseded=include_superseded,
-            min_salience=min_salience,
-            min_confidence=min_confidence,
-            created_after=created_after,
-            created_before=created_before,
-        )
+        search_kwargs = {
+            "search_terms": search_terms,
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "role": role,
+            "memory_types": base_memory_types,
+            "thread_id": thread_id,
+            "top_k": top_k,
+            "tags_all": tags_all,
+            "tags_any": tags_any,
+            "exclude_tags": exclude_tags,
+            "include_superseded": include_superseded,
+            "min_salience": min_salience,
+            "min_confidence": min_confidence,
+            "created_after": created_after,
+            "created_before": created_before,
+        }
+        if tenant_id is not None:
+            search_kwargs["tenant_id"] = tenant_id
+        if scopes is not None:
+            search_kwargs["scopes"] = scopes
+        if ctx is not None:
+            search_kwargs["ctx"] = ctx
 
-        if not user_id:
-            return base
+        pinned: list[dict[str, Any]] = []
+        if include_pins and agent_id and ctx is not None:
+            pinned = store.resolve_pinned_memories(
+                agent_id=agent_id,
+                ctx=ctx,
+                memory_types=base_memory_types,
+                top_k=top_k,
+                include_superseded=include_superseded,
+            )
+        remaining_top_k = top_k - len(pinned)
+        base = [] if remaining_top_k <= 0 else store.search(**{**search_kwargs, "top_k": remaining_top_k})
 
         results: list[dict[str, Any]] = []
         seen_content: set[str] = set()
+        seen_ids: set[str] = set()
 
         def _extend(docs: list[dict[str, Any]]) -> None:
             for doc in docs:
+                doc_id = str(doc.get("id") or "").strip()
                 content = str(doc.get("content") or "").strip()
-                if content and content not in seen_content:
+                if doc_id and doc_id in seen_ids:
+                    continue
+                if content and content in seen_content:
+                    continue
+                if doc_id:
+                    seen_ids.add(doc_id)
+                if content:
                     seen_content.add(content)
-                    results.append(doc)
+                results.append(doc)
 
+        _extend(pinned)
         _extend(base)
+
+        if not user_id and not scopes and not pinned:
+            return base
 
         if include_summaries:
             try:
@@ -815,6 +1163,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     thread_id=thread_id,
                     top_k=summary_top_k if summary_top_k is not None else top_k,
                     exclude_tags=exclude_tags,
+                    tenant_id=tenant_id,
+                    scopes=scopes,
+                    ctx=ctx,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
@@ -834,6 +1185,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     exclude_tags=exclude_tags,
                     created_after=created_after,
                     created_before=created_before,
+                    tenant_id=tenant_id,
+                    scopes=scopes,
+                    ctx=ctx,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
@@ -1063,8 +1417,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         search_terms: str,
         top_k: int = 5,
         *,
-        scope_type: Optional[str] = None,
-        scope_value: Optional[str] = None,
         procedure_kind: Optional[str] = None,
         status: Optional[str] = "active",
         include_superseded: bool = False,
@@ -1072,15 +1424,13 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Context-aware semantic retrieval of a user's procedures.
 
         Ranks active procedures by relevance to ``search_terms`` (a task or
-        situation), optionally narrowed by scope or kind. Pass ``status=None`` to
-        include non-active (e.g. candidate) procedures.
+        situation), optionally narrowed by ``procedure_kind``. Pass ``status=None``
+        to include non-active (e.g. candidate) procedures.
         """
         return self._get_store().retrieve_procedures(
             user_id=user_id,
             search_terms=search_terms,
             top_k=top_k,
-            scope_type=scope_type,
-            scope_value=scope_value,
             procedure_kind=procedure_kind,
             status=status,
             include_superseded=include_superseded,
@@ -1112,9 +1462,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
         user_id: str,
         thread_id: str,
         recent_k: Optional[int] = None,
+        *,
+        tenant_id: Optional[str] = None,
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread."""
-        return self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
+        with tenant_scope(tenant_id):
+            return self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
 
     def extract_episodes(
         self,
@@ -1122,6 +1475,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         thread_id: str,
         *,
         flush: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> dict[str, int]:
         """Segment the thread's open turn stream into episodes at detected boundaries.
 
@@ -1144,7 +1498,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 "Episode extraction runs in-process; manual invocation via the SDK is not "
                 "supported when the Durable Function app is the active processor."
             )
-        return self._get_pipeline().extract_episodes(user_id, thread_id, flush=flush)
+        with tenant_scope(tenant_id):
+            return self._get_pipeline().extract_episodes(user_id, thread_id, flush=flush)
 
     def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:
         processor = self._get_processor()
@@ -1162,26 +1517,66 @@ class CosmosMemoryClient(_BaseMemoryClient):
         user_id: str,
         thread_id: str,
         recent_k: Optional[int] = None,
+        *,
+        tenant_id: Optional[str] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Generate a thread summary."""
-        return self._get_pipeline().generate_thread_summary(user_id, thread_id, recent_k)
+        with tenant_scope(tenant_id):
+            return self._get_pipeline().generate_thread_summary(user_id, thread_id, recent_k)
 
     def generate_user_summary(
         self,
         user_id: str,
         thread_ids: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
+        *,
+        tenant_id: Optional[str] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Generate a cross-thread user summary."""
-        return self._get_pipeline().generate_user_summary(user_id, thread_ids, recent_k)
+        with tenant_scope(tenant_id):
+            return self._get_pipeline().generate_user_summary(user_id, thread_ids, recent_k)
 
-    def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
-        """Reconcile a user's facts via the contradiction-aware dedup pass."""
+    def reconcile(
+        self,
+        user_id: str | None = None,
+        n: Optional[int] = None,
+        *,
+        scope_key: str | None = None,
+        tenant_id: str | None = None,
+        ctx: SecurityContext | None = None,
+    ) -> dict[str, int]:
+        """Reconcile facts in a user's private scope or an authorized shared scope."""
         from .thresholds import get_dedup_pool_size
 
-        return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
+        if scope_key is None and ctx is None and tenant_id is None:
+            if not user_id:
+                raise ValidationError("user_id is required")
+            return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
+
+        if ctx is None:
+            if not user_id:
+                raise ValidationError("ctx or user_id is required for scoped reconcile")
+            ctx = SecurityContext.from_user_id(user_id)
+        if tenant_id is not None and tenant_id != ctx.tenant_id:
+            raise ValidationError(
+                "tenant_id cannot override the SecurityContext tenant; the tenant is the hard "
+                "isolation boundary set by the trusted host, not a request parameter"
+            )
+        scope_key = scope_key or private_scope_key_for_principal(ctx.principal)
+        resolution = resolve_scope_access(ctx, [scope_key], "write")
+        if scope_key not in resolution.allowed_scopes:
+            raise ValidationError(f"write permission denied for scope_key={scope_key!r}")
+        reconcile_user_id = user_id or (
+            ctx.principal.split(":", 1)[1] if ctx.principal and ":" in ctx.principal else ""
+        )
+        return self._get_pipeline().reconcile_memories(
+            reconcile_user_id,
+            n if n is not None else get_dedup_pool_size(),
+            tenant_id=ctx.tenant_id,
+            scope_key=scope_key,
+        )
 
     def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         """Force the processor to run the full pipeline RIGHT NOW for one thread.

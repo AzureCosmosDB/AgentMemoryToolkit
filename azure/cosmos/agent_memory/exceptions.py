@@ -78,6 +78,12 @@ class MemoryConflictError(AgentMemoryError):
     error_code = "memory_conflict"
 
 
+class SharedRecordReadOnlyError(AgentMemoryError):
+    """Raised when a read-only shared coordination record is mutated."""
+
+    error_code = "shared_record_read_only"
+
+
 class MemoryNotFoundError(AgentMemoryError):
     """Raised when a memory document is not found.
 

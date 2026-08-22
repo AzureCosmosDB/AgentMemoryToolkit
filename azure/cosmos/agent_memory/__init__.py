@@ -1,5 +1,14 @@
 """Agent Memory Toolkit – local and cloud agent memory management."""
 
+from azure.cosmos.agent_memory._authz import (
+    AuthzQueryPredicate,
+    AuthzResolution,
+    ScopeAccessDecision,
+    caller_subjects,
+    can,
+    resolve_scope_access,
+)
+from azure.cosmos.agent_memory._security import SecurityContext
 from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 from azure.cosmos.agent_memory.chat import ChatClient
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
@@ -12,9 +21,19 @@ from azure.cosmos.agent_memory.exceptions import (
     MemoryConflictError,
     MemoryNotFoundError,
     MemoryTypeMismatchError,
+    SharedRecordReadOnlyError,
     ValidationError,
 )
-from azure.cosmos.agent_memory.models import MemoryRecord, MemoryRole, MemoryType, SearchResult
+from azure.cosmos.agent_memory.models import (
+    MemoryAcl,
+    MemoryCurationStatus,
+    MemoryProvenance,
+    MemoryRecord,
+    MemoryRole,
+    MemoryScopeType,
+    MemoryType,
+    SearchResult,
+)
 from azure.cosmos.agent_memory.processors import (
     DurableFunctionProcessor,
     InProcessProcessor,
@@ -48,10 +67,21 @@ __all__ = [
     "CosmosMemoryClient",
     "AsyncCosmosMemoryClient",
     "ChatClient",
+    "MemoryCurationStatus",
+    "MemoryAcl",
+    "MemoryProvenance",
     "MemoryRecord",
     "MemoryRole",
+    "MemoryScopeType",
     "MemoryType",
     "SearchResult",
+    "SecurityContext",
+    "AuthzQueryPredicate",
+    "AuthzResolution",
+    "ScopeAccessDecision",
+    "caller_subjects",
+    "can",
+    "resolve_scope_access",
     "MemoryProcessor",
     "InProcessProcessor",
     "DurableFunctionProcessor",
@@ -64,6 +94,7 @@ __all__ = [
     "LLMError",
     "MemoryConflictError",
     "MemoryNotFoundError",
+    "SharedRecordReadOnlyError",
     "MemoryTypeMismatchError",
     "ValidationError",
     "DEFAULT_EPISODE_EVAL_EVERY_N",

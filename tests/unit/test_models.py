@@ -27,7 +27,6 @@ from azure.cosmos.agent_memory.models import (
     OrchestrationResult,
     ProceduralRecord,
     ProcedureKind,
-    ProcedureScopeType,
     ProcedureSourceKind,
     ProcedureStatus,
     ProcedureStep,
@@ -183,7 +182,7 @@ class TestTurnRecord:
         assert rec.memory_type == "turn"
         assert rec.metadata == {}
         assert rec.embedding is None
-        assert rec.agent_id is None
+        assert rec.provenance.agent_id is None
         assert rec.updated_at is None
         assert rec.salience is None
         assert rec.confidence is None
@@ -208,6 +207,7 @@ class TestTurnRecord:
         rec = TurnRecord(user_id="u", role="user", content="c")
         d = rec.to_doc()
         assert "embedding" not in d
+        assert d["provenance"] == {}
         assert "agent_id" not in d
         assert "updated_at" not in d
         assert "salience" not in d
@@ -463,8 +463,7 @@ class TestProceduralRecord:
         rec = ProceduralRecord(
             **_procedural_kwargs(
                 procedure_kind=ProcedureKind.tool_usage,
-                scope_type=ProcedureScopeType.project,
-                scope_value="agent-memory-toolkit",
+                scope_type="project",
                 status=ProcedureStatus.active,
                 source_kind=ProcedureSourceKind.explicit_user_instruction,
                 source_turn_ids=["turn-1"],
@@ -577,7 +576,7 @@ class TestContentHashFormat:
 class TestPromptVersionFormat:
     def test_valid(self):
         rec = FactRecord(**_fact_kwargs(prompt_version="v1.2.3"))
-        assert rec.prompt_version == "v1.2.3"
+        assert rec.provenance.prompt_version == "v1.2.3"
 
     def test_rejects_whitespace(self):
         with pytest.raises(pydantic.ValidationError, match="prompt_version"):
@@ -616,7 +615,7 @@ class TestSupersession:
             )
         )
         assert rec.supersedes_ids == ["old1"]
-        assert rec.source_memory_ids == ["src1"]
+        assert rec.provenance.source_ids == ["src1"]
 
 
 # ---------------------------------------------------------------------------
@@ -678,12 +677,6 @@ class TestRoundTrip:
         restored = MemoryRecord.from_doc(doc)
         assert isinstance(restored, FactRecord)
         assert restored.id == original.id
-
-    def test_from_cosmos_dict_alias_back_compat(self):
-        original = FactRecord(**_fact_kwargs())
-        doc = original.to_cosmos_dict()
-        restored = MemoryRecord.from_cosmos_dict(doc)
-        assert isinstance(restored, FactRecord)
 
 
 # ---------------------------------------------------------------------------
@@ -793,5 +786,5 @@ def test_orchestration_result():
 
 
 def test_memory_type_enum_values():
-    expected = {"turn", "thread_summary", "user_summary", "fact", "episodic", "procedural"}
+    expected = {"turn", "thread_summary", "user_summary", "fact", "episodic", "procedural", "shared_state"}
     assert {m.value for m in MemoryType} == expected

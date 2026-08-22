@@ -19,11 +19,15 @@ class _ProceduralStore(_Store):
     def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
         del partition_key, cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
-        user_id = params.get("@uid", params.get("@user_id"))
+        scope_key = params.get("@scope_key")
         memory_type = params.get("@type", params.get("@memory_type"))
         docs = [dict(doc) for doc in self.docs]
-        if user_id is not None:
-            docs = [doc for doc in docs if doc.get("user_id") == user_id]
+        if scope_key is not None:
+            docs = [
+                doc
+                for doc in docs
+                if (doc.get("scope_key") or (f"user:{doc.get('user_id')}" if doc.get("user_id") else None)) == scope_key
+            ]
         if memory_type is not None:
             docs = [doc for doc in docs if doc.get("type") == memory_type]
         if "c.status='active'" in sql:

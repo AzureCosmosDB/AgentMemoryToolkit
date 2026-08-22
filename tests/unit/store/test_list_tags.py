@@ -43,7 +43,8 @@ def test_list_tags_flattens_dedupes_sorts_and_hides_sys_tags():
     summaries.query_items.assert_not_called()
     kwargs = memories.query_items.call_args.kwargs
     assert kwargs["query"] == (
-        "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+        "SELECT VALUE c.tags FROM c WHERE c.tenant_id = @tenant_id AND c.scope_key = @scope_key "
+        "AND ARRAY_LENGTH(c.tags) > 0"
         " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
     )
     assert kwargs["enable_cross_partition_query"] is True
@@ -73,7 +74,7 @@ def test_list_tags_thread_id_scopes_to_partition():
 
     kwargs = memories.query_items.call_args.kwargs
     assert "AND c.thread_id = @thread_id" in kwargs["query"]
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "user:u1", "t1"]
     assert "enable_cross_partition_query" not in kwargs
     turns.query_items.assert_not_called()
     summaries.query_items.assert_not_called()
@@ -95,7 +96,8 @@ async def test_async_list_tags_flattens_dedupes_sorts_and_hides_sys_tags():
     summaries.query_items.assert_not_called()
     kwargs = memories.query_items.call_args.kwargs
     assert kwargs["query"] == (
-        "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
+        "SELECT VALUE c.tags FROM c WHERE c.tenant_id = @tenant_id AND c.scope_key = @scope_key "
+        "AND ARRAY_LENGTH(c.tags) > 0"
         " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
     )
     assert "enable_cross_partition_query" not in kwargs
@@ -128,7 +130,7 @@ async def test_async_list_tags_thread_id_scopes_to_partition():
 
     kwargs = memories.query_items.call_args.kwargs
     assert "AND c.thread_id = @thread_id" in kwargs["query"]
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "user:u1", "t1"]
     assert "enable_cross_partition_query" not in kwargs
     turns.query_items.assert_not_called()
     summaries.query_items.assert_not_called()

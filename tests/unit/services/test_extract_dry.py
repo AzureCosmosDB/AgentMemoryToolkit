@@ -69,8 +69,13 @@ class _Store:
         del partition_key, cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
         docs = [dict(doc) for doc in self.docs]
-        if "@user_id" in params:
-            docs = [doc for doc in docs if doc.get("user_id") == params["@user_id"]]
+        if "@scope_key" in params:
+            docs = [
+                doc
+                for doc in docs
+                if (doc.get("scope_key") or (f"user:{doc.get('user_id')}" if doc.get("user_id") else None))
+                == params["@scope_key"]
+            ]
         if "@thread_id" in params:
             docs = [doc for doc in docs if doc.get("thread_id") == params["@thread_id"]]
         if "c.type IN" in sql:
@@ -286,7 +291,7 @@ def test_build_episode_docs_builds_new_episode_shape_without_embeddings() -> Non
     assert doc["source_turn_ids"] == ["turn-1", "turn-2"]
     assert doc["events"][0]["source_turn_ids"] == ["turn-1"]
     assert doc["outcome"]["status"] == "successful"
-    assert doc["prompt_id"] == "extract_episode.prompty"
+    assert doc["provenance"]["prompt_id"] == "extract_episode.prompty"
     assert "embedding" not in doc
     assert embeddings.calls == []
 

@@ -176,7 +176,8 @@ def test_make_memory_content_hash_not_included_when_none():
 
 def test_make_memory_required_fields():
     m = _make_memory(user_id="u1", role="user", content="test")
-    assert m["user_id"] == "u1"
+    assert m["scope_key"] == "user:u1"
+    assert "user_id" not in m
     assert m["role"] == "user"
     assert m["content"] == "test"
     assert m["type"] == "turn"

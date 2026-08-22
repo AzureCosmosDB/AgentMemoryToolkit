@@ -41,6 +41,15 @@ For every episode, produce all of these fields:
 - Preserve exact names, dates, products, files, commands, locations, and counts.
 - The agent can be the actor in an episode when it completed a task, made a booking, changed code, or otherwise did something concrete for the user.
 
+## Scope Hint - `suggested_scope_type` and `scope_confidence`
+
+Each episode carries an advisory **`suggested_scope_type`** (one of `user`, `agent`, `team`,
+`project`, `org`, `global`) plus a **`scope_confidence`** in `[0.0, 1.0]`. Default to **`user`**
+(a personal experience) with high confidence; choose a shared type only when the episode is clearly
+useful to others - e.g. a team operational incident (`team`), a project/codebase event (`project`),
+or agent behavior (`agent`). This is advisory only: it never changes where the memory is stored and
+must never infer any tenant/organization identity.
+
 ## Worked Examples
 
 ### Example 1: Task with outcome
@@ -79,7 +88,9 @@ For every episode, produce all of these fields:
       },
       "lessons": ["After renaming a client class, update tests and mocks that patch the old class name."],
       "salience": 0.78,
-      "confidence": 0.96
+      "confidence": 0.96,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9
     }
   ]
 }
@@ -118,7 +129,9 @@ For every episode, produce all of these fields:
       "outcome": null,
       "lessons": [],
       "salience": 0.64,
-      "confidence": 0.92
+      "confidence": 0.92,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9
     }
   ]
 }

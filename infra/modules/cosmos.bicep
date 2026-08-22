@@ -92,7 +92,8 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
         kind: 'MultiHash'
         version: 2
         paths: [
-          '/user_id'
+          '/tenant_id'
+          '/scope_key'
           '/thread_id'
         ]
       }
@@ -161,7 +162,8 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
         kind: 'MultiHash'
         version: 2
         paths: [
-          '/user_id'
+          '/tenant_id'
+          '/scope_key'
           '/thread_id'
         ]
       }
@@ -233,7 +235,8 @@ resource memoriesSummariesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDa
         kind: 'MultiHash'
         version: 2
         paths: [
-          '/user_id'
+          '/tenant_id'
+          '/scope_key'
           '/thread_id'
         ]
       }
@@ -303,7 +306,8 @@ resource counterContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
         kind: 'MultiHash'
         version: 2
         paths: [
-          '/user_id'
+          '/tenant_id'
+          '/scope_key'
           '/thread_id'
         ]
       }

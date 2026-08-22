@@ -44,7 +44,7 @@ def test_get_episodes_returns_user_episodes_newest_first() -> None:
     assert result == episodes
     kwargs = memories.query_items.call_args.kwargs
     assert "c.type = @type" in kwargs["query"]
-    assert "c.user_id = @user_id" in kwargs["query"]
+    assert "c.scope_key = @scope_key" in kwargs["query"]
     assert "ORDER BY c.created_at DESC" in kwargs["query"]
     assert kwargs["enable_cross_partition_query"] is True
 

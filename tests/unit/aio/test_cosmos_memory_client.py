@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._security import SecurityContext as _PinSecurityContext
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
@@ -181,7 +182,8 @@ class TestAddLocal:
 
         assert len(mem.local_memory) == 1
         m = mem.local_memory[0]
-        assert m["user_id"] == "u1"
+        assert m["scope_key"] == "user:u1"
+        assert "user_id" not in m
         assert m["role"] == "user"
         assert m["content"] == "hi"
         assert m["type"] == "turn"
@@ -200,7 +202,7 @@ class TestAddLocal:
         m = mem.local_memory[0]
         assert m["role"] == "agent"
         assert m["type"] == "thread_summary"
-        assert m["agent_id"] == "bot-1"
+        assert m["provenance"]["agent_id"] == "bot-1"
         assert m["metadata"] == {"k": "v"}
         assert m["thread_id"] == "t-custom"
 
@@ -340,6 +342,7 @@ class TestCreateMemoryStore:
                 mock_summaries_container,
                 mock_counter_container,
                 mock_lease_container,
+                MagicMock(),
             ]
         )
 
@@ -405,6 +408,7 @@ class TestCreateMemoryStore:
                 mock_summaries_container,
                 mock_counter_container,
                 mock_lease_container,
+                MagicMock(),
             ]
         )
 
@@ -456,6 +460,7 @@ class TestCreateMemoryStore:
                 mock_summaries_container,
                 mock_counter_container,
                 mock_lease_container,
+                MagicMock(),
             ]
         )
 
@@ -503,21 +508,40 @@ class TestRequireCosmos:
 class TestValidateTopology:
     async def test_validate_topology_succeeds_on_healthy_deploy(self):
         mem = _make_client()
+        healthy_pk = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
         memories = MagicMock(id="memories")
         turns = MagicMock(id="memories_turns")
         summaries = MagicMock(id="memories_summaries")
-        memories.read = AsyncMock()
-        turns.read = AsyncMock()
-        summaries.read = AsyncMock()
+        permissions = MagicMock(id="memories_permissions")
+        memories.read = AsyncMock(return_value=healthy_pk)
+        turns.read = AsyncMock(return_value=healthy_pk)
+        summaries.read = AsyncMock(return_value=healthy_pk)
+        permissions.read = AsyncMock(return_value=healthy_pk)
         mem._memories_container_client = memories
         mem._turns_container_client = turns
         mem._summaries_container_client = summaries
+        mem._permissions_container_client = permissions
 
         await mem.validate_topology()
 
         memories.read.assert_awaited_once()
         turns.read.assert_awaited_once()
         summaries.read.assert_awaited_once()
+
+    async def test_validate_topology_raises_on_partition_key_mismatch(self):
+        mem = _make_client()
+        stale_pk = {"partitionKey": {"paths": ["/user_id", "/thread_id"]}}
+        for attr in (
+            "_memories_container_client",
+            "_turns_container_client",
+            "_summaries_container_client",
+            "_permissions_container_client",
+        ):
+            setattr(mem, attr, MagicMock(id=attr))
+            getattr(mem, attr).read = AsyncMock(return_value=stale_pk)
+
+        with pytest.raises(RuntimeError, match="partition key"):
+            await mem.validate_topology()
 
     async def test_validate_topology_raises_on_missing_container(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -526,8 +550,10 @@ class TestValidateTopology:
         mem._memories_container_client = MagicMock(id="memories")
         mem._turns_container_client = MagicMock(id="memories_turns")
         mem._summaries_container_client = MagicMock(id="memories_summaries")
+        mem._permissions_container_client = MagicMock(id="memories_permissions")
         mem._memories_container_client.read = AsyncMock()
         mem._turns_container_client.read = AsyncMock()
+        mem._permissions_container_client.read = AsyncMock()
         mem._summaries_container_client.read = AsyncMock(side_effect=CosmosResourceNotFoundError(message="missing"))
 
         with pytest.raises(RuntimeError, match="memories_summaries"):
@@ -558,7 +584,8 @@ class TestAddCosmos:
         turns.upsert_item.assert_awaited_once()
         body = turns.upsert_item.call_args.kwargs["body"]
         assert body["content"] == "hello"
-        assert body["user_id"] == "u1"
+        assert body["scope_key"] == "user:u1"
+        assert "user_id" not in body
 
     async def test_upsert_memory_not_connected(self):
         mem = _make_client()
@@ -636,7 +663,7 @@ class TestGetMemories:
         results = await mem.get_memories(user_id="u1", role="user")
         assert len(results) == 1
         call_kwargs = container.query_items.call_args.kwargs
-        assert "@user_id" in str(call_kwargs["parameters"])
+        assert "@scope_key" in str(call_kwargs["parameters"])
 
     async def test_recent_k(self):
         mem, container = _connected_client()
@@ -685,7 +712,7 @@ class TestUpdateCosmos:
 
         await mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
-        container.read_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
+        container.read_item.assert_awaited_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
         container.replace_item.assert_awaited_once()
         body = container.replace_item.call_args.kwargs["body"]
         assert body["content"] == "updated"
@@ -725,7 +752,7 @@ class TestDeleteCosmos:
 
         await mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
-        container.delete_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
+        container.delete_item.assert_awaited_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
 
     async def test_not_found(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -751,7 +778,7 @@ class TestGetUserSummary:
 
         call_kwargs = summaries.read_item.call_args.kwargs
         assert call_kwargs["item"] == "user_summary_u1"
-        assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
+        assert call_kwargs["partition_key"] == ["default", "user:u1", "__user_summary__"]
         assert result == doc
 
     async def test_returns_none_when_absent(self):
@@ -982,7 +1009,10 @@ async def test_list_tags_delegates_to_store():
 
     kwargs = container.query_items.call_args.kwargs
     assert "SELECT VALUE c.tags" in kwargs["query"]
-    assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]
+    assert kwargs["parameters"] == [
+        {"name": "@tenant_id", "value": "default"},
+        {"name": "@scope_key", "value": "user:u1"},
+    ]
 
 
 class TestAsyncSearchCosmosUnifiedRetrieval:
@@ -1136,3 +1166,84 @@ class TestAsyncDeleteHelpers:
         mem = _make_client()
         with pytest.raises(ValidationError):
             await mem.delete_thread("", "t1")
+
+
+class TestAsyncSelectiveInjectionPins:
+    @pytest.mark.asyncio
+    async def test_pinned_memories_are_injected_before_similarity_hits_and_consume_budget(self):
+        mem, _ = _connected_client()
+        store = MagicMock()
+        store.resolve_pinned_memories = AsyncMock(
+            return_value=[
+                {"id": "high", "content": "high priority", "type": "fact", "pin_priority": 100},
+                {"id": "low", "content": "low priority", "type": "fact", "pin_priority": 10},
+            ]
+        )
+        store.search = AsyncMock(return_value=[{"id": "search", "content": "search hit", "type": "fact"}])
+        mem._get_store = MagicMock(return_value=store)
+        ctx = _PinSecurityContext(tenant_id="acme", principal="user:alice")
+
+        out = await mem.search_cosmos("q", scopes=["team:eng"], ctx=ctx, agent_id="planner", include_pins=True, top_k=3)
+
+        assert [doc["id"] for doc in out] == ["high", "low", "search"]
+        store.resolve_pinned_memories.assert_awaited_once_with(
+            agent_id="planner",
+            ctx=ctx,
+            memory_types=["fact"],
+            top_k=3,
+            include_superseded=False,
+        )
+        assert store.search.call_args.kwargs["top_k"] == 1
+
+
+async def test_reconcile_rejects_tenant_override():
+    """A caller-supplied tenant_id must never widen the async context tenant boundary."""
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
+    client._get_pipeline = MagicMock()
+    ctx = SecurityContext(tenant_id="tenant-a", principal="user:alice", roles=["org:victim:writer"])
+
+    with pytest.raises(ValidationError, match="tenant_id cannot override"):
+        await client.reconcile("alice", scope_key="org:victim", tenant_id="victim", ctx=ctx)
+
+    client._get_pipeline.assert_not_called()
+
+
+async def test_bound_add_local_refuses_unauthorized_write_scope_async():
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = _make_client()
+    mallory = SecurityContext(tenant_id="acme", principal="user:mallory")
+    bound = client.session(mallory, write_scope="team:secret")
+
+    with pytest.raises(ValidationError, match="write permission denied"):
+        bound.add_local(role="user", content="exfiltrate", memory_type="fact")
+    assert client.local_memory == []
+
+
+async def test_bound_add_local_agent_scope_is_readable_by_the_agent_async():
+    from azure.cosmos.agent_memory._authz import can
+    from azure.cosmos.agent_memory._security import SecurityContext
+
+    client = _make_client()
+    ctx = SecurityContext(tenant_id="acme", principal="agent:svc", agent_id="agent:svc")
+    bound = client.session(ctx)
+
+    bound.add_local(role="agent", content="operational note", memory_type="fact")
+    record = client.local_memory[-1]
+    assert record["scope_key"] == "agent:svc"
+    assert record["acl"]["read"] == ["agent:svc"]
+    assert can(ctx, record["acl"])
+
+
+async def test_bound_session_supports_agent_principal_async():
+    from azure.cosmos.agent_memory._security import SecurityContext
+
+    client = _make_client()
+    bound = client.session(SecurityContext(tenant_id="acme", principal="agent:svc"))
+    assert bound.write_scope == "agent:svc"
+    assert bound.user_id == "svc"

@@ -156,7 +156,7 @@ class TestThreadSummaryOrchestrator:
 
     @patch.object(ts_mod, "default_retry_options", return_value=MagicMock())
     def test_passes_user_and_thread_ids_to_each_activity(self, _retry):
-        ctx = _make_context({"user_id": "alice", "thread_id": "T-9"})
+        ctx = _make_context({"tenant_id": "acme", "user_id": "alice", "thread_id": "T-9"})
         gen = self._orchestrator()(ctx)
         _drive(gen, [{"id": "s"}, {}])
 
@@ -166,8 +166,9 @@ class TestThreadSummaryOrchestrator:
         summarize_payload = ctx._yielded_calls[0][2]
         persist_payload = ctx._yielded_calls[1][2]
 
-        assert summarize_payload == {"user_id": "alice", "thread_id": "T-9", "limit": 20}
+        assert summarize_payload == {"tenant_id": "acme", "user_id": "alice", "thread_id": "T-9", "limit": 20}
         assert persist_payload == {
+            "tenant_id": "acme",
             "user_id": "alice",
             "thread_id": "T-9",
             "summary": {"id": "s"},
@@ -241,6 +242,7 @@ class TestExtractMemoriesOrchestrator:
 
         assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Persist"]
         assert ctx._yielded_calls[1][2] == {
+            "tenant_id": None,
             "user_id": "u1",
             "extracted": {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
         }
@@ -267,11 +269,11 @@ class TestExtractMemoriesOrchestrator:
 
         names = [c[0] for c in ctx._yielded_calls]
         assert names == ["em_Extract", "em_Persist", "em_ReconcileMemories"]
-        assert ctx._yielded_calls[2][2] == {"user_id": "u1"}
+        assert ctx._yielded_calls[2][2] == {"tenant_id": None, "user_id": "u1"}
         assert [s[0] for s in ctx._yielded_sub_orchestrators] == [
             "SynthesizeProceduralOrchestrator",
         ]
-        assert ctx._yielded_sub_orchestrators[0][2] == {"user_id": "u1", "force": False}
+        assert ctx._yielded_sub_orchestrators[0][2] == {"tenant_id": None, "user_id": "u1", "force": False}
         assert result["reconciled"] == {
             "fact": {"kept": 0, "merged": 1, "contradicted": 0},
             "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
@@ -341,7 +343,7 @@ class TestExtractMemoriesOrchestrator:
         _drive(gen, [{"facts": []}, {"fact_count": 0}])
 
         extract_payload = ctx._yielded_calls[0][2]
-        assert extract_payload == {"user_id": "u", "thread_id": "t"}
+        assert extract_payload == {"tenant_id": None, "user_id": "u", "thread_id": "t"}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_extract_payload_carries_recent_k_when_provided(self, _retry):
@@ -350,7 +352,7 @@ class TestExtractMemoriesOrchestrator:
         _drive(gen, [{"facts": []}, {"fact_count": 0}])
 
         extract_payload = ctx._yielded_calls[0][2]
-        assert extract_payload == {"user_id": "u", "thread_id": "t", "recent_k": 7}
+        assert extract_payload == {"tenant_id": None, "user_id": "u", "thread_id": "t", "recent_k": 7}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_extract_output_flows_to_persist(self, _retry):
@@ -359,7 +361,7 @@ class TestExtractMemoriesOrchestrator:
         gen = self._orchestrator()(ctx)
         _drive(gen, [extracted, {"fact_count": 1}])
 
-        assert ctx._yielded_calls[1][2] == {"user_id": "u", "extracted": extracted}
+        assert ctx._yielded_calls[1][2] == {"tenant_id": None, "user_id": "u", "extracted": extracted}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_activity_failure_propagates(self, _retry):
@@ -377,7 +379,7 @@ class TestExtractMemoriesOrchestrator:
 
         names = [c[0] for c in ctx._yielded_calls]
         assert names == ["em_Extract", "em_Persist", "em_AdvanceExtractWatermark"]
-        assert ctx._yielded_calls[2][2] == {"user_id": "u1", "thread_id": "t1", "count": 42}
+        assert ctx._yielded_calls[2][2] == {"tenant_id": None, "user_id": "u1", "thread_id": "t1", "count": 42}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_no_watermark_advance_when_count_absent(self, _retry):
@@ -491,8 +493,8 @@ class TestUserSummaryOrchestrator:
         gen_payload = ctx._yielded_calls[0][2]
         persist_payload = ctx._yielded_calls[1][2]
 
-        assert gen_payload == {"user_id": "alice", "limit": 20, "thread_ids": None}
-        assert persist_payload == {"user_id": "alice", "user_summary": {"id": "us"}}
+        assert gen_payload == {"tenant_id": None, "user_id": "alice", "limit": 20, "thread_ids": None}
+        assert persist_payload == {"tenant_id": None, "user_id": "alice", "user_summary": {"id": "us"}}
         for payload in (gen_payload, persist_payload):
             assert "thread_id" not in payload
 
@@ -504,6 +506,7 @@ class TestUserSummaryOrchestrator:
 
         gen_payload = ctx._yielded_calls[0][2]
         assert gen_payload == {
+            "tenant_id": None,
             "user_id": "alice",
             "limit": 20,
             "thread_ids": ["t1", "t2"],

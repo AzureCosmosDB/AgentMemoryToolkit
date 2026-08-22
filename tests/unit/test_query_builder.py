@@ -14,19 +14,18 @@ def test_no_filters_returns_empty_string():
 
 def test_one_filter():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@user_id", "u1")
-    assert qb.build_where() == " WHERE c.user_id = @user_id"
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
+    assert qb.build_where() == " WHERE c.scope_key = @scope_key"
     params = qb.get_parameters()
-    assert len(params) == 1
-    assert params[0] == {"name": "@user_id", "value": "u1"}
+    assert params == [{"name": "@scope_key", "value": "user:u1"}]
 
 
 def test_multiple_filters_and_joined():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
     qb.add_filter("c.role", "@role", "agent")
     where = qb.build_where()
-    assert where == " WHERE c.user_id = @uid AND c.role = @role"
+    assert where == " WHERE c.scope_key = @scope_key AND c.role = @role"
     assert len(qb.get_parameters()) == 2
 
 
@@ -37,21 +36,21 @@ def test_multiple_filters_and_joined():
 
 def test_none_values_skipped():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@uid", None)
+    qb.add_filter("c.scope_key", "@scope_key", None)
     assert qb.build_where() == ""
     assert qb.get_parameters() == []
 
 
 def test_mixed_none_and_non_none():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
     qb.add_filter("c.role", "@role", None)
     qb.add_filter("c.type", "@type", "turn")
     where = qb.build_where()
-    assert where == " WHERE c.user_id = @uid AND c.type = @type"
+    assert where == " WHERE c.scope_key = @scope_key AND c.type = @type"
     params = qb.get_parameters()
     assert len(params) == 2
-    assert params[0]["value"] == "u1"
+    assert params[0]["value"] == "user:u1"
     assert params[1]["value"] == "turn"
 
 
@@ -85,10 +84,10 @@ def test_add_array_contains():
 
 def test_add_array_contains_combined_with_filter():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
     qb.add_array_contains("c.tags", "@tag", "topic:travel")
     where = qb.build_where()
-    assert "c.user_id = @uid" in where
+    assert "c.scope_key = @scope_key" in where
     assert "ARRAY_CONTAINS(c.tags, @tag)" in where
     assert " AND " in where
 
@@ -174,15 +173,15 @@ def test_add_not_null_no_parameters():
 
 def test_combined_filters_with_all_new_methods():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
     qb.add_array_contains("c.tags", "@tag", "topic:travel")
     qb.add_is_null_or_undefined("c.superseded_by")
     where = qb.build_where()
-    assert "c.user_id = @uid" in where
+    assert "c.scope_key = @scope_key" in where
     assert "ARRAY_CONTAINS(c.tags, @tag)" in where
     assert "NOT IS_DEFINED(c.superseded_by)" in where
     params = qb.get_parameters()
-    assert len(params) == 2  # filter + array_contains, null/undefined adds no params
+    assert len(params) == 2  # scope filter + array_contains; null/undefined adds no params
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +218,10 @@ def test_add_in_filter_empty_list_skipped():
 
 def test_add_in_filter_combined_with_other_filters():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
     qb.add_in_filter("c.type", "@t_", ["fact", "procedural"])
     where = qb.build_where()
-    assert "c.user_id = @uid" in where
+    assert "c.scope_key = @scope_key" in where
     assert "c.type IN (@t_0, @t_1)" in where
     assert " AND " in where
     assert len(qb.get_parameters()) == 3
@@ -285,7 +284,7 @@ def test_add_metadata_filter_supported_ops():
 
 def test_add_metadata_filter_auto_param_name():
     qb = _QueryBuilder()
-    qb.add_filter("c.user_id", "@user_id", "u1")
+    qb.add_filter("c.scope_key", "@scope_key", "user:u1")
     qb.add_metadata_filter("c.metadata.category", "=", "preference")
     assert "c.metadata.category = @m_1" in qb.build_where()
     assert {"name": "@m_1", "value": "preference"} in qb.get_parameters()

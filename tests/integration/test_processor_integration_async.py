@@ -79,8 +79,8 @@ class TestAsyncInProcessProcessNowEndToEnd:
         assert pipeline.reconcile_memories.await_count == 2
         pipeline.reconcile_memories.assert_has_awaits(
             [
-                mock_call("u-paris", n=50, memory_type="fact", full_rebuild=False),
-                mock_call("u-paris", n=50, memory_type="episodic", full_rebuild=False),
+                mock_call("u-paris", n=50, memory_type="fact"),
+                mock_call("u-paris", n=50, memory_type="episodic"),
             ]
         )
 

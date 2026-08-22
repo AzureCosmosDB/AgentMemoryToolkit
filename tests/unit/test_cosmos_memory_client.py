@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from azure.cosmos.agent_memory._security import SecurityContext as _PinSecurityContext
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.exceptions import (
     ConfigurationError,
@@ -166,7 +167,8 @@ class TestAddLocal:
 
         assert len(mem.local_memory) == 1
         m = mem.local_memory[0]
-        assert m["user_id"] == "u1"
+        assert m["scope_key"] == "user:u1"
+        assert "user_id" not in m
         assert m["role"] == "user"
         assert m["content"] == "hello"
         assert m["type"] == "turn"
@@ -318,6 +320,7 @@ class TestAutoCreateOnInit:
             mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
+            MagicMock(),
         ]
 
         with patch.dict(
@@ -384,18 +387,63 @@ class TestUserAgent:
 class TestValidateTopology:
     def test_validate_topology_succeeds_on_healthy_deploy(self):
         mem = _make_client()
+        healthy = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
         memories = MagicMock(id="memories")
         turns = MagicMock(id="memories_turns")
         summaries = MagicMock(id="memories_summaries")
+        counter = MagicMock(id="counter")
+        for c in (memories, turns, summaries, counter):
+            c.read.return_value = healthy
         mem._memories_container_client = memories
         mem._turns_container_client = turns
         mem._summaries_container_client = summaries
+        mem._counter_container_client = counter
 
         mem.validate_topology()
 
         memories.read.assert_called_once()
         turns.read.assert_called_once()
         summaries.read.assert_called_once()
+        counter.read.assert_called_once()
+
+    def test_validate_topology_raises_on_partition_key_mismatch(self):
+        mem = _make_client()
+        stale_pk = {"partitionKey": {"paths": ["/user_id", "/thread_id"]}}
+        for attr in ("_memories_container_client", "_turns_container_client", "_summaries_container_client"):
+            setattr(mem, attr, MagicMock(id=attr))
+            getattr(mem, attr).read.return_value = stale_pk
+
+        with pytest.raises(RuntimeError, match="partition key"):
+            mem.validate_topology()
+
+    def test_validate_topology_raises_on_empty_partition_key(self):
+        mem = _make_client()
+        good = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
+        mem._memories_container_client = MagicMock(id="memories")
+        mem._turns_container_client = MagicMock(id="memories_turns")
+        mem._summaries_container_client = MagicMock(id="memories_summaries")
+        mem._memories_container_client.read.return_value = good
+        mem._turns_container_client.read.return_value = good
+        # A container whose metadata carries no partition-key paths must be rejected,
+        # not silently accepted.
+        mem._summaries_container_client.read.return_value = {"partitionKey": {"paths": []}}
+
+        with pytest.raises(RuntimeError, match="partition key"):
+            mem.validate_topology()
+
+    def test_validate_topology_checks_counter_container_partition_key(self):
+        mem = _make_client()
+        good = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
+        for attr in ("_memories_container_client", "_turns_container_client", "_summaries_container_client"):
+            setattr(mem, attr, MagicMock(id=attr))
+            getattr(mem, attr).read.return_value = good
+        # The counter container is validated too, and its wrong (2-level) key is caught.
+        counter = MagicMock(id="counter")
+        counter.read.return_value = {"partitionKey": {"paths": ["/user_id", "/thread_id"]}}
+        mem._counter_container_client = counter
+
+        with pytest.raises(RuntimeError, match="counter"):
+            mem.validate_topology()
 
     def test_validate_topology_raises_on_missing_container(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -436,6 +484,7 @@ class TestCreateMemoryStore:
             mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
+            MagicMock(),
         ]
 
         # Start local-only, then create store explicitly
@@ -502,6 +551,7 @@ class TestCreateMemoryStore:
             mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
+            MagicMock(),
         ]
 
         mem = _make_client()
@@ -550,6 +600,7 @@ class TestCreateMemoryStore:
             mock_summaries_container,
             mock_counter_container,
             mock_lease_container,
+            MagicMock(),
         ]
 
         # serverless mode ignores autoscale config entirely, even an invalid value.
@@ -602,7 +653,8 @@ class TestAddCosmos:
         turns.upsert_item.assert_called_once()
         body = turns.upsert_item.call_args.kwargs["body"]
         assert body["content"] == "hello"
-        assert body["user_id"] == "u1"
+        assert body["scope_key"] == "user:u1"
+        assert "user_id" not in body
         assert body["role"] == "user"
 
     def test_upsert_memory_threads_explicit_created_at(self):
@@ -875,7 +927,7 @@ class TestGetMemories:
         params = call_kwargs["parameters"]
         param_names = {p["name"] for p in params}
         assert "@memory_id" in param_names
-        assert "@user_id" in param_names
+        assert "@scope_key" in param_names
         assert "@thread_id" in param_names
         assert "@role" in param_names
         assert "@memory_type_0" in param_names
@@ -928,7 +980,7 @@ class TestUpdateCosmos:
 
         mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
-        container.read_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+        container.read_item.assert_called_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
         container.replace_item.assert_called_once()
         body = container.replace_item.call_args.kwargs["body"]
         assert body["content"] == "updated"
@@ -953,7 +1005,7 @@ class TestDeleteCosmos:
 
         mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
-        container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+        container.delete_item.assert_called_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
 
     def test_not_found(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -979,7 +1031,7 @@ class TestGetUserSummary:
 
         call_kwargs = summaries.read_item.call_args.kwargs
         assert call_kwargs["item"] == "user_summary_u1"
-        assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
+        assert call_kwargs["partition_key"] == ["default", "user:u1", "__user_summary__"]
         assert result == doc
 
     def test_returns_none_when_absent(self):
@@ -1214,7 +1266,10 @@ def test_list_tags_delegates_to_store():
 
     kwargs = container.query_items.call_args.kwargs
     assert "SELECT VALUE c.tags" in kwargs["query"]
-    assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]
+    assert kwargs["parameters"] == [
+        {"name": "@tenant_id", "value": "default"},
+        {"name": "@scope_key", "value": "user:u1"},
+    ]
 
 
 class TestSyncCadenceThresholdsForwarding:
@@ -1336,3 +1391,71 @@ class TestDeleteHelpers:
             mem.delete_thread("", "t1")
         with pytest.raises(ValidationError):
             mem.delete_thread("u1", "")
+
+
+class TestSelectiveInjectionPins:
+    def _client_with_store(self, *, pinned, base):
+        mem, _ = _connected_client()
+        store = MagicMock()
+        store.resolve_pinned_memories.return_value = list(pinned)
+        store.search.return_value = list(base)
+        mem._get_store = MagicMock(return_value=store)
+        return mem, store
+
+    def test_pinned_memories_are_injected_before_similarity_hits_in_priority_order(self):
+        pinned = [
+            {"id": "high", "content": "high priority", "type": "fact", "pin_priority": 100},
+            {"id": "low", "content": "low priority", "type": "fact", "pin_priority": 10},
+        ]
+        mem, store = self._client_with_store(pinned=pinned, base=[{"id": "search", "content": "search hit"}])
+        ctx = _PinSecurityContext(tenant_id="acme", principal="user:alice")
+
+        out = mem.search_cosmos("q", scopes=["team:eng"], ctx=ctx, agent_id="planner", include_pins=True, top_k=3)
+
+        assert [doc["id"] for doc in out] == ["high", "low", "search"]
+        store.resolve_pinned_memories.assert_called_once_with(
+            agent_id="planner",
+            ctx=ctx,
+            memory_types=["fact"],
+            top_k=3,
+            include_superseded=False,
+        )
+        assert store.search.call_args.kwargs["top_k"] == 1
+
+    def test_pins_consume_entire_budget_without_similarity_search(self):
+        pinned = [
+            {"id": "p1", "content": "pin 1", "type": "fact"},
+            {"id": "p2", "content": "pin 2", "type": "fact"},
+        ]
+        mem, store = self._client_with_store(pinned=pinned, base=[{"id": "search", "content": "search hit"}])
+        ctx = _PinSecurityContext(tenant_id="acme", principal="user:alice")
+
+        out = mem.search_cosmos("q", scopes=["team:eng"], ctx=ctx, agent_id="planner", include_pins=True, top_k=2)
+
+        assert [doc["id"] for doc in out] == ["p1", "p2"]
+        store.search.assert_not_called()
+
+    def test_pinned_memory_is_deduped_against_similarity_hit_by_id(self):
+        mem, _ = self._client_with_store(
+            pinned=[{"id": "m1", "content": "pinned content", "type": "fact"}],
+            base=[
+                {"id": "m1", "content": "similarity duplicate", "type": "fact"},
+                {"id": "m2", "content": "other", "type": "fact"},
+            ],
+        )
+        ctx = _PinSecurityContext(tenant_id="acme", principal="user:alice")
+
+        out = mem.search_cosmos("q", scopes=["team:eng"], ctx=ctx, agent_id="planner", include_pins=True, top_k=3)
+
+        assert [doc["id"] for doc in out] == ["m1", "m2"]
+
+    def test_pins_are_off_by_default_without_agent_options(self):
+        mem, store = self._client_with_store(
+            pinned=[{"id": "m1", "content": "pin", "type": "fact"}],
+            base=[{"id": "m2", "content": "base", "type": "fact"}],
+        )
+
+        out = mem.search_cosmos("q", user_id="u1")
+
+        assert out == [{"id": "m2", "content": "base", "type": "fact"}]
+        store.resolve_pinned_memories.assert_not_called()

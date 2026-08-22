@@ -120,7 +120,7 @@ def test_thread_scoped_query_uses_single_partition():
     store.get_memory_history("current", user_id="u1", thread_id="t1")
 
     kwargs = memories.query_items.call_args.kwargs
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "user:u1", "t1"]
     assert "enable_cross_partition_query" not in kwargs
     assert "c.thread_id = @thread_id" in kwargs["query"]
 

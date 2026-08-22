@@ -74,8 +74,8 @@ class TestInProcessProcessNowEndToEnd:
         assert pipeline.reconcile_memories.call_count == 2
         pipeline.reconcile_memories.assert_has_calls(
             [
-                mock_call("u-paris", n=50, memory_type="fact", full_rebuild=False),
-                mock_call("u-paris", n=50, memory_type="episodic", full_rebuild=False),
+                mock_call("u-paris", n=50, memory_type="fact"),
+                mock_call("u-paris", n=50, memory_type="episodic"),
             ]
         )
 

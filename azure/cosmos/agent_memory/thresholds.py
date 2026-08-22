@@ -90,8 +90,8 @@ DEFAULT_ENABLE_TURN_EMBEDDINGS = False
 
 # Owner exclusivity - declares which backend is authoritative for the shared
 # memories + counter container. When set, the *other* backend skips its
-# auto-trigger and logs a loud warning. Default unset preserves today's
-# behavior (no enforcement) for backward compatibility.
+# auto-trigger and logs a loud warning. Default unset means no owner enforcement,
+# so a lone SDK or Function App deployment still processes (the FA defaults to skip).
 PROCESSOR_OWNER_INPROCESS = "inprocess"
 PROCESSOR_OWNER_DURABLE = "durable"
 _VALID_OWNERS = {PROCESSOR_OWNER_INPROCESS, PROCESSOR_OWNER_DURABLE}

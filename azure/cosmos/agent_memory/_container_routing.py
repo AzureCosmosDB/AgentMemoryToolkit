@@ -5,7 +5,7 @@ document type. See `docs/architecture/` and the container split spec for
 rationale.
 
 * ``ContainerKey.TURNS``      → ``memories_turns``      (type=turn)
-* ``ContainerKey.MEMORIES``   → ``memories``            (type ∈ {fact, episodic, procedural})
+* ``ContainerKey.MEMORIES``   → ``memories``            (type ∈ {fact, episodic, procedural, shared_state, memory_pin})
 * ``ContainerKey.SUMMARIES``  → ``memories_summaries``  (type ∈ {thread_summary, user_summary})
 """
 
@@ -26,6 +26,8 @@ _CONTAINER_FOR_TYPE: dict[str, ContainerKey] = {
     "fact": ContainerKey.MEMORIES,
     "episodic": ContainerKey.MEMORIES,
     "procedural": ContainerKey.MEMORIES,
+    "shared_state": ContainerKey.MEMORIES,
+    "memory_pin": ContainerKey.MEMORIES,
     "thread_summary": ContainerKey.SUMMARIES,
     "user_summary": ContainerKey.SUMMARIES,
 }

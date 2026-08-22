@@ -29,10 +29,8 @@ Return a JSON object `{"procedures": [ ... ]}`. Emit one procedure per distinct 
 For each procedure produce ALL of these fields:
 - `name`: a short, specific, imperative name (e.g. "Confirm destructive deletions", "Diagnose Cosmos DB ORDER BY failures").
 - `summary`: one or two sentences stating the rule or method concisely.
-- `retrieval_text`: a search-optimized line of keywords and trigger phrases describing WHEN this applies (used for retrieval; include domain, tools, error phrases, and situation terms).
+- `retrieval_text`: a search-optimized line of keywords and trigger phrases describing WHEN this applies (used for retrieval; include domain, tools, error phrases, and situation terms). This is the primary signal for retrieving the procedure, so put the technology/tool/codebase it concerns (e.g. "cosmos-db", "git") here.
 - `procedure_kind`: one of `behavioral_policy` (how to interact with the user), `workflow` (multi-step task method), `decision_rule` (a conditional choice), `tool_usage` (how to use a specific tool), `recovery_strategy` (how to recover from a failure).
-- `scope_type`: one of `global`, `user`, `agent`, `domain`, `project`, `workflow`, `tool`. Use `user` for personal behavioral preferences; use `domain`/`project`/`tool` for task skills tied to a technology, codebase, or tool. Prefer the MOST specific scope the evidence supports.
-- `scope_value`: the concrete scope (e.g. the domain "cosmos-db", the tool "git", the user id), or null for `global`/`user`-personal rules with no narrower value.
 - `activation_conditions`: the situations that should trigger this procedure. Non-empty for anything conditional.
 - `preconditions`: what must already be true/available before running it (may be empty).
 - `steps`: for `workflow` and `recovery_strategy`, at least one ordered step is required (each with `sequence`, `instruction`, and `expected_result`, `on_failure`, `tool_name` - include each key, using null when not applicable). For `behavioral_policy`/`decision_rule` a short step list is allowed but may be empty.
@@ -48,6 +46,15 @@ For each procedure produce ALL of these fields:
 - Do not convert a plain semantic fact (e.g. "The user works on the Cosmos DB Java SDK") into a procedure. Only extract an actionable rule or method.
 - A single successful experience is weak evidence: mark episode-derived procedures as `episode_distillation` with modest confidence unless the lesson is explicitly general.
 - Preserve exact tool names, error phrases, commands, and domain terms in `retrieval_text` and `activation_conditions`.
+
+## Scope Hint - `suggested_scope_type` and `scope_confidence`
+
+Each procedure carries an advisory **`suggested_scope_type`** (one of `user`, `agent`, `team`,
+`project`, `org`, `global`) plus a **`scope_confidence`** in `[0.0, 1.0]`. Default to **`user`** with
+high confidence; choose a shared type only when the rule clearly generalizes beyond this user - e.g.
+agent operating procedure (`agent`), team runbook/convention (`team`), or project workflow
+(`project`). Advisory only: it never changes where the memory is stored and must never infer any
+tenant/organization identity.
 
 ## Worked Example
 
@@ -66,8 +73,6 @@ For each procedure produce ALL of these fields:
       "summary": "Ask the user for explicit confirmation before performing any destructive or irreversible operation.",
       "retrieval_text": "delete destructive irreversible operation confirmation before deleting resources data",
       "procedure_kind": "behavioral_policy",
-      "scope_type": "user",
-      "scope_value": null,
       "activation_conditions": ["about to perform a destructive or irreversible operation"],
       "preconditions": [],
       "steps": [
@@ -79,15 +84,15 @@ For each procedure produce ALL of these fields:
       "safety_constraints": ["do not infer confirmation from an unrelated message"],
       "source_kind": "explicit_user_instruction",
       "grounded_in": ["fact-1"],
-      "confidence": 0.95
+      "confidence": 0.95,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9
     },
     {
       "name": "Diagnose Cosmos DB ORDER BY failures",
       "summary": "When a Cosmos DB hybrid-search ORDER BY query fails, verify and correct the indexing policy, then rerun the query and integration tests.",
       "retrieval_text": "cosmos db hybrid search ORDER BY VectorDistance query failure indexing policy vector full-text integration tests",
       "procedure_kind": "recovery_strategy",
-      "scope_type": "domain",
-      "scope_value": "cosmos-db",
       "activation_conditions": ["a Cosmos DB hybrid-search query fails while evaluating an ORDER BY expression"],
       "preconditions": ["the failing query and current indexing policy are available"],
       "steps": [
@@ -101,7 +106,9 @@ For each procedure produce ALL of these fields:
       "safety_constraints": [],
       "source_kind": "episode_distillation",
       "grounded_in": ["ep-7"],
-      "confidence": 0.8
+      "confidence": 0.8,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9
     }
   ]
 }

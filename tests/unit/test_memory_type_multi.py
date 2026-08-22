@@ -83,7 +83,7 @@ def test_memory_types_list_combines_with_other_filters():
         min_confidence=0.5,
     )
     where = qb.build_where()
-    assert "c.user_id = @user_id" in where
+    assert "c.scope_key = @scope_key" in where
     # Episodic is user-scoped, so the thread_id filter becomes an OR clause
     # instead of the plain equality form.
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in where

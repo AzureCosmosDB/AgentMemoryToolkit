@@ -63,13 +63,21 @@ class FakeStore:
         del partition_key, cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
         docs = [dict(doc) for doc in self.docs]
-        uid = params.get("@user_id", params.get("@uid"))
-        if uid is not None:
-            docs = [doc for doc in docs if doc.get("user_id") == uid]
+        scope_key = params.get("@scope_key")
+        if scope_key is not None:
+            docs = [
+                doc
+                for doc in docs
+                if (doc.get("scope_key") or (f"user:{doc.get('user_id')}" if doc.get("user_id") else None)) == scope_key
+            ]
+        if "@tenant_id" in params:
+            docs = [doc for doc in docs if doc.get("tenant_id", "default") == params["@tenant_id"]]
         if "@thread_id" in params:
             docs = [doc for doc in docs if doc.get("thread_id") == params["@thread_id"]]
         if "@type" in params:
             docs = [doc for doc in docs if doc.get("type") == params["@type"]]
+        if "@memory_type" in params:
+            docs = [doc for doc in docs if doc.get("type") == params["@memory_type"]]
         if "c.type IN" in sql:
             types = {value for name, value in params.items() if name.startswith("@mtype")}
             docs = [doc for doc in docs if doc.get("type") in types]
@@ -174,6 +182,8 @@ def _turn(content: str = "I prefer dark mode.") -> dict[str, Any]:
         "id": "turn1",
         "user_id": "u1",
         "thread_id": "t1",
+        "tenant_id": "default",
+        "scope_key": "user:u1",
         "role": "user",
         "type": "turn",
         "content": content,
@@ -186,6 +196,8 @@ def _fact(fid: str, content: str, **extra: Any) -> dict[str, Any]:
         "id": fid,
         "user_id": "u1",
         "thread_id": extra.get("thread_id", "t1"),
+        "tenant_id": extra.get("tenant_id", "default"),
+        "scope_key": extra.get("scope_key", "user:u1"),
         "role": "system",
         "type": "fact",
         "content": content,
@@ -373,6 +385,153 @@ def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
     # Only the contradiction loser is tombstoned.
     assert by_id["f4"]["supersede_reason"] == "contradict"
     assert by_id["f4"]["superseded_by"] == "f3"
+
+
+def test_reconcile_scope_only_compares_and_supersedes_within_tenant_scope() -> None:
+    store = FakeStore(
+        [
+            _fact(
+                "team-old",
+                "Release date is March 1.",
+                tenant_id="tenant-a",
+                scope_key="team:eng",
+                created_at="2025-01-01T00:00:00+00:00",
+            ),
+            _fact(
+                "team-new",
+                "Release date is March 15.",
+                tenant_id="tenant-a",
+                scope_key="team:eng",
+                created_at="2025-01-02T00:00:00+00:00",
+            ),
+            _fact(
+                "user-conflict",
+                "Release date is April 1.",
+                tenant_id="tenant-a",
+                scope_key="user:alice",
+                created_at="2025-01-03T00:00:00+00:00",
+            ),
+            _fact(
+                "other-tenant-conflict",
+                "Release date is May 1.",
+                tenant_id="tenant-b",
+                scope_key="team:eng",
+                created_at="2025-01-04T00:00:00+00:00",
+            ),
+        ]
+    )
+    llm = FakeLLMService(
+        [
+            {
+                "contradicted_pairs": [{"winner_id": "team-new", "loser_id": "team-old"}],
+                "kept_ids": ["team-new"],
+            }
+        ]
+    )
+
+    result = _pipeline(store, llm).reconcile_memories("alice", n=10, tenant_id="tenant-a", scope_key="team:eng")
+
+    by_id = {doc["id"]: doc for doc in store.docs}
+    assert result == {"kept": 1, "merged": 0, "contradicted": 1}
+    assert by_id["team-old"]["superseded_by"] == "team-new"
+    assert by_id["user-conflict"].get("superseded_by") is None
+    assert by_id["other-tenant-conflict"].get("superseded_by") is None
+
+
+def test_reconcile_tie_break_prefers_recency_then_confidence() -> None:
+    store = FakeStore(
+        [
+            _fact(
+                "older-high-confidence",
+                "Endpoint is eastus.",
+                confidence=0.95,
+                created_at="2025-01-01T00:00:00+00:00",
+            ),
+            _fact(
+                "newer-low-confidence",
+                "Endpoint is westus.",
+                confidence=0.6,
+                created_at="2025-01-03T00:00:00+00:00",
+            ),
+            _fact(
+                "older-equal-confidence",
+                "Owner is Alice.",
+                confidence=0.8,
+                created_at="2025-01-01T00:00:00+00:00",
+            ),
+            _fact(
+                "newer-equal-confidence",
+                "Owner is Bob.",
+                confidence=0.8,
+                created_at="2025-01-04T00:00:00+00:00",
+            ),
+        ]
+    )
+    llm = FakeLLMService(
+        [
+            {
+                "contradicted_pairs": [
+                    {"winner_id": "newer-low-confidence", "loser_id": "older-high-confidence"},
+                    {"winner_id": "older-equal-confidence", "loser_id": "newer-equal-confidence"},
+                ],
+                "kept_ids": [],
+            }
+        ]
+    )
+
+    _pipeline(store, llm).reconcile_memories("u1", n=4)
+
+    by_id = {doc["id"]: doc for doc in store.docs}
+    # Recency is primary: the newer fact wins even though its confidence is lower.
+    assert by_id["older-high-confidence"]["superseded_by"] == "newer-low-confidence"
+    # Equal confidence -> recency still decides (newer wins).
+    assert by_id["older-equal-confidence"]["superseded_by"] == "newer-equal-confidence"
+
+
+def test_client_reconcile_scope_requires_write_permission() -> None:
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = CosmosMemoryClient.__new__(CosmosMemoryClient)
+    client._get_pipeline = MagicMock()
+    ctx = SecurityContext(tenant_id="tenant-a", principal="user:alice", roles=["team:eng:reader"])
+
+    with pytest.raises(ValidationError, match="write permission denied"):
+        client.reconcile("alice", scope_key="team:eng", ctx=ctx)
+
+
+def test_client_reconcile_scope_passes_tenant_scope_after_write_permission() -> None:
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
+
+    client = CosmosMemoryClient.__new__(CosmosMemoryClient)
+    pipeline = MagicMock()
+    pipeline.reconcile_memories.return_value = {"kept": 1, "merged": 0, "contradicted": 0}
+    client._get_pipeline = MagicMock(return_value=pipeline)
+    ctx = SecurityContext(tenant_id="tenant-a", principal="user:alice", roles=["team:eng:writer"])
+
+    result = client.reconcile("alice", n=3, scope_key="team:eng", ctx=ctx)
+
+    assert result == {"kept": 1, "merged": 0, "contradicted": 0}
+    pipeline.reconcile_memories.assert_called_once_with("alice", 3, tenant_id="tenant-a", scope_key="team:eng")
+
+
+def test_client_reconcile_rejects_tenant_override() -> None:
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = CosmosMemoryClient.__new__(CosmosMemoryClient)
+    client._get_pipeline = MagicMock()
+    # Even with a matching writer role for the *overridden* tenant, a caller-supplied
+    # tenant_id must never widen the trusted context tenant boundary.
+    ctx = SecurityContext(tenant_id="tenant-a", principal="user:alice", roles=["org:victim:writer"])
+
+    with pytest.raises(ValidationError, match="tenant_id cannot override"):
+        client.reconcile("alice", scope_key="org:victim", tenant_id="victim", ctx=ctx)
+
+    client._get_pipeline.assert_not_called()
 
 
 def test_thread_summary_persists_to_summaries_container() -> None:

@@ -52,6 +52,7 @@ class MemoryType(str, Enum):
     user_summary = "user_summary"
     procedural = "procedural"
     episodic = "episodic"
+    shared_state = "shared_state"
 
 
 class ProcedureKind(str, Enum):
@@ -64,16 +65,24 @@ class ProcedureKind(str, Enum):
     recovery_strategy = "recovery_strategy"
 
 
-class ProcedureScopeType(str, Enum):
-    """How broadly a procedure applies. More specific scopes override broader ones."""
+class MemoryScopeType(str, Enum):
+    """Typed owner scope for memory records."""
 
-    global_scope = "global"
     user = "user"
     agent = "agent"
-    domain = "domain"
+    team = "team"
     project = "project"
-    workflow = "workflow"
-    tool = "tool"
+    org = "org"
+    global_scope = "global"
+
+
+class MemoryCurationStatus(str, Enum):
+    """Curation lifecycle for shareable memory records."""
+
+    draft = "draft"
+    candidate = "candidate"
+    approved = "approved"
+    deprecated = "deprecated"
 
 
 class ProcedureStatus(str, Enum):
@@ -116,6 +125,85 @@ TRUSTED_PROCEDURE_SOURCE_KINDS: frozenset[ProcedureSourceKind] = frozenset(
         ProcedureSourceKind.organization_policy,
     }
 )
+
+
+class MemoryAcl(BaseModel):
+    """Inline, group-aware read-visibility list for a memory record.
+
+    Only ``read`` is enforced: the Cosmos read pre-filter (``build_acl_predicate``) and
+    :func:`~azure.cosmos.agent_memory._authz.can` honor ``acl.read``. Write / forget /
+    annotate authorization is decided at the placement-scope level via
+    ``resolve_scope_access`` (scope membership + role), not per record, so there is no
+    inline write ACL to keep in sync.
+    """
+
+    read: list[str] = Field(default_factory=list)
+
+    @field_validator("read", mode="before")
+    @classmethod
+    def _validate_subjects(cls, v: Any, info: ValidationInfo) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError(f"acl.{info.field_name} must be a list of subject strings")
+        subjects: list[str] = []
+        seen: set[str] = set()
+        for subject in v:
+            if not isinstance(subject, str):
+                raise ValueError(f"acl.{info.field_name} entries must be strings")
+            stripped = subject.strip()
+            if not stripped:
+                raise ValueError(f"acl.{info.field_name} entries cannot be empty")
+            if stripped not in seen:
+                seen.add(stripped)
+                subjects.append(stripped)
+        return subjects
+
+
+class MemoryProvenance(BaseModel):
+    """Grouped write/source provenance for a memory record."""
+
+    application: Optional[str] = None
+    agent_id: Optional[str] = None
+    created_by: Optional[str] = None
+    source: Optional[str] = None
+    source_ids: list[str] = Field(default_factory=list)
+    prompt_id: Optional[str] = None
+    prompt_version: Optional[str] = None
+
+    @field_validator("application", "agent_id", "created_by", "source", "prompt_id", "prompt_version", mode="before")
+    @classmethod
+    def _validate_optional_strings(cls, v: Any, info: ValidationInfo) -> Any:
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError(f"provenance.{info.field_name} must be a string")
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError(f"provenance.{info.field_name} cannot be empty")
+        if info.field_name == "prompt_version" and not PROMPT_VERSION_PATTERN.match(stripped):
+            raise ValueError(f"provenance.prompt_version must match {PROMPT_VERSION_PATTERN.pattern!r}, got {v!r}")
+        return stripped
+
+    @field_validator("source_ids", mode="before")
+    @classmethod
+    def _validate_source_ids(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("provenance.source_ids must be a list of strings")
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in v:
+            if not isinstance(item, str):
+                raise ValueError("provenance.source_ids entries must be strings")
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if stripped not in seen:
+                seen.add(stripped)
+                out.append(stripped)
+        return out
 
 
 def _uuid4_str() -> str:
@@ -163,14 +251,18 @@ class MemoryRecordBase(BaseModel):
     )
 
     id: str = Field(default_factory=_uuid4_str)
-    user_id: str
     thread_id: str = Field(default_factory=_uuid4_str)
+    tenant_id: str = "default"
+    scope_type: Optional[MemoryScopeType] = None
+    scope_id: Optional[str] = None
+    scope_key: Optional[str] = None
     role: Optional[MemoryRole] = None
     memory_type: MemoryType = Field(alias="type", default=MemoryType.turn)
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     embedding: Optional[list[float]] = None
-    agent_id: Optional[str] = None
+    acl: MemoryAcl = Field(default_factory=MemoryAcl)
+    provenance: MemoryProvenance = Field(default_factory=MemoryProvenance)
     created_at: str = Field(default_factory=_utc_now_iso)
     updated_at: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
@@ -178,13 +270,11 @@ class MemoryRecordBase(BaseModel):
     salience: Optional[float] = None
     confidence: Optional[float] = None
     content_hash: Optional[str] = None
+    status: Optional[MemoryCurationStatus] = None
     superseded_by: Optional[str] = None
     supersede_reason: Optional[Literal["duplicate", "contradict", "update"]] = None
     superseded_at: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
-    source_memory_ids: list[str] = Field(default_factory=list)
-    prompt_id: Optional[str] = None
-    prompt_version: Optional[str] = None
     last_used_at: Optional[str] = None
     use_count: int = 0
     version: Optional[int] = None
@@ -194,6 +284,62 @@ class MemoryRecordBase(BaseModel):
     _etag: Optional[str] = PrivateAttr(default=None)
 
     _ID_PREFIX: ClassVar[Optional[str]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_inputs(cls, data: Any) -> Any:
+        """Normalize write inputs before validation.
+
+        Maps the ``user_id`` write parameter onto a user scope and folds top-level
+        provenance fields into the ``provenance`` block. (``owner`` / ``visibility``
+        were dropped from the model; unknown keys are ignored by config.)
+        """
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        user_id = values.pop("user_id", None)
+        if user_id and not values.get("scope_key"):
+            values.setdefault("scope_type", MemoryScopeType.user)
+            values.setdefault("scope_id", str(user_id).strip())
+            values.setdefault("scope_key", f"user:{str(user_id).strip()}")
+        provenance = dict(values.get("provenance") or {})
+        provenance_map = {
+            "agent_id": "agent_id",
+            "source": "source",
+            "source_memory_ids": "source_ids",
+            "prompt_id": "prompt_id",
+            "prompt_version": "prompt_version",
+        }
+        for top_key, prov_key in provenance_map.items():
+            value = values.pop(top_key, None)
+            if value is not None and not provenance.get(prov_key):
+                provenance[prov_key] = value
+        if provenance:
+            values["provenance"] = provenance
+        return values
+
+    @field_validator("tenant_id", "scope_id", "scope_key", mode="before")
+    @classmethod
+    def _validate_optional_non_empty_strings(cls, v: Any, info: ValidationInfo) -> Any:
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError(f"{info.field_name} cannot be empty")
+        return stripped
+
+    @field_validator("scope_type", mode="before")
+    @classmethod
+    def _validate_scope_type(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            try:
+                return MemoryScopeType(v)
+            except ValueError:
+                valid = ", ".join(s.value for s in MemoryScopeType)
+                raise ValueError(f"scope_type must be one of {{{valid}}}, got '{v}'")
+        return v
 
     @field_validator("role", mode="before")
     @classmethod
@@ -266,13 +412,20 @@ class MemoryRecordBase(BaseModel):
             raise ValueError(f"content_hash must be 32 lowercase hex chars, got {v!r}")
         return v
 
-    @field_validator("prompt_version", mode="before")
+    @field_validator("status", mode="before", check_fields=False)
     @classmethod
-    def _validate_prompt_version(cls, v: Any) -> Any:
-        if v is None:
+    def _validate_curation_status(cls, v: Any) -> Any:
+        if v is None or isinstance(v, ProcedureStatus):
             return v
-        if not isinstance(v, str) or not PROMPT_VERSION_PATTERN.match(v):
-            raise ValueError(f"prompt_version must match {PROMPT_VERSION_PATTERN.pattern!r}, got {v!r}")
+        if isinstance(v, str):
+            try:
+                return MemoryCurationStatus(v)
+            except ValueError:
+                try:
+                    return ProcedureStatus(v)
+                except ValueError:
+                    valid = ", ".join(s.value for s in MemoryCurationStatus)
+                    raise ValueError(f"status must be one of {{{valid}}}, got '{v}'")
         return v
 
     @field_validator("use_count", mode="before")
@@ -283,6 +436,15 @@ class MemoryRecordBase(BaseModel):
         if not isinstance(v, int) or isinstance(v, bool) or v < 0:
             raise ValueError(f"use_count must be a non-negative integer, got {v!r}")
         return v
+
+    @model_validator(mode="after")
+    def _derive_scope_key(self) -> "MemoryRecordBase":
+        if self.scope_key is None and self.scope_type is not None and self.scope_id is not None:
+            scope_type_value = (
+                self.scope_type.value if isinstance(self.scope_type, MemoryScopeType) else str(self.scope_type)
+            )
+            self.scope_key = f"{scope_type_value}:{self.scope_id}"
+        return self
 
     @model_validator(mode="after")
     def _validate_id_prefix(self) -> "MemoryRecordBase":
@@ -314,11 +476,6 @@ class MemoryRecordBase(BaseModel):
             instance._etag = etag
         return instance
 
-    @classmethod
-    def from_cosmos_dict(cls, doc: dict[str, Any]) -> "MemoryRecord":
-        """Back-compat alias for :meth:`from_doc`."""
-        return cls.from_doc(doc)
-
     def to_doc(self) -> dict[str, Any]:
         """Serialize to a dict suitable for ``container.upsert_item()``.
 
@@ -329,10 +486,6 @@ class MemoryRecordBase(BaseModel):
         """
         raw = self.model_dump(mode="json", by_alias=True)
         return _strip_unset_optional(raw)
-
-    def to_cosmos_dict(self) -> dict[str, Any]:
-        """Back-compat alias for :meth:`to_doc`."""
-        return self.to_doc()
 
     @property
     def etag(self) -> Optional[str]:
@@ -358,23 +511,24 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
     """Drop optional fields that match their unset defaults.
 
     Keeps the wire shape lean and matches the historical Cosmos document
-    layout: keys like ``embedding``, ``agent_id``, ``salience``, etc. are
+    layout: keys like ``embedding``, ``salience``, etc. are
     only emitted when populated. ``tags`` and ``metadata`` are always
     emitted because callers and Cosmos queries treat them as ever-present.
     """
     drop_when_none = {
+        "scope_type",
+        "scope_id",
+        "scope_key",
         "embedding",
-        "agent_id",
         "updated_at",
         "ttl",
         "salience",
         "confidence",
         "content_hash",
+        "status",
         "superseded_by",
         "supersede_reason",
         "superseded_at",
-        "prompt_id",
-        "prompt_version",
         "last_used_at",
         "version",
     }
@@ -389,6 +543,8 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
             continue
         if key in drop_when_zero and (value is None or value == 0):
             continue
+        if key == "provenance" and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if v is not None and v != []}
         out[key] = value
     return out
 
@@ -406,8 +562,8 @@ class TurnRecord(MemoryRecordBase):
         forbidden = {
             "salience": self.salience,
             "content_hash": self.content_hash,
-            "prompt_id": self.prompt_id,
-            "prompt_version": self.prompt_version,
+            "provenance.prompt_id": self.provenance.prompt_id,
+            "provenance.prompt_version": self.provenance.prompt_version,
         }
         for name, value in forbidden.items():
             if value is not None:
@@ -423,10 +579,16 @@ class ThreadSummaryRecord(MemoryRecordBase):
     )
     content_hash: Optional[str] = None
     salience: float = 1.0
-    prompt_id: str
-    prompt_version: str = "v1"
 
     _ID_PREFIX: ClassVar[Optional[str]] = "summary_"
+
+    @model_validator(mode="after")
+    def _require_prompt_provenance(self) -> "ThreadSummaryRecord":
+        if not self.provenance.prompt_id:
+            raise ValueError("ThreadSummaryRecord requires provenance.prompt_id")
+        if not self.provenance.prompt_version:
+            self.provenance.prompt_version = "v1"
+        return self
 
 
 class UserSummaryRecord(MemoryRecordBase):
@@ -437,10 +599,16 @@ class UserSummaryRecord(MemoryRecordBase):
     )
     content_hash: Optional[str] = None
     salience: float = 1.0
-    prompt_id: str
-    prompt_version: str = "v1"
 
     _ID_PREFIX: ClassVar[Optional[str]] = "user_summary_"
+
+    @model_validator(mode="after")
+    def _require_prompt_provenance(self) -> "UserSummaryRecord":
+        if not self.provenance.prompt_id:
+            raise ValueError("UserSummaryRecord requires provenance.prompt_id")
+        if not self.provenance.prompt_version:
+            self.provenance.prompt_version = "v1"
+        return self
 
     @model_validator(mode="after")
     def _require_thread_ids_in_metadata(self) -> "UserSummaryRecord":
@@ -469,10 +637,16 @@ class FactRecord(MemoryRecordBase):
     content_hash: str
     salience: float = 0.5
     confidence: float = 0.5
-    prompt_id: str
-    prompt_version: str = "v1"
 
     _ID_PREFIX: ClassVar[Optional[str]] = "fact_"
+
+    @model_validator(mode="after")
+    def _require_prompt_provenance(self) -> "FactRecord":
+        if not self.provenance.prompt_id:
+            raise ValueError("FactRecord requires provenance.prompt_id")
+        if not self.provenance.prompt_version:
+            self.provenance.prompt_version = "v1"
+        return self
 
     @model_validator(mode="after")
     def _require_category(self) -> "FactRecord":
@@ -515,10 +689,16 @@ class EpisodicRecord(MemoryRecordBase):
     lessons: list[str] = Field(default_factory=list)
     source_turn_ids: list[str] = Field(default_factory=list)
     content_hash: str
-    prompt_id: str
-    prompt_version: str = "v1"
 
     _ID_PREFIX: ClassVar[Optional[str]] = "ep_"
+
+    @model_validator(mode="after")
+    def _require_prompt_provenance(self) -> "EpisodicRecord":
+        if not self.provenance.prompt_id:
+            raise ValueError("EpisodicRecord requires provenance.prompt_id")
+        if not self.provenance.prompt_version:
+            self.provenance.prompt_version = "v1"
+        return self
 
     @model_validator(mode="after")
     def _validate_time_order(self) -> "EpisodicRecord":
@@ -565,8 +745,6 @@ class ProceduralRecord(MemoryRecordBase):
     retrieval_text: str
 
     procedure_kind: ProcedureKind
-    scope_type: ProcedureScopeType = ProcedureScopeType.user
-    scope_value: Optional[str] = None
 
     activation_conditions: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
@@ -586,8 +764,6 @@ class ProceduralRecord(MemoryRecordBase):
     source_turn_ids: list[str] = Field(default_factory=list)
 
     content_hash: Optional[str] = None
-    prompt_id: Optional[str] = None
-    prompt_version: str = "v2"
     version: int = 1
 
     _ID_PREFIX: ClassVar[Optional[str]] = "proc_"
@@ -624,6 +800,23 @@ class ProceduralRecord(MemoryRecordBase):
         return self
 
 
+class SharedStateRecord(MemoryRecordBase):
+    """Small live coordination record updated in place by agents.
+
+    Use for section-owned plans, task queues, and handoff context; keep the
+    payload small to avoid hot-record contention and prefer separate records
+    when different agents own different sections.
+    """
+
+    memory_type: Literal[MemoryType.shared_state] = Field(  # type: ignore[assignment]
+        alias="type", default=MemoryType.shared_state
+    )
+    role: Optional[MemoryRole] = MemoryRole.system
+    content: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+    read_only: bool = False
+
+
 _TYPE_TO_CLASS: dict[str, type[MemoryRecordBase]] = {
     MemoryType.turn.value: TurnRecord,
     MemoryType.thread_summary.value: ThreadSummaryRecord,
@@ -631,6 +824,7 @@ _TYPE_TO_CLASS: dict[str, type[MemoryRecordBase]] = {
     MemoryType.fact.value: FactRecord,
     MemoryType.episodic.value: EpisodicRecord,
     MemoryType.procedural.value: ProceduralRecord,
+    MemoryType.shared_state.value: SharedStateRecord,
 }
 
 
@@ -667,10 +861,6 @@ class _MemoryRecordFactory:
 
     @staticmethod
     def from_doc(doc: dict[str, Any]) -> "MemoryRecord":
-        return MemoryRecordBase.from_doc(doc)
-
-    @staticmethod
-    def from_cosmos_dict(doc: dict[str, Any]) -> "MemoryRecord":
         return MemoryRecordBase.from_doc(doc)
 
 
@@ -716,6 +906,8 @@ __all__ = [
     "MemoryType",
     "MemoryRecord",
     "MemoryRecordBase",
+    "MemoryAcl",
+    "MemoryProvenance",
     "TurnRecord",
     "ThreadSummaryRecord",
     "UserSummaryRecord",
@@ -725,7 +917,6 @@ __all__ = [
     "EpisodicRecord",
     "ProcedureStep",
     "ProcedureKind",
-    "ProcedureScopeType",
     "ProcedureStatus",
     "ProcedureSourceKind",
     "ProcedureSourceAuthority",

@@ -43,8 +43,13 @@ class _Store:
         del sql, partition_key, cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
         docs = [dict(doc) for doc in self.docs]
-        if "@user_id" in params:
-            docs = [doc for doc in docs if doc.get("user_id") == params["@user_id"]]
+        if "@scope_key" in params:
+            docs = [
+                doc
+                for doc in docs
+                if (doc.get("scope_key") or (f"user:{doc.get('user_id')}" if doc.get("user_id") else None))
+                == params["@scope_key"]
+            ]
         if "@thread_id" in params:
             docs = [doc for doc in docs if doc.get("thread_id") == params["@thread_id"]]
         return docs

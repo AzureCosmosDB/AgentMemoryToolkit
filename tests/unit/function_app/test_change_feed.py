@@ -34,8 +34,11 @@ def _default_owner_durable(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _turn(user_id: str = "u1", thread_id: str = "t1", lsn: int | None = None) -> dict:
-    doc: dict = {"type": "turn", "user_id": user_id, "thread_id": thread_id}
+def _turn(user_id: str = "u1", thread_id: str = "t1", lsn: int | None = None, tenant_id: str = "default") -> dict:
+    # Real turn docs are keyed by tenant_id + scope_key (user:<id>); user_id is no
+    # longer stored on the record. The change-feed derives (tenant, user, thread) from
+    # these fields.
+    doc: dict = {"type": "turn", "tenant_id": tenant_id, "scope_key": f"user:{user_id}", "thread_id": thread_id}
     if lsn is not None:
         doc["_lsn"] = lsn
     return doc
@@ -339,9 +342,9 @@ def test_thread_threshold_crossing_starts_summary_and_extract():
     )
 
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
-    assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
-    assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
-    assert ("ExtractEpisodesOrchestrator", "episode:u1:t1:4") in started
+    assert ("ThreadSummaryOrchestrator", "thread_summary:default:u1:t1:4") in started
+    assert ("ExtractMemoriesOrchestrator", "extract:default:u1:t1:4") in started
+    assert ("ExtractEpisodesOrchestrator", "episode:default:u1:t1:4") in started
     # User threshold 20 not crossed by 4 turns.
     assert not any(name == "UserSummaryOrchestrator" for name, _ in started)
 
@@ -371,8 +374,13 @@ def test_episode_threshold_crossing_starts_extract_episodes():
     episode_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractEpisodesOrchestrator"]
     assert len(episode_calls) == 1
     call = episode_calls[0]
-    assert call.kwargs["instance_id"] == "episode:u1:t1:4"
-    assert call.kwargs["client_input"] == {"user_id": "u1", "thread_id": "t1", "count": 4}
+    assert call.kwargs["instance_id"] == "episode:default:u1:t1:4"
+    assert call.kwargs["client_input"] == {
+        "tenant_id": "default",
+        "user_id": "u1",
+        "thread_id": "t1",
+        "count": 4,
+    }
 
 
 @patch.dict(
@@ -399,7 +407,7 @@ def test_user_threshold_crossing_starts_user_summary():
 
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
     # Exactly one user-summary, deterministic instance id at count=20.
-    assert ("UserSummaryOrchestrator", "user_summary:u1:20") in started
+    assert ("UserSummaryOrchestrator", "user_summary:default:u1:20") in started
     user_summary_starts = [n for n, _ in started if n == "UserSummaryOrchestrator"]
     assert len(user_summary_starts) == 1
 
@@ -493,8 +501,8 @@ def test_per_thread_grouping_is_correct():
 
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
     # t1 crossed → summary + extract started for t1 only.
-    assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
-    assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
+    assert ("ThreadSummaryOrchestrator", "thread_summary:default:u1:t1:4") in started
+    assert ("ExtractMemoriesOrchestrator", "extract:default:u1:t1:4") in started
     # t2 below threshold - no orchestrators for t2.
     assert not any("t2" in iid for _, iid in started)
 
@@ -560,7 +568,7 @@ def test_lsn_replay_does_not_double_increment():
     # ``start_new`` server-side. We assert the determinism here.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 2  # same id sent twice - durable dedups
-    assert all(c.kwargs["instance_id"] == "thread_summary:u1:t1:4" for c in summary_starts)
+    assert all(c.kwargs["instance_id"] == "thread_summary:default:u1:t1:4" for c in summary_starts)
 
 
 # ---------------------------------------------------------------------------

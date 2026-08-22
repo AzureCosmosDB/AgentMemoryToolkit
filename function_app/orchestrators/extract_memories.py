@@ -21,6 +21,8 @@ import azure.durable_functions as df
 from shared import config
 from shared.pipeline_factory import get_pipeline
 
+from azure.cosmos.agent_memory._partitioning import tenant_scope
+
 from ._retry import default_retry_options
 
 logger = logging.getLogger(__name__)
@@ -31,13 +33,14 @@ bp = df.Blueprint()
 @bp.orchestration_trigger(context_name="context")
 def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     should_reconcile = bool(payload.get("reconcile", False))
     recent_k = payload.get("recent_k")
     retry = default_retry_options()
 
-    extract_payload = {"user_id": user_id, "thread_id": thread_id}
+    extract_payload = {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id}
     if recent_k is not None:
         extract_payload["recent_k"] = recent_k
     extracted = yield context.call_activity_with_retry(
@@ -48,7 +51,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     persisted = yield context.call_activity_with_retry(
         "em_Persist",
         retry,
-        {"user_id": user_id, "extracted": extracted},
+        {"tenant_id": tenant_id, "user_id": user_id, "extracted": extracted},
     )
 
     count = payload.get("count")
@@ -56,7 +59,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         yield context.call_activity_with_retry(
             "em_AdvanceExtractWatermark",
             retry,
-            {"user_id": user_id, "thread_id": thread_id, "count": count},
+            {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "count": count},
         )
 
     reconciled = None
@@ -65,16 +68,16 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         reconciled = yield context.call_activity_with_retry(
             "em_ReconcileMemories",
             retry,
-            {"user_id": user_id},
+            {"tenant_id": tenant_id, "user_id": user_id},
         )
         if config.get_procedural_synthesis_auto():
             count = payload.get("count")
-            instance_id = f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
+            instance_id = f"procedural:{tenant_id}:{user_id}:{thread_id}:{count}" if count is not None else None
             try:
                 procedural = yield context.call_sub_orchestrator_with_retry(
                     "SynthesizeProceduralOrchestrator",
                     retry,
-                    {"user_id": user_id, "force": False},
+                    {"tenant_id": tenant_id, "user_id": user_id, "force": False},
                     instance_id=instance_id,
                 )
             except Exception as exc:
@@ -97,16 +100,18 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
 @bp.activity_trigger(input_name="payload")
 def em_Extract(payload: dict) -> dict:
     """Load recent turns and run LLM extraction without embeddings or writes."""
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     recent_k = payload.get("recent_k")
     if recent_k is None:
         recent_k = config.get_max_batch_size()
-    extracted = get_pipeline().extract_memories_durable(
-        user_id=user_id,
-        thread_id=thread_id,
-        recent_k=recent_k,
-    )
+    with tenant_scope(tenant_id):
+        extracted = get_pipeline().extract_memories_durable(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+        )
     logger.info(
         "ExtractMemories extracted user=%s thread=%s facts=%d episodic=%d updates=%d",
         user_id,
@@ -121,11 +126,13 @@ def em_Extract(payload: dict) -> dict:
 @bp.activity_trigger(input_name="payload")
 def em_Persist(payload: dict) -> dict:
     """Persist extracted docs with embeddings and deterministic create semantics."""
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
-    counts = get_pipeline().persist_extracted_memories(
-        user_id=user_id,
-        extracted=payload["extracted"],
-    )
+    with tenant_scope(tenant_id):
+        counts = get_pipeline().persist_extracted_memories(
+            user_id=user_id,
+            extracted=payload["extracted"],
+        )
     logger.info("ExtractMemories persisted user=%s counts=%s", user_id, counts)
     return counts or {}
 
@@ -141,11 +148,13 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
     from shared.cosmos_clients import get_counter_container_async
     from shared.counters import advance_extract_watermark, thread_counter_id
 
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     count = payload["count"]
     container = await get_counter_container_async()
-    await advance_extract_watermark(container, thread_counter_id(user_id, thread_id), user_id, thread_id, count)
+    with tenant_scope(tenant_id):
+        await advance_extract_watermark(container, thread_counter_id(user_id, thread_id), user_id, thread_id, count)
     return True
 
 
@@ -153,11 +162,13 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
 def em_ReconcileMemories(payload: dict) -> dict:
     # GA keeps reconcile single-activity: its LLM dedup decisions and supersession
     # operations are larger/more coupled than the extract/persist flow handled here.
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     pipeline = get_pipeline()
     from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     n = get_dedup_pool_size()
-    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact") or {}
-    episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic") or {}
+    with tenant_scope(tenant_id):
+        facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact") or {}
+        episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic") or {}
     return {"fact": facts, "episodic": episodic}

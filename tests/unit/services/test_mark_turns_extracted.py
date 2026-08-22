@@ -97,7 +97,7 @@ def test_mark_turns_extracted_patches_extracted_at() -> None:
     assert turns_container.patch_calls == [
         {
             "item": "turn-1",
-            "partition_key": ["u1", "t1"],
+            "partition_key": ["default", "user:u1", "t1"],
             "patch_operations": [
                 {"op": "set", "path": "/extracted_at", "value": turns_container.docs[0]["extracted_at"]}
             ],

@@ -75,6 +75,8 @@ _FACT_ITEM = {
         "salience": {"type": "number"},
         "temporal_context": {"type": ["string", "null"]},
         "tags": {"type": "array", "items": {"type": "string"}},
+        "suggested_scope_type": {"type": "string", "enum": ["user", "agent", "team", "project", "org", "global"]},
+        "scope_confidence": {"type": "number"},
     },
     "required": [
         "text",
@@ -84,6 +86,8 @@ _FACT_ITEM = {
         "salience",
         "temporal_context",
         "tags",
+        "suggested_scope_type",
+        "scope_confidence",
     ],
     "additionalProperties": False,
 }
@@ -145,6 +149,8 @@ _EPISODE_ITEM = {
         "lessons": {"type": "array", "items": {"type": "string"}},
         "salience": {"type": "number"},
         "confidence": {"type": "number"},
+        "suggested_scope_type": {"type": "string", "enum": ["user", "agent", "team", "project", "org", "global"]},
+        "scope_confidence": {"type": "number"},
     },
     "required": [
         "title",
@@ -157,6 +163,8 @@ _EPISODE_ITEM = {
         "lessons",
         "salience",
         "confidence",
+        "suggested_scope_type",
+        "scope_confidence",
     ],
     "additionalProperties": False,
 }
@@ -197,11 +205,6 @@ _PROCEDURE_ITEM = {
             "type": "string",
             "enum": ["behavioral_policy", "workflow", "decision_rule", "tool_usage", "recovery_strategy"],
         },
-        "scope_type": {
-            "type": "string",
-            "enum": ["global", "user", "agent", "domain", "project", "workflow", "tool"],
-        },
-        "scope_value": {"type": ["string", "null"]},
         "activation_conditions": {"type": "array", "items": {"type": "string"}},
         "preconditions": {"type": "array", "items": {"type": "string"}},
         "steps": {"type": "array", "items": _PROCEDURE_STEP},
@@ -221,14 +224,14 @@ _PROCEDURE_ITEM = {
         },
         "grounded_in": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "number"},
+        "suggested_scope_type": {"type": "string", "enum": ["user", "agent", "team", "project", "org", "global"]},
+        "scope_confidence": {"type": "number"},
     },
     "required": [
         "name",
         "summary",
         "retrieval_text",
         "procedure_kind",
-        "scope_type",
-        "scope_value",
         "activation_conditions",
         "preconditions",
         "steps",
@@ -238,6 +241,8 @@ _PROCEDURE_ITEM = {
         "source_kind",
         "grounded_in",
         "confidence",
+        "suggested_scope_type",
+        "scope_confidence",
     ],
     "additionalProperties": False,
 }

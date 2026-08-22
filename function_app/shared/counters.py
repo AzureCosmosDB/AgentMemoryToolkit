@@ -6,7 +6,7 @@ than fetched via a module-level singleton) so unit tests can mock it cleanly.
 
 Counter document shape::
 
-    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
+    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [tenant_id, scope_key, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "last_batch_lsn": int|None, "last_batch_old_count": int }
 
@@ -23,6 +23,8 @@ from typing import Any
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
+
+from azure.cosmos.agent_memory._partitioning import ensure_user_scope_fields, partition_key_for_user_thread
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ async def increment_counter_by(
     * Stamps ``last_owner=owner`` (advisory) so operators can detect
       double-write configurations across SDK and FA.
     """
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for_user_thread(user_id, thread_id)
 
     for attempt in range(MAX_RETRIES):
         # ---- Read current counter (or default to 0) ----
@@ -158,16 +160,18 @@ async def increment_counter_by(
             return (old_count, old_count)
 
         new_count = old_count + count
-        new_doc = {
-            "id": counter_id,
-            "user_id": user_id,
-            "thread_id": thread_id,
-            "count": new_count,
-            "last_batch_lsn": batch_max_lsn,
-            "last_batch_old_count": old_count,
-            "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
+        new_doc = ensure_user_scope_fields(
+            {
+                "id": counter_id,
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "count": new_count,
+                "last_batch_lsn": batch_max_lsn,
+                "last_batch_old_count": old_count,
+                "created_at": existing_doc.get("created_at", _utc_now_iso()) if existing_doc else _utc_now_iso(),
+                "updated_at": _utc_now_iso(),
+            }
+        )
         # Preserve SDK-written failure breadcrumbs so the FA doesn't blow
         # them away on the next successful increment. Operators alerting on
         # ``last_failure_at`` would otherwise see the field flap based on
@@ -277,7 +281,10 @@ async def read_extract_watermark(
     batch-based recent_k.
     """
     try:
-        doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+        doc = await container.read_item(
+            item=counter_id,
+            partition_key=partition_key_for_user_thread(user_id, thread_id),
+        )
         value = doc.get("last_extract_count")
         return int(value) if value is not None else None
     except Exception as exc:  # pragma: no cover - best-effort
@@ -306,7 +313,7 @@ async def advance_extract_watermark(
     try:
         await container.patch_item(
             item=counter_id,
-            partition_key=[user_id, thread_id],
+            partition_key=partition_key_for_user_thread(user_id, thread_id),
             patch_operations=patch_ops,
             filter_predicate=(f"FROM c WHERE NOT IS_DEFINED(c.last_extract_count) OR c.last_extract_count < {count}"),
         )

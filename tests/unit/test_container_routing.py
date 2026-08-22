@@ -20,7 +20,7 @@ from azure.cosmos.agent_memory._utils import VALID_TYPES
 
 
 class TestContainerKey:
-    def test_enum_has_three_members(self) -> None:
+    def test_enum_has_expected_members(self) -> None:
         assert {k.name for k in ContainerKey} == {"TURNS", "MEMORIES", "SUMMARIES"}
 
     def test_enum_values_are_lowercase_container_short_names(self) -> None:

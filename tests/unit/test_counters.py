@@ -106,7 +106,7 @@ class TestStampFailureSync:
 
         kwargs = container.patch_item.call_args.kwargs
         assert kwargs["item"] == "thread:u:t"
-        assert kwargs["partition_key"] == ["u", "t"]
+        assert kwargs["partition_key"] == ["default", "user:u", "t"]
         ops = kwargs["patch_operations"]
         op_paths = {op["path"]: op for op in ops}
         assert op_paths["/last_failure_reason"]["value"] == "boom"

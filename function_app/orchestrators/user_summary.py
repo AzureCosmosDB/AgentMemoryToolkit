@@ -13,6 +13,7 @@ import azure.durable_functions as df
 from shared import config
 from shared.pipeline_factory import get_pipeline
 
+from azure.cosmos.agent_memory._partitioning import tenant_scope
 from azure.cosmos.agent_memory.exceptions import NoSourceMemoriesError
 
 from ._retry import default_retry_options
@@ -29,10 +30,12 @@ _NO_MEMORIES_YET_STATUS = "no_memories_yet"
 @bp.orchestration_trigger(context_name="context")
 def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     thread_ids = payload.get("thread_ids") or None
     retry = default_retry_options()
     extract_payload = {
+        "tenant_id": tenant_id,
         "user_id": user_id,
         "limit": config.get_max_batch_size(),
         "thread_ids": thread_ids,
@@ -63,7 +66,7 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     persisted = yield context.call_activity_with_retry(
         "us_PersistUserSummary",
         retry,
-        {"user_id": user_id, "user_summary": user_summary},
+        {"tenant_id": tenant_id, "user_id": user_id, "user_summary": user_summary},
     )
 
     return {
@@ -80,13 +83,15 @@ def us_Extract(payload: dict) -> dict:
     the user has no persisted memories yet, so the orchestrator can wait for
     extraction to land rather than exhausting its activity retries.
     """
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     try:
-        summary = get_pipeline().generate_user_summary_durable(
-            user_id=user_id,
-            recent_k=payload.get("limit"),
-            thread_ids=payload.get("thread_ids") or None,
-        )
+        with tenant_scope(tenant_id):
+            summary = get_pipeline().generate_user_summary_durable(
+                user_id=user_id,
+                recent_k=payload.get("limit"),
+                thread_ids=payload.get("thread_ids") or None,
+            )
     except NoSourceMemoriesError:
         logger.info("UserSummary no source memories yet user=%s; will wait and retry", user_id)
         return {"status": _NO_MEMORIES_YET_STATUS}
@@ -97,10 +102,12 @@ def us_Extract(payload: dict) -> dict:
 @bp.activity_trigger(input_name="payload")
 def us_PersistUserSummary(payload: dict) -> dict:
     """Compute the embedding and persist the user summary."""
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
-    summary = get_pipeline().persist_user_summary(
-        user_id=user_id,
-        user_summary_doc=payload["user_summary"],
-    )
+    with tenant_scope(tenant_id):
+        summary = get_pipeline().persist_user_summary(
+            user_id=user_id,
+            user_summary_doc=payload["user_summary"],
+        )
     logger.info("UserSummary persisted user=%s id=%s", user_id, summary.get("id"))
     return summary

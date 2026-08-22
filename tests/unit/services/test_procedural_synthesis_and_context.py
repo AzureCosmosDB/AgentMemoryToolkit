@@ -17,11 +17,15 @@ class _ProceduralStore(_Store):
     def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
         del partition_key, cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
-        user_id = params.get("@uid", params.get("@user_id"))
+        scope_key = params.get("@scope_key")
         memory_type = params.get("@type", params.get("@memory_type"))
         docs = [dict(doc) for doc in self.docs]
-        if user_id is not None:
-            docs = [doc for doc in docs if doc.get("user_id") == user_id]
+        if scope_key is not None:
+            docs = [
+                doc
+                for doc in docs
+                if (doc.get("scope_key") or (f"user:{doc.get('user_id')}" if doc.get("user_id") else None)) == scope_key
+            ]
         if memory_type is not None:
             docs = [doc for doc in docs if doc.get("type") == memory_type]
         if "c.status='active'" in sql:
@@ -156,7 +160,7 @@ def test_synthesize_procedural_is_idempotent_by_scope_and_name() -> None:
 def test_build_procedural_context_uses_active_procedures_only() -> None:
     active = {
         "id": "proc-active",
-        "user_id": "u1",
+        "scope_key": "user:u1",
         "type": "procedural",
         "status": "active",
         "name": "Targeted testing",
@@ -199,7 +203,7 @@ def _active_procedure(
 ) -> dict[str, Any]:
     return {
         "id": f"proc-{name.lower().replace(' ', '-')}",
-        "user_id": "u1",
+        "scope_key": "user:u1",
         "type": "procedural",
         "status": "active",
         "name": name,
@@ -236,30 +240,33 @@ def test_build_procedural_context_includes_task_matching_workflow_only() -> None
     assert service.build_procedural_context("u1", task="summarize billing invoices") == ""
 
 
-def test_build_procedural_context_always_includes_global_and_user_policies() -> None:
+def test_build_procedural_context_includes_policy_kinds_regardless_of_scope() -> None:
     global_policy = _active_procedure(
         "Global reporting",
         summary="Always report validation status.",
         scope_type="global",
     )
-    user_rule = _active_procedure(
-        "User test rule",
+    team_rule = _active_procedure(
+        "Team test rule",
         summary="Run targeted tests before reporting success.",
         procedure_kind="decision_rule",
-        scope_type="user",
+        scope_type="team",
     )
-    domain_policy = _active_procedure(
-        "Domain policy",
-        summary="Do not include domain policies without task matching.",
-        scope_type="domain",
+    unmatched_workflow = _active_procedure(
+        "Unmatched workflow",
+        summary="A task workflow that should not appear without a matching task.",
+        procedure_kind="workflow",
+        scope_type="project",
     )
-    service = _service(_ProceduralStore([global_policy, user_rule, domain_policy]))
+    service = _service(_ProceduralStore([global_policy, team_rule, unmatched_workflow]))
 
     context = service.build_procedural_context("u1")
 
+    # behavioral_policy + decision_rule are standing policies regardless of tenancy scope
     assert "Global reporting" in context
-    assert "User test rule" in context
-    assert "Domain policy" not in context
+    assert "Team test rule" in context
+    # a task procedure (workflow) is only injected when the task matches
+    assert "Unmatched workflow" not in context
 
 
 def test_build_procedural_context_orders_policies_by_priority_then_authority() -> None:

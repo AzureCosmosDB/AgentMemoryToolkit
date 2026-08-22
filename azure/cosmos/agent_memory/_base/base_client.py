@@ -176,7 +176,7 @@ class _BaseMemoryClient:
         if memory_id is not None:
             results = [m for m in results if m["id"] == memory_id]
         if user_id is not None:
-            results = [m for m in results if m["user_id"] == user_id]
+            results = [m for m in results if m.get("scope_key") == f"user:{user_id}"]
         if role is not None:
             results = [m for m in results if m["role"] == role]
         if memory_types:

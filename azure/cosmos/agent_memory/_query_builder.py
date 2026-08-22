@@ -15,15 +15,22 @@ class _QueryBuilder:
     Usage::
 
         qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", some_user_id)
+        qb.add_filter("c.scope_key", "@scope_key", scope_key)
         qb.add_filter("c.role", "@role", some_role)
-        where = qb.build_where()        # " WHERE c.user_id = @user_id AND c.role = @role"
-        params = qb.get_parameters()     # [{"name": "@user_id", "value": ...}, ...]
+        where = qb.build_where()        # " WHERE c.scope_key = @scope_key AND c.role = @role"
+        params = qb.get_parameters()     # [{"name": "@scope_key", "value": ...}, ...]
     """
 
     def __init__(self) -> None:
         self._conditions: list[str] = []
         self._parameters: list[dict[str, Any]] = []
+
+    def add_condition(self, condition: str, parameters: list[dict[str, Any]] | None = None) -> None:
+        """Add a pre-built parameterized condition."""
+        if not condition:
+            return
+        self._conditions.append(condition)
+        self._parameters.extend(parameters or [])
 
     def add_filter(self, field: str, param_name: str, value: Any) -> None:
         """Add a filter only when *value* is not ``None``."""

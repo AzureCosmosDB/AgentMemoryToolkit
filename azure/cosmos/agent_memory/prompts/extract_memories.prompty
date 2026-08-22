@@ -176,6 +176,33 @@ or extract filler; the precision and grounding rules above still apply.
 
 ---
 
+## Scope Hint - `suggested_scope_type` and `scope_confidence`
+
+Every fact carries an advisory **`suggested_scope_type`** plus a **`scope_confidence`** in
+`[0.0, 1.0]`. This hint flags who a fact is *most likely useful to*, so genuinely shared knowledge
+can later be surfaced for promotion to a shared scope. It is **advisory only**: it never changes
+where the memory is stored (a memory is always written to the user's private scope by default) and
+it must **never** infer any tenant/organization identity.
+
+Pick exactly one `suggested_scope_type`:
+
+- **`user`** (default) - a personal fact about *this* user. When unsure, choose `user` with a high
+  `scope_confidence` (e.g. 0.9).
+- **`agent`** - operational knowledge about how an *agent/assistant* should behave, not specific to
+  one user.
+- **`team`** - knowledge useful to the user's whole *team* (shared lessons, decisions, runbooks,
+  budgets, processes).
+- **`project`** - knowledge tied to a *project/codebase/product* teammates would also need (stack,
+  conventions, infrastructure, milestones).
+- **`org`** - organization-wide knowledge (company policies/standards).
+- **`global`** - general knowledge not tied to any user, team, or org.
+
+Most facts are `user`. Only choose a shared type when the fact would clearly help *other people or
+agents* (shared suggestions are typically 0.6-0.85). Do NOT promote a fact that merely *mentions* a
+team/project but is really about the user's own preference.
+
+---
+
 ## Few-Shot Examples
 
 ### Example 1: Mixed conversation about project setup
@@ -194,6 +221,8 @@ or extract filler; the precision and grounding rules above still apply.
       "confidence": 1.0,
       "salience": 0.9,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:identity", "topic:career"]
     },
     {
@@ -203,6 +232,8 @@ or extract filler; the precision and grounding rules above still apply.
       "confidence": 0.95,
       "salience": 0.9,
       "temporal_context": "end of Q2",
+      "suggested_scope_type": "project",
+      "scope_confidence": 0.75,
       "tags": ["topic:project", "topic:ETL"]
     }
   ]
@@ -229,6 +260,8 @@ Capture the whole arc - the problem, the change, and the outcome - in a single f
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": "last month",
+      "suggested_scope_type": "team",
+      "scope_confidence": 0.8,
       "tags": ["topic:kubernetes", "topic:infrastructure", "topic:outage"]
     }
   ]
@@ -251,6 +284,8 @@ Capture the whole arc - the problem, the change, and the outcome - in a single f
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
+      "suggested_scope_type": "project",
+      "scope_confidence": 0.7,
       "tags": ["topic:database", "topic:BigQuery"]
     },
     {
@@ -260,6 +295,8 @@ Capture the whole arc - the problem, the change, and the outcome - in a single f
       "confidence": 0.95,
       "salience": 0.9,
       "temporal_context": "current quarter",
+      "suggested_scope_type": "team",
+      "scope_confidence": 0.75,
       "tags": ["topic:budget", "topic:marketing"]
     }
   ]
@@ -285,6 +322,8 @@ Both are facts. The first is a standing preference. The second is scoped to the 
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:travel", "topic:hotels"]
     },
     {
@@ -294,6 +333,8 @@ Both are facts. The first is a standing preference. The second is scoped to the 
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:travel", "topic:hotels", "topic:luxury"]
     }
   ]
@@ -318,6 +359,8 @@ Extract only the literal, user-stated fact. The load time is concrete and worth 
       "confidence": 0.9,
       "salience": 0.4,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:performance", "topic:dashboard"]
     }
   ]
@@ -342,6 +385,8 @@ The change is one coherent memory: it records the new state, what it replaced, a
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": "last quarter",
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:CI", "topic:tooling"]
     }
   ]
@@ -367,6 +412,8 @@ The user's request is an intent; the concrete bookings and the named recommendat
       "confidence": 0.95,
       "salience": 0.7,
       "temporal_context": "this Friday",
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:reservation", "topic:anniversary"]
     },
     {
@@ -376,6 +423,8 @@ The user's request is an intent; the concrete bookings and the named recommendat
       "confidence": 0.95,
       "salience": 0.8,
       "temporal_context": "June 3rd",
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:flight", "topic:travel"]
     },
     {
@@ -385,6 +434,8 @@ The user's request is an intent; the concrete bookings and the named recommendat
       "confidence": 0.9,
       "salience": 0.6,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:travel", "topic:recommendation"]
     }
   ]
@@ -410,6 +461,8 @@ The user-stated need is a fact, scoped to the Rome trip - capture it with the sc
       "confidence": 0.9,
       "salience": 0.6,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:travel", "topic:hotels"]
     }
   ]
@@ -434,6 +487,8 @@ Extract the actual facts *inside* the shared material - dates, parties, findings
       "confidence": 0.95,
       "salience": 0.6,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:legal", "topic:construction"]
     },
     {
@@ -443,6 +498,8 @@ Extract the actual facts *inside* the shared material - dates, parties, findings
       "confidence": 0.95,
       "salience": 0.6,
       "temporal_context": "December 2016",
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:legal", "topic:construction"]
     }
   ]
@@ -467,6 +524,8 @@ Three unrelated topics in one message. Extract each separately, and use the actu
       "confidence": 0.95,
       "salience": 0.6,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:family"]
     },
     {
@@ -476,6 +535,8 @@ Three unrelated topics in one message. Extract each separately, and use the actu
       "confidence": 0.95,
       "salience": 0.8,
       "temporal_context": "last week",
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:career"]
     },
     {
@@ -485,6 +546,8 @@ Three unrelated topics in one message. Extract each separately, and use the actu
       "confidence": 0.95,
       "salience": 0.6,
       "temporal_context": null,
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:family"]
     }
   ]
@@ -507,6 +570,8 @@ You must output ONLY valid JSON matching the schema below. No preamble, no expla
       "confidence": 0.95,
       "salience": 0.8,
       "temporal_context": "the exact time expression stated (e.g. 'June 3rd', '3 weeks ago', 'by Friday', 'every Monday') or null if none",
+      "suggested_scope_type": "user",
+      "scope_confidence": 0.9,
       "tags": ["topic:x"]
     }
   ]

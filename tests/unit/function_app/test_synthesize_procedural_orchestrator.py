@@ -54,7 +54,7 @@ class TestSynthesizeProceduralOrchestrator:
         result, _ = _drive(gen, [{"status": "synthesized", "procedures_created": 2}])
 
         assert [call[0] for call in ctx._yielded_calls] == ["sp_SynthesizeProcedural"]
-        assert ctx._yielded_calls[0][2] == {"user_id": "u1", "force": True}
+        assert ctx._yielded_calls[0][2] == {"tenant_id": None, "user_id": "u1", "force": True}
         assert result == {"status": "synthesized", "procedures_created": 2}
 
 

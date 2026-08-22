@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._security import SecurityContext
 from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, MemoryTypeMismatchError, ValidationError
 from azure.cosmos.agent_memory.store import MemoryStore
 
@@ -42,9 +43,31 @@ def test_add_upserts_memory_document():
 
     body = turns.upsert_item.call_args.kwargs["body"]
     assert memory_id == body["id"]
-    assert body["user_id"] == "u1"
+    assert body["scope_key"] == "user:u1"
+    assert "user_id" not in body
     assert body["content"] == "hello"
     assert body["ttl"] == 2_592_000
+
+
+def test_add_manual_procedural_defaults_required_fields():
+    """Manually-added procedural memories fill the required procedural fields."""
+    memories = MagicMock()
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.add(
+        user_id="u1",
+        role="system",
+        content="Always confirm before purging Cosmos containers",
+        memory_type="procedural",
+        thread_id="t1",
+    )
+
+    body = memories.upsert_item.call_args.kwargs["body"]
+    assert body["type"] == "procedural"
+    assert body["procedure_kind"] == "behavioral_policy"
+    assert body["retrieval_text"] == "Always confirm before purging Cosmos containers"
+    assert body["name"] == "Always confirm before purging Cosmos containers"
+    assert body["summary"] == "Always confirm before purging Cosmos containers"
 
 
 def test_add_defaults_created_at_to_ingestion_time():
@@ -139,8 +162,8 @@ def test_query_wraps_query_items():
     store = MemoryStore(containers=_containers(memories=memories))
 
     results = store.query(
-        "SELECT * FROM c WHERE c.user_id = @user_id",
-        [{"name": "@user_id", "value": "u1"}],
+        "SELECT * FROM c WHERE c.scope_key = @scope_key",
+        [{"name": "@scope_key", "value": "user:u1"}],
         container_key=ContainerKey.MEMORIES,
         cross_partition=True,
     )
@@ -156,7 +179,7 @@ def test_update_replaces_matching_doc():
 
     store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
-    memories.read_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.read_item.assert_called_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["content"] == "updated"
     assert body["type"] == "fact"
@@ -192,7 +215,7 @@ def test_delete_calls_delete_item_directly():
 
     store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
 
-    memories.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.delete_item.assert_called_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
 
 
 def test_delete_raises_when_missing():
@@ -224,11 +247,11 @@ def test_read_and_tag_mutation_use_point_reads():
     memories.read_item.return_value = _doc(type="fact", tags=["old"])
     store = MemoryStore(containers=_containers(memories=memories))
 
-    assert store.read_item("m1", ["u1", "t1"], container_key=ContainerKey.MEMORIES)["id"] == "m1"
+    assert store.read_item("m1", ["default", "user:u1", "t1"], container_key=ContainerKey.MEMORIES)["id"] == "m1"
     store.add_tags("m1", "u1", "t1", "fact", ["New"])
     store.remove_tags("m1", "u1", "t1", "fact", ["old"])
 
-    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["u1", "t1"]}
+    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["default", "user:u1", "t1"]}
     assert memories.replace_item.call_count == 2
 
 
@@ -357,7 +380,7 @@ def test_search_episodic_forwards_search_options():
     assert "c.type = @type" in kwargs["query"]
     params = _params_by_name(kwargs)
     assert params["@type"] == "episodic"
-    assert params["@user_id"] == "u1"
+    assert params["@scope_key"] == "user:u1"
     assert params["@min_salience"] == 0.5
 
 
@@ -439,12 +462,12 @@ def test_get_thread_summary_queries_summaries_with_partition_key():
 
     assert [doc["id"] for doc in results] == ["s1"]
     call_kwargs = summaries.query_items.call_args.kwargs
-    assert call_kwargs["partition_key"] == ["u1", "t1"]
+    assert call_kwargs["partition_key"] == ["default", "user:u1", "t1"]
     assert "c.type = @type" in call_kwargs["query"]
     assert "TOP @recent_k" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
     assert params["@type"] == "thread_summary"
-    assert params["@user_id"] == "u1"
+    assert params["@scope_key"] == "user:u1"
     assert params["@thread_id"] == "t1"
 
 
@@ -550,7 +573,7 @@ def test_search_fact_only_with_thread_id_uses_partition_path():
     )
 
     call_kwargs = memories.query_items.call_args.kwargs
-    assert call_kwargs.get("partition_key") == ["u1", "t1"]
+    assert call_kwargs.get("partition_key") == ["default", "user:u1", "t1"]
     assert "enable_cross_partition_query" not in call_kwargs
 
 
@@ -655,7 +678,7 @@ def test_search_summaries_queries_summaries_container_scoped_to_user():
     memories.query_items.assert_not_called()
     kwargs = summaries.query_items.call_args.kwargs
     assert "VectorDistance(c.embedding, @embedding)" in kwargs["query"]
-    assert {"name": "@user_id", "value": "u1"} in kwargs["parameters"]
+    assert {"name": "@scope_key", "value": "user:u1"} in kwargs["parameters"]
 
 
 def test_search_summaries_requires_user_id():
@@ -677,7 +700,7 @@ def test_search_turns_scopes_to_single_partition_with_thread_id():
     store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
 
     kwargs = turns.query_items.call_args.kwargs
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "user:u1", "t1"]
     assert "enable_cross_partition_query" not in kwargs
 
 
@@ -728,3 +751,346 @@ def test_search_does_not_query_turns_container():
 
     memories.query_items.assert_called_once()
     turns.query_items.assert_not_called()
+
+
+def test_add_defaults_to_private_user_scope():
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+
+    store.add(user_id="alice", role="user", content="hello", thread_id="t1")
+
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["tenant_id"] == "default"
+    assert body["scope_type"] == "user"
+    assert body["scope_id"] == "alice"
+    assert body["scope_key"] == "user:alice"
+    assert body["acl"]["read"] == ["user:alice"]
+    assert "visibility" not in body
+
+
+def test_add_to_foreign_scope_requires_write_authorization():
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+
+    # No context: a foreign/shared scope_key is refused (fail closed).
+    with pytest.raises(ValidationError, match="requires a SecurityContext"):
+        store.add(
+            user_id="alice",
+            role="user",
+            content="hello",
+            thread_id="t1",
+            tenant_id="acme",
+            scope_key="team:eng",
+        )
+    turns.upsert_item.assert_not_called()
+
+    # A context that only has membership (read) is still refused for writes.
+    outsider = SecurityContext(tenant_id="acme", principal="user:alice", groups=["eng"])
+    with pytest.raises(ValidationError, match="write permission denied"):
+        store.add(
+            user_id="alice",
+            role="user",
+            content="hello",
+            thread_id="t1",
+            tenant_id="acme",
+            scope_key="team:eng",
+            ctx=outsider,
+        )
+
+    # A member/writer role authorizes the shared-scope write.
+    writer = SecurityContext(tenant_id="acme", principal="user:alice", roles=["team:eng:writer"])
+    store.add(
+        user_id="alice",
+        role="user",
+        content="hello",
+        thread_id="t1",
+        tenant_id="acme",
+        scope_key="team:eng",
+        ctx=writer,
+    )
+    body = turns.upsert_item.call_args.kwargs["body"]
+    assert body["tenant_id"] == "acme"
+    assert body["scope_type"] == "team"
+    assert body["scope_id"] == "eng"
+    assert body["scope_key"] == "team:eng"
+
+
+def test_add_to_own_user_scope_needs_no_context():
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+
+    # The caller's own user scope is always writable without a context.
+    store.add(user_id="alice", role="user", content="hello", thread_id="t1", tenant_id="acme")
+    store.add(
+        user_id="alice",
+        role="user",
+        content="hello",
+        thread_id="t1",
+        tenant_id="acme",
+        scope_key="user:alice",
+    )
+    assert turns.upsert_item.call_count == 2
+
+
+def test_authorize_write_anchors_own_scope_to_ctx_principal():
+    """Own-scope is derived from the trusted ctx.principal, never the request user_id, so a
+    caller cannot land a record in another principal's private scope."""
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+    mallory = SecurityContext(tenant_id="acme", principal="user:mallory")
+
+    # Explicit foreign user scope with a matching request user_id must NOT be treated as own.
+    with pytest.raises(ValidationError, match="write permission denied"):
+        store.add(
+            user_id="victim",
+            role="user",
+            content="x",
+            thread_id="t1",
+            tenant_id="acme",
+            scope_key="user:victim",
+            ctx=mallory,
+        )
+    # The same bypass via an omitted scope_key (effective scope derived from user_id).
+    with pytest.raises(ValidationError, match="write permission denied"):
+        store.add(
+            user_id="victim",
+            role="user",
+            content="x",
+            thread_id="t1",
+            tenant_id="acme",
+            ctx=mallory,
+        )
+    turns.upsert_item.assert_not_called()
+
+
+def test_search_scope_union_merges_dedups_and_respects_top_k():
+    memories = MagicMock()
+    memories.query_items.side_effect = [
+        [
+            _doc(id="low", type="fact", scope_key="user:alice", similarity_score=0.40),
+            _doc(id="dup", type="fact", scope_key="user:alice", similarity_score=0.30),
+        ],
+        [
+            _doc(id="best", type="fact", scope_key="team:eng", similarity_score=0.10),
+            _doc(id="dup", type="fact", scope_key="team:eng", similarity_score=0.20),
+        ],
+    ]
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    # A SecurityContext is required to fan out over a shared scope; membership of team:eng
+    # authorizes the read, and the ACL predicate is applied on top of the scope filter.
+    ctx = SecurityContext(tenant_id="acme", principal="user:alice", groups=["eng"])
+    results = store.search(search_terms="hello", scopes=["user:alice", "team:eng"], ctx=ctx, top_k=2)
+
+    assert [doc["id"] for doc in results] == ["best", "dup"]
+    assert memories.query_items.call_count == 2
+    calls = memories.query_items.call_args_list
+    first_params = calls[0].kwargs["parameters"]
+    second_params = calls[1].kwargs["parameters"]
+    assert {"name": "@tenant_id", "value": "acme"} in first_params
+    assert {"name": "@scope_key", "value": "user:alice"} in first_params
+    assert {"name": "@scope_key", "value": "team:eng"} in second_params
+    assert all("c.tenant_id = @tenant_id" in call.kwargs["query"] for call in calls)
+    assert all("c.scope_key = @scope_key" in call.kwargs["query"] for call in calls)
+    assert all("ARRAY_CONTAINS(c.acl.read" in call.kwargs["query"] for call in calls)
+
+
+def test_search_shared_scope_without_context_fails_closed():
+    memories = MagicMock()
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    # Naming a shared scope with no SecurityContext must not fan out unfiltered.
+    results = store.search(search_terms="hello", scopes=["team:eng"], tenant_id="acme", top_k=2)
+
+    assert results == []
+    memories.query_items.assert_not_called()
+
+
+class _PinFakeContainer:
+    def __init__(self, items=None):
+        self.items = list(items or [])
+        self.query_calls = []
+        self.deleted = []
+
+    def upsert_item(self, *, body):
+        self.items = [item for item in self.items if item.get("id") != body.get("id")]
+        self.items.append(dict(body))
+        return body
+
+    def delete_item(self, *, item, partition_key):
+        self.deleted.append((item, partition_key))
+        self.items = [doc for doc in self.items if doc.get("id") != item]
+
+    def query_items(self, **kwargs):
+        self.query_calls.append(kwargs)
+        params = {p["name"]: p["value"] for p in kwargs.get("parameters") or []}
+        query = kwargs.get("query") or ""
+        tenant = params.get("@tenant_id") or params.get("@authz_tenant_id")
+        if "@memory_id" in params:
+            return [
+                doc for doc in self.items if doc.get("tenant_id") == tenant and doc.get("id") == params["@memory_id"]
+            ]
+        if params.get("@type") == "memory_pin":
+            return [
+                doc
+                for doc in self.items
+                if doc.get("tenant_id") == tenant
+                and doc.get("scope_key") == params.get("@scope_key")
+                and doc.get("thread_id") == params.get("@thread_id")
+                and doc.get("type") == "memory_pin"
+            ]
+        if "ORDER BY c.created_at DESC" in query:
+            allowed_types = {value for name, value in params.items() if name.startswith("@pin_type_")}
+            rows = [
+                doc
+                for doc in self.items
+                if doc.get("tenant_id") == tenant
+                and doc.get("scope_key") == params.get("@scope_key")
+                and (not allowed_types or doc.get("type") in allowed_types)
+                and not doc.get("superseded_by")
+            ]
+            return sorted(rows, key=lambda doc: doc.get("created_at") or "", reverse=True)
+        return []
+
+
+class _PinPermissionsContainer:
+    def __init__(self, grants=None):
+        self.grants = list(grants or [])
+
+    def query_items(self, **kwargs):
+        params = {p["name"]: p["value"] for p in kwargs.get("parameters") or []}
+        return [
+            grant
+            for grant in self.grants
+            if grant.get("tenant_id") == params.get("@tenant_id") and grant.get("resource") == params.get("@resource")
+        ]
+
+
+def _pin_store(*, memories=None, grants=None):
+    memories_container = _PinFakeContainer(memories)
+    return MemoryStore(
+        containers={
+            ContainerKey.TURNS: _PinFakeContainer(),
+            ContainerKey.MEMORIES: memories_container,
+            ContainerKey.SUMMARIES: _PinFakeContainer(),
+        }
+    ), memories_container
+
+
+def _pin_memory_doc(**overrides):
+    doc = {
+        "id": "m1",
+        "tenant_id": "acme",
+        "scope_key": "team:eng",
+        "scope_type": "team",
+        "scope_id": "eng",
+        "thread_id": "facts",
+        "role": "system",
+        "type": "fact",
+        "content": "shared fact",
+        "metadata": {},
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "acl": {"read": ["team:eng"], "write": ["team:eng"], "annotate": [], "forget": ["team:eng"]},
+        "provenance": {"created_by": "user:u1"},
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _pin_grant(resource, permission="read"):
+    return {
+        "tenant_id": "acme",
+        "resource": resource,
+        "subject": {"type": "user", "id": "user:alice"},
+        "permission": permission,
+        "effect": "allow",
+    }
+
+
+def test_pin_then_list_returns_binding_ordered_by_priority():
+    store, _ = _pin_store(memories=[_pin_memory_doc()])
+    ctx = SecurityContext(tenant_id="acme", principal="user:admin", roles=["tenant:admin"])
+
+    pin = store.pin_memory("planner", "m1", injection_mode="direct", priority=90, ctx=ctx)
+    listed = store.list_pins("planner", ctx=ctx)
+
+    assert listed == [pin]
+    assert pin["type"] == "memory_pin"
+    assert pin["scope_key"] == "agent:planner"
+    assert pin["thread_id"] == "__pins__"
+    assert pin["resource"] == "m1"
+    assert pin["resource_type"] == "memory"
+    assert pin["injection_mode"] == "direct"
+    assert pin["priority"] == 90
+
+
+def test_pin_and_unpin_require_agent_write_or_assign_permission():
+    store, memories = _pin_store(memories=[_pin_memory_doc()])
+    denied = SecurityContext(tenant_id="acme", principal="user:alice")
+
+    with pytest.raises(ValidationError, match="assign.*write"):
+        store.pin_memory("planner", "m1", ctx=denied)
+    with pytest.raises(ValidationError, match="assign.*write"):
+        store.unpin_memory("planner", "m1", ctx=denied)
+
+    allowed = SecurityContext(tenant_id="acme", principal="user:admin", roles=["tenant:admin"])
+    store.pin_memory("planner", "m1", ctx=allowed)
+    assert store.unpin_memory("planner", "m1", ctx=allowed) is True
+    assert memories.deleted
+
+
+def test_pinned_resource_without_read_permission_is_not_injected():
+    store, memories = _pin_store(
+        memories=[
+            _pin_memory_doc(),
+            {
+                "id": "pin-existing",
+                "tenant_id": "acme",
+                "scope_key": "agent:planner",
+                "scope_type": "agent",
+                "scope_id": "planner",
+                "thread_id": "__pins__",
+                "role": "system",
+                "type": "memory_pin",
+                "content": "",
+                "metadata": {},
+                "acl": {
+                    "read": ["agent:planner"],
+                    "write": ["agent:planner"],
+                    "annotate": [],
+                    "forget": ["agent:planner"],
+                },
+                "provenance": {"agent_id": "planner", "created_by": "user:admin"},
+                "resource": "m1",
+                "resource_type": "memory",
+                "resource_scope_key": "team:eng",
+                "injection_mode": "summary",
+                "priority": 50,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+        ],
+    )
+    ctx = SecurityContext(tenant_id="acme", principal="user:alice", roles=["agent:planner:reader"])
+
+    assert store.resolve_pinned_memories(agent_id="planner", ctx=ctx, top_k=3) == []
+    assert any(call["parameters"][1]["value"] == "m1" for call in memories.query_calls)
+
+
+def test_scope_pin_resolves_by_priority_and_consumes_limit():
+    store, _ = _pin_store(
+        memories=[
+            _pin_memory_doc(id="old", content="old", created_at="2026-01-01T00:00:00+00:00"),
+            _pin_memory_doc(id="new", content="new", created_at="2026-01-02T00:00:00+00:00"),
+        ]
+    )
+    ctx = SecurityContext(tenant_id="acme", principal="user:admin", roles=["tenant:admin"])
+    store.pin_memory("planner", "team:eng", injection_mode="direct", priority=80, ctx=ctx)
+
+    resolved = store.resolve_pinned_memories(agent_id="planner", ctx=ctx, top_k=1)
+
+    assert [doc["id"] for doc in resolved] == ["new"]
+    assert resolved[0]["pinned"] is True

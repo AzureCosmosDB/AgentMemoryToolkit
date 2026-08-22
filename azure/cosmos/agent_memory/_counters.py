@@ -6,7 +6,7 @@ backends can be swapped without losing per-thread / per-user counts.
 
 Counter document shape::
 
-    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
+    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [tenant_id, scope_key, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "last_batch_lsn": int|None, "last_batch_old_count": int,
       "last_failure_at": str|None, "last_failure_reason": str|None,
@@ -34,6 +34,7 @@ from typing import Any, Optional
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory._partitioning import ensure_user_scope_fields, partition_key_for_user_thread
 from azure.cosmos.agent_memory.logging import get_logger
 
 logger = get_logger(__name__)
@@ -124,7 +125,7 @@ def increment_counter_sync(
     Returns ``(0, 0)`` and logs a warning if the container is unreachable -
     auto-trigger failures must never block the user's primary write path.
     """
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for_user_thread(user_id, thread_id)
 
     for attempt in range(MAX_RETRIES):
         old_count = 0
@@ -189,7 +190,7 @@ async def increment_counter_async(
     owner: Optional[str] = None,
 ) -> tuple[int, int]:
     """Async version of :func:`increment_counter_sync`."""
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for_user_thread(user_id, thread_id)
 
     for attempt in range(MAX_RETRIES):
         old_count = 0
@@ -256,15 +257,17 @@ def _build_counter_doc(
 ) -> dict:
     """Construct the counter doc, preserving FA-managed fields when present."""
     now = _utc_now_iso()
-    doc: dict[str, Any] = {
-        "id": counter_id,
-        "user_id": user_id,
-        "thread_id": thread_id,
-        "count": new_count,
-        "last_batch_old_count": old_count,
-        "created_at": existing.get("created_at", now) if existing else now,
-        "updated_at": now,
-    }
+    doc: dict[str, Any] = ensure_user_scope_fields(
+        {
+            "id": counter_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "count": new_count,
+            "last_batch_old_count": old_count,
+            "created_at": existing.get("created_at", now) if existing else now,
+            "updated_at": now,
+        }
+    )
     # Preserve FA-managed LSN replay-dedup fields if present; only initialize
     # to None when seeding the document for the first time. Mutating an
     # existing FA-written LSN to None would invalidate the FA's monotonicity
@@ -289,8 +292,8 @@ def _build_counter_doc(
             doc["last_failure_at"] = existing.get("last_failure_at")
         if "last_failure_reason" in existing:
             doc["last_failure_reason"] = existing.get("last_failure_reason")
-    # Stamp the writing backend (advisory). When owner is None (legacy
-    # caller), preserve whatever the previous writer recorded.
+    # Stamp the writing backend (advisory). When owner is unset, preserve
+    # whatever the previous writer recorded.
     if owner is not None:
         doc["last_owner"] = owner
     elif existing is not None and "last_owner" in existing:
@@ -312,7 +315,7 @@ def stamp_failure_sync(
     logged and swallowed; we never want failure-stamping itself to break
     the user's write path.
     """
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for_user_thread(user_id, thread_id)
     patch_ops = [
         {"op": "add", "path": "/last_failure_at", "value": _utc_now_iso()},
         {"op": "add", "path": "/last_failure_reason", "value": (reason or "")[:500]},
@@ -335,7 +338,7 @@ async def stamp_failure_async(
     reason: str,
 ) -> None:
     """Async version of :func:`stamp_failure_sync`."""
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for_user_thread(user_id, thread_id)
     patch_ops = [
         {"op": "add", "path": "/last_failure_at", "value": _utc_now_iso()},
         {"op": "add", "path": "/last_failure_reason", "value": (reason or "")[:500]},

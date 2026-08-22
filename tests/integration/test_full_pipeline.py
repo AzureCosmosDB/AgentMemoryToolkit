@@ -393,7 +393,7 @@ class TestTaggingAndSalience:
 
 
 class TestReconciliation:
-    def test_dedup_near_duplicate_facts(self, agent_memory, unique_user_id, unique_thread_id):
+    def test_reconcile_keeps_agreeing_paraphrases(self, agent_memory, unique_user_id, unique_thread_id):
         try:
             for content in [
                 "The user lives in Seattle.",
@@ -421,16 +421,18 @@ class TestReconciliation:
             )
             assert isinstance(stats, dict)
             assert "kept" in stats and "merged" in stats and "contradicted" in stats
-            assert stats["merged"] + stats["contradicted"] >= 1, (
-                f"Expected at least one near-duplicate to be merged/contradicted, got {stats}"
-            )
+            # Reconcile is a bounded, contradiction-only pass: agreeing paraphrases are
+            # NOT merged (``merged`` is always 0 - no clustering, no re-merge churn), so
+            # every non-contradictory fact stays active.
+            assert stats["merged"] == 0
+            assert stats["contradicted"] == 0
 
             active = [
                 m
                 for m in agent_memory.get_memories(user_id=unique_user_id, memory_types=["fact"])
                 if not m.get("superseded_by")
             ]
-            assert len(active) < len(before)
+            assert len(active) == len(before)
         finally:
             _cleanup(agent_memory, unique_user_id)
 
@@ -522,14 +524,15 @@ class TestReconciliation:
 
     def test_reconcile_writes_supersede_metadata(self, agent_memory, unique_user_id, unique_thread_id):
         try:
-            paraphrases = [
-                "The user lives in Seattle and works at Microsoft as a data engineer.",
-                "User resides in Seattle, WA, employed by Microsoft as a data engineer.",
-                "The user is based in Seattle and is a data engineer at Microsoft.",
-                "User lives in Seattle; works at Microsoft on the data engineering team.",
-                "The user works as a data engineer at Microsoft in Seattle.",
+            # Reconcile supersedes only on contradiction (agreeing paraphrases are kept),
+            # so seed mutually-exclusive claims about the same subject to exercise the
+            # supersede-metadata path.
+            contradictions = [
+                "The user's home city is Seattle.",
+                "The user's home city is Portland.",
+                "The user's home city is Denver.",
             ]
-            for content in paraphrases:
+            for content in contradictions:
                 agent_memory.upsert_memory(
                     user_id=unique_user_id,
                     role="user",
@@ -542,7 +545,7 @@ class TestReconciliation:
             stats = agent_memory.reconcile(user_id=unique_user_id)
             assert isinstance(stats, dict)
             assert stats.get("merged", 0) + stats.get("contradicted", 0) >= 1, (
-                f"Expected at least one merge/contradiction across paraphrases, got {stats}"
+                f"Expected at least one contradiction to be resolved, got {stats}"
             )
 
             all_facts = agent_memory.get_memories(

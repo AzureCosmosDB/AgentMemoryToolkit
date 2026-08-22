@@ -64,12 +64,12 @@ async def test_async_get_episodes_user_wide_newest_first():
     assert [doc["id"] for doc in results] == ["ep-new", "ep-old"]
     call_kwargs = memories.query_items.call_args.kwargs
     assert "SELECT TOP @recent_k * FROM c" in call_kwargs["query"]
-    assert "c.user_id = @user_id" in call_kwargs["query"]
+    assert "c.scope_key = @scope_key" in call_kwargs["query"]
     assert "c.type = @type" in call_kwargs["query"]
     assert "ORDER BY c.created_at DESC" in call_kwargs["query"]
     assert "partition_key" not in call_kwargs
     params = _params_by_name(call_kwargs)
-    assert params["@user_id"] == "u1"
+    assert params["@scope_key"] == "user:u1"
     assert params["@type"] == "episodic"
     assert params["@recent_k"] == 2
 

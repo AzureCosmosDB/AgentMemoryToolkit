@@ -14,6 +14,8 @@ import logging
 import azure.durable_functions as df
 from shared.pipeline_factory import get_pipeline
 
+from azure.cosmos.agent_memory._partitioning import tenant_scope
+
 from ._retry import default_retry_options
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ bp = df.Blueprint()
 @bp.orchestration_trigger(context_name="context")
 def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     force = bool(payload.get("force", False))
 
@@ -37,7 +40,7 @@ def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
     result = yield context.call_activity_with_retry(
         "sp_SynthesizeProcedural",
         retry,
-        {"user_id": user_id, "force": force},
+        {"tenant_id": tenant_id, "user_id": user_id, "force": force},
     )
 
     return result
@@ -52,10 +55,12 @@ def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
 def sp_SynthesizeProcedural(payload: dict) -> dict:
     # Keep procedural synthesis single-activity for GA: chunked LLM rewrites already
     # retry internally, and the full procedural body is too bulky for history wins.
+    tenant_id = payload.get("tenant_id")
     user_id = payload["user_id"]
     force = bool(payload.get("force", False))
     pipeline = get_pipeline()
-    result = pipeline.synthesize_procedural(user_id=user_id, force=force) or {}
+    with tenant_scope(tenant_id):
+        result = pipeline.synthesize_procedural(user_id=user_id, force=force) or {}
     slim = {
         "status": result.get("status"),
         "procedures_created": int(result.get("procedures_created") or 0),

@@ -53,7 +53,7 @@ class TestExtractEpisodesOrchestrator:
         result, _ = _drive(gen, [{"episodes": 2}])
 
         assert [call[0] for call in ctx._yielded_calls] == ["ee_ExtractEpisodes"]
-        assert ctx._yielded_calls[0][2] == {"user_id": "u1", "thread_id": "t1"}
+        assert ctx._yielded_calls[0][2] == {"tenant_id": None, "user_id": "u1", "thread_id": "t1"}
         assert result == {"episodes": 2}
 
 

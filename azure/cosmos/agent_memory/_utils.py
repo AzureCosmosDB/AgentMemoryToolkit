@@ -16,13 +16,14 @@ from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from ._container_routing import USER_SCOPED_MEMORIES_TYPES
+from ._partitioning import default_acl_for_scope, scope_key_for_user, scope_values_for_user
 from ._query_builder import _QueryBuilder
 from .exceptions import ConfigurationError, ValidationError
 from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE
 from .thresholds import default_ttl_for
 
 VALID_ROLES = {"agent", "user", "tool", "system"}
-VALID_TYPES = {"turn", "thread_summary", "fact", "user_summary", "procedural", "episodic"}
+VALID_TYPES = {"turn", "thread_summary", "fact", "user_summary", "procedural", "episodic", "memory_pin"}
 
 
 def _sdk_user_agent() -> str:
@@ -178,20 +179,27 @@ def _make_memory(
     if ttl is None:
         ttl = default_ttl_for(memory_type)
 
+    tenant_id, scope_type, scope_id, scope_key = scope_values_for_user(user_id)
+    principal = scope_key_for_user(user_id)
     memory: dict[str, Any] = {
         "id": memory_id or str(uuid.uuid4()),
-        "user_id": user_id,
         "thread_id": thread_id or str(uuid.uuid4()),
+        "tenant_id": tenant_id,
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "scope_key": scope_key,
         "role": role,
         "type": memory_type,
         "content": content,
         "metadata": metadata or {},
+        "acl": default_acl_for_scope(scope_key, principal=principal, agent_id=agent_id).model_dump(mode="json"),
+        "provenance": {"created_by": principal},
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tags": tags if tags is not None else [],
     }
 
     if agent_id is not None:
-        memory["agent_id"] = agent_id
+        memory["provenance"]["agent_id"] = agent_id
     if ttl is not None:
         memory["ttl"] = ttl
     if salience is not None:
@@ -500,7 +508,7 @@ def _build_memory_query_builder(
     """
     qb = _QueryBuilder()
     qb.add_filter("c.id", "@memory_id", memory_id)
-    qb.add_filter("c.user_id", "@user_id", user_id)
+    qb.add_filter("c.scope_key", "@scope_key", scope_key_for_user(user_id) if user_id is not None else None)
     in_scope_user_types = _resolve_user_scoped_types_in_query(memory_types)
     if thread_id is not None and in_scope_user_types:
         qb.add_thread_id_or_user_scoped(thread_id, "@thread_id", sorted(in_scope_user_types))

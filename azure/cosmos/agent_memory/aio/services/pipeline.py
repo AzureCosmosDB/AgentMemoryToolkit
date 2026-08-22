@@ -26,6 +26,21 @@ from azure.cosmos.exceptions import (
 from pydantic import ValidationError as PydanticValidationError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._curation import (
+    CURATION_STATUS_CANDIDATE,
+    apply_scope_hint_metadata,
+)
+from azure.cosmos.agent_memory._partitioning import (
+    USER_SUMMARY_THREAD_ID,
+    ensure_user_scope_fields,
+    inherit_scope_fields,
+    partition_key_for_scope_thread,
+    partition_key_for_user_thread,
+    scope_key_for_user,
+    scope_values_for_scope_key,
+    user_scope_parameters,
+    user_scope_predicate,
+)
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
@@ -341,15 +356,15 @@ class AsyncPipelineService:
 
     async def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Upsert a fact, episodic, or procedural document to the memories container."""
-        return await self._upsert_item(self._memories_container, body=doc)
+        return await self._upsert_item(self._memories_container, body=ensure_user_scope_fields(dict(doc)))
 
     async def _upsert_summary(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Upsert a thread/user summary document to the summaries container."""
-        return await self._upsert_item(self._summaries_container, body=doc)
+        return await self._upsert_item(self._summaries_container, body=ensure_user_scope_fields(dict(doc)))
 
     async def _create_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Create a memory document and let Cosmos raise 409 for duplicates."""
-        return await self._create_item(self._memories_container, body=doc)
+        return await self._create_item(self._memories_container, body=ensure_user_scope_fields(dict(doc)))
 
     @staticmethod
     def _empty_extract_counts() -> dict[str, int]:
@@ -370,6 +385,27 @@ class AsyncPipelineService:
         if timestamps:
             return max(timestamps)
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _inherit_source_scope(doc: dict[str, Any], sources: list[dict[str, Any]], user_id: str) -> dict[str, Any]:
+        if sources:
+            return inherit_scope_fields(doc, sources[0], fallback_user_id=user_id)
+        return ensure_user_scope_fields(doc)
+
+    @staticmethod
+    def _apply_scope_hint(doc: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+        try:
+            metadata = apply_scope_hint_metadata(dict(doc.get("metadata") or {}), source)
+        except ValidationError as exc:
+            logger.debug("ignoring invalid scope hint: %s", exc)
+            return doc
+        if metadata != (doc.get("metadata") or {}):
+            doc["metadata"] = metadata
+            if doc.get("type") == "procedural":
+                doc["metadata"].setdefault("curation_status", CURATION_STATUS_CANDIDATE)
+            else:
+                doc["status"] = CURATION_STATUS_CANDIDATE
+        return doc
 
     async def _mark_superseded(
         self,
@@ -403,19 +439,19 @@ class AsyncPipelineService:
 
         if turns is None:
             query = (
-                "SELECT * FROM c WHERE c.user_id = @user_id "
+                f"SELECT * FROM c WHERE {user_scope_predicate()} "
                 "AND c.thread_id = @thread_id AND c.type = 'turn' "
                 "AND (NOT IS_DEFINED(c.extracted_at) OR IS_NULL(c.extracted_at))"
             )
             parameters: list[dict[str, Any]] = [
-                {"name": "@user_id", "value": user_id},
+                *user_scope_parameters(user_id),
                 {"name": "@thread_id", "value": thread_id},
             ]
             items = await self._query_items(
                 self._turns_container,
                 query=query,
                 parameters=parameters,
-                partition_key=[user_id, thread_id],
+                partition_key=partition_key_for_user_thread(user_id, thread_id),
             )
         else:
             items = list(turns)
@@ -536,6 +572,8 @@ class AsyncPipelineService:
                 "updated_at": doc_timestamp,
             }
 
+            self._apply_scope_hint(doc, fact)
+            self._inherit_source_scope(doc, items, user_id)
             fact_docs.append(self._validate_extracted_doc(doc))
             existing_fact_hashes.add(new_content_hash)
 
@@ -632,7 +670,11 @@ class AsyncPipelineService:
             try:
                 await self._turns_container.patch_item(
                     item=turn_id,
-                    partition_key=[turn.get("user_id"), turn.get("thread_id")],
+                    partition_key=partition_key_for_scope_thread(
+                        turn.get("scope_key") or f"user:{turn.get('user_id')}",
+                        turn.get("thread_id"),
+                        turn.get("tenant_id"),
+                    ),
                     patch_operations=[{"op": "set", "path": "/extracted_at", "value": now_iso}],
                 )
                 marked += 1
@@ -686,15 +728,15 @@ class AsyncPipelineService:
         recent_k: int | None = None,
     ) -> list[dict[str, Any]]:
         """Load the newest turns for a thread, returned in chronological order."""
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
+        query = f"SELECT * FROM c WHERE {user_scope_predicate()} AND c.thread_id = @thread_id AND c.type = 'turn'"
         items = await self._query_items(
             self._turns_container,
             query=query,
             parameters=[
-                {"name": "@user_id", "value": user_id},
+                *user_scope_parameters(user_id),
                 {"name": "@thread_id", "value": thread_id},
             ],
-            partition_key=[user_id, thread_id],
+            partition_key=partition_key_for_user_thread(user_id, thread_id),
         )
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:
@@ -861,6 +903,8 @@ class AsyncPipelineService:
                     episode,
                 )
                 continue
+            self._apply_scope_hint(doc, episode)
+            self._inherit_source_scope(doc, items, user_id)
             episode_docs.append(doc)
 
         return episode_docs
@@ -883,7 +927,7 @@ class AsyncPipelineService:
             doc = await self._read_item(
                 self._memories_container,
                 item=self._episode_cursor_id(user_id, thread_id),
-                partition_key=[user_id, thread_id],
+                partition_key=partition_key_for_user_thread(user_id, thread_id),
             )
         except CosmosResourceNotFoundError:
             return "", ""
@@ -904,7 +948,7 @@ class AsyncPipelineService:
         if not last_at:
             return
         cursor_id = self._episode_cursor_id(user_id, thread_id)
-        partition_key = [user_id, thread_id]
+        partition_key = partition_key_for_user_thread(user_id, thread_id)
         for _ in range(3):
             etag: Optional[str] = None
             try:
@@ -919,15 +963,17 @@ class AsyncPipelineService:
                 if (last_at, last_id) <= current:
                     return  # monotonic: never regress
                 etag = existing.get("_etag")
-            body = {
-                "id": cursor_id,
-                "type": "episode_cursor",
-                "user_id": user_id,
-                "thread_id": thread_id,
-                "last_episode_at": last_at,
-                "last_episode_id": last_id,
-                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
-            }
+            body = ensure_user_scope_fields(
+                {
+                    "id": cursor_id,
+                    "type": "episode_cursor",
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "last_episode_at": last_at,
+                    "last_episode_id": last_id,
+                    "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+            )
             try:
                 if existing is None:
                     await self._create_item(self._memories_container, body=body)
@@ -954,18 +1000,18 @@ class AsyncPipelineService:
         items = await self._query_items(
             self._turns_container,
             query=(
-                "SELECT * FROM c WHERE c.user_id = @user_id "
+                f"SELECT * FROM c WHERE {user_scope_predicate()} "
                 "AND c.thread_id = @thread_id AND c.type = 'turn' "
                 "AND (c.created_at > @last_at "
                 "OR (c.created_at = @last_at AND c.id > @last_id))"
             ),
             parameters=[
-                {"name": "@user_id", "value": user_id},
+                *user_scope_parameters(user_id),
                 {"name": "@thread_id", "value": thread_id},
                 {"name": "@last_at", "value": last_at},
                 {"name": "@last_id", "value": last_id},
             ],
-            partition_key=[user_id, thread_id],
+            partition_key=partition_key_for_user_thread(user_id, thread_id),
         )
         items.sort(key=created_at_sort_key)
         return items
@@ -1114,7 +1160,7 @@ class AsyncPipelineService:
         behavioral_fact_docs = await self._query_items(
             self._memories_container,
             query=(
-                "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
+                f"SELECT TOP 50 * FROM c WHERE {user_scope_predicate('@uid')} "
                 "AND c.type = @type "
                 f"AND {_ACTIVE_DOC_FILTER} "
                 "AND ((IS_DEFINED(c.metadata.category) "
@@ -1123,7 +1169,7 @@ class AsyncPipelineService:
                 "ORDER BY c.created_at ASC"
             ),
             parameters=[
-                {"name": "@uid", "value": user_id},
+                *user_scope_parameters(user_id, "@uid"),
                 {"name": "@type", "value": "fact"},
                 {"name": "@min_salience", "value": 0.8},
             ],
@@ -1137,14 +1183,14 @@ class AsyncPipelineService:
         episodic_docs = await self._query_items(
             self._memories_container,
             query=(
-                "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
+                f"SELECT TOP 50 * FROM c WHERE {user_scope_predicate('@uid')} "
                 "AND c.type = @type "
                 f"AND {_ACTIVE_DOC_FILTER} "
                 "AND IS_DEFINED(c.lessons) AND ARRAY_LENGTH(c.lessons) > 0 "
                 "ORDER BY c.created_at ASC"
             ),
             parameters=[
-                {"name": "@uid", "value": user_id},
+                *user_scope_parameters(user_id, "@uid"),
                 {"name": "@type", "value": "episodic"},
             ],
         )
@@ -1259,13 +1305,10 @@ class AsyncPipelineService:
 
                 summary = proc.get("summary") if isinstance(proc.get("summary"), str) else ""
                 retrieval_text = proc.get("retrieval_text") if isinstance(proc.get("retrieval_text"), str) else ""
-                scope_type = proc.get("scope_type") if isinstance(proc.get("scope_type"), str) else "user"
-                scope_value = proc.get("scope_value") if isinstance(proc.get("scope_value"), str) else None
+                procedure_kind = proc.get("procedure_kind", "behavioral_policy")
                 proc_id = (
                     "proc_"
-                    + hashlib.sha256(
-                        f"{user_id}|{scope_type}|{scope_value or ''}|{name.strip().lower()}".encode()
-                    ).hexdigest()[:32]
+                    + hashlib.sha256(f"{user_id}|{procedure_kind}|{name.strip().lower()}".encode()).hexdigest()[:32]
                 )
                 doc: dict[str, Any] = {
                     "id": proc_id,
@@ -1279,9 +1322,7 @@ class AsyncPipelineService:
                     "name": name,
                     "summary": summary.strip() or name,
                     "retrieval_text": retrieval_text.strip() or summary.strip() or name,
-                    "procedure_kind": proc.get("procedure_kind", "behavioral_policy"),
-                    "scope_type": scope_type,
-                    "scope_value": scope_value,
+                    "procedure_kind": procedure_kind,
                     "activation_conditions": proc.get("activation_conditions", []),
                     "preconditions": proc.get("preconditions", []),
                     "steps": proc.get("steps", []),
@@ -1308,6 +1349,7 @@ class AsyncPipelineService:
                     "metadata": {},
                     **self._prompt_lineage("extract_procedure.prompty"),
                 }
+                self._apply_scope_hint(doc, proc)
                 validated = construct_internal(ProceduralRecord, doc).to_doc()
                 validated["embedding"] = await self._embed_one(validated["retrieval_text"])
                 try:
@@ -1350,14 +1392,14 @@ class AsyncPipelineService:
             existing_summary = await self._read_item(
                 self._summaries_container,
                 item=summary_id,
-                partition_key=[user_id, thread_id],
+                partition_key=partition_key_for_user_thread(user_id, thread_id),
             )
         except CosmosResourceNotFoundError:
             pass
 
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
+        query = f"SELECT * FROM c WHERE {user_scope_predicate()} AND c.thread_id = @thread_id AND c.type = 'turn'"
         parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
+            *user_scope_parameters(user_id),
             {"name": "@thread_id", "value": thread_id},
         ]
         if existing_summary:
@@ -1369,7 +1411,7 @@ class AsyncPipelineService:
             self._turns_container,
             query=query,
             parameters=parameters,
-            partition_key=[user_id, thread_id],
+            partition_key=partition_key_for_user_thread(user_id, thread_id),
         )
 
         if existing_summary and not items:
@@ -1426,6 +1468,7 @@ class AsyncPipelineService:
             "created_at": existing_summary["created_at"] if existing_summary else doc_timestamp,
             "updated_at": doc_timestamp,
         }
+        self._inherit_source_scope(summary_doc, items, user_id)
         return construct_internal(ThreadSummaryRecord, summary_doc).to_doc()
 
     async def persist_thread_summary(
@@ -1444,10 +1487,13 @@ class AsyncPipelineService:
 
         doc = dict(summary_doc)
         doc["id"] = doc.get("id") or f"summary_{user_id}_{thread_id}"
-        doc["user_id"] = user_id
+        doc["scope_key"] = scope_key_for_user(user_id)
         doc["thread_id"] = thread_id
-        doc.setdefault("prompt_id", "summarize.prompty")
-        doc.setdefault("prompt_version", "v1")
+        provenance = dict(doc.get("provenance") or {})
+        provenance.setdefault("prompt_id", "summarize.prompty")
+        provenance.setdefault("prompt_version", "v1")
+        provenance.setdefault("created_by", scope_key_for_user(user_id))
+        doc["provenance"] = provenance
         if doc.get("content") and not doc.get("embedding"):
             doc["embedding"] = await self._embed_one(doc["content"])
         validated = construct_internal(ThreadSummaryRecord, doc).to_doc()
@@ -1487,13 +1533,13 @@ class AsyncPipelineService:
             existing_summary = await self._read_item(
                 self._summaries_container,
                 item=user_summary_id,
-                partition_key=[user_id, "__user_summary__"],
+                partition_key=partition_key_for_user_thread(user_id, USER_SUMMARY_THREAD_ID),
             )
         except CosmosResourceNotFoundError:
             pass
 
-        query_predicate = "c.user_id = @user_id"
-        parameters: list[dict[str, Any]] = [{"name": "@user_id", "value": user_id}]
+        query_predicate = user_scope_predicate()
+        parameters: list[dict[str, Any]] = user_scope_parameters(user_id)
         if existing_summary:
             since = existing_summary["updated_at"]
             query_predicate += " AND c.created_at > @since"
@@ -1568,7 +1614,7 @@ class AsyncPipelineService:
         summary_doc: dict[str, Any] = {
             "id": user_summary_id,
             "user_id": user_id,
-            "thread_id": "__user_summary__",
+            "thread_id": USER_SUMMARY_THREAD_ID,
             "role": "system",
             "type": "user_summary",
             "content": overview,
@@ -1586,6 +1632,7 @@ class AsyncPipelineService:
             "created_at": existing_summary["created_at"] if existing_summary else doc_timestamp,
             "updated_at": doc_timestamp,
         }
+        self._inherit_source_scope(summary_doc, items, user_id)
         return construct_internal(UserSummaryRecord, summary_doc).to_doc()
 
     async def persist_user_summary(
@@ -1601,10 +1648,13 @@ class AsyncPipelineService:
 
         doc = dict(user_summary_doc)
         doc["id"] = doc.get("id") or f"user_summary_{user_id}"
-        doc["user_id"] = user_id
-        doc["thread_id"] = "__user_summary__"
-        doc.setdefault("prompt_id", "user_summary.prompty")
-        doc.setdefault("prompt_version", "v1")
+        doc["scope_key"] = scope_key_for_user(user_id)
+        doc["thread_id"] = USER_SUMMARY_THREAD_ID
+        provenance = dict(doc.get("provenance") or {})
+        provenance.setdefault("prompt_id", "user_summary.prompty")
+        provenance.setdefault("prompt_version", "v1")
+        provenance.setdefault("created_by", scope_key_for_user(user_id))
+        doc["provenance"] = provenance
         structured_summary = doc.get("metadata", {}).get("structured_summary")
         topics = structured_summary.get("topics", []) if isinstance(structured_summary, dict) else []
         doc["tags"] = sorted({*(doc.get("tags") or []), "sys:user-summary", *build_topic_tags(topics)})
@@ -1646,17 +1696,40 @@ class AsyncPipelineService:
                 "duration_ms": duration_ms,
                 "prompt_id": "dedup.prompty",
                 "prompt_version": "v1",
+                "provenance": {
+                    "prompt_id": "dedup.prompty",
+                    "prompt_version": "v1",
+                    "created_by": scope_key_for_user(user_id),
+                },
             },
         )
 
-    async def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
+    async def _active_memories_for_reconcile(
+        self,
+        user_id: str,
+        memory_type: str,
+        n: int,
+        *,
+        tenant_id: str | None = None,
+        scope_key: str | None = None,
+    ) -> list[dict[str, Any]]:
         capped_n = top_literal(n, name="reconcile_memories.n")
+        if scope_key is not None:
+            tenant_id, _, _, scope_key = scope_values_for_scope_key(scope_key, tenant_id)
+            scope_predicate = "c.tenant_id = @tenant_id AND c.scope_key = @scope_key"
+            scope_parameters = [
+                {"name": "@tenant_id", "value": tenant_id},
+                {"name": "@scope_key", "value": scope_key},
+            ]
+        else:
+            scope_predicate = user_scope_predicate()
+            scope_parameters = user_scope_parameters(user_id)
         # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
         # agent did/recommended (historical events), not mutable user state, so
         # they must never be contradiction-superseded by a later user statement.
         query = (
             f"SELECT TOP {capped_n} * FROM c "
-            "WHERE c.user_id = @user_id "
+            f"WHERE {scope_predicate} "
             "AND c.type = @memory_type "
             f"AND {_ACTIVE_DOC_FILTER} "
             "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
@@ -1666,7 +1739,7 @@ class AsyncPipelineService:
             self._memories_container,
             query=query,
             parameters=[
-                {"name": "@user_id", "value": user_id},
+                *scope_parameters,
                 {"name": "@memory_type", "value": memory_type},
             ],
         )
@@ -1682,20 +1755,28 @@ class AsyncPipelineService:
             return []
         placeholders = ", ".join(f"@id{i}" for i in range(len(id_list)))
         query = (
-            "SELECT * FROM c WHERE c.user_id = @user_id "
+            f"SELECT * FROM c WHERE {user_scope_predicate()} "
             "AND c.type = @memory_type "
             f"AND c.id IN ({placeholders}) "
             f"AND {_ACTIVE_DOC_FILTER}"
         )
         parameters = [
-            {"name": "@user_id", "value": user_id},
+            *user_scope_parameters(user_id),
             {"name": "@memory_type", "value": memory_type},
         ]
         parameters.extend({"name": f"@id{i}", "value": mid} for i, mid in enumerate(id_list))
         return await self._query_items(self._memories_container, query=query, parameters=parameters)
 
-    async def reconcile_memories(self, user_id: str, n: int = 50, *, memory_type: str = "fact") -> dict[str, int]:
-        """Resolve contradictions among a user's most-recent active memories.
+    async def reconcile_memories(
+        self,
+        user_id: str,
+        n: int = 50,
+        *,
+        memory_type: str = "fact",
+        tenant_id: str | None = None,
+        scope_key: str | None = None,
+    ) -> dict[str, int]:
+        """Resolve contradictions among active memories in a user or explicit scope.
 
         Async mirror of the sync contradiction-only reconcile. This pass only
         supersedes the loser of each ``contradicted_pairs`` entry - no clustering,
@@ -1703,8 +1784,10 @@ class AsyncPipelineService:
         no-ops.
         Returns ``{"kept", "merged", "contradicted"}`` with ``merged`` always 0.
         """
-        if not user_id:
+        if scope_key is None and not user_id:
             raise ValidationError("user_id is required")
+        if scope_key is not None:
+            tenant_id, _, _, scope_key = scope_values_for_scope_key(scope_key, tenant_id)
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:
             raise ValidationError(f"n must be a positive integer, got {n!r}")
         if n > 500:
@@ -1717,10 +1800,20 @@ class AsyncPipelineService:
             return result
 
         started_at = time.monotonic()
-        logger.info("reconcile_memories started user_id=%s n=%d memory_type=%s", user_id, n, memory_type)
+        reconcile_scope = scope_key or f"user:{user_id}"
+        logger.info(
+            "reconcile_memories started user_id=%s tenant_id=%s scope_key=%s n=%d memory_type=%s",
+            user_id,
+            tenant_id or "default",
+            reconcile_scope,
+            n,
+            memory_type,
+        )
 
-        facts = await self._active_memories_for_reconcile(user_id, memory_type, n)
-        result = await self._reconcile_contradictions(user_id, memory_type, facts)
+        facts = await self._active_memories_for_reconcile(
+            user_id, memory_type, n, tenant_id=tenant_id, scope_key=scope_key
+        )
+        result = await self._reconcile_contradictions(user_id, memory_type, facts, scope_key=reconcile_scope)
         self._emit_reconcile_outcome(
             started_at=started_at,
             user_id=user_id,
@@ -1730,7 +1823,7 @@ class AsyncPipelineService:
         return result
 
     async def _reconcile_contradictions(
-        self, user_id: str, memory_type: str, facts: list[dict[str, Any]]
+        self, user_id: str, memory_type: str, facts: list[dict[str, Any]], *, scope_key: str | None = None
     ) -> dict[str, int]:
         """Async mirror: resolve only ``contradicted_pairs`` within the pool.
 
@@ -1765,17 +1858,17 @@ class AsyncPipelineService:
         contradicted = 0
         consumed_loser_ids: set[str] = set()
         for pair in contradicted_pairs:
-            winner_id = pair.get("winner_id")
-            loser_id = pair.get("loser_id")
-            if not winner_id or not loser_id or winner_id == loser_id:
+            first_id = pair.get("winner_id")
+            second_id = pair.get("loser_id")
+            if not first_id or not second_id or first_id == second_id:
                 continue
-            if winner_id not in facts_by_id:
+            if first_id not in facts_by_id or second_id not in facts_by_id:
                 logger.warning(
-                    "reconcile_memories: hallucinated winner_id=%s not in pool; skipping pair %r",
-                    winner_id,
+                    "reconcile_memories: hallucinated contradiction id(s) not in pool; skipping pair %r",
                     pair,
                 )
                 continue
+            winner_id, loser_id = self._choose_contradiction_winner(first_id, second_id, facts_by_id)
             # Guard chained contradictions (A>B then B>C) and re-supersession.
             if winner_id in consumed_loser_ids or loser_id in consumed_loser_ids:
                 logger.info(
@@ -1794,32 +1887,54 @@ class AsyncPipelineService:
         kept = len([fid for fid in facts_by_id if fid not in consumed_loser_ids])
         result = {"kept": kept, "merged": 0, "contradicted": contradicted}
         logger.info(
-            "reconcile_memories contradiction pass user_id=%s memory_type=%s result=%s",
+            "reconcile_memories contradiction pass user_id=%s scope_key=%s memory_type=%s result=%s",
             user_id,
+            scope_key,
             memory_type,
             result,
         )
         return result
+
+    @staticmethod
+    def _choose_contradiction_winner(
+        first_id: str, second_id: str, facts_by_id: dict[str, dict[str, Any]]
+    ) -> tuple[str, str]:
+        first = facts_by_id[first_id]
+        second = facts_by_id[second_id]
+        first_created = str(first.get("created_at") or "")
+        second_created = str(second.get("created_at") or "")
+        # Contradiction winner selection (matches dedup.prompty):
+        #   1. more recent created_at wins - newest information supersedes;
+        #   2. higher confidence breaks a timestamp tie;
+        #   3. the alphabetically-first id is the final deterministic tiebreak,
+        #      so the outcome never flaps across runs.
+        # Shared-scope owner/role priority remains deferred (design decision #6).
+        if first_created != second_created:
+            return (first_id, second_id) if first_created > second_created else (second_id, first_id)
+        first_conf = first.get("confidence") if _is_real_number(first.get("confidence")) else float("-inf")
+        second_conf = second.get("confidence") if _is_real_number(second.get("confidence")) else float("-inf")
+        if first_conf != second_conf:
+            return (first_id, second_id) if first_conf > second_conf else (second_id, first_id)
+        return (first_id, second_id) if first_id <= second_id else (second_id, first_id)
 
     async def build_procedural_context(self, user_id: str, task: Optional[str] = None) -> str:
         """Build a deterministic system prompt projection from active procedures."""
         if not user_id:
             raise ValidationError("user_id is required")
         query = (
-            "SELECT * FROM c WHERE c.user_id=@uid AND c.type='procedural' "
+            "SELECT * FROM c WHERE c.scope_key=@scope_key AND c.type='procedural' "
             "AND c.status='active' "
             "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
         )
         procedures = await self._query_items(
             self._memories_container,
             query=query,
-            parameters=[{"name": "@uid", "value": user_id}],
+            parameters=[{"name": "@scope_key", "value": scope_key_for_user(user_id)}],
         )
         procedures = [
             proc
             for proc in procedures
-            if proc.get("user_id") == user_id
-            and proc.get("type") == "procedural"
+            if proc.get("type") == "procedural"
             and proc.get("status") == "active"
             and not proc.get("superseded_by")
         ]
@@ -1854,8 +1969,7 @@ class AsyncPipelineService:
         task_procedures: list[dict[str, Any]] = []
         for proc in procedures:
             kind = proc.get("procedure_kind")
-            scope_type = proc.get("scope_type")
-            if kind in {"behavioral_policy", "decision_rule"} and scope_type in {"global", "user"}:
+            if kind in {"behavioral_policy", "decision_rule"}:
                 policies.append(proc)
                 continue
             if task_tokens and kind in {"workflow", "recovery_strategy", "tool_usage"}:
@@ -1898,8 +2012,7 @@ class AsyncPipelineService:
                 str(proc.get("version", "")),
                 str(proc.get("status", "")),
                 str(proc.get("priority", "")),
-                str(proc.get("scope_type", "")),
-                str(proc.get("scope_value", "")),
+                str(proc.get("scope_key", "")),
             )
             for proc in included
         )

@@ -8,6 +8,6 @@ azure-identity>=1.20
 
 # LLM + prompty (used transitively by azure.cosmos.agent_memory.services.pipeline)
 openai>=1.60
-prompty>=2.0.0a9
+prompty==2.0.0b3
 jinja2>=3.1.4
 typing_extensions>=4.10

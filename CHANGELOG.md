@@ -2,10 +2,8 @@
 
 ## [Unreleased]
 
-> Supersedes parts of the 0.3.0b2 notes below: the default extraction prompt is now `extract_memories-v3.prompty`, procedural memory is reshaped (see Breaking Changes), and `reconcile()` folds duplicate facts again.
-
 #### Features Added
-* **Better fact extraction.** `extract_memories-v3.prompty` is now the default. Extraction also sees recent turns, the thread summary and the user's existing facts as read-only context, and facts can record `assertion`, `subject`, `attribute`, `entities` and the `source_turn_ids` they came from. Set `AMT_EXTRACT_MEMORIES_PROMPT` to use an earlier prompt.
+* **New extraction prompt.** `extract_memories-v3.prompty` is now the default. Set `AMT_EXTRACT_MEMORIES_PROMPT` to use an earlier prompt.
 * **Duplicates are folded and combined.** Before resolving contradictions, `reconcile()` retires a fact into another that states everything it states (`supersede_reason="duplicate"`, with `merged_from` on the survivor) and combines facts about one specific thing into one `sys:combined` fact (`supersede_reason="combined"`). It returns counts for both passes, and `DEDUP_POOL_SIZE` limits how many new facts one pass checks.
 * **Procedural memory is learned from conversations.** The toolkit learns standing instructions, habits and skills from what users teach and correct, and `build_procedural_context(user_id, task=None)` returns the rules to add to a prompt.
 * **Search slots.** `search_cosmos(preference_slot=True, procedure_slot=True)` reserves places in `top_k` for the user's best-matching preference and situational procedure, so closer-matching facts do not crowd them out.
@@ -15,12 +13,11 @@
 * **Cosmos DB read regions.** `cosmos_preferred_locations` (or `COSMOS_DB_PREFERRED_REGIONS`) sets the regions the SDK reads from, closest first.
 
 #### Breaking Changes
-* **Procedural memory is reshaped, with no migration.** `procedure_kind` is now `instruction`, `habit` or `skill`, and a procedure's `status` follows from its evidence. `scope_type` / `scope_value`, `ProcedureScopeType` and `synthesize_procedural.prompty` are removed, `synthesize_procedural()` works incrementally, `build_procedural_context()` returns only standing rules (plus the nearest situational rule for a `task`), and `search_cosmos()` hides procedures that are not active. Delete or ignore procedural documents written by earlier betas.
+* **Procedural memory is reshaped** `procedure_kind` is now `instruction`, `habit` or `skill`, and a procedure's `status` follows from its evidence. `scope_type` / `scope_value`, `ProcedureScopeType` and `synthesize_procedural.prompty` are removed, `synthesize_procedural()` works incrementally, `build_procedural_context()` returns only standing rules (plus the nearest situational rule for a `task`), and `search_cosmos()` hides procedures that are not active. Delete or ignore procedural documents written by earlier betas.
 * **Logs and failure messages no longer quote exception text.** JSON logs write `exc_detail` (type, error code and location) instead of `exc_msg`, so update any query or alert that reads `exc_msg`. A failed Function App activity now reports only `<code> (<ExcType>)` to Durable Functions.
 * **Bicep creates `memories_summaries` with a vector and full-text index**, as `create_memory_store()` already does, so `search_summaries()` works on a deployment from the template. Cosmos DB sets a vector policy only when a container is created: an environment provisioned from an earlier template needs that container created again, and `azd up` over it can fail.
 
 #### Bugs Fixed
-* Thread-scoped keyword and hybrid searches no longer return the same order for every question. They now run cross-partition with `user_id` / `thread_id` filters to work around Azure/azure-sdk-for-python#42241.
 * Procedure learning no longer ignores newer facts and episodes.
 * Turns with the same `created_at`, as in an imported session, are processed in write order, and `recent_k` keeps the newest.
 * Empty model replies are retried, and content-filtered or refused replies raise an `LLMError` that names the cause instead of being retried on every run.
@@ -30,7 +27,6 @@
 * New prompts `extract_memories-v3`, `dedup_verify` and `combine_memories`; `extract_procedure` is rewritten. Every memory-writing prompt now tells the model never to write a literal secret.
 * Search results include the new fact and procedure fields and `merged_from`, and `MemoryStore.search()` gains `categories`, `vector_only`, `active_procedures_only`, `applies` and `query_embedding`.
 * Bicep adds the `dedupPoolSize`, `activityTimeBudgetSeconds`, `chatCapacity` and `embeddingCapacity` parameters (azd variables `DEDUP_POOL_SIZE`, `ACTIVITY_TIME_BUDGET_SECONDS`, `AI_FOUNDRY_CHAT_CAPACITY`, `AI_FOUNDRY_EMBEDDING_CAPACITY`). New `counter` containers expire a turn counter 90 days after its last update; existing containers are unchanged.
-* `function_app/requirements.txt` still pins `azure-cosmos-agent-memory==0.3.0b2`. Bump it with the SDK release before deploying the updated Function App code (see `Docs/RELEASING.md`).
 
 ## [0.3.0b2] (2026-08-17)
 

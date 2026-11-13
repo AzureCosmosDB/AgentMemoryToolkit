@@ -26,11 +26,25 @@ import pytest
 
 from azure.cosmos.agent_memory._utils import _normalize_for_hash, compute_content_hash
 from azure.cosmos.agent_memory.exceptions import ValidationError
+from azure.cosmos.agent_memory.services._dedup import dedup_result
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
+
+NO_DEDUP = dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
+
+
+def _no_dedup() -> MagicMock:
+    """A dedup pass that finds nothing, so a test exercises the contradiction pass alone."""
+    return MagicMock(return_value=dict(NO_DEDUP))
+
+
+def _counts(kept: int, merged: int = 0, contradicted: int = 0) -> dict[str, int]:
+    """A ``reconcile_memories`` result when the dedup pass did nothing."""
+    return {**NO_DEDUP, "kept": kept, "merged": merged, "contradicted": contradicted}
 
 
 def _make_pipeline() -> PipelineService:
     p = PipelineService.__new__(PipelineService)
+    p.consolidate_memories = _no_dedup()
     p._embeddings = MagicMock()
     p._embeddings.generate.return_value = [0.1] * 8
     p._upsert_memory = MagicMock(side_effect=lambda doc: doc)
@@ -145,7 +159,7 @@ class TestReconcileMemories:
         p._container.query_items.return_value = iter([])
         p._run_prompty = MagicMock()
         result = p.reconcile_memories("u1")
-        assert result == {"kept": 0, "merged": 0, "contradicted": 0}
+        assert result == _counts(0)
         p._run_prompty.assert_not_called()
 
     def test_single_fact_no_op(self):
@@ -153,7 +167,7 @@ class TestReconcileMemories:
         p._container.query_items.return_value = iter([_fact("f1", "User likes coffee")])
         p._run_prompty = MagicMock()
         result = p.reconcile_memories("u1")
-        assert result == {"kept": 1, "merged": 0, "contradicted": 0}
+        assert result == _counts(1)
         p._run_prompty.assert_not_called()
 
     def test_only_contradictions(self):
@@ -175,7 +189,7 @@ class TestReconcileMemories:
 
         result = p.reconcile_memories("u1")
 
-        assert result == {"kept": 1, "merged": 0, "contradicted": 1}
+        assert result == _counts(1, contradicted=1)
         # No new doc upserted (contradiction never creates a merged doc)
         p._upsert_memory.assert_not_called()
         assert p._mark_superseded.call_count == 1
@@ -394,6 +408,7 @@ class TestReconcileSupersedeRaceCounting:
 
     def test_failed_supersede_does_not_consume_source(self):
         p = PipelineService.__new__(PipelineService)
+        p.consolidate_memories = _no_dedup()
         p._container = MagicMock()
         p._memories_container = p._container
         p._turns_container = p._container
@@ -427,7 +442,7 @@ class TestReconcileSupersedeRaceCounting:
         p._mark_superseded = MagicMock(return_value=False)
         result = p.reconcile_memories("u1")
         # Sources stay active: kept counts ALL three originals.
-        assert result == {"kept": 3, "merged": 0, "contradicted": 0}
+        assert result == _counts(3)
 
 
 class TestReconcileWinnerValidation:
@@ -436,6 +451,7 @@ class TestReconcileWinnerValidation:
 
     def test_hallucinated_winner_id_skipped(self):
         p = PipelineService.__new__(PipelineService)
+        p.consolidate_memories = _no_dedup()
         p._container = MagicMock()
         p._memories_container = p._container
         p._turns_container = p._container
@@ -466,7 +482,7 @@ class TestReconcileWinnerValidation:
         result = p.reconcile_memories("u1")
         # Refuse to write a dangling superseded_by pointer.
         p._mark_superseded.assert_not_called()
-        assert result == {"kept": 2, "merged": 0, "contradicted": 0}
+        assert result == _counts(2)
 
 
 class TestReconcileFactsTextEscapesContent:
@@ -474,6 +490,7 @@ class TestReconcileFactsTextEscapesContent:
 
     def test_special_chars_in_content_are_json_escaped(self):
         p = PipelineService.__new__(PipelineService)
+        p.consolidate_memories = _no_dedup()
         p._container = MagicMock()
         p._memories_container = p._container
         p._turns_container = p._container
@@ -749,7 +766,7 @@ class TestReconcileOutcomeTelemetry:
             result = p.reconcile_memories("u1")
 
         p._run_prompty.assert_not_called()
-        assert result == {"kept": 0, "merged": 0, "contradicted": 0}
+        assert result == _counts(0)
 
         records = self._outcome_records(caplog)
         assert len(records) == 1

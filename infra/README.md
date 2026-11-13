@@ -12,7 +12,7 @@ This folder provisions everything the Agent Memory Toolkit needs in a single Azu
   | --- | --- |
   | `memories` | Facts, episodics, and procedural memories; vector + FTS index |
   | `memories_turns` | Turns; minimal index, change-feed binding target |
-  | `memories_summaries` | Thread + user summaries; minimal index, point-read access pattern |
+  | `memories_summaries` | Thread + user summaries; vector + FTS index (`search_summaries`), composite index for point reads |
   | `leases` | Change-feed checkpoints |
   | `counter` | Atomic counters |
 - **AI Foundry** (`Microsoft.CognitiveServices/accounts` with `kind: AIServices`) - with `gpt-4o-mini` and `text-embedding-3-large` deployments
@@ -106,6 +106,17 @@ azd env set AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME my-prod-embed
 
 The `*_DEPLOYMENT_NAME` value is what the SDK and Function app pass as the `model=` argument to the Azure OpenAI client at runtime.
 
+### Model capacity
+
+Both deployments are created with 30K tokens per minute (TPM). Fact extraction, reconcile (a duplicate check per new fact that has close neighbours, plus combining) and procedure learning all use the chat model, and each extraction call sends a long prompt, so a busy workload can exceed the default. Raise the capacity before `azd up`, within your subscription's quota for the model:
+
+```bash
+azd env set AI_FOUNDRY_CHAT_CAPACITY 100        # thousands of TPM
+azd env set AI_FOUNDRY_EMBEDDING_CAPACITY 100
+```
+
+To cut chat usage instead, see the cost knobs under [Counter-based trigger configuration](#counter-based-trigger-configuration-function-app-only).
+
 ## Counter-based trigger configuration (Function app only)
 
 The Function app uses a counter document per `(user_id, thread_id)` to decide when to fire each orchestrator. Every knob is a Bicep parameter bound to an `azd env` variable - `azd up` re-renders them on every deploy, so changing a value is a one-line `azd env set ...` followed by `azd up`.
@@ -113,13 +124,17 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | `azd env` variable | Bicep param | Default | Effect |
 |---|---|---|---|
 | `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. `0` disables it. |
-| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
-| `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run fact dedup every Nth fact-extraction (so dedup actually fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns). |
+| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact extraction every N turns within a `(user_id, thread_id)`. Reconcile and procedure learning run on multiples of it (see `DEDUP_EVERY_N`). `0` disables all three. |
+| `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run reconcile (fold duplicate facts, combine facts about one specific thing, resolve contradictions) every Nth fact-extraction, so it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns. Procedure learning is chained after it (unless `PROCEDURAL_SYNTHESIS_AUTO` is `false`). `0` disables both. |
 | `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
-| `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Maximum number of change-feed items processed per orchestration batch. |
+| `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Maximum number of change-feed items processed per orchestration batch. At least 1; a lower value falls back to `20`. |
+| `DEDUP_POOL_SIZE` | `dedupPoolSize` | `50` | The `n` of the automatic reconcile: the most new facts its duplicate pass checks per run (each costs a model call; the rest wait for the next run) and the size of its contradiction pool. `1`-`500`. |
+| `ACTIVITY_TIME_BUDGET_SECONDS` | `activityTimeBudgetSeconds` | `240` | Seconds a reconcile or procedure-learning activity keeps starting model calls. It then saves what it finished and the next run continues from its cursor. At least `30`; keep it below the function app timeout (30 minutes by default on Flex Consumption). |
 | `MEMORY_PROCESSOR_OWNER` | `memoryProcessorOwner` | `durable` | Backend that owns processing. `durable` = this function-app fleet owns it; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing instead. |
 
 The Function-app defaults match the SDK in-process defaults so behavior is consistent across backends. The Function-app fleet pays real per-turn LLM cost on every orchestrator invocation; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive production traffic.
+
+`PROCEDURAL_SYNTHESIS_AUTO` (`true`) and `AMT_EXTRACT_MEMORIES_PROMPT` are Function-app settings that are not Bicep parameters, so the code defaults apply. Set them with `az functionapp config appsettings set`, or add them to `infra/modules/functions.bicep` so `azd up` keeps them. See [`Docs/operations.md`](../Docs/operations.md#reconcile-procedure-and-extraction-knobs).
 
 Set any value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:
 

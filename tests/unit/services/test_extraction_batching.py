@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     batch_turns_by_tokens,
     is_retryable_llm_error,
@@ -11,6 +14,15 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
 class TestIsRetryableLLMError:
     def test_content_filter_is_non_retryable(self) -> None:
         assert is_retryable_llm_error(Exception("Error code: 400 - content_filter triggered")) is False
+
+    @pytest.mark.parametrize("cause", ["model_refusal", "unexpected_tool_response"])
+    def test_terminal_empty_reply_causes_are_non_retryable(self, cause: str) -> None:
+        assert is_retryable_llm_error(LLMError(f"LLM {cause} (model=gpt-4o-mini)")) is False
+
+    def test_empty_reply_after_retries_stays_retryable(self) -> None:
+        error = LLMError("LLM returned empty content after 6 attempts (model=gpt-4o-mini, finish_reason=stop)")
+
+        assert is_retryable_llm_error(error) is True
 
     def test_content_management_policy_is_non_retryable(self) -> None:
         assert is_retryable_llm_error(Exception("blocked by Azure content management policy")) is False

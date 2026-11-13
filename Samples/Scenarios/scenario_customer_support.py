@@ -48,30 +48,44 @@ def _process_ticket(mem: CosmosMemoryClient, user_id: str, ticket: str) -> None:
 
 def _run_ticket_1(mem: CosmosMemoryClient, user_id: str, ticket: str) -> None:
     _banner(f"Ticket 1 ({ticket}) - initial complaint")
-    _add_dialogue(mem, user_id, ticket, [
-        ("user", "Hi, I'm having issues with my Surface Pro 9. The battery drains in 3 hours."),
-        ("agent", "I'm sorry to hear that. Could you share when you bought the device?"),
-        ("user", "I bought it in March 2024 from the Microsoft Store online."),
-        ("agent", "Thanks. I'll check warranty status. Could you also confirm your email?"),
-        ("user", "It's alex.chen@example.com. The order number was MS-78234."),
-        ("agent", "Verified - the device is under warranty. I've initiated a battery diagnostic. "
-                  "Please run the Surface app diagnostic."),
-        ("user", "OK, will do. By the way, I work as a software engineer so I rely on this device daily."),
-    ])
+    _add_dialogue(
+        mem,
+        user_id,
+        ticket,
+        [
+            ("user", "Hi, I'm having issues with my Surface Pro 9. The battery drains in 3 hours."),
+            ("agent", "I'm sorry to hear that. Could you share when you bought the device?"),
+            ("user", "I bought it in March 2024 from the Microsoft Store online."),
+            ("agent", "Thanks. I'll check warranty status. Could you also confirm your email?"),
+            ("user", "It's alex.chen@example.com. The order number was MS-78234."),
+            (
+                "agent",
+                "Verified - the device is under warranty. I've initiated a battery diagnostic. "
+                "Please run the Surface app diagnostic.",
+            ),
+            ("user", "OK, will do. By the way, I work as a software engineer so I rely on this device daily."),
+        ],
+    )
     _process_ticket(mem, user_id, ticket)
 
 
 def _run_ticket_2(mem: CosmosMemoryClient, user_id: str, ticket: str) -> None:
     _banner(f"Ticket 2 ({ticket}) - accessory question")
-    _add_dialogue(mem, user_id, ticket, [
-        ("user", "Hello again - Alex from the previous battery ticket. "
-                 "The Surface app says battery is degraded."),
-        ("agent", "Welcome back, Alex! Yes, that confirms the diagnostic. "
-                  "We'll ship a replacement battery service unit."),
-        ("user", "Great. While we're talking, can you recommend a USB-C dock that works with the Surface Pro 9?"),
-        ("agent", "The Surface Dock 2 or the Anker 778 are excellent choices for multi-monitor setups."),
-        ("user", "Multi-monitor is exactly what I need - I run 3 displays for development work."),
-    ])
+    _add_dialogue(
+        mem,
+        user_id,
+        ticket,
+        [
+            ("user", "Hello again - Alex from the previous battery ticket. The Surface app says battery is degraded."),
+            (
+                "agent",
+                "Welcome back, Alex! Yes, that confirms the diagnostic. We'll ship a replacement battery service unit.",
+            ),
+            ("user", "Great. While we're talking, can you recommend a USB-C dock that works with the Surface Pro 9?"),
+            ("agent", "The Surface Dock 2 or the Anker 778 are excellent choices for multi-monitor setups."),
+            ("user", "Multi-monitor is exactly what I need - I run 3 displays for development work."),
+        ],
+    )
     _process_ticket(mem, user_id, ticket)
 
 
@@ -88,12 +102,17 @@ def _run_ticket_3_greeting(mem: CosmosMemoryClient, user_id: str, ticket: str) -
     for f in facts[:8]:
         print(f"  • {f['content']}")
 
-    _add_dialogue(mem, user_id, ticket, [
-        ("user", "Hi, I have a quick question about my Microsoft 365 subscription."),
-        # An agent built on top of the toolkit could now look up the profile + facts
-        # before composing its greeting (Alex / engineer / Surface Pro 9 owner).
-        ("agent", "Welcome back, Alex! Happy to help with your Microsoft 365 subscription. What's on your mind?"),
-    ])
+    _add_dialogue(
+        mem,
+        user_id,
+        ticket,
+        [
+            ("user", "Hi, I have a quick question about my Microsoft 365 subscription."),
+            # An agent built on top of the toolkit could now look up the profile + facts
+            # before composing its greeting (Alex / engineer / Surface Pro 9 owner).
+            ("agent", "Welcome back, Alex! Happy to help with your Microsoft 365 subscription. What's on your mind?"),
+        ],
+    )
 
 
 def main() -> None:

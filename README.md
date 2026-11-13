@@ -11,7 +11,7 @@
 [![YouTube](https://img.shields.io/badge/YouTube-Azure%20Cosmos%20DB-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@AzureCosmosDB)
 
 
-Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming agent memories on Azure Cosmos DB. It gives your agent both raw conversation history and higher-value derived memory - thread summaries, extracted facts, and cross-thread user profiles - all searchable semantically. The processing pipeline can run **in-process** (zero infra) or in a sibling **Azure Durable Function app** that watches the Cosmos DB change feed. Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs are mirror-images of each other.
+Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming agent memories on Azure Cosmos DB. It gives your agent both raw conversation history and higher-value derived memory - thread summaries, extracted facts, episodes, procedures learned from what the user teaches and corrects, and cross-thread user profiles - all searchable semantically. The processing pipeline can run **in-process** (zero infra) or in a sibling **Azure Durable Function app** that watches the Cosmos DB change feed. Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs are mirror-images of each other.
 
 
 ---
@@ -126,16 +126,18 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 
 ## Concepts in 60 seconds
 
-| Concept            | What it is                                                              | API                                                   |
-|--------------------|-------------------------------------------------------------------------|-------------------------------------------------------|
-| **Turn**           | One message (user or assistant) - the raw conversation atom             | `upsert_memory(...)`, `add_local(...)`                   |
-| **Thread summary** | LLM-generated, incrementally updated rollup of a single thread          | `generate_thread_summary(...)`                        |
-| **Fact**           | Discrete, independently searchable assertion extracted from turns       | `extract_memories(...)`                               |
-| **Procedural**     | Behavioral rule / instruction the user wants followed                   | `extract_memories(...)`                               |
-| **Episodic**       | Past situation → action → outcome experience (90-day TTL)               | `extract_memories(...)`                               |
-| **User summary**   | Cross-thread profile of what's known about a user                       | `generate_user_summary(...)`, `get_user_summary(...)` |
-| **Search**         | Vector + full-text + filter over `fact` / `episodic` / `procedural`     | `search_cosmos(...)`                                  |
-| **Process now**    | Run the full pipeline (summary → facts → user profile) for recent turns | `process_now(...)`, `process_now_and_wait(...)`       |
+| Concept                   | What it is                                                                             | API                                                      |
+|---------------------------|----------------------------------------------------------------------------------------|----------------------------------------------------------|
+| **Turn**                  | One message (user or assistant) - the raw conversation atom                            | `upsert_memory(...)`, `add_local(...)`                   |
+| **Thread summary**        | LLM-generated, incrementally updated rollup of a single thread                         | `generate_thread_summary(...)`                           |
+| **Fact**                  | Discrete, independently searchable assertion extracted from turns                      | `extract_memories(...)`                                  |
+| **Episodic**              | Bounded experience: situation → action → outcome, with lessons (90-day TTL)            | `extract_episodes(...)`                                  |
+| **Procedural**            | Instruction, habit or skill learned from what the user teaches, corrects and practices | `synthesize_procedural(...)`, `retrieve_procedures(...)` |
+| **Standing instructions** | The user's active, always-applicable procedures, compiled for a system prompt          | `build_procedural_context(...)`                          |
+| **User summary**          | Cross-thread profile of what's known about a user                                      | `generate_user_summary(...)`, `get_user_summary(...)`    |
+| **Search**                | Vector + full-text + filter over `fact` / `episodic` / `procedural`; optional slots    | `search_cosmos(...)`                                     |
+| **Reconcile**             | Fold duplicate facts, combine facts about one thing, retire contradicted facts         | `reconcile(...)`                                         |
+| **Process now**           | Run the full pipeline (summary → facts → reconcile → procedures → user profile)        | `process_now(...)`, `process_now_and_wait(...)`          |
 
 AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarchical `(user_id, thread_id)` keys:
 
@@ -147,14 +149,13 @@ AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarch
 
 ### Memory Type Taxonomy
 
-The `extract_memories` pipeline classifies each item it pulls from the conversation into one of four buckets. Every memory carries a top-level `confidence` (0.0–1.0) so retrieval can suppress weakly-grounded extractions.
+Each pipeline step writes one kind of derived memory. Every extracted fact carries a top-level `confidence` (0.0–1.0) so retrieval can suppress weakly-grounded extractions.
 
-| Bucket       | Meaning                                                      | Storage type                           | TTL     |
-|--------------|--------------------------------------------------------------|----------------------------------------|---------|
-| Fact         | Declarative knowledge ("user prefers dark mode")             | `type="fact"`                          | none    |
-| Procedural   | Behavioral rule ("always confirm before deleting")           | `type="procedural"`                    | none    |
-| Episodic     | Past experience: situation → action → outcome                | `type="episodic"`                      | 90 days |
-| Unclassified | Item worth keeping but the LLM couldn't confidently classify | `type="fact"` + tag `sys:unclassified` | none    |
+| Type       | Meaning                                                                       | Written by              | Storage type        | TTL     |
+|------------|-------------------------------------------------------------------------------|-------------------------|---------------------|---------|
+| Fact       | Declarative knowledge ("user prefers dark mode")                              | `extract_memories`      | `type="fact"`       | none    |
+| Episodic   | Past experience: situation → action → outcome, with lessons                   | `extract_episodes`      | `type="episodic"`   | 90 days |
+| Procedural | How the assistant should act for this user ("always confirm before deleting") | `synthesize_procedural` | `type="procedural"` | none    |
 
 #### Confidence Scale
 
@@ -163,7 +164,7 @@ The `extract_memories` pipeline classifies each item it pulls from the conversat
 | 0.9–1.0 | Directly stated and unambiguous                    |
 | 0.7–0.9 | Clearly implied, no contradicting evidence         |
 | 0.5–0.7 | Inferred from context - plausible but not explicit |
-| < 0.5   | Should be in `unclassified` instead                |
+| < 0.5   | Speculative - likely should not be extracted       |
 
 Filter at retrieval time:
 
@@ -172,32 +173,90 @@ results = memory.search_cosmos("user preferences", user_id="u1", min_confidence=
 high_conf_facts = memory.get_memories(user_id="u1", memory_types=["fact"], min_confidence=0.7)
 ```
 
+#### Fact fields and extraction context
+
+`extract_memories` runs `extract_memories-v3.prompty` by default. Besides `content`, `salience`, `confidence` and `metadata.category` (`preference`, `requirement`, `biographical` or `other`), each fact records:
+
+- `assertion` - how the conversation put the fact forward: `stated`, `decided`, `suggested`, `observed`, `directive` (the user told the assistant how to act in future) or `correction` (the user corrected how the assistant did something). Only the user can direct or correct.
+- `subject`, `attribute`, `entities` - what the fact is about, the single-valued property it gives a value of (`home city`), and the names it mentions (at most 12).
+- `source_turn_ids` - the turns it came from.
+
+The prompt also reads, as context only, up to 6 earlier turns of the thread, the thread summary (when it is older than the new turns) and the user's 15 nearest stored facts, so a reply such as "yes, do that" is written out in full and what is already stored is not restated. Facts still come only from the new turns. Set `AMT_EXTRACT_MEMORIES_PROMPT=extract_memories-v2.prompty` (or `extract_memories.prompty` for v1) to select an earlier prompt, which reads no context and records no `assertion`, `subject`, `attribute` or `entities`.
+
+#### Procedural memory
+
+Procedures are learned from evidence, not copied from one message. `synthesize_procedural` reads the behavioral facts and episode lessons written since its last run, and a procedure's `status` follows from the evidence it has gathered:
+
+| `procedure_kind` | Learned from                                                                   | Becomes `active` when                                                          |
+|------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `instruction`    | The user taught the assistant how to act in future ("always ...", "never ...") | the user taught it                                                             |
+| `habit`          | The user corrected the assistant, or chose the same way repeatedly             | the user corrected the assistant, or sources on two different dates support it |
+| `skill`          | A method of two or more steps that worked in practice                          | it succeeded on two different dates, or the user endorsed it                   |
+
+Anything else stays a `candidate`, which search and prompt injection do not show. A procedure `applies` either `always` (nearly every interaction: language, tone, format) or `when` its activation conditions match, and may carry a `valid_until` date. `build_procedural_context(user_id)` returns the active, unexpired `always` rules as a system-prompt block, and `task=` adds the nearest situational rule:
+
+```python
+print(memory.build_procedural_context(USER, task="Review this pull request"))
+# # Standing instructions from the user
+# - Reply in Spanish.
+# - Keep answers under 150 words.
+#
+# ## Apply only when the situation matches
+# - When reviewing code for the user: Include a suggested fix with every review comment.
+```
+
+The pass runs after each reconcile (`PROCEDURAL_SYNTHESIS_AUTO`) or on demand with `synthesize_procedural(user_id)`. When an active situational procedure holds a directive or correction fact it cites, that fact is retired into the procedure, so the rule is stored and retrieved once.
+
+#### Search slots
+
+A plain search can fill `top_k` with topically close facts and miss a standing preference or a relevant procedure. `preference_slot=True` and `procedure_slot=True` reserve a place inside `top_k` for the user's best-matching preference fact and best-matching active situational procedure, found by vector similarity with the search's own filters. An empty slot takes the next ranked result, and a slotted result carries `retrieval={"rank": ..., "slot": "preference" | "procedure" | "backfill"}`:
+
+```python
+hits = memory.search_cosmos(
+    "Plan a weekend in Lisbon", user_id=USER, top_k=5, preference_slot=True, procedure_slot=True
+)
+```
+
+`search_cosmos` always hides procedures that are not `active` or are past `valid_until`.
+
+#### Secret redaction
+
+Every write through the store or the pipeline, raw turns included, is scanned for credentials with a fixed format: private keys, Azure account keys and connection strings, SAS signatures, JWTs, Bearer and Basic authorization values, OpenAI, GitHub and AWS keys, and passwords inside URLs. Each match is replaced with `[REDACTED-SECRET]` before the text is embedded or stored, and the record is tagged `sys:secret` (`metadata.classification="secret"`). Credentials without a fixed format, such as `password: hunter2`, are left to the memory-writing prompts, which forbid storing them.
+
 ### Memory Reconciliation
 
-`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `ProcessingPipeline.reconcile_memories`) resolves **semantic contradictions** in a single LLM pass over the N most-recent active facts, soft-deleting each loser with `supersede_reason="contradict"`. Paraphrased duplicates are *not* handled here - they are folded in place at write time by the LLM-free vector dedup (see below), so reconcile stays a bounded, convergent contradiction pass. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
+`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `PipelineService.reconcile_memories`) keeps a user's fact pool clean in two passes, duplicates first and then contradictions:
 
-> **Cost note.** Each reconciliation makes one LLM call covering up to `n` facts (default 50, hard cap 500). With auto-trigger, this fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user, with `n` taken from `DEDUP_POOL_SIZE`. The previous cosine-cluster pre-filter was removed deliberately - it could not catch semantic contradictions like "vegetarian" vs "ribeye steak" - so the LLM is now invoked whenever there are ≥ 2 active facts. To bound LLM cost more tightly: raise `DEDUP_EVERY_N` (lower frequency - reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (smaller per-call pool), or override `n` per call when invoking `reconcile()` directly.
+1. **Duplicates, without losing detail.** Each fact written since the last pass is compared with its nearest active facts (cosine similarity ≥ 0.85) in one model call. A fact is retired into another (`supersede_reason="duplicate"`) only when the two state the same claim or one contains the other, the model lists nothing that would be lost, and a numbers / names / negation check agrees. The survivor keeps its content verbatim and lists the retired fact in `merged_from`. The pass also combines facts about one specific thing that each hold details the others lack into one verified fact (tagged `sys:combined`), and retires its sources with `supersede_reason="combined"`.
+2. **Contradictions.** A single LLM pass over the `n` most-recent active facts soft-deletes each loser with `supersede_reason="contradict"`.
 
-| New `MemoryRecord` field | Meaning                                                                     |
-|--------------------------|-----------------------------------------------------------------------------|
-| `content_hash`           | SHA-256 of normalized content; enables write-time exact-dedup short-circuit |
-| `supersede_reason`       | `"contradict"` (None for live records)                                      |
-| `superseded_at`          | ISO timestamp when the supersede happened (None for live records)           |
-| `superseded_by`          | Id of the record that replaced this one (existing field)                    |
+The pass returns `kept`, `merged` (duplicates retired), `contradicted`, and `checked`, `compared`, `vetoed`, `combined`, `synthesized`, `combine_groups` and `combine_failed` for the duplicate pass. Search hides retired records and `get_memory_history()` returns them; deleting a fact or procedure with `delete_memory()` also deletes the records retired into it. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
+
+> **Cost note.** A pass makes one duplicate check per new fact that has close neighbours (at most `n`, default 50, hard cap 500), up to four calls per combine group (write, check, and one retry of each), and one contradiction call over the `n` most-recent facts. With auto-trigger it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user, with `n` taken from `DEDUP_POOL_SIZE`. To bound LLM cost: raise `DEDUP_EVERY_N` (reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (fewer new facts checked per pass; the rest wait for the next one), or override `n` per call when invoking `reconcile()` directly. In the Function App, `ACTIVITY_TIME_BUDGET_SECONDS` (default 240) stops a pass from starting model calls near the function timeout, and the next pass continues where it stopped.
+
+| `MemoryRecord` field | Meaning                                                                                               |
+|----------------------|-------------------------------------------------------------------------------------------------------|
+| `content_hash`       | SHA-256 of normalized content; identical facts in a thread are skipped at write time                  |
+| `supersede_reason`   | `"contradict"`, `"duplicate"`, `"combined"` or `"procedure"` (None for live records)                  |
+| `superseded_at`      | ISO timestamp when the supersede happened (None for live records)                                     |
+| `superseded_by`      | Id of the record that replaced this one                                                               |
+| `merged_from`        | Ids of the records retired into this fact (duplicates it absorbed, or the sources of a combined fact) |
 
 ### Auto-trigger (per-turn extraction)
 
 By default, the **InProcess processor** runs each pipeline step independently as its own threshold trips inside `push_to_cosmos()`:
 
-| Env var                   | Default          | Step that fires                                                                                                   | Async behavior                      |
-|---------------------------|------------------|-------------------------------------------------------------------------------------------------------------------|-------------------------------------|
-| `FACT_EXTRACTION_EVERY_N` | `2` (every 2 turns) | `process_extract_memories`                                                                                        | scheduled via `asyncio.create_task` |
-| `DEDUP_EVERY_N`           | `5`              | `process_reconcile` (fires every Nth extract → effectively every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns) | scheduled via `asyncio.create_task` |
-| `DEDUP_POOL_SIZE`         | `50`             | pool size (`n`) passed to `process_reconcile` from the auto-trigger; hard-capped at `500`                         | n/a (per-call)                      |
-| `THREAD_SUMMARY_EVERY_N`  | `10`             | `process_thread_summary`                                                                                          | scheduled via `asyncio.create_task` |
-| `USER_SUMMARY_EVERY_N`    | `20`             | `process_user_summary`                                                                                            | scheduled via `asyncio.create_task` |
+| Env var                        | Default             | Step that fires                                                                                                                                                     | Async behavior                      |
+|--------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------|
+| `FACT_EXTRACTION_EVERY_N`      | `2` (every 2 turns) | `process_extract_memories`                                                                                                                                          | scheduled via `asyncio.create_task` |
+| `DEDUP_EVERY_N`                | `5`                 | `process_reconcile` (fires every Nth extract → effectively every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns)                                                   | scheduled via `asyncio.create_task` |
+| `DEDUP_POOL_SIZE`              | `50`                | pool size (`n`) passed to `process_reconcile` from the auto-trigger: new facts checked per duplicate pass and facts in the contradiction pass; hard-capped at `500` | n/a (per-call)                      |
+| `PROCEDURAL_SYNTHESIS_AUTO`    | `true`              | `synthesize_procedural` after each reconcile; `false` turns the chained procedure pass off                                                                          | scheduled via `asyncio.create_task` |
+| `THREAD_SUMMARY_EVERY_N`       | `10`                | `process_thread_summary`                                                                                                                                            | scheduled via `asyncio.create_task` |
+| `USER_SUMMARY_EVERY_N`         | `20`                | `process_user_summary`                                                                                                                                              | scheduled via `asyncio.create_task` |
+| `ACTIVITY_TIME_BUDGET_SECONDS` | `240`               | **Function App only**: seconds a reconcile or procedure activity keeps starting model calls (minimum `30`; keep it below `functionTimeout`)                         | n/a                                 |
 
-Each `*_EVERY_N=0` disables only that step. Dedup is gated independently of extract because cross-thread dedup is dramatically more expensive than per-thread extract (it reads every active fact for the user) - running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive, higher-volume production traffic. Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
+Each `*_EVERY_N=0` disables only that step. Reconcile is gated independently of extract because it makes the most model calls per run (a duplicate check per new fact, combining, and the contradiction pass), and running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive, higher-volume production traffic. Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
 
 The async client (`AsyncCosmosMemoryClient.push_to_cosmos`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
 
@@ -265,16 +324,19 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 
 ## Public API reference
 
-| Symbol                               | Module                          | Purpose                                                                                |
-|--------------------------------------|---------------------------------|----------------------------------------------------------------------------------------|
-| `CosmosMemoryClient`                 | `azure.cosmos.agent_memory`     | Sync client - local CRUD, Cosmos DB I/O, processing                                    |
-| `AsyncCosmosMemoryClient`            | `azure.cosmos.agent_memory.aio` | Async mirror                                                                           |
-| `MemoryProcessor`                    | `azure.cosmos.agent_memory`     | Protocol that any processor backend implements                                         |
-| `InProcessProcessor`                 | `azure.cosmos.agent_memory`     | Default backend - runs the pipeline in-process                                         |
-| `DurableFunctionProcessor`           | `azure.cosmos.agent_memory`     | Marker backend - work runs in sibling Function app via change feed                     |
-| `client.process_now()`               | -                               | Run the pipeline for recent turns (in-process) or no-op (remote)                       |
-| `client.process_now_and_wait()`      | -                               | Opt-in poll until processing completes; useful for tests/demos with the remote backend |
-| `MemoryRecord`, `MemoryType`, `Role` | `azure.cosmos.agent_memory`     | Pydantic models / enums                                                                |
+| Symbol                               | Module                          | Purpose                                                                                  |
+|--------------------------------------|---------------------------------|------------------------------------------------------------------------------------------|
+| `CosmosMemoryClient`                 | `azure.cosmos.agent_memory`     | Sync client - local CRUD, Cosmos DB I/O, processing                                      |
+| `AsyncCosmosMemoryClient`            | `azure.cosmos.agent_memory.aio` | Async mirror                                                                             |
+| `MemoryProcessor`                    | `azure.cosmos.agent_memory`     | Protocol that any processor backend implements                                           |
+| `InProcessProcessor`                 | `azure.cosmos.agent_memory`     | Default backend - runs the pipeline in-process                                           |
+| `DurableFunctionProcessor`           | `azure.cosmos.agent_memory`     | Marker backend - work runs in sibling Function app via change feed                       |
+| `client.process_now()`               | -                               | Run the pipeline for recent turns (in-process) or no-op (remote)                         |
+| `client.process_now_and_wait()`      | -                               | Opt-in poll until processing completes; useful for tests/demos with the remote backend   |
+| `client.search_cosmos()`             | -                               | Vector + full-text search; `preference_slot` / `procedure_slot` reserve result slots     |
+| `client.reconcile()`                 | -                               | Fold duplicate facts, combine facts about one thing, retire contradicted facts           |
+| `client.build_procedural_context()`  | -                               | Standing instructions (plus the nearest situational rule with `task=`) as a prompt block |
+| `MemoryRecord`, `MemoryType`, `Role` | `azure.cosmos.agent_memory`     | Pydantic models / enums                                                                  |
 
 Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) live in `azure.cosmos.agent_memory.aio`.
 
@@ -282,8 +344,10 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 
 ## Documentation
 
-- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, threads, roles, embeddings, processing pipeline
+- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, threads, roles, embeddings, search slots, processing pipeline, reconciliation
 - **[Docs/design_patterns.md](Docs/design_patterns.md)** - Integration patterns for chat apps and multi-agent systems
+- **[Docs/public_api.md](Docs/public_api.md)** - Client methods and options, fact and procedure fields, secret redaction
+- **[Docs/operations.md](Docs/operations.md)** - TTLs and runtime settings (thresholds, reconcile, procedures, extraction prompt)
 - **[Docs/local_testing.md](Docs/local_testing.md)** - Prerequisites, environment setup, running locally, debugging
 - **[Docs/azure_testing.md](Docs/azure_testing.md)** - Azure deployment, RBAC, cloud validation
 - **[infra/README.md](infra/README.md)** - `azd` deployment, Bicep modules, RBAC, counter-trigger tuning, SDK-only mode
@@ -311,6 +375,8 @@ tests/                  Unit + integration tests (pytest)
 - **`azure.cosmos.agent_memory.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
 - **New `processor=` kwarg.** Defaults to `InProcessProcessor()` - existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.
+- **Procedural memory is reshaped, with no migration.** `procedure_kind` is `instruction`, `habit` or `skill`; `scope_type` / `scope_value`, `ProcedureScopeType` and the `scope_*` arguments of `retrieve_procedures()` are gone; `build_procedural_context()` returns only standing (`applies="always"`) rules, plus the nearest situational rule when `task=` is given. Procedures written by earlier betas are not shown or migrated. See [CHANGELOG.md](CHANGELOG.md).
+- **Structured logs: `exc_msg` is now `exc_detail`.** It describes an exception by type, error code, status and code location and never quotes its message. Failed Function App activities likewise report only `<code> (<ExcType>)` to Durable Functions.
 
 ## Trademark notice
 Trademarks This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow Microsoft’s Trademark & Brand Guidelines. Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party’s policies.

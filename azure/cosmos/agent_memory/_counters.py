@@ -34,7 +34,7 @@ from typing import Any, Optional
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
 logger = get_logger(__name__)
 
@@ -310,7 +310,8 @@ def stamp_failure_sync(
     Uses Cosmos ``patch_item`` so only the failure fields are touched -
     concurrent counter increments cannot lose updates here. Failures are
     logged and swallowed; we never want failure-stamping itself to break
-    the user's write path.
+    the user's write path. ``reason`` is stored as given, so it must describe
+    the failure (``describe_exception``), never quote an exception's text.
     """
     partition_key = [user_id, thread_id]
     patch_ops = [
@@ -324,7 +325,7 @@ def stamp_failure_sync(
             patch_operations=patch_ops,
         )
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("stamp_failure_sync failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("stamp_failure_sync failed counter_id=%s: %s", counter_id, describe_exception(exc))
 
 
 async def stamp_failure_async(
@@ -347,7 +348,7 @@ async def stamp_failure_async(
             patch_operations=patch_ops,
         )
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, describe_exception(exc))
 
 
 __all__ = [

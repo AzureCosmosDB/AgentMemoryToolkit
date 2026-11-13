@@ -19,6 +19,7 @@ Required environment variables:
     AI_FOUNDRY_ENDPOINT  – Azure AI Foundry endpoint URL (for embeddings)
     AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME – embedding model deployment name
 """
+
 from __future__ import annotations
 
 import os
@@ -63,20 +64,13 @@ def main() -> None:
     print_section("Seeding memories with tags")
     seeds = [
         # (memory_type, content, tags)
-        ("fact",       "User prefers Python over Java for backend work",
-         ["preference", "language", "work"]),
-        ("fact",       "User is allergic to peanuts",
-         ["preference", "diet", "health", "important"]),
-        ("fact",       "User lives in Seattle, WA",
-         ["profile", "location"]),
-        ("episodic",   "Last Friday the user shipped a Cosmos-backed search service",
-         ["work", "milestone"]),
-        ("episodic",   "User attended PyCon 2024 in Pittsburgh",
-         ["work", "travel", "conference"]),
-        ("procedural", "When the user says 'deploy', run `azd up` and tail the logs",
-         ["workflow", "ops"]),
-        ("procedural", "Always confirm before purging Cosmos containers",
-         ["workflow", "ops", "important"]),
+        ("fact", "User prefers Python over Java for backend work", ["preference", "language", "work"]),
+        ("fact", "User is allergic to peanuts", ["preference", "diet", "health", "important"]),
+        ("fact", "User lives in Seattle, WA", ["profile", "location"]),
+        ("episodic", "Last Friday the user shipped a Cosmos-backed search service", ["work", "milestone"]),
+        ("episodic", "User attended PyCon 2024 in Pittsburgh", ["work", "travel", "conference"]),
+        ("procedural", "When the user says 'deploy', run `azd up` and tail the logs", ["workflow", "ops"]),
+        ("procedural", "Always confirm before purging Cosmos containers", ["workflow", "ops", "important"]),
     ]
     for mem_type, content, tags in seeds:
         client.upsert_memory(

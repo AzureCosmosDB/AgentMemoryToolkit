@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
+from . import _slots
 from ._base import _BaseMemoryClient
 from ._base.base_client import is_transient_tail_step_error
 from ._container_routing import container_key_for_type
@@ -30,7 +31,8 @@ from .processors import InProcessProcessor, MemoryProcessor
 from .services._pipeline_helpers import _normalize_cadence_thresholds, _normalize_metadata_keys
 from .services.pipeline import PipelineService
 from .store import MemoryStore
-from .thresholds import DEFAULT_TTL_BY_TYPE
+from .store._search_helpers import require_search_terms
+from .thresholds import COUNTER_TTL_SECONDS, DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from .processors import ProcessThreadResult, UserSummaryResult  # noqa: F401
@@ -68,6 +70,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         processor: Optional[MemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
         cadence_thresholds: Optional[Mapping[str, int]] = None,
+        cosmos_preferred_locations: Optional[str | Iterable[str]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -90,6 +93,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             use_default_credential=use_default_credential,
             enable_turn_embeddings=enable_turn_embeddings,
             user_agent=user_agent,
+            cosmos_preferred_locations=cosmos_preferred_locations,
         )
         # Embeddings/chat clients may be injected (e.g. an OpenAI-compatible backend, a
         # caller-configured client, or a deterministic fake for offline tests). When a client
@@ -206,6 +210,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_endpoint,
                 credential=self._cosmos_credential,
                 user_agent=self._cosmos_user_agent,
+                preferred_locations=self._cosmos_preferred_locations,
             )
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
@@ -278,6 +283,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_endpoint,
                 credential=self._cosmos_credential,
                 user_agent=self._cosmos_user_agent,
+                preferred_locations=self._cosmos_preferred_locations,
             )
             db = client.create_database_if_not_exists(id=self._cosmos_database)
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
@@ -355,6 +361,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     container_id=self._cosmos_counter_container,
                     partition_key=partition_key,
                     offer_throughput=offer,
+                    default_ttl=COUNTER_TTL_SECONDS,
                 )
             )
             db.create_container_if_not_exists(
@@ -450,8 +457,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
             if callable(close):
                 try:
                     close()
-                except Exception:
-                    logger.warning("Failed to close prior Cosmos client during reconnect", exc_info=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to close prior Cosmos client during reconnect: %s", describe_exception(exc, stack=True)
+                    )
         self._cosmos_client = None
         self._memories_container_client = None
         self._turns_container_client = None
@@ -500,7 +509,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     "Counter container %s/%s unreachable: %s",
                     self._cosmos_database,
                     self._cosmos_counter_container,
-                    exc,
+                    describe_exception(exc),
                 )
             return None
 
@@ -566,7 +575,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             try:
                 self._maybe_auto_trigger({(user_id, thread_id): 1})
             except Exception as exc:
-                logger.warning("Auto-trigger after upsert_memory failed: %s", exc)
+                logger.warning("Auto-trigger after upsert_memory failed: %s", describe_exception(exc))
         return memory_id
 
     def push_to_cosmos(self, batch_size: int = 25) -> None:
@@ -576,7 +585,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         try:
             self._maybe_auto_trigger(turn_counts)
         except Exception as exc:
-            logger.warning("Auto-trigger after push_to_cosmos failed: %s", exc)
+            logger.warning("Auto-trigger after push_to_cosmos failed: %s", describe_exception(exc))
 
     def get_memories(
         self,
@@ -746,6 +755,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
         turn_top_k: Optional[int] = None,
         include_summaries: bool = False,
         summary_top_k: Optional[int] = None,
+        preference_slot: bool = False,
+        procedure_slot: bool = False,
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity, with optional retrieval blending.
 
@@ -758,6 +769,17 @@ class CosmosMemoryClient(_BaseMemoryClient):
         ``include_summaries`` / ``include_turns`` blend those in after the base
         block, deduped by content (best-effort; a blend fetch failure never
         breaks the base result).
+
+        ``preference_slot`` and ``procedure_slot`` reserve result slots within ``top_k``
+        (see ``azure.cosmos.agent_memory._slots``): the user's best-matching preference fact
+        not already shown, and their best-matching active situational procedure
+        (``applies="when"``); procedures then leave the ranked results. Slot candidates are
+        ranked by vector similarity alone and use the search's own filters, and an empty
+        slot takes the next ranked result. A slotted result's ``retrieval`` dict names its
+        ``slot`` (``preference``, ``procedure`` or ``backfill``) and its ``rank``. Slots need
+        ``user_id`` and are skipped without it or with ``memory_id``; a search for procedures
+        alone ranks them, so ``procedure_slot`` has no effect there. Search shows only
+        active procedures that are not past ``valid_until``.
         """
         store = self._get_store()
         # Facts + episodes share one ranked query and one top_k budget: episodic
@@ -774,23 +796,45 @@ class CosmosMemoryClient(_BaseMemoryClient):
         if include_episodes:
             base_memory_types = [*base_memory_types, "episodic"]
         base_memory_types = base_memory_types or ["fact"]
-        base = store.search(
-            search_terms=search_terms,
-            memory_id=memory_id,
-            user_id=user_id,
-            role=role,
-            memory_types=base_memory_types,
-            thread_id=thread_id,
-            top_k=top_k,
-            tags_all=tags_all,
-            tags_any=tags_any,
-            exclude_tags=exclude_tags,
-            include_superseded=include_superseded,
-            min_salience=min_salience,
-            min_confidence=min_confidence,
-            created_after=created_after,
-            created_before=created_before,
+        plan = _slots.plan_slots(
+            top_k,
+            preference_slot=preference_slot and memory_id is None and bool(user_id),
+            procedure_slot=procedure_slot and memory_id is None and bool(user_id),
+            pool_types=[t for t in base_memory_types if t != "procedural"],
         )
+        if plan.procedure:
+            # Procedures get their slot instead of competing with the ranked results.
+            base_memory_types = [t for t in base_memory_types if t != "procedural"]
+        search_kwargs: dict[str, Any] = {
+            "search_terms": search_terms,
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "role": role,
+            "memory_types": base_memory_types,
+            "thread_id": thread_id,
+            "top_k": top_k,
+            "tags_all": tags_all,
+            "tags_any": tags_any,
+            "exclude_tags": exclude_tags,
+            "include_superseded": include_superseded,
+            "min_salience": min_salience,
+            "min_confidence": min_confidence,
+            "created_after": created_after,
+            "created_before": created_before,
+            "active_procedures_only": True,
+        }
+        if plan.count:
+            # The ranked and slot searches embed the same query: embed it once.
+            search_kwargs["query_embedding"] = store._embed(require_search_terms(search_terms))
+        base = store.search(**search_kwargs)
+        if plan.count:
+            preferences = (
+                self._slot_candidates(store, _slots.preference_search(search_kwargs, top_k - plan.count))
+                if plan.preference
+                else []
+            )
+            procedures = self._slot_candidates(store, _slots.procedure_search(search_kwargs)) if plan.procedure else []
+            base = _slots.compose(base, top_k=top_k, plan=plan, preferences=preferences, procedures=procedures)
 
         if not user_id:
             return base
@@ -817,7 +861,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     exclude_tags=exclude_tags,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
+                logger.warning(
+                    "search_cosmos: include_summaries search failed (%s); skipping summaries", describe_exception(exc)
+                )
                 summaries = []
             # Summaries come after facts/episodes (and before turns) so they
             # neither jump the ranking nor evict memories under truncation.
@@ -836,10 +882,24 @@ class CosmosMemoryClient(_BaseMemoryClient):
                     created_before=created_before,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
+                logger.warning(
+                    "search_cosmos: include_turns turn search failed (%s); returning memories only",
+                    describe_exception(exc),
+                )
                 turns = []
             _extend(turns)
         return results
+
+    def _slot_candidates(self, store: Any, search_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        """Candidates for a result slot; a failed slot search leaves the slot to the ranked results."""
+        try:
+            return list(store.search(**search_kwargs) or [])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "search_cosmos: slot search failed (%s); filling the slot from the ranked results",
+                describe_exception(exc),
+            )
+            return []
 
     def search_summaries(
         self,
@@ -880,9 +940,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
         Searches the turns container directly. Only vector-searchable when
         ``enable_turn_embeddings`` was set when the turns were written.
         ``user_id`` is required and always filters the results. Passing
-        ``thread_id`` as well scopes the search to a single partition; omitting
-        it fans out across partitions, filtered by ``user_id`` in the WHERE
-        clause.
+        ``thread_id`` as well restricts the results to that thread: a vector-only
+        query targets the thread's partition, while a keyword (hybrid) query runs
+        across partitions with ``user_id`` and ``thread_id`` filters in the WHERE
+        clause (a partition key breaks full-text ranking, Azure SDK issue #42241).
+        Omitting it fans out across the user's partitions.
         """
         return self._get_store().search_turns(
             search_terms=search_terms,
@@ -1063,8 +1125,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
         search_terms: str,
         top_k: int = 5,
         *,
-        scope_type: Optional[str] = None,
-        scope_value: Optional[str] = None,
         procedure_kind: Optional[str] = None,
         status: Optional[str] = "active",
         include_superseded: bool = False,
@@ -1072,25 +1132,27 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Context-aware semantic retrieval of a user's procedures.
 
         Ranks active procedures by relevance to ``search_terms`` (a task or
-        situation), optionally narrowed by scope or kind. Pass ``status=None`` to
-        include non-active (e.g. candidate) procedures.
+        situation), optionally narrowed by kind (``instruction``, ``habit`` or
+        ``skill``). Pass ``status=None`` to include non-active (candidate)
+        procedures.
         """
         return self._get_store().retrieve_procedures(
             user_id=user_id,
             search_terms=search_terms,
             top_k=top_k,
-            scope_type=scope_type,
-            scope_value=scope_value,
             procedure_kind=procedure_kind,
             status=status,
             include_superseded=include_superseded,
         )
 
     def build_procedural_context(self, user_id: str, task: Optional[str] = None) -> str:
-        """Compile a procedural system-prompt projection for prompt injection.
+        """Compile the user's standing instructions for prompt injection.
 
-        With no ``task``, returns the user's always-on behavioral policies. With a
-        ``task`` string, also folds in relevant task procedures (skills).
+        Returns the active, unexpired procedures that apply to nearly every
+        interaction (``applies: always``), under a "Standing instructions from
+        the user" header, or an empty string when there are none. With a
+        ``task`` string, also adds the active situational procedure nearest to
+        it.
         """
         return self._get_pipeline().build_procedural_context(user_id, task)
 
@@ -1152,8 +1214,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
             raise NotImplementedError(
                 "Procedural synthesis runs automatically after reconcile in durable mode; "
                 "manual invocation via the SDK is not supported when the Durable Function "
-                "app is the active processor. Use get_procedural_prompt() to read the "
-                "latest synthesized prompt."
+                "app is the active processor. Use build_procedural_context() to read the "
+                "current standing instructions."
             )
         return processor.synthesize_procedural(user_id=user_id, force=force)
 
@@ -1178,7 +1240,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
         return self._get_pipeline().generate_user_summary(user_id, thread_ids, recent_k)
 
     def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
-        """Reconcile a user's facts via the contradiction-aware dedup pass."""
+        """Reconcile a user's facts: fold duplicates, then resolve contradictions.
+
+        Returns ``{"kept", "merged", "contradicted"}`` plus the dedup pass's ``checked``, ``compared``,
+        ``vetoed``, ``combined``, ``synthesized``, ``combine_groups`` and ``combine_failed`` counts.
+        """
         from .thresholds import get_dedup_pool_size
 
         return self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
@@ -1212,7 +1278,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 logger.warning(
                     "process_now: synthesize_procedural failed (transient) for user_id=%s: %s",
                     user_id,
-                    exc,
+                    describe_exception(exc),
                 )
             try:
                 user_summary_result = processor.process_user_summary(user_id=user_id)
@@ -1224,7 +1290,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 logger.warning(
                     "process_now: process_user_summary failed (transient) for user_id=%s: %s",
                     user_id,
-                    exc,
+                    describe_exception(exc),
                 )
         return result
 
@@ -1261,7 +1327,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 user_id,
                 thread_id,
                 getattr(exc, "status_code", None),
-                exc,
+                describe_exception(exc),
             )
             return False
         return bool(results)

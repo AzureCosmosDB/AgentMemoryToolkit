@@ -37,6 +37,7 @@ RESEARCHER = "researcher"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def print_header(title: str) -> None:
     """Print a formatted section header."""
     print(f"\n{'=' * 60}")
@@ -60,18 +61,18 @@ def print_thread(thread: list[dict], label: str = "Thread") -> None:
 
 def filter_by_agent(thread: list[dict], agent_id: str) -> list[dict]:
     """Return only messages written by a specific agent."""
-    return [
-        msg for msg in thread
-        if msg.get("metadata", {}).get("agent_id") == agent_id
-    ]
+    return [msg for msg in thread if msg.get("metadata", {}).get("agent_id") == agent_id]
 
 
 # ---------------------------------------------------------------------------
 # Scenario steps
 # ---------------------------------------------------------------------------
 
+
 def step1_user_question(
-    mem: CosmosMemoryClient, user_id: str, thread_id: str,
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
 ) -> None:
     """User asks a complex, multi-part question."""
     print_header("Step 1 - User posts a complex question")
@@ -91,7 +92,9 @@ def step1_user_question(
 
 
 def step2_planner_creates_plan(
-    mem: CosmosMemoryClient, user_id: str, thread_id: str,
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
 ) -> None:
     """Planner reads the user question and stores a structured plan."""
     print_header("Step 2 - Planner reads question & creates plan")
@@ -99,7 +102,8 @@ def step2_planner_creates_plan(
     # Planner retrieves the thread to see the user's question
     thread = mem.get_thread(thread_id=thread_id, user_id=user_id)
     user_msg = next(
-        (m for m in thread if m.get("role") == "user"), None,
+        (m for m in thread if m.get("role") == "user"),
+        None,
     )
     print(f"  Planner sees user question: {user_msg['content'][:80]}…")
 
@@ -123,7 +127,9 @@ def step2_planner_creates_plan(
 
 
 def step3_researcher_performs_research(
-    mem: CosmosMemoryClient, user_id: str, thread_id: str,
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
 ) -> None:
     """Researcher reads the planner's plan, then stores research findings."""
     print_header("Step 3 - Researcher reads plan & stores findings")
@@ -134,7 +140,8 @@ def step3_researcher_performs_research(
     print(f"  Researcher found {len(planner_msgs)} message(s) from Planner.")
 
     plan_msg = next(
-        (m for m in planner_msgs if m.get("memory_type") == "plan"), None,
+        (m for m in planner_msgs if m.get("memory_type") == "plan"),
+        None,
     )
     if plan_msg:
         print(f"  Plan preview: {plan_msg['content'][:80]}…")
@@ -182,7 +189,9 @@ def step3_researcher_performs_research(
 
 
 def step4_planner_synthesises_answer(
-    mem: CosmosMemoryClient, user_id: str, thread_id: str,
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
 ) -> None:
     """Planner reads the researcher's findings and generates a final answer."""
     print_header("Step 4 - Planner reads findings & produces final answer")
@@ -218,7 +227,9 @@ def step4_planner_synthesises_answer(
 
 
 def step5_review_shared_thread(
-    mem: CosmosMemoryClient, user_id: str, thread_id: str,
+    mem: CosmosMemoryClient,
+    user_id: str,
+    thread_id: str,
 ) -> None:
     """Display the complete thread and per-agent filtered views."""
     print_header("Step 5 - Review the shared thread")
@@ -240,12 +251,11 @@ def step5_review_shared_thread(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     cosmos_endpoint = os.environ.get("COSMOS_DB_ENDPOINT")
     if not cosmos_endpoint:
-        raise SystemExit(
-            "Error: Set COSMOS_DB_ENDPOINT environment variable."
-        )
+        raise SystemExit("Error: Set COSMOS_DB_ENDPOINT environment variable.")
 
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,

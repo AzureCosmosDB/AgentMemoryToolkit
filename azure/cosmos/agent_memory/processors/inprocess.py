@@ -135,20 +135,22 @@ class InProcessProcessor:
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
 
     def process_reconcile(self, *, user_id: str) -> int:
-        """Run reconciliation standalone. Returns count of facts contradicted.
+        """Run reconciliation standalone. Returns the count of facts consolidated or retired.
 
-        Pool size is read from ``DEDUP_POOL_SIZE`` (env-tunable, default 50,
-        capped at 500) so the auto-trigger and the standalone path agree.
+        That is the dedup pass's merged and combined facts plus the facts the
+        contradiction pass retired. Pool size is read from ``DEDUP_POOL_SIZE``
+        (env-tunable, default 50, capped at 500) so the auto-trigger and the
+        standalone path agree.
         """
         from ..thresholds import get_dedup_pool_size
 
         return self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
 
     def _reconcile_fact_and_episodic(self, user_id: str, n: int) -> int:
-        """Reconcile facts and episodic memories; sum contradicted counts.
+        """Reconcile facts and episodic memories; sum the consolidated counts.
 
         SDK in-process processing reconciles both types (matching the Durable
-        backend) so contradictions are resolved for each.
+        backend) so duplicates and contradictions are resolved for each.
         """
         total = 0
         for memory_type in ("fact", "episodic"):
@@ -158,18 +160,20 @@ class InProcessProcessor:
 
     @staticmethod
     def _extract_reconcile_count(reconciled: Any) -> int:
-        """Sum ``merged + contradicted`` from a ``reconcile_memories`` result.
+        """Sum ``merged + contradicted + combined`` from a ``reconcile_memories`` result.
 
         ``ProcessingPipeline.reconcile_memories`` returns a dict with
-        ``{"kept", "merged", "contradicted"}`` - both ``merged`` and
-        ``contradicted`` represent facts that were consolidated or retired,
-        so they contribute to the dedup-count metric.
+        ``{"kept", "merged", "contradicted"}`` plus the dedup pass's counts;
+        ``merged`` (duplicates), ``contradicted`` and ``combined`` (facts
+        retired into a combined fact) all represent facts that were
+        consolidated or retired, so they contribute to the dedup-count metric.
         """
         if not isinstance(reconciled, dict):
             return 0
-        merged = reconciled.get("merged", 0) if isinstance(reconciled.get("merged"), int) else 0
-        contradicted = reconciled.get("contradicted", 0) if isinstance(reconciled.get("contradicted"), int) else 0
-        return merged + contradicted
+        return sum(
+            reconciled[key] if isinstance(reconciled.get(key), int) else 0
+            for key in ("merged", "contradicted", "combined")
+        )
 
     def generate_user_summary(
         self,

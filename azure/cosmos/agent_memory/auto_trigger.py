@@ -17,7 +17,7 @@ from typing import Any
 
 from azure.cosmos.agent_memory import _counters
 from azure.cosmos.agent_memory import thresholds as default_thresholds
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 from azure.cosmos.agent_memory.processors import InProcessProcessor
 
 logger = get_logger(__name__)
@@ -149,7 +149,7 @@ def _trigger_thread_steps(
                 owner=default_thresholds.PROCESSOR_OWNER_INPROCESS,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Counter increment failed for %s/%s: %s", user_id, thread_id, exc)
+            logger.warning("Counter increment failed for %s/%s: %s", user_id, thread_id, describe_exception(exc))
             continue
         _fire_thread_steps(
             processor,
@@ -193,9 +193,10 @@ def _fire_thread_steps(
         try:
             processor.process_extract_memories(user_id=user_id, thread_id=thread_id)
         except Exception as exc:
-            logger.warning("Auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, exc)
+            error = describe_exception(exc)
+            logger.warning("Auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, error)
             _counters.stamp_failure_sync(
-                counter_container, counter_id, user_id, thread_id, f"process_extract_memories: {exc!r}"
+                counter_container, counter_id, user_id, thread_id, f"process_extract_memories: {error}"
             )
     for enabled, label, call in (
         (
@@ -224,8 +225,9 @@ def _fire_thread_steps(
         try:
             call()
         except Exception as exc:
-            logger.warning("Auto-trigger %s failed for %s/%s: %s", label, user_id, thread_id, exc)
-            _counters.stamp_failure_sync(counter_container, counter_id, user_id, thread_id, f"{label}: {exc!r}")
+            error = describe_exception(exc)
+            logger.warning("Auto-trigger %s failed for %s/%s: %s", label, user_id, thread_id, error)
+            _counters.stamp_failure_sync(counter_container, counter_id, user_id, thread_id, f"{label}: {error}")
 
 
 def _trigger_user_steps(
@@ -249,20 +251,21 @@ def _trigger_user_steps(
                 owner=default_thresholds.PROCESSOR_OWNER_INPROCESS,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("User counter increment failed for %s: %s", user_id, exc)
+            logger.warning("User counter increment failed for %s: %s", user_id, describe_exception(exc))
             continue
         if not _counters.crosses_threshold(old_count, new_count, n_user):
             continue
         try:
             processor.process_user_summary(user_id=user_id)
         except Exception as exc:
-            logger.warning("Auto-trigger process_user_summary failed for %s: %s", user_id, exc)
+            error = describe_exception(exc)
+            logger.warning("Auto-trigger process_user_summary failed for %s: %s", user_id, error)
             _counters.stamp_failure_sync(
                 counter_container,
                 counter_id,
                 user_id,
                 _counters.USER_COUNTER_THREAD_ID,
-                f"process_user_summary: {exc!r}",
+                f"process_user_summary: {error}",
             )
 
 

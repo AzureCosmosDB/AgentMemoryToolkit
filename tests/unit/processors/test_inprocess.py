@@ -48,6 +48,14 @@ def test_process_thread_handles_non_dict_summary():
     assert result.reconciled_count == 0
 
 
+def test_the_reconcile_count_includes_facts_retired_into_a_combined_fact():
+    pipeline = MagicMock()
+    pipeline.reconcile_memories.return_value = {"merged": 1, "contradicted": 2, "combined": 3, "kept": 4}
+
+    # Facts and episodic memories are reconciled in turn: 1 + 2 + 3 each time.
+    assert InProcessProcessor(pipeline=pipeline).process_reconcile(user_id="u1") == 12
+
+
 def test_generate_user_summary_passes_thread_ids():
     pipeline = MagicMock()
     pipeline.generate_user_summary.return_value = {"id": "user_summary", "type": "user_summary"}

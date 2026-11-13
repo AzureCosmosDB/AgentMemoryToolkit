@@ -10,6 +10,7 @@ import logging
 
 import azure.durable_functions as df
 from shared import config
+from shared.error_redaction import redact_errors
 from shared.pipeline_factory import get_pipeline
 
 from ._retry import default_retry_options
@@ -45,6 +46,7 @@ def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def ts_Extract(payload: dict) -> dict:
     """Generate (or incrementally update) the thread summary body only."""
     user_id = payload["user_id"]
@@ -59,6 +61,7 @@ def ts_Extract(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def ts_PersistSummary(payload: dict) -> dict:
     """Compute the embedding and persist the thread summary."""
     user_id = payload["user_id"]

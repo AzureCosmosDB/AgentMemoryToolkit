@@ -11,6 +11,7 @@ from datetime import timedelta
 
 import azure.durable_functions as df
 from shared import config
+from shared.error_redaction import redact_errors
 from shared.pipeline_factory import get_pipeline
 
 from azure.cosmos.agent_memory.exceptions import NoSourceMemoriesError
@@ -73,6 +74,7 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def us_Extract(payload: dict) -> dict:
     """Generate a cross-thread user summary body only.
 
@@ -95,6 +97,7 @@ def us_Extract(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def us_PersistUserSummary(payload: dict) -> dict:
     """Compute the embedding and persist the user summary."""
     user_id = payload["user_id"]

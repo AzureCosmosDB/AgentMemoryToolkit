@@ -381,6 +381,40 @@ class TestUserAgent:
         assert ua.endswith("azsdk-python-cosmos-agent-memory/" + ua.rsplit("/", 1)[1])
 
 
+class TestPreferredLocations:
+    @staticmethod
+    def _cosmos_client_kwargs(entry_point: str = "connect_cosmos", **client_kwargs) -> dict:
+        mock_cosmos_cls = MagicMock()
+        mem = _make_client(**client_kwargs)
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=mock_cosmos_cls, PartitionKey=MagicMock(), ThroughputProperties=MagicMock()
+                )
+            },
+        ):
+            getattr(mem, entry_point)(endpoint="https://fake.documents.azure.com:443/", credential="fake-key")
+        return mock_cosmos_cls.call_args.kwargs
+
+    @pytest.mark.parametrize("entry_point", ["connect_cosmos", "create_memory_store"])
+    def test_constructor_argument_reaches_the_cosmos_client(self, monkeypatch, entry_point):
+        monkeypatch.delenv("COSMOS_DB_PREFERRED_REGIONS", raising=False)
+
+        kwargs = self._cosmos_client_kwargs(entry_point, cosmos_preferred_locations="West US 3, West US 2")
+
+        assert kwargs["preferred_locations"] == ["West US 3", "West US 2"]
+
+    def test_preferred_locations_default_to_account_order(self, monkeypatch):
+        monkeypatch.delenv("COSMOS_DB_PREFERRED_REGIONS", raising=False)
+        assert self._cosmos_client_kwargs()["preferred_locations"] == []
+
+    @pytest.mark.parametrize("entry_point", ["connect_cosmos", "create_memory_store"])
+    def test_preferred_locations_read_from_environment(self, monkeypatch, entry_point):
+        monkeypatch.setenv("COSMOS_DB_PREFERRED_REGIONS", "West US 3")
+        assert self._cosmos_client_kwargs(entry_point)["preferred_locations"] == ["West US 3"]
+
+
 class TestValidateTopology:
     def test_validate_topology_succeeds_on_healthy_deploy(self):
         mem = _make_client()
@@ -469,6 +503,7 @@ class TestCreateMemoryStore:
         ft_policy = memories_call.kwargs["full_text_policy"]
         assert ft_policy["defaultLanguage"] == "en-US"
         assert counter_call.kwargs["id"] == "counter"
+        assert counter_call.kwargs["default_ttl"] == 7_776_000
         assert counter_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
         assert lease_call.kwargs["id"] == "leases"
         assert lease_call.kwargs["offer_throughput"].auto_scale_max_throughput == 1000
@@ -1060,6 +1095,7 @@ class TestSearchCosmos:
             min_confidence=None,
             created_after=None,
             created_before=None,
+            active_procedures_only=True,
         )
 
     def test_search_episodic_memories_forwards_search_options(self):

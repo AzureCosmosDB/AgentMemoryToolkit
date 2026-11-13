@@ -73,8 +73,11 @@ def main() -> None:
     _banner("STEP 3 – more turns (incremental update path)")
     follow_up = [
         ("user", "What about food? I'm a vegetarian."),
-        ("agent", "Japan has wonderful vegetarian options - try shojin-ryori (Buddhist temple cuisine), "
-                  "tofu specialties, and tempura vegetables."),
+        (
+            "agent",
+            "Japan has wonderful vegetarian options - try shojin-ryori (Buddhist temple cuisine), "
+            "tofu specialties, and tempura vegetables.",
+        ),
         ("user", "Are there any vegetarian restaurants you'd recommend in Kyoto?"),
         ("agent", "Shigetsu inside Tenryu-ji temple is famous for its shojin-ryori meals."),
     ]

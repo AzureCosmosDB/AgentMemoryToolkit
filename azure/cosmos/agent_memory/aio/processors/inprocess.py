@@ -127,10 +127,10 @@ class AsyncInProcessProcessor:
         return await self._reconcile_fact_and_episodic(user_id, get_dedup_pool_size())
 
     async def _reconcile_fact_and_episodic(self, user_id: str, n: int) -> int:
-        """Reconcile facts and episodic memories; sum contradicted counts.
+        """Reconcile facts and episodic memories; sum the consolidated counts.
 
         SDK in-process processing reconciles both types (matching the Durable
-        backend) so contradictions are resolved for each.
+        backend) so duplicates and contradictions are resolved for each.
         """
         total = 0
         for memory_type in ("fact", "episodic"):
@@ -140,18 +140,20 @@ class AsyncInProcessProcessor:
 
     @staticmethod
     def _extract_reconcile_count(reconciled: Any) -> int:
-        """Sum ``merged + contradicted`` from a ``reconcile_memories`` result.
+        """Sum ``merged + contradicted + combined`` from a ``reconcile_memories`` result.
 
         ``ProcessingPipeline.reconcile_memories`` returns a dict with
-        ``{"kept", "merged", "contradicted"}`` - both ``merged`` and
-        ``contradicted`` represent facts that were consolidated or retired,
-        so they contribute to the dedup-count metric.
+        ``{"kept", "merged", "contradicted"}`` plus the dedup pass's counts;
+        ``merged`` (duplicates), ``contradicted`` and ``combined`` (facts
+        retired into a combined fact) all represent facts that were
+        consolidated or retired, so they contribute to the dedup-count metric.
         """
         if not isinstance(reconciled, dict):
             return 0
-        merged = reconciled.get("merged", 0) if isinstance(reconciled.get("merged"), int) else 0
-        contradicted = reconciled.get("contradicted", 0) if isinstance(reconciled.get("contradicted"), int) else 0
-        return merged + contradicted
+        return sum(
+            reconciled[key] if isinstance(reconciled.get(key), int) else 0
+            for key in ("merged", "contradicted", "combined")
+        )
 
     async def generate_user_summary(
         self,

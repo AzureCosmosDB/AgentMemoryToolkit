@@ -36,6 +36,7 @@ Prerequisites
   Set any value to ``0`` to disable that orchestrator entirely (useful for
   cost control or for staged rollout).
 """
+
 from __future__ import annotations
 
 import os
@@ -47,7 +48,6 @@ from dotenv import load_dotenv
 from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
-
 
 
 def main() -> None:
@@ -68,11 +68,11 @@ def main() -> None:
     # function app will fire the thread-summary orchestrator on turn 4.
     # ------------------------------------------------------------------
     transcript = [
-        ("user",      "I'm planning a hiking trip to Olympic National Park."),
+        ("user", "I'm planning a hiking trip to Olympic National Park."),
         ("agent", "Great choice! Hoh Rainforest and Hurricane Ridge are must-sees."),
-        ("user",      "I'd like to camp 2 nights. Any permit guidance?"),
+        ("user", "I'd like to camp 2 nights. Any permit guidance?"),
         ("agent", "You'll need a wilderness permit from recreation.gov for the Hoh."),
-        ("user",      "Thanks - also, I'm vegetarian, please remember that."),
+        ("user", "Thanks - also, I'm vegetarian, please remember that."),
     ]
     print(f"Writing {len(transcript)} turns to Cosmos (thread={thread_id})...")
     for role, content in transcript:

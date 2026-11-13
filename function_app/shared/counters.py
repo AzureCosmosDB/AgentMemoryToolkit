@@ -24,6 +24,8 @@ from typing import Any
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory.logging import describe_exception
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
@@ -281,7 +283,7 @@ async def read_extract_watermark(
         value = doc.get("last_extract_count")
         return int(value) if value is not None else None
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("read_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("read_extract_watermark failed counter_id=%s: %s", counter_id, describe_exception(exc))
         return None
 
 
@@ -313,6 +315,6 @@ async def advance_extract_watermark(
     except CosmosHttpResponseError as exc:
         if exc.status_code == 412:
             return  # another run already advanced past this count
-        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, describe_exception(exc))
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, describe_exception(exc))

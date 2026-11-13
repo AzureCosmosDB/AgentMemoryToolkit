@@ -23,7 +23,7 @@ Produce a clean reconciliation that:
 1. Resolves opposing claims about the same subject by picking a winner and a loser.
 2. Leaves everything else untouched.
 
-Near-duplicate paraphrases are NOT your concern here - they are folded together earlier, at write time. Do not merge, rewrite, or collapse facts. Your only job is to identify genuine contradictions.
+Near-duplicate paraphrases are NOT your concern here - they are folded together earlier, in the duplicate pass that runs before this one. Do not merge, rewrite, or collapse facts. Your only job is to identify genuine contradictions.
 
 ## Two Outcomes
 

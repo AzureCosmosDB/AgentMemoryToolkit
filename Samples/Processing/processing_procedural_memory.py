@@ -1,25 +1,31 @@
-"""Demonstrate procedural memory extraction, retrieval, and prompt projection.
+"""Demonstrate procedural memory learning, retrieval, and prompt projection.
 
-Procedural memory is a skill and policy library. Instead of storing one
-mutable prompt blob, the toolkit stores many atomic ``ProceduralRecord`` items:
-behavioral policies, workflows, decision rules, tool-usage notes, and recovery
-strategies. Each procedure carries provenance, activation conditions, scope,
-status, and executable steps where appropriate.
+Procedural memory is learned from evidence. Instead of storing one mutable
+prompt blob, the toolkit stores many atomic ``ProceduralRecord`` items of three
+kinds: instructions the user taught the assistant, habits learned from the
+user's corrections or repeated choices, and skills (multi-step methods) that
+worked in practice or that the user endorsed. Each procedure carries the
+evidence behind it, activation conditions, status, and, for skills, steps.
 
-The personalized system prompt is compiled on demand by
-``CosmosMemoryClient.build_procedural_context(...)``. That prompt is a
-deterministic projection of ACTIVE procedures only. Candidate procedures remain
-in the library for inspection and later promotion, but they are not injected.
+A procedure's status follows from its evidence: an instruction is ACTIVE once
+the user taught it, a habit after a correction or on two dates, a skill after
+two successful practices or the user's endorsement. Anything else stays a
+CANDIDATE, which retrieval and prompt injection do not show, until more
+evidence arrives.
+
+The standing instructions are compiled on demand by
+``CosmosMemoryClient.build_procedural_context(...)``: the ACTIVE procedures
+that apply to nearly every interaction (``applies == "always"``), plus, when a
+task is given, the nearest ACTIVE situational procedure.
 
 This sample seeds both kinds of sources:
 
 1. An explicit user instruction: "Always ask for confirmation before deleting
-   cloud resources." Explicit user instructions are trusted provenance, so the
-   synthesized behavioral policy should become ACTIVE.
-2. A realistic debugging episode about a Cosmos DB ORDER BY query. Lessons
-   distilled from episodes are useful skills, but episode-distilled procedures
-   stay CANDIDATE under the provenance gate and are excluded from prompt
-   injection until promoted by trusted policy or review.
+   cloud resources." The user taught it, so the learned instruction should
+   become ACTIVE.
+2. A realistic debugging episode about a Cosmos DB ORDER BY query. A lesson
+   learned from a single successful episode is a skill with one practice, so
+   it stays CANDIDATE until it is practiced again or the user endorses it.
 
 Required environment variables (.env supported via python-dotenv):
 
@@ -46,7 +52,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from azure.cosmos.agent_memory import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient, MemoryNotFoundError
 
 load_dotenv()
 
@@ -75,8 +81,9 @@ def print_procedure(proc: dict[str, Any], *, index: int | None = None) -> None:
     prefix = f"  {index}." if index is not None else "  -"
     print(f"{prefix} {proc.get('name') or '(unnamed)'}")
     print(f"      kind:        {proc.get('procedure_kind')}")
-    print(f"      scope:       {proc.get('scope_type') or '(none)'}:{proc.get('scope_value') or '*'}")
+    print(f"      applies:     {proc.get('applies')}")
     print(f"      status:      {proc.get('status')}")
+    print(f"      evidence:    {', '.join(proc.get('evidence') or []) or '(none)'}")
     print(f"      source_kind: {proc.get('source_kind')}")
     print(f"      summary:     {_short(proc.get('summary') or proc.get('content'))}")
     conditions = proc.get("activation_conditions") or []
@@ -106,9 +113,9 @@ def print_procedures(title: str, procedures: list[dict[str, Any]]) -> None:
 # Demo data
 # ---------------------------------------------------------------------------
 
-# Thread 1 is a direct instruction from the user. The procedural synthesizer can
-# turn this into a behavioral_policy. Because the source is an explicit user
-# instruction, provenance gating should mark it ACTIVE.
+# Thread 1 is a direct instruction from the user. The procedural pass can turn
+# this into an instruction. Because the user taught it, the evidence rules
+# should mark it ACTIVE.
 POLICY_TURNS = [
     (
         "user",
@@ -122,10 +129,9 @@ POLICY_TURNS = [
 ]
 
 # Thread 2 is an ordinary debugging conversation. Episodic extraction should
-# produce an episode with a lesson, and procedural synthesis can distill that
-# lesson into a reusable Cosmos DB recovery_strategy or workflow. Because this
-# is episode-distilled rather than an explicit policy, it remains CANDIDATE and
-# is not injected into the compiled system prompt.
+# produce an episode with a lesson, and the procedural pass can learn that
+# lesson as a reusable Cosmos DB skill. Because it was practiced only once, it
+# remains CANDIDATE and is not shown by retrieval or prompt injection.
 DEBUGGING_TURNS = [
     (
         "user",
@@ -214,7 +220,9 @@ def main() -> None:
         banner("2. Extract facts from the explicit instruction")
         # Fact extraction supplies behavioral facts to synthesize_procedural.
         # The direct "Always ask..." instruction should be categorized as a
-        # user requirement or high-salience preference by the extraction prompt.
+        # user requirement or high-salience preference and recorded as a
+        # directive, which is what lets it count as the user teaching the
+        # assistant.
         fact_stats = mem.extract_memories(user_id=user_id, thread_id=policy_thread_id)
         print(f"  stats: {json.dumps(fact_stats, indent=2)}")
 
@@ -235,7 +243,7 @@ def main() -> None:
             for lesson in episode.get("lessons") or []:
                 print(f"    lesson: {_short(lesson)}")
 
-        banner("5. Synthesize the procedural skill and policy library")
+        banner("5. Learn procedures from the facts and episodes")
         synthesis_stats = mem.synthesize_procedural(user_id)
         print(f"  stats: {json.dumps(synthesis_stats, indent=2)}")
         print(f"  procedures created: {synthesis_stats.get('procedures_created', 0)}")
@@ -244,8 +252,8 @@ def main() -> None:
         procedures = mem.get_procedural_memories(user_id)
         active = [p for p in procedures if p.get("status") == "active"]
         candidates = [p for p in procedures if p.get("status") == "candidate"]
-        print_procedures("ACTIVE procedures from trusted provenance:", active)
-        print_procedures("CANDIDATE procedures retained for review, not injection:", candidates)
+        print_procedures("ACTIVE procedures with enough evidence:", active)
+        print_procedures("CANDIDATE procedures waiting for more evidence, not injected:", candidates)
 
         banner("7. Context-aware retrieval")
         # The default retrieval API is injection-safe: status defaults to
@@ -256,35 +264,35 @@ def main() -> None:
 
         # For library inspection or review workflows, pass status=None to rank
         # both active and candidate procedures. This should surface the Cosmos DB
-        # debugging skill while the delete-confirmation policy ranks poorly or is
-        # absent for this coding task.
+        # debugging skill while the delete-confirmation instruction ranks poorly
+        # or is absent for this coding task.
         all_matches = mem.retrieve_procedures(user_id, "cosmos db order by query failing", status=None)
         print_procedures("Review retrieval including candidates:", all_matches)
 
-        banner("8. Compile deterministic prompt projections")
-        # With no task, only always-on global/user behavioral policies are folded
-        # into the prompt. Candidate skills are deliberately excluded.
+        banner("8. Compile the standing instructions")
+        # With no task, only the always-on procedures (applies == "always") are
+        # listed. Candidates are deliberately excluded.
         global_context = mem.build_procedural_context(user_id)
-        print("Global policies only:")
-        print(global_context or "(no active global policies)")
+        print("Standing instructions only:")
+        print(global_context or "(no active standing instructions)")
 
-        # With a task, ACTIVE task procedures relevant to that task can be folded
-        # in after the global policies. Episode-distilled candidates still stay
-        # out of the prompt until promoted by trusted provenance.
+        # With a task, the ACTIVE situational procedure nearest to the task is
+        # added after the standing instructions. Candidates stay out of the
+        # prompt until they have enough evidence.
         task_context = mem.build_procedural_context(user_id, task="fix a failing cosmos db query")
-        print("\nPolicies plus relevant active task skills:")
-        print(task_context or "(no active policies or task skills)")
+        print("\nStanding instructions plus the situational rule nearest the task:")
+        print(task_context or "(no active instructions)")
 
         banner("9. Closing notes")
         print(
             "Procedural memory keeps a two-layer model: atomic procedure "
-            "records form the skill/policy library, and build_procedural_context "
-            "compiles the deterministic prompt projection on demand. Provenance "
-            "gating keeps explicit user instructions, observed preferences, and "
-            "organization policy active, while episode-distilled, document, and "
-            "inferred procedures remain candidates. Episodic extraction, one "
-            "source of candidate procedures, also runs under the Durable Functions "
-            "backend in deployed processing setups."
+            "records form the library, and build_procedural_context compiles "
+            "the standing instructions on demand. A procedure becomes active "
+            "only when the evidence its kind needs has arrived (taught, "
+            "corrected, repeated, practiced, or endorsed); until then it stays "
+            "a candidate. Episodic extraction, one source of candidate "
+            "procedures, also runs under the Durable Functions backend in "
+            "deployed processing setups."
         )
 
     finally:
@@ -321,6 +329,8 @@ def main() -> None:
                         memory_type=record_type,
                     )
                     deleted += 1
+                except MemoryNotFoundError:
+                    continue  # already deleted with the memory it was folded into
                 except Exception as exc:  # pragma: no cover - best effort cleanup
                     print(f"  WARN: failed to delete {memory_id}: {exc}")
             print(f"  Deleted {deleted} record(s) for user {user_id}")

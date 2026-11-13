@@ -229,6 +229,31 @@ def test_add_in_filter_combined_with_other_filters():
 
 
 # ---------------------------------------------------------------------------
+# add_condition
+# ---------------------------------------------------------------------------
+
+
+def test_add_condition_adds_a_prebuilt_condition_and_its_parameters():
+    qb = _QueryBuilder()
+    qb.add_filter("c.user_id", "@uid", "u1")
+    qb.add_condition("(c.type != @t OR c.status = @s)", [{"name": "@t", "value": "x"}, {"name": "@s", "value": "y"}])
+    assert qb.build_where() == " WHERE c.user_id = @uid AND (c.type != @t OR c.status = @s)"
+    assert qb.get_parameters() == [
+        {"name": "@uid", "value": "u1"},
+        {"name": "@t", "value": "x"},
+        {"name": "@s", "value": "y"},
+    ]
+
+
+def test_add_condition_without_parameters_or_text():
+    qb = _QueryBuilder()
+    qb.add_condition("c.pinned = true")
+    qb.add_condition("")
+    assert qb.build_where() == " WHERE c.pinned = true"
+    assert qb.get_parameters() == []
+
+
+# ---------------------------------------------------------------------------
 # add_time_range
 # ---------------------------------------------------------------------------
 

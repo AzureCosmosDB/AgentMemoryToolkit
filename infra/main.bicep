@@ -96,6 +96,21 @@ param episodeMinTurns int = 2
 @description('Maximum number of change-feed items processed per orchestration batch.')
 param maxBatchSize int = 20
 
+@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run (each costs a model call; the rest wait for the next run) and the size of its contradiction pool. 1-500.')
+@minValue(1)
+@maxValue(500)
+param dedupPoolSize int = 50
+
+@description('Seconds a reconcile or procedure-learning activity keeps starting model calls before it saves what it finished and stops; the next run continues from its cursor. Keep it below the function app timeout (30 minutes by default on Flex Consumption).')
+@minValue(30)
+param activityTimeBudgetSeconds int = 240
+
+@description('Chat model deployment capacity (TPM, in thousands). Fact extraction, reconcile and procedure learning all use the chat model, so raise this for busy workloads, subject to subscription quota.')
+param chatCapacity int = 30
+
+@description('Embedding model deployment capacity (TPM, in thousands).')
+param embeddingCapacity int = 30
+
 @description('Backend that owns processing. `durable` (default) = the function-app fleet owns processing; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing, function-app skips.')
 @allowed([
   'durable'
@@ -173,8 +188,10 @@ module aiFoundry 'modules/ai-foundry.bicep' = {
     tags: commonTags
     chatModelName: chatModelName
     chatDeploymentName: chatDeploymentName
+    llmCapacity: chatCapacity
     embeddingModelName: embeddingModelName
     embeddingDeploymentName: embeddingDeploymentName
+    embeddingCapacity: embeddingCapacity
   }
 }
 
@@ -214,6 +231,8 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
     episodeMaxTurns: episodeMaxTurns
     episodeMinTurns: episodeMinTurns
     maxBatchSize: maxBatchSize
+    dedupPoolSize: dedupPoolSize
+    activityTimeBudgetSeconds: activityTimeBudgetSeconds
     memoryProcessorOwner: memoryProcessorOwner
     tags: commonTags
   }

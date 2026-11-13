@@ -1,124 +1,318 @@
+"""Async mirror of the procedure pass, procedural context and directive-retirement tests; the builders and the
+in-memory container are shared with the sync tests."""
+
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
-from azure.cosmos.exceptions import CosmosResourceExistsError
+from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceExistsError
 
+from azure.cosmos.agent_memory.aio.services import pipeline as pipeline_module
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
-from tests.unit.services.test_extract_dry import (
-    _async_containers_for_store,
-    _AsyncChat,
-    _AsyncEmbeddings,
-    _AsyncStore,
+from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+from azure.cosmos.agent_memory.services._procedures import (
+    SITUATIONAL_HEADER,
+    STANDING_HEADER,
+    STANDING_RULES_MAX,
+    procedure_id,
+)
+from tests.unit.services.test_procedural_synthesis_and_context import (
+    PROCEDURAL_PARTITION,
+    STEPS,
+    Chat,
+    Embeddings,
+    Memories,
+    answer,
+    containers_for,
+    cursor_doc,
+    directive,
+    episode,
+    fact,
+    fact_doc,
+    procedure,
+    procedures_by_name,
+    prompt_text,
+    rule,
 )
 
 
-class _AsyncProceduralStore(_AsyncStore):
-    async def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
-        del partition_key, cross_partition
-        params = {p["name"]: p["value"] for p in (parameters or [])}
-        user_id = params.get("@uid", params.get("@user_id"))
-        memory_type = params.get("@type", params.get("@memory_type"))
-        docs = [dict(doc) for doc in self.docs]
-        if user_id is not None:
-            docs = [doc for doc in docs if doc.get("user_id") == user_id]
-        if memory_type is not None:
-            docs = [doc for doc in docs if doc.get("type") == memory_type]
-        if "c.status='active'" in sql:
-            docs = [doc for doc in docs if doc.get("status") == "active"]
-        if "superseded_by" in sql:
-            docs = [doc for doc in docs if not doc.get("superseded_by")]
-        return docs
+class AsyncRows:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = iter(rows)
+
+    def __aiter__(self) -> AsyncRows:
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        try:
+            return next(self._rows)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+class AsyncMemories:
+    """The in-memory container behind awaitable methods, as the async Cosmos client exposes it. A query without a
+    partition reads every partition, which the async client does without being asked."""
+
+    def __init__(self, inner: Memories) -> None:
+        self.inner = inner
+
+    def query_items(self, *, query: str, parameters: Any = None, partition_key: Any = None) -> AsyncRows:
+        rows = self.inner.query_items(
+            query=query,
+            parameters=parameters,
+            partition_key=partition_key,
+            enable_cross_partition_query=partition_key is None,
+        )
+        return AsyncRows(rows)
+
+    async def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
+        return self.inner.read_item(item=item, partition_key=partition_key)
 
     async def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
-        if any(doc.get("id") == body.get("id") for doc in self.docs):
-            raise CosmosResourceExistsError(message="conflict")
-        self.docs.append(dict(body))
-        return dict(body)
+        return self.inner.create_item(body=body)
+
+    async def replace_item(self, **kwargs: Any) -> dict[str, Any]:
+        return self.inner.replace_item(**kwargs)
+
+
+class AsyncChat(Chat):
+    async def generate(self, messages: list[dict[str, Any]], **opts: Any) -> str:  # type: ignore[override]
+        return super().generate(messages, **opts)
+
+
+class AsyncEmbeddings(Embeddings):
+    async def generate(self, text: str) -> list[float]:  # type: ignore[override]
+        return super().generate(text)
 
 
 def _service(
-    store: _AsyncProceduralStore,
-    responses: list[dict[str, Any]] | None = None,
-) -> AsyncPipelineService:
-    return AsyncPipelineService(
-        store,
-        _AsyncChat(responses or []),
-        _AsyncEmbeddings(),
-        containers=_async_containers_for_store(store),
+    memories: Memories, responses: list[Any], vectors: dict[str, list[float]] | None = None
+) -> tuple[AsyncPipelineService, AsyncChat]:
+    chat, embeddings = AsyncChat(responses), AsyncEmbeddings(vectors)
+    containers = containers_for(AsyncMemories(memories))
+    store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings)
+    return AsyncPipelineService(store, chat, embeddings, containers=containers), chat
+
+
+# ---------------------------------------------------------------------------
+# Learning procedures
+# ---------------------------------------------------------------------------
+
+
+async def test_a_taught_instruction_is_active_with_its_support_recorded() -> None:
+    memories = Memories([fact()])
+    service, chat = _service(memories, [{"procedures": [answer()]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result == {
+        "status": "synthesized",
+        "procedures_created": 1,
+        "procedures_updated": 0,
+        "procedures_reinforced": 0,
+        "procedures_skipped": 0,
+        "facts_retired": 0,
+    }
+    created = procedures_by_name(memories)["Run targeted tests"]
+    assert (created["procedure_kind"], created["status"], created["applies"]) == ("instruction", "active", "when")
+    assert (created["evidence"], created["user_support_count"], created["support_dates"]) == (
+        ["taught"],
+        1,
+        ["2025-01-01"],
     )
+    assert (created["source_kind"], created["source_authority"]) == ("explicit_user_instruction", "high")
+    assert created["id"] == procedure_id("u1", "instruction", "Run targeted tests")
+    assert (created["user_id"], created["thread_id"], created["embedding"]) == ("u1", "__procedural__", [1.0])
+    assert (created["prompt_id"], created["prompt_version"]) == ("extract_procedure.prompty", "v6")
+    assert "Never write a literal secret" in prompt_text(chat, 0)
 
 
-def _fact() -> dict[str, Any]:
-    return {
-        "id": "fact-raw-1",
-        "user_id": "u1",
-        "type": "fact",
-        "content": "The user explicitly said to run targeted tests before reporting success.",
-        "metadata": {"category": "preference"},
-        "salience": 0.9,
-        "created_at": "2025-01-01T00:00:00+00:00",
-    }
+@pytest.mark.parametrize(
+    ("sources", "item", "status"),
+    [
+        pytest.param([fact(agent=True)], answer(), "candidate", id="instruction-stated-by-the-assistant"),
+        pytest.param(
+            [fact()], answer("Use the logger", kind="habit", evidence="repeated"), "candidate", id="habit-seen-once"
+        ),
+        pytest.param(
+            [fact()], answer("Use the logger", kind="habit", evidence="corrected"), "active", id="habit-corrected"
+        ),
+        pytest.param(
+            [episode()],
+            answer("Stabilize flaky tests", kind="skill", evidence="practiced", grounded_in=("ep-1",)),
+            "candidate",
+            id="skill-practiced-once",
+        ),
+        pytest.param(
+            [fact()], answer("Stabilize flaky tests", kind="skill", evidence="endorsed"), "active", id="skill-endorsed"
+        ),
+    ],
+)
+async def test_status_follows_the_evidence_each_kind_needs(sources, item, status) -> None:
+    memories = Memories(sources)
+    service, _ = _service(memories, [{"procedures": [item]}])
+
+    await service.synthesize_procedural("u1")
+
+    [created] = procedures_by_name(memories).values()
+    assert created["status"] == status
+    if status == "candidate":
+        assert (created["source_kind"], created["source_authority"]) == ("agent_inference", "low")
 
 
-def _episode() -> dict[str, Any]:
-    return {
-        "id": "episode-raw-1",
-        "user_id": "u1",
-        "type": "episodic",
-        "content": "A retry investigation succeeded.",
-        "lessons": ["Retry transient CI failures once before escalating."],
-        "salience": 0.8,
-        "created_at": "2025-01-01T00:01:00+00:00",
-    }
+async def test_a_skill_practiced_again_on_another_day_becomes_active() -> None:
+    skill = procedure(
+        "Stabilize flaky tests",
+        kind="skill",
+        status="candidate",
+        evidence=["practiced"],
+        source_fact_ids=[],
+        source_episodic_ids=["ep-old"],
+        user_support_count=0,
+        practiced_dates=["2025-01-01"],
+    )
+    memories = Memories([skill, episode("ep-new", ts=5, day="2025-02-01")])
+    reinforce = answer(
+        "Stabilize flaky tests",
+        kind="skill",
+        evidence="practiced",
+        grounded_in=("ep-1",),
+        action="reinforce",
+        updates="proc-1",
+    )
+    service, chat = _service(memories, [{"procedures": [reinforce]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result["procedures_reinforced"] == 1
+    assert "proc-1 [skill · candidate · practiced · 1 source]: Stabilize flaky tests:" in prompt_text(chat, 0)
+    reinforced = procedures_by_name(memories)["Stabilize flaky tests"]
+    assert (reinforced["status"], reinforced["version"]) == ("active", 1)
+    assert reinforced["practiced_dates"] == ["2025-01-01", "2025-02-01"]
+    assert reinforced["source_episodic_ids"] == ["ep-new", "ep-old"]
 
 
-def _procedure(
-    name: str,
-    *,
-    grounded_in: list[str],
-    source_kind: str,
-    summary: str = "Run targeted tests before reporting success.",
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "summary": summary,
-        "retrieval_text": summary,
-        "procedure_kind": "behavioral_policy",
-        "scope_type": "user",
-        "scope_value": None,
-        "activation_conditions": [],
-        "preconditions": [],
-        "steps": [],
-        "success_conditions": [],
-        "failure_conditions": [],
-        "safety_constraints": [],
-        "source_kind": source_kind,
-        "grounded_in": grounded_in,
-        "confidence": 0.8,
-    }
+async def test_an_add_that_names_an_existing_procedure_reinforces_it() -> None:
+    habit = procedure("Use the logger", kind="habit", status="candidate", evidence=["repeated"])
+    later = fact("fact-new", "The user again asked for logger calls instead of print.", ts=5, day="2025-02-01")
+    memories = Memories([habit, later])
+    service, _ = _service(memories, [{"procedures": [answer("Use the logger", kind="habit", evidence="repeated")]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert (result["procedures_created"], result["procedures_reinforced"]) == (0, 1)
+    reinforced = procedures_by_name(memories)["Use the logger"]
+    assert (reinforced["status"], reinforced["support_dates"]) == ("active", ["2025-01-01", "2025-02-01"])
 
 
-@pytest.mark.asyncio
-async def test_synthesize_procedural_applies_provenance_gate() -> None:
-    store = _AsyncProceduralStore([_fact(), _episode()])
-    service = _service(
-        store,
+async def test_an_answer_that_cites_only_known_sources_changes_nothing() -> None:
+    memories = Memories([procedure(source_fact_ids=["fact-raw-1"]), fact()])
+    service, _ = _service(memories, [{"procedures": [answer(action="reinforce", updates="proc-1")]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result["procedures_skipped"] == 1
+    assert "updated_at" not in procedures_by_name(memories)["Run targeted tests"]
+
+
+async def test_an_update_revises_a_procedure_in_place() -> None:
+    existing = procedure()
+    memories = Memories([existing, fact("fact-new", "The user wants the test command shown.", ts=5)])
+    revision = answer(
+        action="update", updates="proc-1", summary="Run targeted tests before reporting success; show the command."
+    )
+    service, chat = _service(memories, [{"procedures": [revision]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result["procedures_updated"] == 1
+    assert "proc-1 [instruction · active · taught · 1 source]: Run targeted tests:" in prompt_text(chat, 0)
+    revised = procedures_by_name(memories)["Run targeted tests"]
+    assert (revised["id"], revised["version"], revised["created_at"]) == (existing["id"], 2, existing["created_at"])
+    assert revised["summary"] == "Run targeted tests before reporting success; show the command."
+    assert (revised["source_fact_ids"], revised["status"]) == (["fact-new", "fact-old"], "active")
+    assert (revised["prompt_id"], revised["prompt_version"]) == ("extract_procedure.prompty", "v6")
+    assert revised["embedding"] == [1.0]
+    assert service._embeddings.calls == [["Run targeted tests before reporting success; show the command."]]
+
+
+@pytest.mark.parametrize(
+    ("source", "evidence", "revised"),
+    [
+        pytest.param(
+            fact("fact-new", "The user likes brief answers.", ts=5), "taught", False, id="rewrite-loses-the-number"
+        ),
+        pytest.param(
+            fact("fact-new", "The assistant shortened its replies.", ts=5, agent=True),
+            "corrected",
+            False,
+            id="correction-the-user-never-made",
+        ),
+        pytest.param(
+            fact("fact-new", "The user said replies must stay under 100 words, not 200.", ts=5),
+            "corrected",
+            True,
+            id="the-users-correction",
+        ),
+    ],
+)
+async def test_a_revision_keeps_numbers_and_negations_unless_the_user_corrected_them(source, evidence, revised) -> None:
+    existing = procedure("Keep replies short", summary="Keep replies under 200 words.", status="candidate")
+    existing["user_support_count"] = 0
+    memories = Memories([existing, source])
+    revision = answer(
+        "Keep replies short",
+        evidence=evidence,
+        action="update",
+        updates="proc-1",
+        summary="Keep replies under 100 words.",
+    )
+    service, _ = _service(memories, [{"procedures": [revision]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    kept = procedures_by_name(memories)["Keep replies short"]
+    if revised:
+        assert result["procedures_updated"] == 1
+        assert (kept["version"], kept["summary"], kept["status"]) == (2, "Keep replies under 100 words.", "active")
+    else:
+        assert (result["procedures_updated"], result["procedures_skipped"]) == (0, 1)
+        assert (kept["version"], kept["summary"], kept["status"]) == (1, "Keep replies under 200 words.", "candidate")
+        assert kept["source_fact_ids"] == ["fact-old"]
+
+
+async def test_a_correction_under_an_existing_name_revises_the_procedure() -> None:
+    existing = procedure("Keep replies short", summary="Keep replies under 200 words.")
+    memories = Memories([existing, fact("fact-new", "The user said: under 100 words, not 200.", ts=5)])
+    correction = answer("Keep replies short", evidence="corrected", summary="Keep replies under 100 words.")
+    service, _ = _service(memories, [{"procedures": [correction]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert (result["procedures_created"], result["procedures_updated"]) == (0, 1)
+    assert procedures_by_name(memories)["Keep replies short"]["summary"] == "Keep replies under 100 words."
+
+
+async def test_two_answers_for_the_same_procedure_in_one_batch_both_count() -> None:
+    candidate = procedure(status="candidate", evidence=["repeated"])
+    candidate["user_support_count"] = 0
+    memories = Memories(
+        [
+            candidate,
+            fact("fact-a", "The assistant ran the targeted tests first.", ts=5, agent=True),
+            fact("fact-b", "The user said to always run the targeted tests first.", ts=6),
+        ]
+    )
+    service, _ = _service(
+        memories,
         [
             {
                 "procedures": [
-                    _procedure(
-                        "Targeted testing",
-                        grounded_in=["fact-1"],
-                        source_kind="explicit_user_instruction",
-                    ),
-                    _procedure(
-                        "Retry CI failures",
-                        grounded_in=["ep-1"],
-                        source_kind="explicit_user_instruction",
-                        summary="Retry transient CI failures once before escalating.",
-                    ),
+                    answer(evidence="repeated", grounded_in=("fact-1",), action="reinforce", updates="proc-1"),
+                    answer(evidence="taught", grounded_in=("fact-2",), action="reinforce", updates="proc-1"),
                 ]
             }
         ],
@@ -126,316 +320,515 @@ async def test_synthesize_procedural_applies_provenance_gate() -> None:
 
     result = await service.synthesize_procedural("u1")
 
-    assert result == {"status": "synthesized", "procedures_created": 2, "procedures_skipped": 0}
-    procedures = [doc for doc in store.docs if doc.get("type") == "procedural"]
-    assert {doc["name"]: doc["status"] for doc in procedures} == {
-        "Targeted testing": "active",
-        "Retry CI failures": "candidate",
+    assert result["procedures_reinforced"] == 2
+    reinforced = procedures_by_name(memories)["Run targeted tests"]
+    assert (reinforced["source_fact_ids"], reinforced["status"]) == (["fact-a", "fact-b", "fact-old"], "active")
+
+
+async def test_a_procedure_changed_since_it_was_read_keeps_the_other_writers_version(monkeypatch) -> None:
+    memories = Memories([procedure(), fact("fact-new", "The user wants the test command shown.", ts=5)])
+    service, _ = _service(
+        memories, [{"procedures": [answer(action="update", updates="proc-1", summary="Run tests; show the command.")]}]
+    )
+    read = memories.read_item
+
+    def another_writer_wins(*, item: str, partition_key: Any) -> dict[str, Any]:
+        doc = read(item=item, partition_key=partition_key)
+        if item.startswith("proc_"):
+            memories.docs = [{**d, "_etag": "etag-other"} if d["id"] == item else d for d in memories.docs]
+        return doc
+
+    monkeypatch.setattr(memories, "read_item", another_writer_wins)
+
+    result = await service.synthesize_procedural("u1")
+
+    assert (result["procedures_updated"], result["procedures_skipped"]) == (0, 1)
+    kept = procedures_by_name(memories)["Run targeted tests"]
+    assert (kept["version"], kept["_etag"], kept["summary"]) == (1, "etag-other", procedure()["summary"])
+
+
+async def test_an_update_naming_no_shown_procedure_is_an_add() -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer(action="update", updates="proc-9")]}])
+
+    assert (await service.synthesize_procedural("u1"))["procedures_created"] == 1
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [
+        pytest.param(answer(kind="policy"), id="unknown-kind"),
+        pytest.param(answer(kind="workflow"), id="retired-kind"),
+        pytest.param(answer(evidence="inferred"), id="unknown-evidence"),
+        pytest.param(answer(grounded_in=("fact-9",)), id="ungrounded"),
+        pytest.param(
+            answer("Flaky tests", kind="skill", evidence="endorsed", steps=STEPS[:1]), id="skill-with-one-step"
+        ),
+        pytest.param("not an object", id="not-an-answer"),
+    ],
+)
+async def test_unusable_answers_are_skipped_beside_a_valid_one(unusable) -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [unusable, answer("Valid instruction")]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert (result["procedures_created"], result["procedures_skipped"]) == (1, 1)
+    assert list(procedures_by_name(memories)) == ["Valid instruction"]
+
+
+async def test_a_procedure_that_already_exists_is_never_created_twice() -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+    original = service._create_memory
+
+    async def lose_the_race(doc: dict[str, Any]) -> dict[str, Any]:
+        await original(doc)
+        raise CosmosResourceExistsError(status_code=409, message="conflict")
+
+    service._create_memory = lose_the_race  # type: ignore[method-assign]
+
+    result = await service.synthesize_procedural("u1")
+
+    assert (result["procedures_created"], result["procedures_skipped"]) == (0, 1)
+    assert len(procedures_by_name(memories)) == 1
+
+
+# ---------------------------------------------------------------------------
+# What the model reads
+# ---------------------------------------------------------------------------
+
+
+async def test_sources_reach_the_model_oldest_first_in_batches_with_speaker_date_and_outcome() -> None:
+    facts = [fact(f"fact-{i}", f"The user stated rule {i}.", ts=i, day=f"2025-01-{i + 10:02d}") for i in range(11)]
+    facts[0]["tags"] = ["sys:agent-fact"]
+    memories = Memories([*facts, episode(ts=20, day="2025-02-01")])
+    service, chat = _service(memories, [{"procedures": []}, {"procedures": []}])
+
+    await service.synthesize_procedural("u1")
+
+    assert chat.calls == 2
+    first, second = prompt_text(chat, 0), prompt_text(chat, 1)
+    assert "fact-1 [preference · assistant · 2025-01-10]: The user stated rule 0." in first
+    assert "rule 9." in first and "rule 10." not in first
+    assert "fact-1 [preference · user · 2025-01-20]: The user stated rule 10." in second
+    assert "ep-1 [2025-02-01] Fixed flaky tests (outcome: successful - The suite passed.). Summary:" in second
+
+
+async def test_only_behavioral_facts_and_the_users_directives_are_read() -> None:
+    plain = {
+        **fact("fact-plain", "The user lives in Lisbon.", ts=1),
+        "metadata": {"category": "other"},
+        "salience": 0.2,
     }
-    assert {doc["name"]: doc["source_kind"] for doc in procedures}["Retry CI failures"] == "episode_distillation"
-    assert procedures[0]["thread_id"] == "__procedural__"
-    assert procedures[0]["embedding"] == [1.0]
+    salient = {**plain, "id": "fact-salient", "content": "The user is allergic to penicillin.", "salience": 0.95}
+    corrected = {**plain, "id": "fact-corrected", "content": "The user said to stop apologizing.", "_ts": 3}
+    corrected["assertion"] = "correction"
+    memories = Memories(
+        [
+            plain,
+            salient,
+            corrected,
+            fact("fact-retired", "The user wanted tabs.", ts=4),
+            fact("fact-other-user", "The user of another account.", ts=5, user_id="u2"),
+        ]
+    )
+    memories.docs[3]["superseded_by"] = "fact-newer"
+    service, chat = _service(memories, [{"procedures": []}])
+
+    await service.synthesize_procedural("u1")
+
+    text = prompt_text(chat, 0)
+    assert "allergic to penicillin" in text and "stop apologizing" in text
+    assert "Lisbon" not in text and "wanted tabs" not in text and "another account" not in text
 
 
-@pytest.mark.asyncio
-async def test_build_procedural_context_uses_active_procedures_only() -> None:
-    active = {
-        "id": "proc-active",
-        "user_id": "u1",
-        "type": "procedural",
-        "status": "active",
-        "name": "Targeted testing",
-        "summary": "Run targeted tests before reporting success.",
-        "retrieval_text": "tests success",
-        "procedure_kind": "behavioral_policy",
-        "scope_type": "user",
-        "scope_value": None,
-        "priority": 10,
-        "source_authority": "high",
-        "version": 1,
-    }
-    candidate = {
-        **active,
-        "id": "proc-candidate",
-        "status": "candidate",
-        "name": "Candidate policy",
-        "summary": "Do not include this candidate procedure.",
-    }
-    service = _service(_AsyncProceduralStore([active, candidate]))
+async def test_the_users_nearest_existing_procedures_are_shown_so_the_model_can_revise_one() -> None:
+    near = [procedure(f"Near {i}", embedding=[1.0, 0.1 * i], summary=f"Near rule {i}.") for i in range(1, 4)]
+    far = [procedure(f"Far {i}", embedding=[0.0, 1.0], summary=f"Far rule {i}.") for i in range(1, 3)]
+    memories = Memories([*near, *far, {**fact(), "embedding": [1.0, 0.0]}])
+    service, chat = _service(memories, [{"procedures": []}])
 
-    context = await service.build_procedural_context("u1")
+    await service.synthesize_procedural("u1")
 
-    assert "Run targeted tests before reporting success." in context
-    assert "Do not include this candidate procedure." not in context
+    lines = [line for line in prompt_text(chat, 0).splitlines() if line.startswith("proc-")]
+    assert [line.split("]: ")[1].split(":")[0] for line in lines] == ["Near 1", "Near 2", "Near 3"]
+    assert "Far 1" not in prompt_text(chat, 0)
+
+
+async def test_procedures_and_the_cursor_live_in_the_users_procedural_partition() -> None:
+    memories = Memories([fact(), fact("fact-theirs", "Their rule.", user_id="u2")])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+
+    await service.synthesize_procedural("u1")
+
+    created = procedures_by_name(memories)["Run targeted tests"]
+    assert memories.read_item(item=created["id"], partition_key=PROCEDURAL_PARTITION)["name"] == created["name"]
+    cursor = memories.read_item(item="procedure_cursor", partition_key=PROCEDURAL_PARTITION)
+    assert (cursor["type"], cursor["user_id"], cursor["thread_id"]) == ("procedure_cursor", "u1", "__procedural__")
+
+
+# ---------------------------------------------------------------------------
+# The cursor
+# ---------------------------------------------------------------------------
+
+
+async def test_synthesize_procedural_reads_each_source_once() -> None:
+    memories = Memories([fact("fact-a", "The user wants tests run before every commit.", ts=3)])
+    service, chat = _service(memories, [{"procedures": [answer("Test before commit")]}, {"procedures": []}])
+
+    first = await service.synthesize_procedural("u1")
+    second = await service.synthesize_procedural("u1")
+    memories.docs.append(fact("fact-b", "The user wants commit messages in the imperative mood.", ts=7))
+    third = await service.synthesize_procedural("u1")
+
+    assert first["procedures_created"] == 1
+    assert second == {"status": "unchanged", "procedures_created": 0}
+    assert third["status"] == "synthesized"
+    assert chat.calls == 2
+    assert "imperative mood" in prompt_text(chat, 1)
+    assert "tests run before every commit" not in prompt_text(chat, 1)
+    assert cursor_doc(memories)["facts"] == {"last_ts": 7, "ids_at_last_ts": ["fact-b"]}
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "cursor_moved"),
+    [("rate limit", "deferred", False), ("content_filter", "skipped", True)],
+    ids=["retryable-keeps-the-sources", "non-retryable-skips-them"],
+)
+async def test_synthesize_procedural_moves_its_cursor_only_past_sources_it_is_done_with(
+    error, status, cursor_moved
+) -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [])
+
+    async def fail(filename: str, inputs: dict[str, Any]) -> str:
+        del filename, inputs
+        raise RuntimeError(error)
+
+    service._run_prompty = fail  # type: ignore[method-assign]
+
+    assert await service.synthesize_procedural("u1") == {"status": status, "procedures_created": 0}
+    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs) is cursor_moved
+
+
+async def test_synthesize_procedural_skips_an_unusable_answer_and_moves_on() -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, ["not json"])
+
+    assert await service.synthesize_procedural("u1") == {"status": "skipped", "procedures_created": 0}
+    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs)
+
+
+def _twelve_facts() -> list[dict[str, Any]]:
+    return [fact(f"fact-{i:02d}", f"The user stated rule {i}.", ts=i + 1) for i in range(12)]
+
+
+async def test_a_stopped_run_keeps_the_batches_it_finished() -> None:
+    memories = Memories(_twelve_facts())
+    service, _ = _service(memories, [])
+    replies = iter([json.dumps({"procedures": []})])
+
+    async def first_batch_only(filename: str, inputs: dict[str, Any]) -> str:
+        del filename, inputs
+        reply = next(replies, None)
+        if reply is None:
+            raise RuntimeError("rate limit")
+        return reply
+
+    service._run_prompty = first_batch_only  # type: ignore[method-assign]
+
+    assert await service.synthesize_procedural("u1") == {"status": "deferred", "procedures_created": 0}
+    assert cursor_doc(memories)["facts"] == {"last_ts": 10, "ids_at_last_ts": ["fact-09"]}
+
+    shown: list[str] = []
+
+    async def record(filename: str, inputs: dict[str, Any]) -> str:
+        del filename
+        shown.append(inputs["behavioral_facts"])
+        return '{"procedures": []}'
+
+    service._run_prompty = record  # type: ignore[method-assign]
+    await service.synthesize_procedural("u1")
+
+    assert len(shown) == 1
+    assert "rule 10." in shown[0] and "rule 11." in shown[0] and "rule 9." not in shown[0]
+
+
+async def test_a_deadline_stops_the_pass_between_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    memories = Memories(_twelve_facts())
+    service, _ = _service(memories, [])
+    clock = {"now": 0.0}
+    monkeypatch.setattr(pipeline_module.time, "monotonic", lambda: clock["now"])
+
+    async def slow_batch(filename: str, inputs: dict[str, Any]) -> str:
+        del filename, inputs
+        clock["now"] = 100.0
+        return json.dumps({"procedures": []})
+
+    service._run_prompty = slow_batch  # type: ignore[method-assign]
+
+    result = await service.synthesize_procedural("u1", deadline=50.0)
+
+    assert (result["status"], result["procedures_created"]) == ("synthesized", 0)
+    assert cursor_doc(memories)["facts"]["last_ts"] == 10
+    assert await service.synthesize_procedural("u1", deadline=50.0) == {"status": "deferred", "procedures_created": 0}
+
+
+@pytest.mark.parametrize(
+    "docs",
+    [
+        pytest.param([], id="no-memories"),
+        pytest.param([{**fact(), "content": "   "}, {**episode(), "lessons": ["", "   "]}], id="only-blank-sources"),
+    ],
+)
+async def test_synthesize_procedural_is_unchanged_without_a_model_call_when_nothing_qualifies(docs) -> None:
+    memories = Memories(docs)
+    service, chat = _service(memories, [])
+
+    assert await service.synthesize_procedural("u1") == {"status": "unchanged", "procedures_created": 0}
+    assert chat.calls == 0
+    assert procedures_by_name(memories) == {}
+
+
+async def test_synthesize_procedural_requires_a_user() -> None:
+    service, _ = _service(Memories([]), [])
+
+    with pytest.raises(Exception, match="user_id is required"):
+        await service.synthesize_procedural("")
+
+
+# ---------------------------------------------------------------------------
+# Procedural context
+# ---------------------------------------------------------------------------
+
+
+async def test_build_procedural_context_lists_the_standing_rules_in_force() -> None:
+    memories = Memories(
+        [
+            rule("Repeated", evidence=("repeated",)),
+            rule("Taught-old", updated_at="2024-01-01T00:00:00+00:00"),
+            rule("Taught-new", updated_at="2025-06-01T00:00:00+00:00"),
+            rule("Corrected", evidence=("corrected",)),
+            rule("Situational", applies="when"),
+            rule("Candidate", status="candidate"),
+            rule("Expired", valid_until="2000-01-01"),
+            rule("Retired", superseded_by="proc-Taught-new"),
+            {**rule("Theirs"), "user_id": "u2"},
+        ]
+    )
+    service, _ = _service(memories, [])
+
+    assert (await service.build_procedural_context("u1")).splitlines() == [
+        STANDING_HEADER,
+        "- Taught-new rule.",
+        "- Taught-old rule.",
+        "- Corrected rule.",
+        "- Repeated rule.",
+    ]
     assert await service.build_procedural_context("missing-user") == ""
 
 
-def _active_procedure(
-    name: str,
-    *,
-    summary: str,
-    procedure_kind: str = "behavioral_policy",
-    scope_type: str = "user",
-    retrieval_text: str | None = None,
-    activation_conditions: list[str] | None = None,
-    priority: int = 0,
-    source_authority: str = "low",
-    steps: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    return {
-        "id": f"proc-{name.lower().replace(' ', '-')}",
-        "user_id": "u1",
-        "type": "procedural",
-        "status": "active",
-        "name": name,
-        "summary": summary,
-        "retrieval_text": retrieval_text if retrieval_text is not None else summary,
-        "procedure_kind": procedure_kind,
-        "scope_type": scope_type,
-        "scope_value": None,
-        "activation_conditions": activation_conditions or [],
-        "steps": steps or [],
-        "priority": priority,
-        "source_authority": source_authority,
-        "version": 1,
+async def test_build_procedural_context_leaves_out_rules_written_before_procedures_were_learned_from_evidence() -> None:
+    legacy = {
+        key: value for key, value in rule("Legacy", procedure_kind="behavioral_policy").items() if key != "applies"
     }
+    memories = Memories([legacy, rule("Current")])
+    service, _ = _service(memories, [])
+
+    assert (await service.build_procedural_context("u1")).splitlines() == [STANDING_HEADER, "- Current rule."]
 
 
-@pytest.mark.asyncio
-async def test_build_procedural_context_includes_task_matching_workflow_only() -> None:
-    workflow = _active_procedure(
-        "Partition workflow",
-        summary="Use partition key diagnostics.",
-        procedure_kind="workflow",
-        scope_type="domain",
-        retrieval_text="cosmos partition routing diagnostics",
-        activation_conditions=["when debugging partition fanout"],
-        steps=[{"sequence": 1, "instruction": "Inspect partition routing."}],
-    )
-    service = _service(_AsyncProceduralStore([workflow]))
-
-    matching_context = await service.build_procedural_context("u1", task="debug partition latency")
-
-    assert "Partition workflow" in matching_context
-    assert "Inspect partition routing." in matching_context
-    assert await service.build_procedural_context("u1") == ""
-    assert await service.build_procedural_context("u1", task="summarize billing invoices") == ""
-
-
-@pytest.mark.asyncio
-async def test_build_procedural_context_always_includes_global_and_user_policies() -> None:
-    global_policy = _active_procedure(
-        "Global reporting",
-        summary="Always report validation status.",
-        scope_type="global",
-    )
-    user_rule = _active_procedure(
-        "User test rule",
-        summary="Run targeted tests before reporting success.",
-        procedure_kind="decision_rule",
-        scope_type="user",
-    )
-    domain_policy = _active_procedure(
-        "Domain policy",
-        summary="Do not include domain policies without task matching.",
-        scope_type="domain",
-    )
-    service = _service(_AsyncProceduralStore([global_policy, user_rule, domain_policy]))
-
-    context = await service.build_procedural_context("u1")
-
-    assert "Global reporting" in context
-    assert "User test rule" in context
-    assert "Domain policy" not in context
-
-
-@pytest.mark.asyncio
-async def test_build_procedural_context_orders_policies_by_priority_then_authority() -> None:
-    lower_priority = _active_procedure(
-        "Lower priority",
-        summary="Lower priority policy.",
-        priority=1,
-        source_authority="mandatory",
-    )
-    higher_priority = _active_procedure(
-        "Higher priority",
-        summary="Higher priority policy.",
-        priority=10,
-        source_authority="low",
-    )
-    mandatory_authority = _active_procedure(
-        "Mandatory authority",
-        summary="Mandatory authority policy.",
-        priority=10,
-        source_authority="mandatory",
-    )
-    service = _service(_AsyncProceduralStore([lower_priority, higher_priority, mandatory_authority]))
-
-    context = await service.build_procedural_context("u1")
-
-    assert context.index("Mandatory authority") < context.index("Higher priority")
-    assert context.index("Higher priority") < context.index("Lower priority")
-
-
-@pytest.mark.asyncio
-async def test_synthesize_procedural_downgrades_episode_only_explicit_claim() -> None:
-    store = _AsyncProceduralStore([_episode()])
-    service = _service(
-        store,
+async def test_build_procedural_context_shows_a_rule_through_its_last_valid_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pipeline_module, "utc_today", lambda: "2025-06-01")
+    memories = Memories(
         [
-            {
-                "procedures": [
-                    _procedure(
-                        "Episode claim",
-                        grounded_in=["ep-1"],
-                        source_kind="explicit_user_instruction",
-                        summary="Retry transient CI failures once before escalating.",
-                    )
-                ]
-            }
-        ],
+            rule("Through-today", valid_until="2025-06-01"),
+            rule("Ended-yesterday", valid_until="2025-05-31"),
+            rule("No-end", valid_until=None),
+        ]
     )
+    service, _ = _service(memories, [])
 
-    result = await service.synthesize_procedural("u1")
+    assert (await service.build_procedural_context("u1")).splitlines() == [
+        STANDING_HEADER,
+        "- Through-today rule.",
+        "- No-end rule.",
+    ]
 
-    assert result == {"status": "synthesized", "procedures_created": 1, "procedures_skipped": 0}
-    procedure = next(doc for doc in store.docs if doc.get("type") == "procedural")
-    assert procedure["status"] == "candidate"
-    assert procedure["source_kind"] == "episode_distillation"
+
+async def test_build_procedural_context_caps_the_standing_rules() -> None:
+    memories = Memories([rule(f"Rule-{i:02d}") for i in range(STANDING_RULES_MAX + 2)])
+    service, _ = _service(memories, [])
+
+    assert len((await service.build_procedural_context("u1")).splitlines()) == 1 + STANDING_RULES_MAX
 
 
-@pytest.mark.asyncio
-async def test_synthesize_procedural_downgrades_episode_only_organization_policy() -> None:
-    store = _AsyncProceduralStore([_episode()])
-    service = _service(
-        store,
+async def test_build_procedural_context_adds_the_situational_rule_nearest_a_task() -> None:
+    memories = Memories(
         [
-            {
-                "procedures": [
-                    _procedure(
-                        "Org policy from episode",
-                        grounded_in=["ep-1"],
-                        source_kind="organization_policy",
-                        summary="Retry transient CI failures once before escalating.",
-                    )
-                ]
-            }
-        ],
+            rule("Always"),
+            rule("Reviews", applies="when", embedding=[0.0, 1.0]),
+            rule("Cooking", applies="when", embedding=[1.0, 0.0]),
+            rule("Draft", applies="when", status="candidate", embedding=[0.0, 1.0]),
+            rule("Expired", applies="when", embedding=[0.0, 1.0], valid_until="2000-01-01"),
+        ]
     )
+    service, _ = _service(memories, [], vectors={"review this pull request": [0.0, 1.0]})
+
+    context = await service.build_procedural_context("u1", task="review this pull request")
+
+    assert context.splitlines() == [
+        STANDING_HEADER,
+        "- Always rule.",
+        "",
+        SITUATIONAL_HEADER,
+        "- When working on Reviews: Reviews rule.",
+    ]
+    assert service._embeddings.calls == [["review this pull request"]]
+    assert (await service.build_procedural_context("u1")).splitlines() == [STANDING_HEADER, "- Always rule."]
+    assert service._embeddings.calls == [["review this pull request"]]
+
+
+async def test_build_procedural_context_never_lists_the_steps_of_a_skill() -> None:
+    skill = rule("Flaky", applies="when", procedure_kind="skill", steps=STEPS)
+    service, _ = _service(Memories([skill]), [])
+
+    context = await service.build_procedural_context("u1", task="flaky tests")
+
+    assert context.splitlines()[-1] == "- When working on Flaky: Flaky rule."
+    assert "Check for shared state" not in context
+
+
+async def test_build_procedural_context_requires_a_user() -> None:
+    service, _ = _service(Memories([]), [])
+
+    with pytest.raises(Exception, match="user_id is required"):
+        await service.build_procedural_context("")
+
+
+# ---------------------------------------------------------------------------
+# Directives and corrections
+# ---------------------------------------------------------------------------
+
+
+async def test_a_directive_is_held_by_the_active_situational_procedure_it_teaches() -> None:
+    memories = Memories([directive()])
+    service, chat = _service(memories, [{"procedures": [answer()]}])
 
     result = await service.synthesize_procedural("u1")
 
-    assert result == {"status": "synthesized", "procedures_created": 1, "procedures_skipped": 0}
-    procedure = next(doc for doc in store.docs if doc.get("type") == "procedural")
-    assert procedure["status"] == "candidate"
-    assert procedure["source_kind"] == "episode_distillation"
+    created = procedures_by_name(memories)["Run targeted tests"]
+    assert (created["status"], created["evidence"]) == ("active", ["taught"])
+    retired = fact_doc(memories)
+    assert (retired["superseded_by"], retired["supersede_reason"]) == (created["id"], "procedure")
+    assert result["facts_retired"] == 1
+    assert "fact-1 [preference · user · directive · 2025-01-01]" in prompt_text(chat, 0)
 
 
-@pytest.mark.asyncio
-async def test_synthesize_procedural_ungrounded_claim_is_candidate() -> None:
-    store = _AsyncProceduralStore([_fact()])
-    service = _service(
-        store,
-        [
-            {
-                "procedures": [
-                    _procedure(
-                        "Ungrounded org policy",
-                        grounded_in=["nonexistent"],
-                        source_kind="organization_policy",
-                    )
-                ]
-            }
-        ],
-    )
+async def test_a_standing_rule_leaves_its_directive_searchable() -> None:
+    memories = Memories([directive()])
+    service, _ = _service(memories, [{"procedures": [answer(applies="always", activation_conditions=[])]}])
 
     result = await service.synthesize_procedural("u1")
 
-    assert result == {"status": "synthesized", "procedures_created": 1, "procedures_skipped": 0}
-    procedure = next(doc for doc in store.docs if doc.get("type") == "procedural")
-    assert procedure["status"] == "candidate"
+    assert procedures_by_name(memories)["Run targeted tests"]["status"] == "active"
+    assert not fact_doc(memories).get("superseded_by")
+    assert result["facts_retired"] == 0
 
 
-@pytest.mark.asyncio
-async def test_synthesize_procedural_skips_malformed_workflow_and_creates_valid_sibling() -> None:
-    malformed = _procedure(
-        "Empty workflow",
-        grounded_in=["fact-1"],
-        source_kind="explicit_user_instruction",
-        summary="Malformed workflow with no steps.",
-    )
-    malformed["procedure_kind"] = "workflow"
-    valid = _procedure(
-        "Valid policy",
-        grounded_in=["fact-1"],
-        source_kind="explicit_user_instruction",
-    )
-    store = _AsyncProceduralStore([_fact()])
-    service = _service(store, [{"procedures": [malformed, valid]}])
+async def test_a_stated_preference_taken_for_an_instruction_stays_a_hidden_candidate() -> None:
+    memories = Memories([directive(assertion="stated")])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
 
     result = await service.synthesize_procedural("u1")
 
-    assert result == {"status": "synthesized", "procedures_created": 1, "procedures_skipped": 1}
-    procedures = [doc for doc in store.docs if doc.get("type") == "procedural"]
-    assert [doc["name"] for doc in procedures] == ["Valid policy"]
+    created = procedures_by_name(memories)["Run targeted tests"]
+    assert (created["status"], created["evidence"], created["user_support_count"]) == ("candidate", [], 1)
+    assert not fact_doc(memories).get("superseded_by")
+    assert result["facts_retired"] == 0
 
 
-@pytest.mark.asyncio
-async def test_synthesize_procedural_quarantines_retryable_and_non_retryable_llm_errors() -> None:
-    retryable_service = _service(_AsyncProceduralStore([_fact()]))
-
-    async def raise_retryable(filename: str, inputs: dict[str, Any]) -> str:
-        del filename, inputs
-        raise RuntimeError("rate limit")
-
-    retryable_service._run_prompty = raise_retryable  # type: ignore[method-assign]
-
-    retryable_result = await retryable_service.synthesize_procedural("u1")
-
-    assert retryable_result == {"status": "deferred", "procedures_created": 0}
-
-    non_retryable_service = _service(_AsyncProceduralStore([_fact()]))
-
-    async def raise_non_retryable(filename: str, inputs: dict[str, Any]) -> str:
-        del filename, inputs
-        raise RuntimeError("content_filter")
-
-    non_retryable_service._run_prompty = raise_non_retryable  # type: ignore[method-assign]
-
-    non_retryable_result = await non_retryable_service.synthesize_procedural("u1")
-
-    assert non_retryable_result == {"status": "skipped", "procedures_created": 0}
-
-
-@pytest.mark.asyncio
-async def test_synthesize_procedural_maps_multi_procedure_lineage() -> None:
-    store = _AsyncProceduralStore([_fact(), _episode()])
-    service = _service(
-        store,
-        [
-            {
-                "procedures": [
-                    _procedure(
-                        "Fact lineage",
-                        grounded_in=["fact-1"],
-                        source_kind="explicit_user_instruction",
-                    ),
-                    _procedure(
-                        "Episode lineage",
-                        grounded_in=["ep-1"],
-                        source_kind="episode_distillation",
-                        summary="Retry transient CI failures once before escalating.",
-                    ),
-                ]
-            }
-        ],
-    )
+async def test_a_fact_without_an_assertion_teaches_but_is_never_retired() -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
 
     result = await service.synthesize_procedural("u1")
 
-    assert result == {"status": "synthesized", "procedures_created": 2, "procedures_skipped": 0}
-    procedures = {doc["name"]: doc for doc in store.docs if doc.get("type") == "procedural"}
-    assert procedures["Fact lineage"]["source_fact_ids"] == ["fact-raw-1"]
-    assert procedures["Fact lineage"]["source_episodic_ids"] == []
-    assert procedures["Episode lineage"]["source_fact_ids"] == []
-    assert procedures["Episode lineage"]["source_episodic_ids"] == ["episode-raw-1"]
+    assert procedures_by_name(memories)["Run targeted tests"]["status"] == "active"
+    assert not fact_doc(memories).get("superseded_by")
+    assert result["facts_retired"] == 0
+
+
+async def test_a_directive_from_the_assistant_is_never_retired() -> None:
+    memories = Memories([directive(agent=True)])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+
+    result = await service.synthesize_procedural("u1")
+
+    assert not fact_doc(memories).get("superseded_by")
+    assert result["facts_retired"] == 0
+
+
+async def test_a_directive_supporting_two_procedures_is_retired_once() -> None:
+    memories = Memories([directive()])
+    second = answer("Report targeted test results", summary="Report which targeted tests ran.")
+    service, _ = _service(memories, [{"procedures": [answer(), second]}])
+    retirements: list[str] = []
+    store_retire = service._store.mark_superseded
+
+    async def count(old_doc: dict[str, Any], superseder_id: str, *, reason: str) -> bool:
+        retirements.append(old_doc["id"])
+        return await store_retire(old_doc, superseder_id, reason=reason)
+
+    service._store.mark_superseded = count  # type: ignore[method-assign]
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result["procedures_created"] == 2
+    assert result["facts_retired"] == 1
+    assert retirements == ["fact-raw-1"]
+    assert fact_doc(memories)["superseded_by"] == procedures_by_name(memories)["Run targeted tests"]["id"]
+
+
+async def test_a_directive_changed_since_it_was_read_stays_beside_its_procedure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from azure.core import MatchConditions
+
+    memories = Memories([directive()])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+    replace = memories.replace_item
+    conditions: list[tuple[Any, Any]] = []
+
+    def lose_the_race_on_facts(**kwargs: Any) -> Any:
+        if kwargs["item"] == "fact-raw-1":
+            conditions.append((kwargs.get("etag"), kwargs.get("match_condition")))
+            raise CosmosAccessConditionFailedError(status_code=412, message="precondition failed")
+        return replace(**kwargs)
+
+    monkeypatch.setattr(memories, "replace_item", lose_the_race_on_facts)
+
+    result = await service.synthesize_procedural("u1")
+
+    assert conditions == [("etag-fact-raw-1", MatchConditions.IfNotModified)]
+    assert procedures_by_name(memories)["Run targeted tests"]["status"] == "active"
+    assert not fact_doc(memories).get("superseded_by")
+    assert result["facts_retired"] == 0
+
+
+async def test_a_directive_that_cannot_be_retired_does_not_stop_the_run() -> None:
+    memories = Memories([directive(), fact("fact-next", "The user wants commit messages short.", ts=7)])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+
+    async def broken(old_doc: dict[str, Any], superseder_id: str, *, reason: str) -> bool:
+        raise RuntimeError("store unavailable")
+
+    service._store.mark_superseded = broken  # type: ignore[method-assign]
+
+    result = await service.synthesize_procedural("u1")
+
+    assert (result["status"], result["procedures_created"], result["facts_retired"]) == ("synthesized", 1, 0)
+    assert cursor_doc(memories)["facts"]["last_ts"] == 7

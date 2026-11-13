@@ -31,6 +31,12 @@
     "// --- Batch knob ---": "",
     "MAX_BATCH_SIZE": "20",
 
+    "// --- Reconcile: DEDUP_POOL_SIZE is the most facts one run checks (max 500). ---": "",
+    "DEDUP_POOL_SIZE": "50",
+
+    "// --- Seconds a reconcile or procedure activity keeps starting model calls (minimum 30). Keep it below functionTimeout; the next run continues from the saved cursor. ---": "",
+    "ACTIVITY_TIME_BUDGET_SECONDS": "240",
+
     "// --- UserSummaryOrchestrator waits this long (seconds) for extraction to persist the first memories of a brand-new user before skipping the cadence; polls every interval. ---": "",
     "USER_SUMMARY_WAIT_SECONDS": "120",
     "USER_SUMMARY_WAIT_INTERVAL_SECONDS": "10",

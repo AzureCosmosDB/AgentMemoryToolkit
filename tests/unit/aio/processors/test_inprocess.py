@@ -51,6 +51,15 @@ async def test_close_is_noop():
 
 
 @pytest.mark.asyncio
+async def test_the_reconcile_count_includes_facts_retired_into_a_combined_fact():
+    pipeline = AsyncMock()
+    pipeline.reconcile_memories.return_value = {"merged": 1, "contradicted": 2, "combined": 3, "kept": 4}
+
+    # Facts and episodic memories are reconciled in turn: 1 + 2 + 3 each time.
+    assert await AsyncInProcessProcessor(pipeline=pipeline).process_reconcile(user_id="u") == 12
+
+
+@pytest.mark.asyncio
 async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch):
     """Regression: this was completely broken (ModuleNotFoundError on
     ``from ..thresholds``) - auto-trigger silently never reconciled in

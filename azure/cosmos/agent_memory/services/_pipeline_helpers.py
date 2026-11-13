@@ -22,7 +22,7 @@ from typing import Any, Iterable, Mapping, Optional
 from azure.cosmos.agent_memory._embedding_tokens import count_tokens
 from azure.cosmos.agent_memory._utils import cosine_similarity, vector_centroid
 from azure.cosmos.agent_memory.exceptions import LLMError
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_turn_refs, get_logger
 
 logger = get_logger(__name__)
 
@@ -134,6 +134,21 @@ def created_at_sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
     return (0, dt.timestamp(), str(item.get("id") or ""))
 
 
+def chronological_key(item: Mapping[str, Any]) -> tuple[str, int]:
+    """Sort key for conversation order: event time (``created_at``), then write order (Cosmos ``_ts``).
+
+    Turns sharing an event time, as an imported session's do, keep the order they were written
+    in; a stable sort keeps the order they were read in within one write second.
+    """
+    return str(item.get("created_at") or ""), int(item.get("_ts") or 0)
+
+
+def newest_window(items: Iterable[dict[str, Any]], limit: Optional[int]) -> list[dict[str, Any]]:
+    """The newest ``limit`` of ``items`` (all of them when ``limit`` is ``None``), oldest first."""
+    ordered = sorted(items, key=chronological_key)
+    return ordered if limit is None else ordered[max(len(ordered) - limit, 0) :]
+
+
 def deterministic_episode_id(segment_key: str, index: int) -> str:
     """Identity from the STABLE segment key plus the episode's ordinal within the
     segment - never the LLM summary text - so re-running the same un-stamped
@@ -184,6 +199,8 @@ def find_episode_boundary(
 
 _NON_RETRYABLE_LLM_MARKERS = (
     "content_filter",
+    "model_refusal",
+    "unexpected_tool_response",
     "content management policy",
     "context_length_exceeded",
     "maximum context length",
@@ -539,6 +556,66 @@ def build_transcript(
     return "\n".join(parts)
 
 
+def transcript_labels(turns: list[Mapping[str, Any]]) -> list[str]:
+    """Return the label each turn shows in a grounded transcript.
+
+    A turn's own id where it has one; otherwise ``turn-N`` for its 1-based position, made
+    unique so it can never read as another turn's real id.
+    """
+    taken = {str(turn["id"]) for turn in turns if turn.get("id")}
+    labels: list[str] = []
+    for index, turn in enumerate(turns, start=1):
+        if turn.get("id"):
+            labels.append(str(turn["id"]))
+            continue
+        label, suffix = f"turn-{index}", 0
+        while label in taken:
+            suffix += 1
+            label = f"turn-{index}.{suffix}"
+        taken.add(label)
+        labels.append(label)
+    return labels
+
+
+def ground_fact_sources(fact: Mapping[str, Any], *, turn_ids: list[Optional[str]], labels: list[str]) -> list[str]:
+    """Resolve a fact's model-declared turn refs to real ids from its batch.
+
+    ``turn_ids`` holds one slot per transcript line, ``None`` where the turn has no id, and
+    ``labels`` the label each line showed (see :func:`transcript_labels`). A ref is matched
+    against those exact labels first, then read as a positional ``turn-N``, so it resolves to
+    exactly the line the model saw. A ref to an unidentified turn or to anything outside the
+    batch is dropped rather than recorded as provenance, so a fact whose citations all fail
+    records none, as episodes do. Only a fact that cites nothing (a v1 or v2 response) falls
+    back to every identified turn in the batch.
+    """
+    identified = [turn_id for turn_id in turn_ids if turn_id]
+    refs = fact.get("source_turn_ids")
+    if not isinstance(refs, list):
+        refs = [refs] if refs else []
+    if not refs:
+        return identified
+    by_label = dict(zip(labels, turn_ids))
+    by_folded_label = {label.lower(): turn_id for label, turn_id in by_label.items()}
+    by_position = {f"turn-{i}": turn_id for i, turn_id in enumerate(turn_ids, start=1)}
+    grounded: list[str] = []
+    for raw in refs:
+        ref = str(raw).strip()
+        if ref in by_label:
+            mapped = by_label[ref]
+        elif ref.lower() in by_folded_label:
+            mapped = by_folded_label[ref.lower()]
+        else:
+            mapped = by_position.get(ref.lower())
+        if mapped and mapped not in grounded:
+            grounded.append(mapped)
+    if not grounded:
+        logger.warning(
+            "extract_memories: no cited turn resolves in the batch; recording none refs=%s",
+            describe_turn_refs(refs),
+        )
+    return grounded
+
+
 # Map common role synonyms onto the toolkit's canonical speaker labels. Callers
 # may write turns with any role string (e.g. OpenAI's ``assistant``); the
 # extraction prompt reasons about ``user`` vs ``agent``, so synonyms are folded
@@ -586,16 +663,16 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
     try:
         obj, end = decoder.raw_decode(cleaned)
     except json.JSONDecodeError as exc:
-        preview = (text or "")[:200].replace("\n", " ")
+        # The decode error names only a position; the response itself stays out of the error, which is logged.
         if _looks_truncated(cleaned, exc):
             raise LLMError(
                 "LLM JSON output appears TRUNCATED (decode error at the very end of a "
                 f"{len(cleaned)}-char body - the model almost certainly hit its output-token "
                 "cap mid-object). Increase 'maxOutputTokens' in the calling prompty, or reduce "
                 "the amount of input per call (e.g. lower the fact-extraction batch size / "
-                f"recent_k, or split oversized turns). Decode error: {exc}. preview={preview!r}"
+                f"recent_k, or split oversized turns). Decode error: {exc}."
             ) from exc
-        raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
+        raise LLMError(f"LLM returned invalid JSON ({len(cleaned)}-char body): {exc}") from exc
     remainder = cleaned[end:]
     if not isinstance(obj, dict):
         # Type contract: this returns a JSON object. Some deployments emit a bare
@@ -605,10 +682,9 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
         # error-handlers misclassify as a transient (retryable) failure and defer
         # forever. Raise a typed LLMError so a malformed root is handled like any
         # other bad output instead of wedging the segment/batch.
-        preview = (text or "")[:200].replace("\n", " ")
         raise LLMError(
             f"LLM returned a non-object JSON root ({type(obj).__name__}); expected a JSON "
-            f"object such as {{'facts': [...]}}. preview={preview!r}"
+            f"object such as {{'facts': [...]}}."
         )
     if not remainder.strip():
         # Fast path: exactly one JSON object, no trailing content (the vast
@@ -640,11 +716,9 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
             leftover = cleaned[pos:].strip()
             logger.warning(
                 "LLM response had %d chars of non-JSON trailing data after %d concatenated "
-                "JSON object(s); merged the objects and ignored the remainder "
-                "(trailing_preview=%r)",
+                "JSON object(s); merged the objects and ignored the remainder",
                 len(leftover),
                 object_count,
-                leftover[:120].replace("\n", " "),
             )
             break
         object_count += 1
@@ -692,21 +766,25 @@ def default_prompts_dir() -> str:
     return os.path.join(pkg_dir, "prompts")
 
 
-_EXTRACT_MEMORIES_PROMPT_DEFAULT = "extract_memories-v2.prompty"
-_EXTRACT_MEMORIES_PROMPT_ALLOWED = frozenset({"extract_memories.prompty", "extract_memories-v2.prompty"})
+_EXTRACT_MEMORIES_PROMPT_DEFAULT = "extract_memories-v3.prompty"
+_EXTRACT_MEMORIES_PROMPT_ALLOWED = frozenset(
+    {"extract_memories.prompty", "extract_memories-v2.prompty", "extract_memories-v3.prompty"}
+)
 
 
 def extract_memories_prompt_file() -> str:
     """Return the fact-extraction prompt filename, env-selectable.
 
-    Defaults to the v2 ``extract_memories-v2.prompty`` extractor (higher recall;
-    also captures assistant-provided information: lists, tables, instructions,
-    and researched answers the user may later reference). Set
-    ``AMT_EXTRACT_MEMORIES_PROMPT=extract_memories.prompty`` to fall back to the
-    v1 extractor without touching the default. An unknown value falls back to
-    the v2 default so a typo can never point extraction at an arbitrary or
-    missing prompt file. The chosen filename must be registered in
-    ``PROMPTY_SCHEMAS`` so it still gets the structured-output response format.
+    Defaults to the v3 ``extract_memories-v3.prompty`` extractor: the v2 rules (higher recall;
+    also captures assistant-provided information: lists, tables, instructions, and researched
+    answers the user may later reference) plus read-only context (the thread's earlier turns
+    and summary, and the user's related stored memories), how each fact was asserted, its
+    subject, attribute and entities, and the turns it came from. Set
+    ``AMT_EXTRACT_MEMORIES_PROMPT=extract_memories-v2.prompty`` (or ``extract_memories.prompty``
+    for v1) to select an earlier extractor without touching the default. An unknown value falls
+    back to the v3 default so a typo can never point extraction at an arbitrary or missing
+    prompt file. The chosen filename must be registered in ``PROMPTY_SCHEMAS`` so it still gets
+    the structured-output response format.
     """
     name = os.environ.get("AMT_EXTRACT_MEMORIES_PROMPT", _EXTRACT_MEMORIES_PROMPT_DEFAULT)
     return name if name in _EXTRACT_MEMORIES_PROMPT_ALLOWED else _EXTRACT_MEMORIES_PROMPT_DEFAULT

@@ -1,14 +1,19 @@
-"""Scenario: Memory reconciliation - duplicate merging and contradiction resolution.
+"""Scenario: Memory reconciliation - duplicate folding and contradiction resolution.
 
-Demonstrates how `reconcile_memories` collapses paraphrased facts and resolves
-semantic contradictions in a single LLM pass:
+Demonstrates how `reconcile` cleans up a user's facts in two passes:
 
-1. Seed paraphrased facts about a user (will be merged).
-2. Seed contradicting facts about the same subject (one will win, one will lose).
-3. Run reconcile() and print the {kept, merged, contradicted} stats.
-4. Show the live state - paraphrased duplicates collapsed, contradiction loser hidden.
-5. Show the audit trail (include_superseded=True) - soft-deleted records carry
-   supersede_reason, superseded_at, and superseded_by pointing at the survivor.
+1. Seed paraphrased facts about a user (the dedup pass retires a fact into another
+   only when nothing it states would be lost; it may instead combine facts into one new
+   fact).
+2. Seed contradicting facts about the same subject (the contradiction pass retires
+   the loser).
+3. Run reconcile() and print the stats: {kept, merged, contradicted} plus the dedup
+   pass's checked, compared, vetoed, combined, synthesized, combine_groups and
+   combine_failed counts.
+4. Show the live state - folded duplicates and the contradiction loser are hidden.
+5. Show the audit trail (include_superseded=True) - retired records carry
+   supersede_reason ("duplicate", "combined" or "contradict"), superseded_at, and
+   superseded_by pointing at the survivor.
 
 Requirements:
     - Azure Cosmos DB account with vector-search enabled.
@@ -29,7 +34,7 @@ import uuid
 
 from dotenv import load_dotenv
 
-from azure.cosmos.agent_memory import CosmosMemoryClient
+from azure.cosmos.agent_memory import CosmosMemoryClient, MemoryNotFoundError
 
 load_dotenv()
 
@@ -126,11 +131,11 @@ def main() -> None:
         before = mem.get_memories(user_id=unique_user_id, memory_types=["fact"])
         print_facts(before)
 
-        banner("4. Running reconcile_memories")
+        banner("4. Running reconcile (dedup pass, then contradiction pass)")
         stats = mem.reconcile(user_id=unique_user_id)
         print(f"  stats: {dict(stats)}")
 
-        banner("5. Active facts after reconcile (duplicates merged, contradictions resolved)")
+        banner("5. Active facts after reconcile (duplicates folded, contradictions resolved)")
         after = mem.get_memories(user_id=unique_user_id, memory_types=["fact"])
         print_facts(after)
 
@@ -168,6 +173,8 @@ def main() -> None:
                         memory_type=rec["type"],
                     )
                     deleted += 1
+                except MemoryNotFoundError:
+                    continue  # already deleted with the memory it was folded into
                 except Exception as exc:  # pragma: no cover - best effort cleanup
                     print(f"  WARN: failed to delete {rec.get('id')}: {exc}")
             print(f"  Deleted {deleted} record(s) for user {unique_user_id}")

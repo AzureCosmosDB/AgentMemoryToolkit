@@ -121,3 +121,23 @@ class TestNonObjectRoot:
     def test_scalar_string_root_raises(self) -> None:
         with pytest.raises(LLMError):
             parse_llm_json('"just a sentence"')
+
+
+_MODEL_TEXT = "zx-model-ana-prefers-window-seats-9902"
+
+
+class TestErrorTextHoldsNoModelOutput:
+    """The error names a position and size, never the response: it is logged and can reach Durable history."""
+
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            pytest.param(f'{{"facts": [{{"text": "{_MODEL_TEXT}"}}', "TRUNCATED", id="truncated"),
+            pytest.param(f'{{"facts": {_MODEL_TEXT}}}', "invalid JSON", id="invalid"),
+            pytest.param(f'["{_MODEL_TEXT}"]', "non-object JSON root", id="non-object-root"),
+        ],
+    )
+    def test_unparseable_model_output_stays_out_of_the_error(self, response: str, expected: str) -> None:
+        with pytest.raises(LLMError, match=expected) as exc:
+            parse_llm_json(response)
+        assert _MODEL_TEXT not in str(exc.value)

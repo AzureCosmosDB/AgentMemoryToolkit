@@ -275,9 +275,9 @@ Bring the environment up in this order:
 7. test `search_cosmos()`
 8. deploy the Function App (e.g., via `azd up`) so the change-feed processor is running
 9. write a few turns and verify a thread `summary` memory appears
-10. write more turns and verify `fact`, `procedural`, and `episodic` memories appear
+10. write more turns and verify `fact` and `episodic` memories appear (a `procedural` memory appears only when the conversation teaches a preference or an instruction and reconcile has run, and it stays a `candidate` until the evidence for its kind has arrived)
 11. verify a per-user `user_summary` memory appears once `USER_SUMMARY_EVERY_N` turns have accumulated for that user
-12. test deduplication by writing two near-duplicate facts and confirming the second folds into the first in place (one active record remains, its `updated_at` bumped) rather than creating a duplicate
+12. test deduplication by writing two near-duplicate facts (for example the paraphrases in `Samples/Scenarios/scenario_memory_reconciliation.py`), then call `reconcile(user_id)` or wait for the `DEDUP_EVERY_N` cadence, and confirm one is retired into the other (`superseded_by` set, `supersede_reason="duplicate"`) while the survivor keeps its text and lists the retired fact in `merged_from`; facts about one specific thing that hold different details may instead become one new fact tagged `sys:combined`
 
 This keeps failures isolated and easier to diagnose.
 
@@ -373,7 +373,7 @@ Common issues:
 | 401 / 403 from Azure OpenAI       | Missing OpenAI RBAC                                                                                                              |
 | Durable Function starts but fails | Missing app settings or downstream RBAC                                                                                          |
 | `No memories found`               | No turn memories exist, or all candidate turns predate the existing summary                                                      |
-| Search is slow                    | Embedding latency, index choice, or region mismatch                                                                              |
+| Search is slow                    | Embedding latency, index choice, or region mismatch (set `COSMOS_DB_PREFERRED_REGIONS` for the SDK client); keyword searches also read across partitions, which costs more RUs on a large container |
 | Change feed trigger not firing    | Verify `COSMOS_DB__accountEndpoint` is set and the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
 | Auto-processing not starting      | Check threshold settings are > 0 in Function App configuration                                                                   |
 

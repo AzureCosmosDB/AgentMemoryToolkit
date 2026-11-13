@@ -11,6 +11,7 @@ from azure.cosmos.agent_memory._container_routing import (
     ContainerKey,
     container_key_for_type,
 )
+from azure.cosmos.agent_memory._curation import mark_secret, sanitize_record, sanitize_text
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
     _build_memory_query_builder,
@@ -28,10 +29,13 @@ from azure.cosmos.agent_memory.exceptions import (
     MemoryTypeMismatchError,
     ValidationError,
 )
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 from azure.cosmos.agent_memory.models import MemoryRecord
+from azure.cosmos.agent_memory.services._absorbed import ABSORBING_TYPES, delete_absorbed
 from azure.cosmos.agent_memory.store._search_helpers import (
+    FULL_TEXT_SCORE_SCOPE,
     MEMORY_PROJECTION,
+    add_result_filters,
     add_salience_filter,
     add_tag_filters,
     build_search_sql,
@@ -107,8 +111,11 @@ class MemoryStore:
         return self._memories_container
 
     def _prepare_doc(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Return a write-ready document with type defaults applied."""
+        """Return a write-ready document: literal credentials redacted and type defaults applied."""
         body = dict(doc)
+        redacted = sanitize_record(body)
+        if redacted:
+            logger.warning("redacted literal secrets before write id=%s patterns=%s", body.get("id"), redacted)
         if body.get("ttl") is None:
             body.pop("ttl", None)
             ttl = default_ttl_for(body.get("type"))
@@ -139,6 +146,7 @@ class MemoryStore:
         container_key: ContainerKey,
         partition_key: Any = None,
         cross_partition: bool = False,
+        full_text_score_scope: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Run a query against the explicitly selected split container."""
         return self._query_items(
@@ -146,6 +154,7 @@ class MemoryStore:
             parameters=parameters,
             partition_key=partition_key,
             cross_partition=cross_partition,
+            full_text_score_scope=full_text_score_scope,
             operation="query",
             container=self._containers[container_key],
         )
@@ -157,14 +166,22 @@ class MemoryStore:
         parameters: Optional[list[dict[str, Any]]] = None,
         partition_key: Any = None,
         cross_partition: bool = False,
+        full_text_score_scope: Optional[str] = None,
         operation: str,
         container: Any = None,
     ) -> list[dict[str, Any]]:
+        if partition_key is not None and "FullTextScore(" in query:
+            raise ValidationError(
+                "Cosmos DB ignores FullTextScore ranking in a query sent with a partition key "
+                "(Azure/azure-sdk-for-python#42241); filter on the partition key fields in the WHERE clause instead"
+            )
         kwargs: dict[str, Any] = {"query": query, "parameters": parameters or None}
         if partition_key is not None:
             kwargs["partition_key"] = partition_key
         if cross_partition:
             kwargs["enable_cross_partition_query"] = True
+        if full_text_score_scope is not None:
+            kwargs["full_text_score_scope"] = full_text_score_scope
         target = container if container is not None else self._memories_container
         try:
             return list(target.query_items(**kwargs))
@@ -206,6 +223,7 @@ class MemoryStore:
         created_at: Optional[str | datetime] = None,
     ) -> str:
         """Add a memory document to Cosmos DB and return its id."""
+        content, secret_patterns = sanitize_text(content)
         kwargs: dict[str, Any] = {
             "user_id": user_id,
             "role": role,
@@ -242,6 +260,13 @@ class MemoryStore:
         record = MemoryRecord(**kwargs)
         body = record.to_cosmos_dict()
 
+        if secret_patterns and embedding is not None:
+            logger.warning(
+                "upsert_memory: discarding the supplied embedding for %s; it encodes text that held a literal secret",
+                record.id,
+            )
+            embedding = None
+            embed = embed is not False
         if embed is None:
             embed = memory_type != "turn" or self._enable_turn_embeddings
         if embedding is not None:
@@ -253,9 +278,10 @@ class MemoryStore:
                 logger.warning(
                     "upsert_memory: embedding generation failed for %s (%s); proceeding without embedding",
                     record.id,
-                    exc,
+                    describe_exception(exc),
                 )
 
+        mark_secret(body, secret_patterns)
         body = self._prepare_doc(body)
         try:
             container = self._container_for_type(memory_type)
@@ -277,7 +303,9 @@ class MemoryStore:
         records = [dict(m) for m in local_memory]
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            bodies = [dict(r) for r in batch]
+            # Redact before embedding: no raw credential may reach the embedding provider, and a
+            # supplied vector built from redacted text is dropped here and rebuilt below.
+            bodies = [self._prepare_doc(dict(r)) for r in batch]
 
             to_embed_idx: list[int] = []
             to_embed_text: list[str] = []
@@ -296,11 +324,10 @@ class MemoryStore:
                     logger.warning(
                         "push_to_cosmos: batch embedding generation failed (%s); "
                         "proceeding without embeddings for %d records",
-                        exc,
+                        describe_exception(exc),
                         len(to_embed_text),
                     )
 
-            bodies = [self._prepare_doc(body) for body in bodies]
             for body in bodies:
                 memory_type = body.get("type")
                 if memory_type not in _CONTAINER_FOR_TYPE:
@@ -435,6 +462,9 @@ class MemoryStore:
                 doc["role"] = role
             if metadata is not None:
                 doc["metadata"] = metadata
+            redacted = sanitize_record(doc)
+            if redacted:
+                logger.warning("redacted literal secrets before write id=%s patterns=%s", memory_id, redacted)
             doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             kwargs: dict[str, Any] = {"item": doc["id"], "body": doc}
@@ -468,7 +498,9 @@ class MemoryStore:
         Reads the doc first to verify its ``type`` matches ``memory_type`` and
         then issues the delete with ``If-Match`` on the read ETag, so a
         concurrent type mutation between read and delete is rejected (412)
-        rather than silently dropping the wrong document.
+        rather than silently dropping the wrong document. The records folded
+        into a fact or procedure (merged duplicates and, for a procedure, the
+        statements it absorbed; see ``services._absorbed``) are deleted first.
         """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import (
@@ -488,6 +520,15 @@ class MemoryStore:
         if actual_type != memory_type:
             raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
 
+        absorbed: list[dict[str, Any]] = []
+        if memory_type in ABSORBING_TYPES:
+            try:
+                absorbed = delete_absorbed(container, user_id, memory_id)
+            except Exception as exc:
+                raise _wrap_cosmos_exception(
+                    exc, message=f"delete of the records folded into {memory_id} failed: {exc}"
+                ) from exc
+
         kwargs: dict[str, Any] = {"item": memory_id, "partition_key": [user_id, thread_id]}
         if etag := doc.get("_etag"):
             kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
@@ -502,7 +543,7 @@ class MemoryStore:
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"delete failed for {memory_id}: {exc}") from exc
 
-        logger.info("Deleted record %s", memory_id)
+        logger.info("Deleted record %s and %d records folded into it", memory_id, len(absorbed))
 
     def get_thread(
         self,
@@ -778,7 +819,7 @@ class MemoryStore:
                 old_doc.get("id"),
                 superseder_id,
                 getattr(exc, "status_code", None),
-                exc,
+                describe_exception(exc),
             )
             return False
 
@@ -886,16 +927,27 @@ class MemoryStore:
         created_before: Optional[str | datetime] = None,
         *,
         query: Optional[str] = None,
+        active_procedures_only: bool = False,
+        categories: Optional[list[str]] = None,
+        applies: Optional[str] = None,
+        vector_only: bool = False,
+        query_embedding: Optional[list[float]] = None,
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity with optional full-text hybrid ranking.
 
         Searches the derived memories container (facts/episodic/procedural). Use
         :meth:`search_turns` to vector-search the raw conversation log instead.
+
+        ``active_procedures_only`` hides procedures that are not active or are past their
+        ``valid_until`` (user-facing search sets it). ``categories`` keeps facts of those
+        ``metadata.category`` values, ``applies`` procedures with that ``applies`` value, and
+        ``vector_only`` ranks by vector similarity alone, without the keyword ranking.
+        ``query_embedding`` is the query's embedding when the caller already has it.
         """
         terms = require_search_terms(search_terms, query)
         top = top_literal(top_k, name="top_k")
-        query_vector = self._embed(terms)
-        keywords = extract_keywords(terms)
+        query_vector = query_embedding if query_embedding is not None else self._embed(terms)
+        keywords = [] if vector_only else extract_keywords(terms)
 
         qb = _build_memory_query_builder(
             memory_id=memory_id,
@@ -914,6 +966,13 @@ class MemoryStore:
             before_param="@created_before",
         )
         add_salience_filter(qb, min_salience)
+        add_result_filters(
+            qb,
+            # The procedure filter matters only where procedures can match.
+            active_procedures_only=active_procedures_only and (not memory_types or "procedural" in memory_types),
+            categories=categories,
+            applies=applies,
+        )
 
         sql = build_search_sql(
             qb=qb,
@@ -926,7 +985,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id)
+        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
         if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
             partition_key, cross_partition = None, True
         logger.debug("MemoryStore.search query: %s", sql)
@@ -936,6 +995,7 @@ class MemoryStore:
             container_key=ContainerKey.MEMORIES,
             partition_key=partition_key,
             cross_partition=cross_partition,
+            full_text_score_scope=FULL_TEXT_SCORE_SCOPE if keywords else None,
         )
 
     def get_memory_history(
@@ -1017,9 +1077,12 @@ class MemoryStore:
 
         Only vector-searchable when turn embeddings were enabled at write time
         (see ``enable_turn_embeddings``). ``user_id`` is required and always
-        filters the results. When ``thread_id`` is also supplied the query
-        targets a single partition; when it is omitted the query fans out
-        across partitions and is filtered by ``user_id`` in the WHERE clause.
+        filters the results. When ``thread_id`` is also supplied the results are
+        restricted to that thread: a vector-only query targets the thread's
+        partition, while a keyword (hybrid) query runs across partitions with
+        ``user_id`` and ``thread_id`` filters in the WHERE clause (a partition key
+        breaks full-text ranking, Azure SDK issue #42241). When it is omitted the
+        query fans out across the user's partitions.
 
         """
         if not user_id:
@@ -1048,7 +1111,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id)
+        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
         logger.debug("MemoryStore.search_turns query: %s", sql)
         return self.query(
             sql,
@@ -1056,6 +1119,7 @@ class MemoryStore:
             container_key=ContainerKey.TURNS,
             partition_key=partition_key,
             cross_partition=cross_partition,
+            full_text_score_scope=FULL_TEXT_SCORE_SCOPE if keywords else None,
         )
 
     def search_summaries(
@@ -1096,7 +1160,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id)
+        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
         logger.debug("MemoryStore.search_summaries query: %s", sql)
         return self.query(
             sql,
@@ -1104,6 +1168,7 @@ class MemoryStore:
             container_key=ContainerKey.SUMMARIES,
             partition_key=partition_key,
             cross_partition=cross_partition,
+            full_text_score_scope=FULL_TEXT_SCORE_SCOPE if keywords else None,
         )
 
     def search_episodic(
@@ -1174,7 +1239,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id)
+        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
         logger.debug("MemoryStore.search_episodic query: %s", sql)
         return self.query(
             sql,
@@ -1182,6 +1247,7 @@ class MemoryStore:
             container_key=ContainerKey.MEMORIES,
             partition_key=partition_key,
             cross_partition=cross_partition,
+            full_text_score_scope=FULL_TEXT_SCORE_SCOPE if keywords else None,
         )
 
     def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:
@@ -1195,8 +1261,6 @@ class MemoryStore:
         search_terms: str,
         top_k: int = 5,
         *,
-        scope_type: Optional[str] = None,
-        scope_value: Optional[str] = None,
         procedure_kind: Optional[str] = None,
         status: Optional[str] = "active",
         include_superseded: bool = False,
@@ -1212,8 +1276,6 @@ class MemoryStore:
         qb = _QueryBuilder()
         qb.add_filter("c.type", "@type", "procedural")
         qb.add_filter("c.user_id", "@user_id", user_id)
-        qb.add_filter("c.scope_type", "@scope_type", scope_type)
-        qb.add_filter("c.scope_value", "@scope_value", scope_value)
         qb.add_filter("c.procedure_kind", "@procedure_kind", procedure_kind)
         qb.add_filter("c.status", "@status", status)
 

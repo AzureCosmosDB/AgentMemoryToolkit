@@ -19,6 +19,7 @@ Behavior notes
 * :meth:`CosmosMemoryClient.process_now_and_wait` *polls* Cosmos for the resulting
   summary; that costs RUs so it's opt-in and intended for demos / tests.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,7 +29,6 @@ from dotenv import load_dotenv
 from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
-
 
 
 def main() -> None:

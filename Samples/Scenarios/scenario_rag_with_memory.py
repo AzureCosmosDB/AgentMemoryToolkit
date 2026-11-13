@@ -160,7 +160,7 @@ def run_demo() -> None:
     _print_section("Step 2: New user query")
 
     user_query = "What web framework and database should I use for my new project?"
-    print(f"  User asks: \"{user_query}\"")
+    print(f'  User asks: "{user_query}"')
 
     # ------------------------------------------------------------------
     # Step 3 - Search memory for relevant context
@@ -195,17 +195,13 @@ def run_demo() -> None:
 
     # 4a. RAG retrieval
     rag_docs = simulated_rag_retrieve(user_query)
-    rag_context = "\n\n".join(
-        f"### {doc['title']}\n{doc['text']}" for doc in rag_docs
-    )
+    rag_context = "\n\n".join(f"### {doc['title']}\n{doc['text']}" for doc in rag_docs)
 
     # 4b. Memory context
     memory_context = _format_memories(memory_results)
 
     # 4c. User summary context
-    summary_context = (
-        summaries.get("content", "") if summaries else "No summary available."
-    )
+    summary_context = summaries.get("content", "") if summaries else "No summary available."
 
     augmented_prompt = textwrap.dedent(f"""\
         You are a helpful developer assistant. Use the following context to

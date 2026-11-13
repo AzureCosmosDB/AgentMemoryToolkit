@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -42,10 +43,12 @@ class _AsyncChat:
     def __init__(self, responses: list[dict[str, Any]]):
         self.responses = list(responses)
         self.calls = 0
+        self.messages: list[list[dict[str, Any]]] = []
 
     async def generate(self, messages: list[dict[str, Any]], **opts: Any) -> str:
-        del messages, opts
+        del opts
         self.calls += 1
+        self.messages.append(messages)
         return json.dumps(self.responses.pop(0))
 
 
@@ -90,6 +93,29 @@ class _Store:
             ]
         elif "extracted_at" in sql:
             docs = [doc for doc in docs if not doc.get("extracted_at")]
+        if "c.created_at < @before" in sql or "c.created_at <= @before" in sql:
+            # Extraction context: the thread's earlier turns, or stored facts written by then. A turn
+            # sharing the event time counts as earlier when it was written in an earlier second.
+            before = params["@before"]
+            strict = "c.created_at < @before" in sql
+            before_ts = params.get("@before_ts")
+            docs = [
+                doc
+                for doc in docs
+                if (str(doc.get("created_at") or "") < before)
+                or (not strict and str(doc.get("created_at") or "") == before)
+                or (
+                    before_ts is not None
+                    and str(doc.get("created_at") or "") == before
+                    and int(doc.get("_ts") or 0) < before_ts
+                )
+            ]
+        if "@fact_type" in params:
+            docs = [doc for doc in docs if doc.get("type") == params["@fact_type"]]
+        if "ORDER BY c._ts DESC" in sql:
+            docs.sort(key=lambda doc: int(doc.get("_ts") or 0), reverse=True)
+        if ("@before" in params or "@fact_type" in params) and (top := re.match(r"SELECT TOP (\d+) ", sql)):
+            docs = docs[: int(top.group(1))]
         return docs
 
     def upsert_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
@@ -229,7 +255,8 @@ def test_extract_memories_durable_shape_is_small_and_has_no_embeddings() -> None
     assert output["facts"]
     assert output["episodic"] == []
     assert all("embedding" not in doc for docs in (output["facts"], output["episodic"]) for doc in docs)
-    assert embeddings.calls == []
+    # Only the batch is embedded (to look up stored memories); extracted facts never are.
+    assert all("The user prefers dark mode." not in text for call in embeddings.calls for text in call)
 
 
 def test_build_episode_docs_builds_new_episode_shape_without_embeddings() -> None:
@@ -388,7 +415,8 @@ async def test_async_extract_memories_durable_shape_is_small_and_has_no_embeddin
     assert set(output) == {"facts", "episodic", "updates", "processed_turn_docs"}
     assert len(json.dumps(output)) < 32 * 1024
     assert all("embedding" not in doc for docs in (output["facts"], output["episodic"]) for doc in docs)
-    assert embeddings.calls == []
+    # Only the batch is embedded (to look up stored memories); extracted facts never are.
+    assert all("The user prefers dark mode." not in text for call in embeddings.calls for text in call)
 
 
 @pytest.mark.asyncio
@@ -428,17 +456,17 @@ async def test_async_extract_memories_durable_does_not_call_store_search() -> No
 
 
 class _BatchChat:
-    """Returns a unique fact per call; optionally raises on a chosen call index."""
+    """Returns a unique fact per call; optionally raises on chosen call indexes."""
 
     def __init__(self, fail_on_call=None, error=None):
         self.calls = 0
-        self.fail_on_call = fail_on_call
+        self.fail_on_calls = {fail_on_call} if isinstance(fail_on_call, int) else set(fail_on_call or ())
         self.error = error
 
     def generate(self, messages, **opts):
         del messages, opts
         self.calls += 1
-        if self.fail_on_call and self.calls == self.fail_on_call:
+        if self.calls in self.fail_on_calls:
             raise self.error
         return json.dumps(
             {
@@ -488,7 +516,8 @@ def test_extract_batches_run_independently_one_call_per_batch(monkeypatch) -> No
 
 def test_extract_quarantines_non_retryable_batch_but_keeps_others(monkeypatch) -> None:
     _one_turn_per_batch(monkeypatch)
-    chat = _BatchChat(fail_on_call=2, error=Exception("Error code: 400 content_filter"))
+    # Call 3 is batch 2 retried without its read-only context; it is quarantined only if that fails too.
+    chat = _BatchChat(fail_on_call={2, 3}, error=Exception("Error code: 400 content_filter"))
     memories_store = _Store([])
     turns_store = _Store([_turn(i) for i in range(3)])
     service = PipelineService(
@@ -550,7 +579,7 @@ def test_extract_memories_returns_deferred_turn_count_for_retryable_batch() -> N
 
 
 def test_extract_memories_returns_quarantined_turn_count_for_non_retryable_batch() -> None:
-    chat = _BatchChat(fail_on_call=1, error=Exception("Error code: 400 content_filter"))
+    chat = _BatchChat(fail_on_call={1, 2}, error=Exception("Error code: 400 content_filter"))
     memories_store = _Store([])
     turns = [_turn(i) for i in range(3)]
     turns_store = _Store(turns)
@@ -590,7 +619,7 @@ async def test_async_extract_memories_returns_deferred_turn_count_for_retryable_
 
 @pytest.mark.asyncio
 async def test_async_extract_memories_returns_quarantined_turn_count_for_non_retryable_batch() -> None:
-    chat = _AsyncBatchChat(fail_on_call=1, error=Exception("Error code: 400 content_filter"))
+    chat = _AsyncBatchChat(fail_on_call={1, 2}, error=Exception("Error code: 400 content_filter"))
     memories_store = _AsyncStore([])
     turns = [_turn(i) for i in range(3)]
     turns_store = _AsyncStore(turns)

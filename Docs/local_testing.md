@@ -233,7 +233,7 @@ for r in results:
 await memory.close()
 ```
 
-`create_memory_store()` creates the database and required containers, configures the hierarchical partition key (`user_id`, `thread_id`) for memories and counters, uses `/id` for the lease container, and applies either serverless or autoscale throughput based on `COSMOS_DB_THROUGHPUT_MODE`.
+`create_memory_store()` creates the database and required containers, configures the hierarchical partition key (`user_id`, `thread_id`) for memories and counters, gives a newly created counter container a 90-day default TTL, uses `/id` for the lease container, and applies either serverless or autoscale throughput based on `COSMOS_DB_THROUGHPUT_MODE`.
 
 ---
 

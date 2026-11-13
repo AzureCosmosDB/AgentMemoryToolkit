@@ -66,7 +66,33 @@ DEFAULT_DEDUP_POOL_SIZE = 50
 # template). They are maintainer-tunable here in code only; if a knob ever
 # needs to become operator-facing we add the env plumbing back deliberately.
 # ---------------------------------------------------------------------------
+# Read-only context beside the new turns for prompts that take it (extract_memories-v3): up to
+# this many earlier turns of the thread within a token budget, each clipped; the thread summary,
+# clipped; and the user's stored facts nearest the new turns.
+EXTRACTION_CONTEXT_TURNS = 6
+EXTRACTION_CONTEXT_MAX_TOKENS = 1500
+EXTRACTION_CONTEXT_TURN_MAX_CHARS = 1200
+EXTRACTION_SUMMARY_MAX_CHARS = 1500
+EXTRACTION_KNOWN_FACTS = 15
 EXTRACTION_BATCH_MAX_TOKENS = 7000
+
+# Dedup pass (``consolidate_memories``): a fact is compared only with its nearest active
+# neighbours whose cosine similarity reaches the floor. Unsafe folds were found well below
+# 0.85 and no similarity is high enough to fold without the model's check.
+DEDUP_SIMILARITY_FLOOR = 0.85
+DEDUP_MAX_NEIGHBORS = 5
+
+# Combining: a fact is also compared with neighbours down to this similarity that it could be
+# combined with, and facts about one specific thing that each hold details the others lack become
+# one fact of at most this many sources and characters. Few same-topic pairs reach the dedup
+# floor; the lower floor reaches most of them. Folds still need the dedup floor.
+COMBINE_SIMILARITY_FLOOR = 0.65
+COMBINE_MAX_SOURCES = 4
+COMBINE_MAX_CHARS = 800
+# The dedup pass on facts combines when this is on (``services/_combine``); off, it only folds
+# duplicates. Workers is how many combine groups are written at once.
+COMBINE_ENABLED = True
+COMBINE_WORKERS = 4
 
 DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "turn": 2_592_000,
@@ -76,6 +102,8 @@ DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "fact": -1,
     "procedural": -1,
 }
+# Turn counters expire 90 days after their last update: the counter container's default TTL.
+COUNTER_TTL_SECONDS = 7_776_000
 
 _TRUTHY = {"true", "1", "yes", "on", "t", "y"}
 _FALSY = {"false", "0", "no", "off", "f", "n"}
@@ -242,13 +270,22 @@ def get_extraction_batch_max_tokens() -> int:
     return EXTRACTION_BATCH_MAX_TOKENS
 
 
+def get_combine_enabled() -> bool:
+    """Whether the dedup pass also combines facts about one specific thing (internal; see COMBINE_ENABLED)."""
+    return COMBINE_ENABLED
+
+
+def get_combine_workers() -> int:
+    """How many fact groups the combine step writes at once (internal; see COMBINE_WORKERS)."""
+    return COMBINE_WORKERS
+
+
 def get_procedural_synthesis_auto() -> bool:
     """Whether procedural synthesis auto-fires after extract.
 
     Set ``PROCEDURAL_SYNTHESIS_AUTO=false`` to disable chained synthesis in
     function-app flows. In-process customers can still call
-    :meth:`CosmosMemoryClient.synthesize_procedural` explicitly with
-    ``force=True``.
+    :meth:`CosmosMemoryClient.synthesize_procedural` explicitly.
     """
     return _parse_bool("PROCEDURAL_SYNTHESIS_AUTO", DEFAULT_PROCEDURAL_SYNTHESIS_AUTO)
 
@@ -313,6 +350,7 @@ __all__ = [
     "DEFAULT_DEDUP_EVERY_N",
     "DEFAULT_DEDUP_POOL_SIZE",
     "DEFAULT_TTL_BY_TYPE",
+    "COUNTER_TTL_SECONDS",
     "DEFAULT_PROCEDURAL_SYNTHESIS_AUTO",
     "DEFAULT_ENABLE_TURN_EMBEDDINGS",
     "PROCESSOR_OWNER_INPROCESS",
@@ -328,6 +366,8 @@ __all__ = [
     "get_user_summary_every_n",
     "get_dedup_every_n",
     "get_dedup_pool_size",
+    "get_combine_enabled",
+    "get_combine_workers",
     "get_extraction_batch_max_tokens",
     "get_procedural_synthesis_auto",
     "get_enable_turn_embeddings",

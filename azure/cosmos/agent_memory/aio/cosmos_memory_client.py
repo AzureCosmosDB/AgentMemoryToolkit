@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
+from azure.cosmos.agent_memory import _slots
 from azure.cosmos.agent_memory._base import _BaseMemoryClient
 from azure.cosmos.agent_memory._base.base_client import is_transient_tail_step_error
 from azure.cosmos.agent_memory._container_routing import container_key_for_type
@@ -33,12 +34,13 @@ from azure.cosmos.agent_memory.exceptions import (
     MemoryNotFoundError,
     ValidationError,
 )
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     _normalize_cadence_thresholds,
     _normalize_metadata_keys,
 )
-from azure.cosmos.agent_memory.thresholds import DEFAULT_TTL_BY_TYPE
+from azure.cosmos.agent_memory.store._search_helpers import require_search_terms
+from azure.cosmos.agent_memory.thresholds import COUNTER_TTL_SECONDS, DEFAULT_TTL_BY_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from azure.cosmos.agent_memory.processors.base import ProcessThreadResult, UserSummaryResult  # noqa: F401
@@ -48,7 +50,7 @@ logger = get_logger(__name__)
 
 def _log_auto_trigger_task_failure(task: "asyncio.Task[Any]") -> None:
     if not task.cancelled() and (exc := task.exception()) is not None:
-        logger.warning("Background auto-trigger task failed: %r", exc)
+        logger.warning("Background auto-trigger task failed: %s", describe_exception(exc))
 
 
 class AsyncCosmosMemoryClient(_BaseMemoryClient):
@@ -81,6 +83,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         processor: Optional[AsyncMemoryProcessor] = None,
         transcript_metadata_keys: Optional[Iterable[str]] = None,
         cadence_thresholds: Optional[Mapping[str, int]] = None,
+        cosmos_preferred_locations: Optional[str | Iterable[str]] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -104,6 +107,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             enable_turn_embeddings=enable_turn_embeddings,
             user_agent=user_agent,
             default_credential_module="azure.identity.aio",
+            cosmos_preferred_locations=cosmos_preferred_locations,
         )
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._pipeline_init_error: Exception | None = None
@@ -238,6 +242,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_endpoint,
                 credential=self._cosmos_credential,
                 user_agent=self._cosmos_user_agent,
+                preferred_locations=self._cosmos_preferred_locations,
             )
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
@@ -315,6 +320,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_endpoint,
                 credential=self._cosmos_credential,
                 user_agent=self._cosmos_user_agent,
+                preferred_locations=self._cosmos_preferred_locations,
             )
             db = await client.create_database_if_not_exists(id=self._cosmos_database)
             partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
@@ -389,6 +395,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     container_id=self._cosmos_counter_container,
                     partition_key=partition_key,
                     offer_throughput=offer,
+                    default_ttl=COUNTER_TTL_SECONDS,
                 )
             )
             await db.create_container_if_not_exists(
@@ -547,7 +554,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     "Counter container %s/%s unreachable: %s",
                     self._cosmos_database,
                     self._cosmos_counter_container,
-                    exc,
+                    describe_exception(exc),
                 )
             return None
 
@@ -790,6 +797,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         turn_top_k: Optional[int] = None,
         include_summaries: bool = False,
         summary_top_k: Optional[int] = None,
+        preference_slot: bool = False,
+        procedure_slot: bool = False,
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity, with optional retrieval blending.
 
@@ -797,7 +806,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         when ``include_episodes`` is True; facts only when False. Callers may
         pass ``memory_types`` for other non-episodic types (``episodic`` is added
         or removed by ``include_episodes``). Optional summaries/turns blend in
-        after the base block. See the sync client for full details."""
+        after the base block. ``preference_slot`` and ``procedure_slot`` reserve
+        result slots within ``top_k`` for the user's best-matching preference and
+        situational procedure. See the sync client for full details."""
         store = self._get_store()
         # Facts + episodes share one ranked query and one top_k budget: episodic
         # is added when include_episodes is True and stripped when it is False.
@@ -813,23 +824,48 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         if include_episodes:
             base_memory_types = [*base_memory_types, "episodic"]
         base_memory_types = base_memory_types or ["fact"]
-        base = await store.search(
-            search_terms=search_terms,
-            memory_id=memory_id,
-            user_id=user_id,
-            role=role,
-            memory_types=base_memory_types,
-            thread_id=thread_id,
-            top_k=top_k,
-            tags_all=tags_all,
-            tags_any=tags_any,
-            exclude_tags=exclude_tags,
-            include_superseded=include_superseded,
-            min_salience=min_salience,
-            min_confidence=min_confidence,
-            created_after=created_after,
-            created_before=created_before,
+        plan = _slots.plan_slots(
+            top_k,
+            preference_slot=preference_slot and memory_id is None and bool(user_id),
+            procedure_slot=procedure_slot and memory_id is None and bool(user_id),
+            pool_types=[t for t in base_memory_types if t != "procedural"],
         )
+        if plan.procedure:
+            # Procedures get their slot instead of competing with the ranked results.
+            base_memory_types = [t for t in base_memory_types if t != "procedural"]
+        search_kwargs: dict[str, Any] = {
+            "search_terms": search_terms,
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "role": role,
+            "memory_types": base_memory_types,
+            "thread_id": thread_id,
+            "top_k": top_k,
+            "tags_all": tags_all,
+            "tags_any": tags_any,
+            "exclude_tags": exclude_tags,
+            "include_superseded": include_superseded,
+            "min_salience": min_salience,
+            "min_confidence": min_confidence,
+            "created_after": created_after,
+            "created_before": created_before,
+            "active_procedures_only": True,
+        }
+        if plan.count:
+            # The ranked and slot searches embed the same query: embed it once.
+            search_kwargs["query_embedding"] = await store._embed(require_search_terms(search_terms))
+        base = await store.search(**search_kwargs)
+        if plan.count:
+            preferences = (
+                await self._slot_candidates(store, _slots.preference_search(search_kwargs, top_k - plan.count))
+                if plan.preference
+                else []
+            )
+            procedures = (
+                await self._slot_candidates(store, _slots.procedure_search(search_kwargs)) if plan.procedure else []
+            )
+            base = _slots.compose(base, top_k=top_k, plan=plan, preferences=preferences, procedures=procedures)
+
         if not user_id:
             return base
 
@@ -855,7 +891,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     exclude_tags=exclude_tags,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
+                logger.warning(
+                    "search_cosmos: include_summaries search failed (%s); skipping summaries", describe_exception(exc)
+                )
                 summaries = []
             _extend(summaries)
 
@@ -872,10 +910,24 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     created_before=created_before,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
+                logger.warning(
+                    "search_cosmos: include_turns turn search failed (%s); returning memories only",
+                    describe_exception(exc),
+                )
                 turns = []
             _extend(turns)
         return results
+
+    async def _slot_candidates(self, store: Any, search_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        """Candidates for a result slot; a failed slot search leaves the slot to the ranked results."""
+        try:
+            return list(await store.search(**search_kwargs) or [])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "search_cosmos: slot search failed (%s); filling the slot from the ranked results",
+                describe_exception(exc),
+            )
+            return []
 
     async def search_summaries(
         self,
@@ -916,9 +968,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         Searches the turns container directly. Only vector-searchable when
         ``enable_turn_embeddings`` was set when the turns were written.
         ``user_id`` is required and always filters the results. Passing
-        ``thread_id`` as well scopes the search to a single partition; omitting
-        it fans out across partitions, filtered by ``user_id`` in the WHERE
-        clause.
+        ``thread_id`` as well restricts the results to that thread: a vector-only
+        query targets the thread's partition, while a keyword (hybrid) query runs
+        across partitions with ``user_id`` and ``thread_id`` filters in the WHERE
+        clause (a partition key breaks full-text ranking, Azure SDK issue #42241).
+        Omitting it fans out across the user's partitions.
         """
         return await self._get_store().search_turns(
             search_terms=search_terms,
@@ -1092,8 +1146,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         search_terms: str,
         top_k: int = 5,
         *,
-        scope_type: Optional[str] = None,
-        scope_value: Optional[str] = None,
         procedure_kind: Optional[str] = None,
         status: Optional[str] = "active",
         include_superseded: bool = False,
@@ -1102,8 +1154,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             user_id=user_id,
             search_terms=search_terms,
             top_k=top_k,
-            scope_type=scope_type,
-            scope_value=scope_value,
             procedure_kind=procedure_kind,
             status=status,
             include_superseded=include_superseded,
@@ -1153,8 +1203,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             raise NotImplementedError(
                 "Procedural synthesis runs automatically after reconcile in durable mode; "
                 "manual invocation via the SDK is not supported when the Durable Function "
-                "app is the active processor. Use get_procedural_prompt() to read the "
-                "latest synthesized prompt."
+                "app is the active processor. Use build_procedural_context() to read the "
+                "current standing instructions."
             )
         return await processor.synthesize_procedural(user_id=user_id, force=force)
 
@@ -1177,6 +1227,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_pipeline().generate_user_summary(user_id, thread_ids, recent_k)
 
     async def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
+        """Reconcile a user's facts: fold duplicates, then resolve contradictions."""
         from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
         return await self._get_pipeline().reconcile_memories(user_id, n if n is not None else get_dedup_pool_size())
@@ -1210,7 +1261,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 logger.warning(
                     "process_now: synthesize_procedural failed (transient) for user_id=%s: %s",
                     user_id,
-                    exc,
+                    describe_exception(exc),
                 )
             try:
                 user_summary_result = await processor.process_user_summary(user_id=user_id)
@@ -1222,7 +1273,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 logger.warning(
                     "process_now: process_user_summary failed (transient) for user_id=%s: %s",
                     user_id,
-                    exc,
+                    describe_exception(exc),
                 )
         return result
 
@@ -1257,7 +1308,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 user_id,
                 thread_id,
                 getattr(exc, "status_code", None),
-                exc,
+                describe_exception(exc),
             )
             return False
         return bool(results)

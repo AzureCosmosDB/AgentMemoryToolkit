@@ -100,6 +100,12 @@ param episodeMinTurns int
 @description('Maximum number of change-feed items processed per orchestration batch.')
 param maxBatchSize int
 
+@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run and the size of its contradiction pool.')
+param dedupPoolSize int
+
+@description('Seconds a reconcile or procedure-learning activity keeps starting model calls. Must stay below the function app timeout.')
+param activityTimeBudgetSeconds int
+
 @description('Backend that owns processing. `durable` = the function-app fleet owns processing; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing, function-app skips.')
 @allowed([
   'durable'
@@ -359,6 +365,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'MAX_BATCH_SIZE'
           value: string(maxBatchSize)
+        }
+        {
+          name: 'DEDUP_POOL_SIZE'
+          value: string(dedupPoolSize)
+        }
+        {
+          name: 'ACTIVITY_TIME_BUDGET_SECONDS'
+          value: string(activityTimeBudgetSeconds)
         }
         {
           name: 'MEMORY_PROCESSOR_OWNER'

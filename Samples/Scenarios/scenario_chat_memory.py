@@ -62,6 +62,7 @@ def print_search_results(results: list[dict]) -> None:
     for i, r in enumerate(results, 1):
         print(f"  [{i}] ({r['role']}) {r['content']}")
 
+
 # ---------------------------------------------------------------------------
 # Simulated conversations
 # ---------------------------------------------------------------------------
@@ -126,6 +127,7 @@ def run_session(
 
     print(f"\n  ✅ Stored {len(turns)} turns in Cosmos DB.")
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -136,9 +138,7 @@ def main() -> None:
     ai_foundry_endpoint = os.environ.get("AI_FOUNDRY_ENDPOINT")
 
     if not cosmos_endpoint or not ai_foundry_endpoint:
-        raise SystemExit(
-            "Please set COSMOS_DB_ENDPOINT and AI_FOUNDRY_ENDPOINT environment variables."
-        )
+        raise SystemExit("Please set COSMOS_DB_ENDPOINT and AI_FOUNDRY_ENDPOINT environment variables.")
 
     # --- Initialise CosmosMemoryClient and connect to Cosmos DB ---
     banner("Initialising CosmosMemoryClient")

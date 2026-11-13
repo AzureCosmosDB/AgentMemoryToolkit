@@ -22,6 +22,7 @@ load_dotenv()
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def print_header(title: str) -> None:
     """Print a formatted section header."""
     print(f"\n{'=' * 60}")
@@ -46,6 +47,7 @@ def print_results(results: list) -> None:
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------
+
 
 def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None:
     """Populate the store with sample memories for searching."""
@@ -87,6 +89,7 @@ def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None
 # ---------------------------------------------------------------------------
 # Search patterns
 # ---------------------------------------------------------------------------
+
 
 def vector_search(mem: CosmosMemoryClient, user_id: str) -> None:
     """Pattern 1 - Semantic-style query (natural language, low keyword overlap)."""
@@ -183,14 +186,13 @@ def top_k_tuning(mem: CosmosMemoryClient, user_id: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     cosmos_endpoint = os.environ.get("COSMOS_DB_ENDPOINT")
     ai_foundry_endpoint = os.environ.get("AI_FOUNDRY_ENDPOINT")
 
     if not cosmos_endpoint or not ai_foundry_endpoint:
-        raise SystemExit(
-            "Error: Set COSMOS_DB_ENDPOINT and AI_FOUNDRY_ENDPOINT environment variables."
-        )
+        raise SystemExit("Error: Set COSMOS_DB_ENDPOINT and AI_FOUNDRY_ENDPOINT environment variables.")
 
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,

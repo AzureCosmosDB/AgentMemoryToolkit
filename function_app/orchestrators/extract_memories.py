@@ -16,10 +16,14 @@ when the source fact/episodic IDs have not moved.
 from __future__ import annotations
 
 import logging
+import time
 
 import azure.durable_functions as df
 from shared import config
+from shared.error_redaction import redact_errors
 from shared.pipeline_factory import get_pipeline
+
+from azure.cosmos.agent_memory.logging import describe_exception
 
 from ._retry import default_retry_options
 
@@ -83,7 +87,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
                         "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
                         user_id,
                         thread_id,
-                        exc,
+                        describe_exception(exc),
                     )
 
     return {
@@ -95,6 +99,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def em_Extract(payload: dict) -> dict:
     """Load recent turns and run LLM extraction without embeddings or writes."""
     user_id = payload["user_id"]
@@ -119,6 +124,7 @@ def em_Extract(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def em_Persist(payload: dict) -> dict:
     """Persist extracted docs with embeddings and deterministic create semantics."""
     user_id = payload["user_id"]
@@ -131,6 +137,7 @@ def em_Persist(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 async def em_AdvanceExtractWatermark(payload: dict) -> bool:
     """Advance the extraction watermark after a successful extract->persist.
 
@@ -150,14 +157,18 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def em_ReconcileMemories(payload: dict) -> dict:
     # GA keeps reconcile single-activity: its LLM dedup decisions and supersession
     # operations are larger/more coupled than the extract/persist flow handled here.
+    # The deadline keeps it inside the function timeout: each pass stops starting
+    # model calls once it passes, keeps what it checked, and the next one continues.
     user_id = payload["user_id"]
     pipeline = get_pipeline()
     from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     n = get_dedup_pool_size()
-    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact") or {}
-    episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic") or {}
+    deadline = time.monotonic() + config.get_activity_time_budget_seconds()
+    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact", deadline=deadline) or {}
+    episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic", deadline=deadline) or {}
     return {"fact": facts, "episodic": episodic}

@@ -31,6 +31,8 @@ from shared.counters import (
     user_counter_id,
 )
 
+from azure.cosmos.agent_memory.logging import describe_exception
+
 logger = logging.getLogger(__name__)
 
 bp = df.Blueprint()
@@ -56,18 +58,19 @@ async def _ensure_topology() -> None:
 
         db = await get_cosmos_database_async()
         for name in (config.TURNS_CONTAINER, config.MEMORIES_CONTAINER, config.SUMMARIES_CONTAINER):
+            problem = None
             try:
                 container = db.get_container_client(name)
                 await container.read()
-            except CosmosResourceNotFoundError as exc:
-                raise RuntimeError(
-                    f"Topology error: container {name!r} does not exist. "
-                    "Run azd up to provision the 3-container split or fix env vars."
-                ) from exc
+            except CosmosResourceNotFoundError:
+                problem = (
+                    f"container {name!r} does not exist. Run azd up to provision the 3-container split or fix env vars."
+                )
             except Exception as exc:
-                raise RuntimeError(
-                    f"Topology error: cannot read container {name!r}: {type(exc).__name__}: {exc}"
-                ) from exc
+                problem = f"cannot read container {name!r}: {describe_exception(exc)}"
+            if problem:
+                # Raised after the handler, so the host's log of this error carries no SDK error or its text.
+                raise RuntimeError(f"Topology error: {problem}")
         _topology_validated = True
 
 
@@ -273,9 +276,13 @@ async def process_changefeed_batch(
                     orchestration_errors,
                 )
 
-    # Re-raise so the change-feed batch is retried & thresholds re-fire.
+    # Re-raise so the change-feed batch is retried & thresholds re-fire. The host logs this error and any it was
+    # raised from, so it names the first failure safely instead of chaining the SDK error and its text.
     if orchestration_errors:
-        raise RuntimeError(f"Failed to start {len(orchestration_errors)} orchestration(s)") from orchestration_errors[0]
+        raise RuntimeError(
+            f"Failed to start {len(orchestration_errors)} orchestration(s): "
+            f"{describe_exception(orchestration_errors[0])}"
+        )
 
 
 async def _safe_start(
@@ -322,10 +329,11 @@ async def _safe_start(
                 exc_type,
             )
             return
-        logger.exception(
-            "change-feed: failed to start %s (exc_type=%s)",
+        logger.error(
+            "change-feed: failed to start %s (exc_type=%s): %s",
             instance_id,
             exc_type,
+            describe_exception(exc, stack=True),
         )
         errors.append(exc)
 

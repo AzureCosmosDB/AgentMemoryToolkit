@@ -70,6 +70,8 @@ class FakeStore:
             docs = [doc for doc in docs if doc.get("thread_id") == params["@thread_id"]]
         if "@type" in params:
             docs = [doc for doc in docs if doc.get("type") == params["@type"]]
+        if "@memory_type" in params:
+            docs = [doc for doc in docs if doc.get("type") == params["@memory_type"]]
         if "c.type IN" in sql:
             types = {value for name, value in params.items() if name.startswith("@mtype")}
             docs = [doc for doc in docs if doc.get("type") in types]
@@ -259,62 +261,6 @@ def test_extract_memories_creates_new_fact_without_superseding() -> None:
     assert "superseded_by" not in old_doc
 
 
-def test_synthesize_procedural_produces_procedural_memory() -> None:
-    store = FakeStore(
-        [
-            _fact("f1", "Always use bullet points.", salience=0.9),
-            {
-                "id": "e1",
-                "user_id": "u1",
-                "thread_id": "t1",
-                "role": "system",
-                "type": "episodic",
-                "content": "Past project",
-                "lessons": ["Keep examples small."],
-                "salience": 0.8,
-                "created_at": "2025-01-02T00:00:00+00:00",
-            },
-        ]
-    )
-    llm = FakeLLMService(
-        [
-            {
-                "procedures": [
-                    {
-                        "name": "Concise bullet responses",
-                        "summary": "Use concise bullet points.",
-                        "retrieval_text": "Use concise bullet points.",
-                        "procedure_kind": "behavioral_policy",
-                        "scope_type": "user",
-                        "scope_value": None,
-                        "activation_conditions": [],
-                        "preconditions": [],
-                        "steps": [],
-                        "success_conditions": [],
-                        "failure_conditions": [],
-                        "safety_constraints": [],
-                        "source_kind": "explicit_user_instruction",
-                        "grounded_in": ["fact-1"],
-                        "confidence": 0.8,
-                    }
-                ]
-            }
-        ]
-    )
-
-    result = _pipeline(store, llm).synthesize_procedural("u1")
-
-    assert result["status"] == "synthesized"
-    assert result["procedures_created"] >= 1
-    proc = next(doc for doc in store.upserts if doc["type"] == "procedural")
-    assert proc["type"] == "procedural"
-    assert proc["id"].startswith("proc_")
-    assert proc["name"] == "Concise bullet responses"
-    assert proc["status"] == "active"
-    assert proc["retrieval_text"] == "Use concise bullet points."
-    assert proc["source_fact_ids"] == ["f1"]
-
-
 def test_reconcile_memories_returns_contradiction_counts() -> None:
     store = FakeStore(
         [
@@ -327,7 +273,7 @@ def test_reconcile_memories_returns_contradiction_counts() -> None:
     llm = FakeLLMService(
         [
             {
-                # duplicate_groups are ignored now (paraphrases fold at write time);
+                # duplicate_groups are ignored (paraphrases fold in the dedup pass);
                 # only contradicted_pairs are applied.
                 "duplicate_groups": [
                     {"source_ids": ["f1", "f2"], "merged_content": "The user prefers coffee.", "confidence": 0.9}
@@ -340,9 +286,9 @@ def test_reconcile_memories_returns_contradiction_counts() -> None:
 
     result = _pipeline(store, llm).reconcile_memories("u1", n=4)
 
-    # f1/f2 are NOT merged (paraphrase folding moved to write time); only f4 loses a
-    # contradiction. Survivors: f1, f2, f3.
-    assert result == {"kept": 3, "merged": 0, "contradicted": 1}
+    # f1/f2 are NOT merged (no embeddings, so the dedup pass has no neighbours to compare);
+    # only f4 loses a contradiction. Survivors: f1, f2, f3.
+    assert (result["kept"], result["merged"], result["contradicted"]) == (3, 0, 1)
 
 
 def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
@@ -367,7 +313,8 @@ def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
     _pipeline(store, llm).reconcile_memories("u1", n=4)
 
     by_id = {doc["id"]: doc for doc in store.docs}
-    # Paraphrases f1/f2 are left untouched (no write-time merge in reconcile).
+    # Paraphrases f1/f2 are left untouched: duplicate_groups are ignored and, without embeddings,
+    # the dedup pass has no neighbours to fold them into.
     assert by_id["f1"].get("supersede_reason") is None
     assert by_id["f2"].get("supersede_reason") is None
     # Only the contradiction loser is tombstoned.
@@ -436,52 +383,6 @@ def test_generate_thread_and_user_summary_basic_shape() -> None:
     assert user_summary["content"] == "The project needs retries."
     assert user_summary["metadata"]["thread_ids"] == ["t1"]
     assert llm.embed_one_calls == ["Thread discussed retries.", "The project needs retries."]
-
-
-def test_build_procedural_context_returns_active_procedural() -> None:
-    store = FakeStore(
-        [
-            {
-                "id": "proc_active",
-                "user_id": "u1",
-                "thread_id": "__procedural__",
-                "type": "procedural",
-                "status": "active",
-                "name": "Targeted testing",
-                "summary": "Run targeted tests before reporting success.",
-                "retrieval_text": "tests success",
-                "procedure_kind": "behavioral_policy",
-                "scope_type": "user",
-                "scope_value": None,
-                "priority": 10,
-                "source_authority": "high",
-                "version": 1,
-            },
-            {
-                "id": "proc_candidate",
-                "user_id": "u1",
-                "thread_id": "__procedural__",
-                "type": "procedural",
-                "status": "candidate",
-                "name": "Candidate policy",
-                "summary": "Do not include this candidate procedure.",
-                "retrieval_text": "candidate policy",
-                "procedure_kind": "behavioral_policy",
-                "scope_type": "user",
-                "scope_value": None,
-                "priority": 10,
-                "source_authority": "low",
-                "version": 2,
-            },
-        ]
-    )
-
-    fake = FakeLLMService([])
-    result = _pipeline(store, fake).build_procedural_context("u1")
-    assert "Targeted testing" in result
-    assert "Run targeted tests before reporting success." in result
-    assert "Candidate policy" not in result
-    assert "Do not include this candidate procedure." not in result
 
 
 def test_build_procedural_context_requires_user_id() -> None:

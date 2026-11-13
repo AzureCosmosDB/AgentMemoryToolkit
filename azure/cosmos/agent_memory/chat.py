@@ -96,10 +96,11 @@ def extract_content(response: Any, model: str) -> str:
     """Pull the assistant content out of a chat-completions response.
 
     An empty reply (no choices, or no content) returns ``""`` so the caller can
-    retry it. A content-filtered reply, a refusal and a tool-only reply raise
-    :class:`LLMError` naming the cause (``content_filter``, ``model_refusal``,
-    ``unexpected_tool_response``): asking again gets the same answer, so the
-    pipeline classifies them as non-retryable.
+    retry it. A content-filtered reply, a refusal and a tool-only reply (tool
+    calls with no text, or only blank text) raise :class:`LLMError` naming the
+    cause (``content_filter``, ``model_refusal``, ``unexpected_tool_response``):
+    asking again gets the same answer, so the pipeline classifies them as
+    non-retryable.
     """
     if not response.choices:
         return ""
@@ -111,11 +112,10 @@ def extract_content(response: Any, model: str) -> str:
     if isinstance(refusal, str) and refusal.strip():
         raise LLMError(f"LLM model_refusal (model={model})")
     content = getattr(choice.message, "content", None)
-    if content is None:
-        if finish_reason in {"tool_calls", "function_call"}:
-            raise LLMError(f"LLM unexpected_tool_response (model={model}, finish_reason={finish_reason})")
-        return ""
-    return content
+    blank = content is None or (isinstance(content, str) and not content.strip())
+    if blank and finish_reason in {"tool_calls", "function_call"}:
+        raise LLMError(f"LLM unexpected_tool_response (model={model}, finish_reason={finish_reason})")
+    return "" if content is None else content
 
 
 class ChatClient:

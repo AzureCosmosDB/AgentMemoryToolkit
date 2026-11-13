@@ -266,15 +266,18 @@ async def test_all_transient_empty_reply_shapes_share_the_retry_budget(shape):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("reason", "refusal", "code"),
+    ("reason", "content", "refusal", "code"),
     [
-        ("content_filter", None, "content_filter"),
-        ("stop", "refused", "model_refusal"),
-        ("tool_calls", None, "unexpected_tool_response"),
+        ("content_filter", None, None, "content_filter"),
+        ("stop", None, "refused", "model_refusal"),
+        ("tool_calls", None, None, "unexpected_tool_response"),
+        ("tool_calls", "", None, "unexpected_tool_response"),
+        ("tool_calls", "  \n", None, "unexpected_tool_response"),
+        ("function_call", "", None, "unexpected_tool_response"),
     ],
 )
-async def test_terminal_empty_replies_are_not_retried(reason, refusal, code):
-    client, create = _client_replying(_reply(None, finish_reason=reason, refusal=refusal))
+async def test_terminal_empty_replies_are_not_retried(reason, content, refusal, code):
+    client, create = _client_replying(_reply(content, finish_reason=reason, refusal=refusal))
 
     with pytest.raises(LLMError, match=code) as failure:
         await client.generate(MESSAGES, max_retries=3, base_delay=0)

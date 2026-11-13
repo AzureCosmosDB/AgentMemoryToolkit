@@ -114,6 +114,9 @@ class _Store:
             docs = [doc for doc in docs if doc.get("type") == params["@fact_type"]]
         if "ORDER BY c._ts DESC" in sql:
             docs.sort(key=lambda doc: int(doc.get("_ts") or 0), reverse=True)
+        elif "ORDER BY c.created_at DESC" in sql and "c.created_at < @before" in sql:
+            # Ties on event time keep their stored order; Cosmos promises none.
+            docs.sort(key=lambda doc: str(doc.get("created_at") or ""), reverse=True)
         if ("@before" in params or "@fact_type" in params) and (top := re.match(r"SELECT TOP (\d+) ", sql)):
             docs = docs[: int(top.group(1))]
         return docs
@@ -597,6 +600,28 @@ def test_extract_memories_returns_quarantined_turn_count_for_non_retryable_batch
     assert all("extracted_at" in turn for turn in turns_store.docs)
 
 
+def test_extract_memories_defers_a_batch_whose_context_cannot_be_built(monkeypatch) -> None:
+    def unbuildable(turns):
+        raise ValueError("quoted-turn-text")
+
+    monkeypatch.setattr("azure.cosmos.agent_memory.services.pipeline.context_turns_text", unbuildable)
+    chat = _BatchChat()
+    memories_store = _Store([])
+    turns = [_turn(i) for i in range(3)]
+    turns_store = _Store(turns)
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    counts = service.extract_memories("u1", "t1")
+
+    assert (counts["deferred_turn_count"], chat.calls) == (len(turns), 0)
+    assert all("extracted_at" not in turn for turn in turns_store.docs)
+
+
 @pytest.mark.asyncio
 async def test_async_extract_memories_returns_deferred_turn_count_for_retryable_batch() -> None:
     chat = _AsyncBatchChat(fail_on_call=1, error=Exception("Error code: 429 rate limit"))
@@ -614,6 +639,29 @@ async def test_async_extract_memories_returns_deferred_turn_count_for_retryable_
 
     assert counts["deferred_turn_count"] == len(turns)
     assert counts["quarantined_turn_count"] == 0
+    assert all("extracted_at" not in turn for turn in turns_store.docs)
+
+
+@pytest.mark.asyncio
+async def test_async_extract_memories_defers_a_batch_whose_context_cannot_be_built(monkeypatch) -> None:
+    def unbuildable(turns):
+        raise ValueError("quoted-turn-text")
+
+    monkeypatch.setattr("azure.cosmos.agent_memory.aio.services.pipeline.context_turns_text", unbuildable)
+    chat = _AsyncBatchChat()
+    memories_store = _AsyncStore([])
+    turns = [_turn(i) for i in range(3)]
+    turns_store = _AsyncStore(turns)
+    service = AsyncPipelineService(
+        memories_store,
+        chat,
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    counts = await service.extract_memories("u1", "t1")
+
+    assert (counts["deferred_turn_count"], chat.calls) == (len(turns), 0)
     assert all("extracted_at" not in turn for turn in turns_store.docs)
 
 

@@ -159,12 +159,27 @@ def _make_pipeline() -> PipelineService:
     p._turns_container = p._container
     p._summaries_container = p._container
     p._chat = MagicMock()
-    p._container.read_item.side_effect = CosmosResourceNotFoundError(message="no dedup cursor yet")
+    p._docs = {}  # the facts a re-read returns, by id (filled by `_run`); anything else is not found
+
+    def read_item(item, partition_key):
+        if item not in p._docs:
+            raise CosmosResourceNotFoundError(message="not found")
+        return dict(p._docs[item])
+
+    p._container.read_item.side_effect = read_item
     return p
 
 
-def _run(p, seeds, neighbors=None, model=None, *, deadline=None):
+def _run(p, seeds, neighbors=None, model=None, *, deadline=None, changed=None):
     neighbors = neighbors or {}
+    # The facts the pass read are still there, unchanged, when it re-reads them before writing; `changed`
+    # maps a fact's ID to what it became meanwhile, or to None when it was deleted.
+    p._docs.update({doc["id"]: doc for doc in [*seeds, *(doc for docs in neighbors.values() for doc in docs)]})
+    for fact_id, replacement in (changed or {}).items():
+        if replacement is None:
+            p._docs.pop(fact_id, None)
+        else:
+            p._docs[fact_id] = replacement
 
     def query_items(query, parameters, **kwargs):
         params = {item["name"]: item["value"] for item in parameters}
@@ -536,10 +551,16 @@ class TestCommitCombine:
             if body["type"] == "fact"
             else body
         )
-        p._container.read_item.side_effect = [
-            CosmosResourceNotFoundError(message="no dedup cursor yet"),
-            {"id": "x", "superseded_by": "other"},
-        ]
+        registry_read = p._container.read_item.side_effect
+
+        def read_item(item, partition_key):
+            if item in p._docs:
+                return registry_read(item, partition_key)
+            if item.startswith("dedup_cursor"):
+                raise CosmosResourceNotFoundError(message="no dedup cursor yet")
+            return {"id": item, "superseded_by": "other"}  # the combined fact, retired since
+
+        p._container.read_item.side_effect = read_item
         seed, partner, verdicts = _pair()
 
         result, _ = _run(p, [seed], {"f2": [partner]}, _Model(verdicts, [_write(["M1", "M2"], BOTH)], [_holds(2)]))
@@ -563,6 +584,42 @@ class TestCommitCombine:
             p._commit_combine(record, members)
 
         p._mark_superseded.assert_not_called()
+
+
+class TestAMemberChangedSinceThePassReadIt:
+    @pytest.mark.parametrize(
+        "change",
+        [
+            pytest.param(None, id="deleted"),
+            pytest.param({"_etag": "etag-newer"}, id="edited"),
+            pytest.param({"superseded_by": "other"}, id="retired"),
+        ],
+    )
+    def test_the_combined_fact_is_not_written(self, change):
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        replacement = None if change is None else {**partner, **change}
+        model = _Model(verdicts, [_write(["M1", "M2"], BOTH)], [_holds(2)])
+
+        result, _ = _run(p, [seed], {"f2": [partner]}, model, changed={"f1": replacement})
+
+        assert _created(p) == [] and _retired(p) == []
+        assert (result["synthesized"], result["combined"], result["combine_failed"]) == (0, 0, 1)
+
+
+class TestACombinedFactIsRedactedBeforeItIsEmbedded:
+    def test_the_vector_survives_the_write_guard_and_matches_the_stored_text(self):
+        token = "ghp_" + "A1b2" * 9  # built here so the source holds no token literal
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        model = _Model(verdicts, [_write(["M1", "M2"], f"{BOTH} Its token is {token}.")], [_holds(2)])
+
+        _run(p, [seed], {"f2": [partner]}, model)
+
+        [body] = _created(p)
+        assert token not in body["content"] and "[REDACTED-SECRET]" in body["content"]
+        assert body["embedding"] == [0.1, 0.2, 0.3]
+        assert token not in p._embed_one.call_args.args[0]
 
 
 class TestWhichFactsCombine:
@@ -794,6 +851,7 @@ class TestWriteResult:
         p._reconcile_contradictions = MagicMock(return_value={"kept": 0, "merged": 0, "contradicted": 0})
         p._active_memories_for_reconcile = MagicMock(return_value=[])
         seed, partner, verdicts = _pair()
+        p._docs.update({seed["id"]: seed, partner["id"]: partner})
         p._container.query_items.side_effect = lambda query, parameters, **kwargs: iter(
             [partner] if "VectorDistance" in query else [seed]
         )

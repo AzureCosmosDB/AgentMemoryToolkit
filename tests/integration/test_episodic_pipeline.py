@@ -197,8 +197,13 @@ def test_live_episodic_lessons_feed_procedural_synthesis(
     """Episodes carry first-class ``lessons`` that must flow into procedural synthesis.
 
     Uses a fresh user with no extracted facts, so the only possible source for the
-    synthesized prompt is episodic lessons - this isolates the episodic->procedural
+    procedure pass is episodic lessons - this isolates the episodic->procedural
     seam end-to-end against live Cosmos (real ``IS_DEFINED(c.lessons)`` filtering).
+
+    ``synthesize_procedural`` returns counts, never the procedures, and a run reads
+    only the sources written since the last one. So: the first run must read the
+    episodes (``synthesized``, not ``unchanged``), whatever procedures it writes
+    cite only those episodes, and a second run has nothing new left to read.
     """
     try:
         _write_hiking_thread(episodic_memory, unique_user_id, unique_thread_id)
@@ -219,13 +224,27 @@ def test_live_episodic_lessons_feed_procedural_synthesis(
             f"got {[ep.get('lessons') for ep in episodes]}"
         )
 
-        result = episodic_memory.synthesize_procedural(unique_user_id, force=True)
-        assert result.get("status") == "synthesized", result
-        proc = result.get("procedural") or {}
-        assert isinstance(proc.get("content"), str) and proc["content"].strip(), proc
-        assert set(proc.get("source_episodic_ids") or []) == lesson_bearing, (
-            "Expected every lesson-bearing episode to feed procedural synthesis; "
-            f"lesson_bearing={lesson_bearing} source_episodic_ids={proc.get('source_episodic_ids')}"
+        result = episodic_memory.synthesize_procedural(unique_user_id)
+        assert result.get("status") == "synthesized", (
+            f"Expected the lesson-bearing episodes to be read and answered by the model, got {result}"
+        )
+        counts = {"procedures_created", "procedures_updated", "procedures_reinforced", "procedures_skipped"}
+        assert counts <= set(result), result
+        assert result.get("facts_retired") == 0, "no fact was extracted, so none can be retired into a procedure"
+
+        procedures = episodic_memory.get_procedural_memories(unique_user_id)
+        assert len(procedures) >= result["procedures_created"], (result, procedures)
+        for procedure in procedures:
+            assert set(procedure.get("source_episodic_ids") or []) <= lesson_bearing, (
+                f"Expected a procedure to cite only lesson-bearing episodes {lesson_bearing}, got {procedure}"
+            )
+            assert not procedure.get("source_fact_ids"), procedure
+            # An episode can neither teach nor correct, and these all fall on one date, so none has met its bar.
+            assert procedure.get("status") == "candidate", procedure
+
+        again = episodic_memory.synthesize_procedural(unique_user_id)
+        assert again.get("status") == "unchanged", (
+            f"Expected every lesson-bearing episode to be consumed by the first run, got {again}"
         )
     finally:
         _delete_user_records(episodic_memory, unique_user_id)

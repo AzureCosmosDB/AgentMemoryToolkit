@@ -1,16 +1,20 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``Extract`` -> ``Persist`` followed by an optional
-``ReconcileMemories`` activity, then a best-effort
-``SynthesizeProceduralOrchestrator`` sub-call.
+Chain: ``Extract`` -> ``Persist`` -> ``AdvanceExtractWatermark`` (when the
+change feed passes a count), then an optional ``ReconcileMemories`` activity,
+then a best-effort ``SynthesizeProceduralOrchestrator`` sub-call.
 Reconciliation is gated by the change-feed trigger (which tracks the
 per-user/thread turn counter) and signaled to the orchestrator via the
-``reconcile`` flag on its input payload. Procedural synthesis fires only
-after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO`` is enabled, so
-operators have a kill-switch for the extra LLM call. The prompt is always
-derived from the extracted fact pool. Redundant concurrent runs across threads
-are cheap because the pipeline short-circuits with ``status="unchanged"``
-when the source fact/episodic IDs have not moved.
+``reconcile`` flag on its input payload. It runs the duplicate pass (fold and
+combine) and then the contradiction pass within a time budget
+(``ACTIVITY_TIME_BUDGET_SECONDS``): once it has passed no new model call
+starts, and the next run continues from the cursors. Procedural synthesis
+fires only after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO`` is
+enabled, so operators have a kill-switch for the extra LLM call. It learns
+from the behavioral facts and episode lessons written since the user's
+procedure cursor, not from the extracted fact pool, so redundant concurrent
+runs across threads are cheap: a run with nothing new after the cursor makes
+no model call and returns ``status="unchanged"``.
 """
 
 from __future__ import annotations

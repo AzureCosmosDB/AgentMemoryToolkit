@@ -7,7 +7,10 @@ candidate takes the next ranked result instead, so the count stays ``top_k``. Fo
 ``top_k=5`` that is 3 ranked results, 1 preference and 1 procedure.
 
 Slot candidates are ranked by vector similarity alone. Their queries reuse the search's own
-arguments (user, thread and filters), so a slot can only return what the search itself could.
+arguments (user, thread and filters), so a slot can only return what the search itself could. The
+procedure slot leaves out the filters no procedure can meet: ``role``, ``tags_all``, ``tags_any``,
+``min_salience`` and ``min_confidence``. A procedure has no salience or confidence, its role is
+always ``system`` and its tags are the pipeline's own, so they would always leave the slot empty.
 """
 
 from __future__ import annotations
@@ -18,6 +21,9 @@ from typing import Any, Mapping, Sequence
 PREFERENCE_CATEGORY = "preference"
 # Where a slotted result names the slot it filled and its place in the results; ranked results carry none.
 RETRIEVAL_METADATA_KEY = "retrieval"
+# Search filters on fields a procedure never has. ``exclude_tags`` stays: it only hides what the caller names,
+# and a procedure does carry ``sys:`` tags (``sys:secret`` after a redaction).
+_PROCEDURE_UNMEETABLE_FILTERS = ("role", "tags_all", "tags_any", "min_salience", "min_confidence")
 
 
 @dataclass(frozen=True)
@@ -51,9 +57,12 @@ def preference_search(search_kwargs: Mapping[str, Any], ranked_count: int) -> di
 
 
 def procedure_search(search_kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    """Store search arguments for the procedure slot: the nearest active situational procedure."""
+    """Store search arguments for the procedure slot: the nearest active situational procedure.
+
+    The search's user, thread, dates and ``exclude_tags`` carry over; its filters on fields a procedure never has
+    do not."""
     return {
-        **search_kwargs,
+        **{key: value for key, value in search_kwargs.items() if key not in _PROCEDURE_UNMEETABLE_FILTERS},
         "memory_types": ["procedural"],
         "applies": "when",
         "active_procedures_only": True,

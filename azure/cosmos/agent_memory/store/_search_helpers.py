@@ -7,6 +7,7 @@ search SQL building and result formatting in one place.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -99,6 +100,14 @@ def add_result_filters(
 # The BM25 statistics scope of a keyword search: ``Local`` takes them from the partition ranges the query targets
 # instead of running a statistics query against every range in the container.
 FULL_TEXT_SCORE_SCOPE = "Local"
+
+# SQL function names are case-insensitive and may be followed by whitespace before the parenthesis.
+_FULL_TEXT_SCORE_CALL = re.compile(r"fulltextscore\s*\(", re.IGNORECASE)
+
+
+def uses_full_text_score(query: str) -> bool:
+    """Return whether ``query`` calls ``FullTextScore``."""
+    return _FULL_TEXT_SCORE_CALL.search(query) is not None
 
 
 def query_scope(user_id: Optional[str], thread_id: Optional[str], keyword_count: int = 0) -> tuple[Any, bool]:

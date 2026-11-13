@@ -5,7 +5,9 @@ from, the turns just before them, the thread summary when it was written before 
 user's stored facts nearest them. The context lets the model resolve references ("yes, do
 that"), keep the rationale a new turn points at, and skip what is already stored; facts still
 come only from the new turns. Each part is bounded, and each part predates the new turns, so
-extracting an old conversation never shows the model what came after it.
+extracting an old conversation never shows the model what came after it. Every earlier turn, the
+summary and every stored fact take one line (see ``one_line``), so that nothing in them can start
+a line of the prompt.
 """
 
 from __future__ import annotations
@@ -53,6 +55,18 @@ def clip(text: str, max_chars: int) -> str:
     return text[:head].rstrip() + CLIP_MARK + (text[-tail:].lstrip() if tail else "")
 
 
+def one_line(text: str) -> str:
+    """``text`` with every run of whitespace, line breaks included, collapsed to one space.
+
+    The prompt parser starts a new message at any line that holds only a role and a colon
+    (``assistant:``), and the model reads a line that starts ``[<time> | user]:`` as a turn. Text
+    that spans lines could forge either; on one line, behind the line's own lead-in, it cannot.
+    ``str.split`` splits on every character that ``str.splitlines``, which the parser reads lines
+    with, does.
+    """
+    return " ".join(text.split())
+
+
 def _created_at(turn: Mapping[str, Any]) -> str:
     return str(turn.get("created_at") or "")
 
@@ -86,10 +100,14 @@ def previous_turns_query(
     before: str,
     before_ts: Optional[int] = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """The thread's turns before ``before`` (an event time), most recently written first.
+    """The thread's turns before ``before`` (an event time), the latest event time first.
 
     With ``before_ts``, a turn sharing the event time ``before`` also counts when it was written
-    before that second, as the earlier turns of the same session are.
+    before that second, as the earlier turns of the same session are. Turns are picked by event
+    time, not by write time (``_ts``), which the "extracted" stamp rewrites for a whole batch at
+    once. Cosmos orders by one field without a composite index, so turns that share an event time
+    are cut off at the limit in no particular order; ``prior_turns`` puts what comes back in write
+    order.
     """
     earlier = "c.created_at < @before"
     if before_ts is not None:
@@ -97,7 +115,7 @@ def previous_turns_query(
     query = (
         f"SELECT TOP {EXTRACTION_CONTEXT_TURNS} c.id, c.role, c.content, c.created_at, c._ts FROM c "
         f"WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn' AND {earlier} "
-        "ORDER BY c._ts DESC"
+        "ORDER BY c.created_at DESC"
     )
     parameters = [
         {"name": "@user_id", "value": user_id},
@@ -119,13 +137,14 @@ def prior_turns(rows: Iterable[Mapping[str, Any]], window: Sequence[Mapping[str,
 
 def context_turns_text(history: Sequence[Mapping[str, Any]]) -> str:
     """The last turns of ``history`` within the context budget, each clipped, as transcript lines
-    without turn ids (so the model cannot cite them); ``(none)`` when there are none."""
+    without turn ids (so the model cannot cite them); ``(none)`` when there are none. Each turn is
+    one line: see ``one_line``."""
     chosen: list[dict[str, Any]] = []
     used = 0
     for turn in reversed(history):
         if len(chosen) == EXTRACTION_CONTEXT_TURNS:
             break
-        content = clip(str(turn.get("content") or ""), EXTRACTION_CONTEXT_TURN_MAX_CHARS)
+        content = clip(one_line(str(turn.get("content") or "")), EXTRACTION_CONTEXT_TURN_MAX_CHARS)
         if not content:
             continue
         tokens = count_tokens(content)
@@ -134,14 +153,17 @@ def context_turns_text(history: Sequence[Mapping[str, Any]]) -> str:
         chosen.append({"role": turn.get("role"), "content": content, "created_at": turn.get("created_at")})
         used += tokens
     chosen.reverse()
-    return build_transcript(chosen, include_timestamp=True) if chosen else NONE
+    # The lead-in (time and role) is collapsed too: every line starts with "[", never with a role.
+    lines = [one_line(build_transcript([turn], include_timestamp=True)) for turn in chosen]
+    return "\n".join(lines) if lines else NONE
 
 
 def summary_text(doc: Optional[Mapping[str, Any]], window_start: Optional[str], window_ts: Optional[int] = None) -> str:
-    """The thread summary as context: its overview and decisions, clipped. ``(none)`` when there
-    is no summary, or when it may cover turns from ``window_start`` on (its ``updated_at`` is the
-    event time of the newest turn it summarized). A summary whose newest turn shares the window's
-    event time is used only when it was written before the window's turns (``window_ts``)."""
+    """The thread summary as context, on one line (see ``one_line``): its overview and decisions,
+    clipped. ``(none)`` when there is no summary, or when it may cover turns from ``window_start``
+    on (its ``updated_at`` is the event time of the newest turn it summarized). A summary whose
+    newest turn shares the window's event time is used only when it was written before the
+    window's turns (``window_ts``)."""
     if not doc or not window_start:
         return NONE
     covered_to = str(doc.get("updated_at") or doc.get("created_at") or "")
@@ -153,11 +175,13 @@ def summary_text(doc: Optional[Mapping[str, Any]], window_start: Optional[str], 
         return NONE
     metadata = doc.get("metadata") if isinstance(doc.get("metadata"), Mapping) else {}
     structured = metadata.get("structured_summary") if isinstance(metadata.get("structured_summary"), Mapping) else {}
-    parts = [str(structured.get("overview") or doc.get("content") or "").strip()]
-    decisions = [str(item).strip() for item in structured.get("decisions") or [] if str(item).strip()]
+    overview = one_line(str(structured.get("overview") or doc.get("content") or ""))
+    # The label also keeps the line from starting as a role marker ("assistant:") or a speaker label.
+    parts = [f"Overview: {overview}"] if overview else []
+    decisions = [one_line(str(item)) for item in structured.get("decisions") or [] if str(item).strip()]
     if decisions:
         parts.append("Decisions: " + "; ".join(decisions[:5]))
-    text = "\n".join(part for part in parts if part)
+    text = " ".join(parts)
     return clip(text, EXTRACTION_SUMMARY_MAX_CHARS) if text else NONE
 
 
@@ -197,7 +221,7 @@ def _from_agent(doc: Mapping[str, Any]) -> bool:
 
 
 def _known_fact_line(doc: Mapping[str, Any]) -> Optional[str]:
-    content = clip(" ".join(str(doc.get("content") or "").split()), KNOWN_FACT_MAX_CHARS)
+    content = clip(one_line(str(doc.get("content") or "")), KNOWN_FACT_MAX_CHARS)
     if not content:
         return None
     assertion = doc.get("assertion") if doc.get("assertion") in FACT_ASSERTIONS else None
@@ -207,7 +231,7 @@ def _known_fact_line(doc: Mapping[str, Any]) -> Optional[str]:
     named = (("subject", doc.get("subject")), ("attribute", doc.get("attribute")), ("entities", entities))
     keys = "; ".join(f"{name}: {value}" for name, value in named if isinstance(value, str) and value.strip())
     line = f"- ({head}) {content}"
-    return f"{line} [{keys}]" if keys else line
+    return one_line(f"{line} [{keys}]" if keys else line)
 
 
 def known_facts_text(docs: Iterable[Mapping[str, Any]]) -> str:

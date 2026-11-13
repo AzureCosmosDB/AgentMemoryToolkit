@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceExistsError
+from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosHttpResponseError, CosmosResourceExistsError
 
 from azure.cosmos.agent_memory.aio.services import pipeline as pipeline_module
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
@@ -520,6 +521,29 @@ async def test_synthesize_procedural_skips_an_unusable_answer_and_moves_on() -> 
     assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs)
 
 
+@pytest.mark.parametrize(
+    ("failure", "status", "cursor_moved"),
+    [
+        (CosmosHttpResponseError(status_code=429, message="throttled"), "deferred", False),
+        (CosmosHttpResponseError(status_code=503, message="unavailable"), "deferred", False),
+        (CosmosHttpResponseError(status_code=400, message="bad request"), "synthesized", True),
+    ],
+    ids=["throttled", "unavailable", "bad-request"],
+)
+async def test_a_failed_procedure_write_moves_the_cursor_only_when_a_retry_could_succeed(
+    failure, status, cursor_moved
+) -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+    service._embedded_procedure = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result["status"] == status
+    assert procedures_by_name(memories) == {}
+    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs) is cursor_moved
+
+
 def _twelve_facts() -> list[dict[str, Any]]:
     return [fact(f"fact-{i:02d}", f"The user stated rule {i}.", ts=i + 1) for i in range(12)]
 
@@ -690,6 +714,16 @@ async def test_build_procedural_context_adds_the_situational_rule_nearest_a_task
     assert service._embeddings.calls == [["review this pull request"]]
     assert (await service.build_procedural_context("u1")).splitlines() == [STANDING_HEADER, "- Always rule."]
     assert service._embeddings.calls == [["review this pull request"]]
+
+
+async def test_build_procedural_context_keeps_the_standing_rules_when_the_situational_lookup_fails(caplog) -> None:
+    service, _ = _service(Memories([rule("Always"), rule("Reviews", applies="when", embedding=[0.0, 1.0])]), [])
+    service._embeddings.generate = AsyncMock(side_effect=RuntimeError("quoted-model-text"))  # type: ignore[method-assign]
+
+    context = await service.build_procedural_context("u1", task="review this pull request")
+
+    assert context.splitlines() == [STANDING_HEADER, "- Always rule."]
+    assert "RuntimeError" in caplog.text and "quoted-model-text" not in caplog.text
 
 
 async def test_build_procedural_context_never_lists_the_steps_of_a_skill() -> None:

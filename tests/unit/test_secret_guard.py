@@ -45,6 +45,9 @@ CURL_BEARER_TOKEN = "xox" + "b-1234567890-abcdefghijklmnop"
 DB_PASSWORD = "s3cretpass"
 OPENAI_KEY = "sk-" + "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
 OPENAI_PROJECT_KEY = "sk-proj-" + "AbCdEf0123456789_ghIJklMNopQRstUVwxYZ-0123456789abcd"
+# Not every sk- key is mixed case: some providers issue 32 lowercase hex digits, or lowercase letters alone.
+OPENAI_HEX_KEY = "sk-" + "0123456789abcdef" * 2
+OPENAI_LOWERCASE_KEY = "sk-" + "abcdefghijklmnopqrstuvwxyz" * 2
 GITHUB_CLASSIC_TOKEN = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789AB"
 GITHUB_FINE_GRAINED_TOKEN = "github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnop"
 AWS_ACCESS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
@@ -71,6 +74,8 @@ def _surviving_pieces(secret: str, text: str, size: int = 5) -> list[str]:
         (f"Bearer {JWT}", JWT, "", "bearer_jwt"),
         (OPENAI_KEY, OPENAI_KEY, "", "openai_key"),
         (OPENAI_PROJECT_KEY, OPENAI_PROJECT_KEY, "", "openai_key"),
+        (OPENAI_HEX_KEY, OPENAI_HEX_KEY, "", "openai_key"),
+        (OPENAI_LOWERCASE_KEY, OPENAI_LOWERCASE_KEY, "", "openai_key"),
         (GITHUB_CLASSIC_TOKEN, GITHUB_CLASSIC_TOKEN, "", "github_token"),
         (GITHUB_FINE_GRAINED_TOKEN, GITHUB_FINE_GRAINED_TOKEN, "", "github_token"),
         (AWS_ACCESS_KEY_ID, AWS_ACCESS_KEY_ID, "", "aws_access_key_id"),
@@ -89,6 +94,16 @@ def _surviving_pieces(secret: str, text: str, size: int = 5) -> list[str]:
             "url_credentials",
         ),
         ("redis://:hunter2secret@cache:6379", "hunter2secret", "redis://:", "url_credentials"),
+        (
+            "postgres://admin:$Up3rS3cret!@db.example.com:5432/app",
+            "$Up3rS3cret!",
+            "postgres://admin:",
+            "url_credentials",
+        ),
+        ("postgres://admin:$Up3rS3cret@db.example.com/app", "$Up3rS3cret", "postgres://admin:", "url_credentials"),
+        ("mongodb://svc:*Kp9#qL2v@cluster.example.com:27017/db", "*Kp9#qL2v", "mongodb://svc:", "url_credentials"),
+        ("postgres://admin:Secretx@db.example.com/app", "Secretx", "postgres://admin:", "url_credentials"),
+        ("postgres://admin:Pa?ssw0rd@db.example.com/app", "Pa?ssw0rd", "postgres://admin:", "url_credentials"),
         (
             f"https://a.blob.core.windows.net/c?sv=2021&sig={SAS_SIGNATURE}",
             SAS_SIGNATURE,
@@ -109,6 +124,8 @@ def _surviving_pieces(secret: str, text: str, size: int = 5) -> list[str]:
         "bearer-jwt",
         "openai-key",
         "openai-project-key",
+        "openai-hex-key",
+        "openai-lowercase-key",
         "github-classic-token",
         "github-fine-grained-token",
         "aws-access-key-id",
@@ -117,6 +134,11 @@ def _surviving_pieces(secret: str, text: str, size: int = 5) -> list[str]:
         "basic-auth",
         "postgres-url-password",
         "redis-url-password",
+        "url-password-after-dollar-with-symbol",
+        "url-password-after-dollar",
+        "url-password-with-leading-asterisk-and-hash",
+        "url-password-ending-in-x",
+        "url-password-with-question-mark",
         "sas-signature",
         "sas-connection-string",
     ],
@@ -140,8 +162,9 @@ def test_detects_and_removes_literal_credentials(text, secret, kept, expected):
         f"-----BEGIN OPENSSH PRIVATE KEY----- {PEM_BODY.replace(chr(10), ' ')} -----END OPENSSH PRIVATE KEY-----",
         f"-----BEGIN PGP PRIVATE KEY BLOCK-----\n{PEM_BODY}\n-----END PGP PRIVATE KEY BLOCK-----",
         f"-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n-----END PRIVATE KEY-----",
+        f"> -----BEGIN PRIVATE KEY-----\n> {PEM_BODY.replace(chr(10), chr(10) + '> ')}\n> -----END PRIVATE KEY-----",
     ],
-    ids=["complete", "truncated", "single-line", "pgp", "unterminated-then-complete"],
+    ids=["complete", "truncated", "single-line", "pgp", "unterminated-then-complete", "quoted-lines"],
 )
 def test_private_key_block_is_redacted_whole(pem):
     """Replacing only the BEGIN header left the entire key body stored."""
@@ -196,6 +219,23 @@ def test_private_key_block_is_redacted_whole(pem):
         '"postgresql://%s:%s@%s/%s" % (user, password, host, db)',
         "postgres://user:%3Cpassword%3E@host/db",
         "postgres://user:%24%7BDB_PASS%7D@host/db",
+        "http://localhost:3000?email=jane@contoso.com",
+        "postgres://user:$DB_PASSWORD@host/db",
+        "postgres://user:${DB_PASSWORD}@host/db",
+        "postgresql://postgres:[YOUR-PASSWORD]@db.example.com:5432/postgres",
+        "mongodb://svc:{password}@cluster.example.com:27017/db",
+        "postgres://user:xxxxxxxx@host/db",
+        "postgres://user:********@host/db",
+        "postgres://user:%1$s@host/db",
+        "A PEM file starts with -----BEGIN RSA PRIVATE KEY----- and ends with -----END RSA PRIVATE KEY-----.",
+        "Never paste -----BEGIN RSA PRIVATE KEY----- into a chat",
+        "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----\n<your key here>\n-----END PRIVATE KEY-----",
+        'PEM_START = b"-----BEGIN OPENSSH PRIVATE KEY-----"\nPEM_END = b"-----END OPENSSH PRIVATE KEY-----"',
+        "sk-learn-extensions-for-time-series-forecasting",
+        "sk-proj-roadmap-for-the-next-quarter-planning_notes",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "1196a3ac2e4b7d6f3a0c5e9b2d8a4f1c7e9b0a2d",
     ],
     ids=[
         "sha512-digest",
@@ -238,6 +278,23 @@ def test_private_key_block_is_redacted_whole(pem):
         "url-printf-format",
         "url-encoded-placeholder",
         "url-encoded-template",
+        "url-query-with-an-email",
+        "url-shell-variable",
+        "url-brace-variable",
+        "url-bracket-placeholder",
+        "url-curly-placeholder",
+        "url-mask-of-x",
+        "url-mask-of-asterisks",
+        "url-positional-format",
+        "pem-markers-in-prose",
+        "pem-begin-marker-in-prose",
+        "pem-elided-body",
+        "pem-placeholder-body",
+        "pem-markers-as-constants",
+        "sk-hyphenated-phrase",
+        "sk-project-phrase",
+        "uuid",
+        "git-sha",
     ],
 )
 def test_ordinary_technical_text_is_left_alone(text):
@@ -313,8 +370,22 @@ def test_credentials_without_a_fixed_format_are_left_to_the_prompts(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["a." * 50_000, "eyJ-" * 50_000, "-----BEGIN PRIVATE KEY-----" * 5_000, "password=x://" * 20_000],
-    ids=["dotted-word", "base64url-run", "unterminated-key-markers", "scheme-separators"],
+    [
+        "a." * 50_000,
+        "eyJ-" * 50_000,
+        "-----BEGIN PRIVATE KEY-----" * 5_000,
+        "password=x://" * 20_000,
+        "sk-" * 50_000,
+        "-----BEGIN PRIVATE KEY----- and ends with " * 5_000,
+    ],
+    ids=[
+        "dotted-word",
+        "base64url-run",
+        "unterminated-key-markers",
+        "scheme-separators",
+        "sk-prefix-run",
+        "markers-in-prose",
+    ],
 )
 def test_redaction_time_grows_linearly_with_input(text):
     """Each input took from seconds to minutes when a pattern rescanned a run once per start."""

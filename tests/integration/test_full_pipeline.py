@@ -28,6 +28,21 @@ import pytest
 from azure.cosmos.agent_memory import CosmosMemoryClient
 from tests.conftest import INTEGRATION_ENABLED
 
+# What ``reconcile`` returns: the contradiction pass's ``kept`` and ``contradicted``, the duplicates folded
+# (``merged``), and the duplicate pass's counts, including the facts combined into one.
+RECONCILE_KEYS = {
+    "kept",
+    "merged",
+    "contradicted",
+    "checked",
+    "compared",
+    "vetoed",
+    "combined",
+    "synthesized",
+    "combine_groups",
+    "combine_failed",
+}
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -420,9 +435,9 @@ class TestReconciliation:
                 user_id=unique_user_id,
             )
             assert isinstance(stats, dict)
-            assert "kept" in stats and "merged" in stats and "contradicted" in stats
-            assert stats["merged"] + stats["contradicted"] >= 1, (
-                f"Expected at least one near-duplicate to be merged/contradicted, got {stats}"
+            assert RECONCILE_KEYS <= set(stats), stats
+            assert stats["merged"] + stats["combined"] + stats["contradicted"] >= 1, (
+                f"Expected at least one near-duplicate to be merged, combined or contradicted, got {stats}"
             )
 
             active = [
@@ -541,8 +556,8 @@ class TestReconciliation:
 
             stats = agent_memory.reconcile(user_id=unique_user_id)
             assert isinstance(stats, dict)
-            assert stats.get("merged", 0) + stats.get("contradicted", 0) >= 1, (
-                f"Expected at least one merge/contradiction across paraphrases, got {stats}"
+            assert stats.get("merged", 0) + stats.get("combined", 0) + stats.get("contradicted", 0) >= 1, (
+                f"Expected at least one merge, combine or contradiction across paraphrases, got {stats}"
             )
 
             all_facts = agent_memory.get_memories(
@@ -554,7 +569,7 @@ class TestReconciliation:
             assert len(losers) >= 1, "Expected at least one superseded record"
 
             sample_loser = losers[0]
-            assert sample_loser["supersede_reason"] in {"duplicate", "contradict"}
+            assert sample_loser["supersede_reason"] in {"duplicate", "combined", "contradict"}
             assert isinstance(sample_loser["superseded_at"], str) and len(sample_loser["superseded_at"]) > 0
             assert isinstance(sample_loser["superseded_by"], str) and len(sample_loser["superseded_by"]) > 0
 

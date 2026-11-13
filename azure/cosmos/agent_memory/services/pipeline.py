@@ -49,6 +49,7 @@ from azure.cosmos.agent_memory.prompts._schemas import response_format_for
 from azure.cosmos.agent_memory.services import MemoryStoreProtocol
 from azure.cosmos.agent_memory.services._combine import (
     COMBINE_PROMPT,
+    COMBINED_TAG,
     CombineCounts,
     CombineDraft,
     CombineOutcome,
@@ -131,6 +132,7 @@ from azure.cosmos.agent_memory.services._procedures import (
     behavioral_facts_query,
     existing_procedures_input,
     in_force,
+    is_transient_write_failure,
     lesson_episodes_query,
     new_procedure,
     plan_answer,
@@ -598,17 +600,19 @@ class PipelineService:
         for batch in batches:
             batch_turn_ids = [str(item["id"]) if item.get("id") else None for item in batch]
             batch_labels = transcript_labels(batch)
-            if with_context:
-                inputs = {
-                    "transcript": self._build_grounded_transcript(batch, labels=batch_labels),
-                    "previous_turns": context_turns_text([*prior, *items[:batch_start]]),
-                    "thread_summary": summary,
-                    "known_memories": self._known_memories(user_id, batch),
-                }
-            else:
-                inputs = {"transcript": self._build_transcript(batch, include_timestamp=True)}
+            context_end = batch_start
             batch_start += len(batch)
             try:
+                # Built inside the try: a failure reading or sizing the context costs this batch, not the run.
+                if with_context:
+                    inputs = {
+                        "transcript": self._build_grounded_transcript(batch, labels=batch_labels),
+                        "previous_turns": context_turns_text([*prior, *items[:context_end]]),
+                        "thread_summary": summary,
+                        "known_memories": self._known_memories(user_id, batch),
+                    }
+                else:
+                    inputs = {"transcript": self._build_transcript(batch, include_timestamp=True)}
                 response_text = self._run_extraction(extract_prompt, inputs)
                 parsed = self._parse_llm_json(response_text)
                 facts.extend(
@@ -1416,8 +1420,10 @@ class PipelineService:
         returns ``status="unchanged"`` without a model call.
 
         The cursor moves past each batch once it is done, so a run that stops early resumes where
-        it stopped. A retryable model failure stops the run (``deferred``); any other failure
-        skips that batch. ``deadline``, a ``time.monotonic()`` value, stops the run from starting
+        it stopped. A retryable model failure, or a transient embedding or Cosmos failure while
+        writing a procedure, stops the run (``deferred``) without moving the cursor, so the batch is
+        tried again; any other failure skips that batch. ``deadline``, a ``time.monotonic()`` value,
+        stops the run from starting
         another model call once it has passed, for callers with a time limit such as a Durable
         activity. ``force`` has no effect: a run only ever reads what is new.
         """
@@ -1483,7 +1489,7 @@ class PipelineService:
 
         Returns ``("answered", outcomes)``; ``("skipped", {})`` when the call failed for good or
         its answer was unusable, which would fail the same way on a retry; or ``("deferred", {})``
-        after a retryable model error.
+        after a retryable model error or a transient failure writing a procedure.
         """
         source_inputs, labels = sources_input(sources)
         existing_text, existing_by_label = existing_procedures_input(self._related_procedures(scope, sources))
@@ -1514,6 +1520,8 @@ class PipelineService:
         answers = parsed.get("procedures", []) if isinstance(parsed, dict) else []
         for item in answers if isinstance(answers, list) else []:
             outcome, written = self._apply_procedure_answer(user_id, scope, item, labels, existing_by_label)
+            if outcome == "deferred":
+                return "deferred", {}
             outcomes[outcome] += 1
             if written is not None:
                 outcomes["facts_retired"] += self._retire_taught_facts(user_id, written, labels.values())
@@ -1528,7 +1536,8 @@ class PipelineService:
         existing_by_label: Mapping[str, dict[str, Any]],
     ) -> tuple[str, Optional[dict[str, Any]]]:
         """Apply one answer; returns ``created``, ``updated``, ``reinforced`` or ``skipped``, with
-        the procedure as written (``None`` when nothing was written).
+        the procedure as written (``None`` when nothing was written), or ``deferred`` after a
+        transient embedding or Cosmos failure, so the batch is tried again.
 
         An ``add`` whose procedure already exists (same kind and name) reinforces it, or revises
         it when the answer is the user's correction. An answer that cites no new source, or a
@@ -1562,6 +1571,13 @@ class PipelineService:
             )
             return "skipped", None
         except Exception as exc:
+            if is_transient_write_failure(exc):
+                logger.warning(
+                    "synthesize_procedural deferred: a procedure write hit a transient failure user_id=%s: %s",
+                    user_id,
+                    describe_exception(exc),
+                )
+                return "deferred", None
             logger.error(
                 "synthesize_procedural failed to persist one procedure user_id=%s: %s",
                 user_id,
@@ -2377,8 +2393,8 @@ class PipelineService:
 
     def _write_combined(self, draft: Optional[CombineDraft]) -> CombineWrite:
         """Validate, embed and apply a combined fact: ``written`` with the members retired into it; ``lost`` when it
-        cannot be built or validated or its embedding fails for good; ``deferred`` after a retryable embedding error,
-        so a later pass tries the group again."""
+        cannot be built or validated, its embedding fails for good, or a member was deleted, edited or retired since
+        the pass read it; ``deferred`` after a retryable embedding error, so a later pass tries the group again."""
         if draft is None:
             return CombineWrite("lost")
         members = list(draft.members)
@@ -2393,6 +2409,8 @@ class PipelineService:
                 describe_exception(exc),
             )
             return CombineWrite("lost")
+        # Redact before embedding: the write guard drops the vector of a record whose text it rewrites.
+        self._redact_for_embedding(record)
         try:
             record["embedding"] = self._embed_one(record["content"])
         except Exception as exc:
@@ -2405,8 +2423,29 @@ class PipelineService:
                 describe_exception(exc),
             )
             return CombineWrite("lost")
+        if not self._members_unchanged(members):
+            logger.info(
+                "consolidate_memories: keeping %d facts; one was deleted, edited or retired since this pass read it",
+                len(members),
+            )
+            return CombineWrite("lost")
         retired = self._commit_combine(record, members)
         return CombineWrite("lost") if retired is None else CombineWrite("written", tuple(retired))
+
+    def _members_unchanged(self, members: list[dict[str, Any]]) -> bool:
+        """Whether every member is still there as this pass read it: not deleted, edited or retired since.
+
+        A combined fact built from a member that has since been deleted would bring its text back."""
+        for doc in members:
+            try:
+                current = self._memories_container.read_item(
+                    item=doc["id"], partition_key=[doc["user_id"], doc["thread_id"]]
+                )
+            except CosmosResourceNotFoundError:
+                return False
+            if current.get("superseded_by") or current.get("_etag") != doc.get("_etag"):
+                return False
+        return True
 
     def _commit_combine(self, record: dict[str, Any], members: list[dict[str, Any]]) -> Optional[list[str]]:
         """Create ``record``, then retire each of ``members`` into it as combined.
@@ -2519,12 +2558,15 @@ class PipelineService:
         # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
         # agent did/recommended (historical events), not mutable user state, so
         # they must never be contradiction-superseded by a later user statement.
+        # Combined facts (sys:combined) are excluded too: retiring one as a loser
+        # would retire every detail it absorbed along with the conflicting one.
         query = (
             f"SELECT TOP {top_literal(n, name='reconcile_memories.n')} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = @memory_type "
             f"AND {_ACTIVE_DOC_FILTER} "
             "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
+            f"AND NOT ARRAY_CONTAINS(c.tags, '{COMBINED_TAG}') "
             "ORDER BY c.created_at DESC"
         )
         return list(
@@ -2558,8 +2600,15 @@ class PipelineService:
             )
         situational: list[dict[str, Any]] = []
         if isinstance(task, str) and task.strip():
-            query, parameters = situational_rule_query(scope, self._embed_one(task), today)
-            situational = [doc for doc in self._query_procedures(scope, query, parameters) if in_force(doc, today)]
+            try:
+                query, parameters = situational_rule_query(scope, self._embed_one(task), today)
+                situational = [doc for doc in self._query_procedures(scope, query, parameters) if in_force(doc, today)]
+            except Exception as exc:  # the standing rules are still worth returning without the situational one
+                logger.warning(
+                    "build_procedural_context left out the situational rule user_id=%s: %s",
+                    user_id,
+                    describe_exception(exc),
+                )
         logger.debug(
             "build_procedural_context included_ids=%s user_id=%s",
             [doc.get("id") for doc in [*standing, *situational]],

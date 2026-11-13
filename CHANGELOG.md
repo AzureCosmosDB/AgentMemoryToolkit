@@ -26,7 +26,7 @@
 #### Other Changes
 * New prompts `extract_memories-v3`, `dedup_verify` and `combine_memories`; `extract_procedure` is rewritten. Every memory-writing prompt now tells the model never to write a literal secret.
 * Search results include the new fact and procedure fields and `merged_from`, and `MemoryStore.search()` gains `categories`, `vector_only`, `active_procedures_only`, `applies` and `query_embedding`.
-* Bicep adds the `dedupPoolSize`, `activityTimeBudgetSeconds`, `chatCapacity` and `embeddingCapacity` parameters (azd variables `DEDUP_POOL_SIZE`, `ACTIVITY_TIME_BUDGET_SECONDS`, `AI_FOUNDRY_CHAT_CAPACITY`, `AI_FOUNDRY_EMBEDDING_CAPACITY`). New `counter` containers expire a turn counter 90 days after its last update; existing containers are unchanged.
+* Bicep adds the `dedupPoolSize`, `activityTimeBudgetSeconds`, `chatCapacity` and `embeddingCapacity` parameters (azd variables `DEDUP_POOL_SIZE`, `ACTIVITY_TIME_BUDGET_SECONDS`, `AI_FOUNDRY_CHAT_CAPACITY`, `AI_FOUNDRY_EMBEDDING_CAPACITY`). New `counter` containers expire their documents 90 days after the last update; existing containers are unchanged.
 
 ## [0.3.0b2] (2026-08-17)
 

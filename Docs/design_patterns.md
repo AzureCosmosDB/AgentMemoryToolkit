@@ -396,7 +396,7 @@ Procedural memory records how the assistant should act for one user: instruction
 ### How a procedure appears
 
 1. The user teaches or corrects the assistant: "Always cite your sources." Extraction records the fact with `assertion="directive"` (or `"correction"`).
-2. The procedure pass reads new behavioral facts and episode lessons and adds, revises or reinforces procedures. An `instruction` the user taught is `active` at once. A `habit` needs a correction or support on two different dates, and a `skill` needs two successful practices or the user's endorsement; until then it stays a `candidate`, which search and prompt injection do not show.
+2. The procedure pass reads new behavioral facts and episode lessons and adds, revises or reinforces procedures. An `instruction` the user taught or corrected is `active` at once. A `habit` needs a correction by the user, or support on two different dates from facts the user stated or episodes that went well (a successful or partially successful outcome), and a `skill` needs two such episodes on different dates or the user's endorsement; until then it stays a `candidate`, which search and prompt injection do not show.
 3. The pass runs after each reconcile (every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns by default) unless `PROCEDURAL_SYNTHESIS_AUTO=false`. To run it now with the in-process backend:
 
 ```python
@@ -454,7 +454,7 @@ print(result["merged"], result["combined"], result["contradicted"])
 
 - Retired facts stay in the container with a `supersede_reason` (`duplicate`, `combined`, `contradict`); search hides them, `include_superseded=True` shows them, and `get_memory_history(memory_id, user_id)` walks a fact's chain.
 - A surviving duplicate keeps its wording and gains `merged_from`; a combined fact is tagged `sys:combined` and lists its sources in `merged_from`.
-- A user's statement is never retired into an agent-sourced fact, and agent-sourced facts are not part of the contradiction pass.
+- A user's statement is never retired into an agent-sourced fact, and agent-sourced facts are not part of the contradiction pass. A combined fact (`sys:combined`) is left out of the contradiction pass, so it cannot be retired together with the details it absorbed.
 
 ### Cost and control
 

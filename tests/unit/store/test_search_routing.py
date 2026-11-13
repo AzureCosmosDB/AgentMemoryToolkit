@@ -1,9 +1,9 @@
 """Search routing: a keyword search runs cross-partition, confined to its records by the WHERE clause.
 
-Cosmos DB ranks a ``FullTextScore`` (keyword or hybrid) query only when it runs across partitions. Sent with a
-partition key, the same query came back in one fixed order for every question (azure-sdk-for-python#42241), so a
-thread holding more memories than ``top_k`` returned the same memories whatever was asked. Vector-only searches rank
-correctly either way and keep the key.
+A ``FullTextScore`` (keyword or hybrid) query is ranked only when it runs across partitions. The Python SDK runs one
+sent with a partition key without planning it, and it came back in one fixed order for every question
+(azure-sdk-for-python#42241), so a thread holding more memories than ``top_k`` returned the same memories whatever
+was asked. Vector-only searches rank correctly either way and keep the key.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ THREAD_SEARCHES = [
     ("search_summaries", ContainerKey.SUMMARIES, {}),
     ("search_episodic", ContainerKey.MEMORIES, {}),
 ]
+# retrieve_procedures reads a user's procedures wherever they live, so it has no thread to confine it to.
+USER_SEARCHES = [*THREAD_SEARCHES, ("retrieve_procedures", ContainerKey.MEMORIES, {})]
 
 
 def _store() -> tuple[MemoryStore, dict[ContainerKey, MagicMock]]:
@@ -80,7 +82,7 @@ def test_a_vector_only_search_of_a_thread_keeps_the_partition_key(method, contai
     assert "full_text_score_scope" not in call
 
 
-@pytest.mark.parametrize(("method", "container_key", "options"), THREAD_SEARCHES)
+@pytest.mark.parametrize(("method", "container_key", "options"), USER_SEARCHES)
 def test_a_keyword_search_of_the_users_threads_ranks_with_local_statistics(method, container_key, options):
     store, containers = _store()
 
@@ -94,6 +96,16 @@ def test_a_keyword_search_of_the_users_threads_ranks_with_local_statistics(metho
     assert call["full_text_score_scope"] == "Local"
 
 
+def test_a_vector_only_search_for_procedures_sets_no_statistics_scope():
+    store, containers = _store()
+
+    store.retrieve_procedures(user_id="u1", search_terms=NO_KEYWORDS)
+
+    (call,) = _calls(containers[ContainerKey.MEMORIES])
+    assert "FullTextScore" not in call["query"]
+    assert "full_text_score_scope" not in call
+
+
 def test_a_keyword_search_with_a_thread_keeps_the_user_scoped_types_reachable():
     store, containers = _store()
 
@@ -104,18 +116,37 @@ def test_a_keyword_search_with_a_thread_keeps_the_user_scoped_types_reachable():
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call["query"]
 
 
-def test_a_full_text_query_sent_with_a_partition_key_is_rejected():
-    """Cosmos DB would return it unranked; failing loudly keeps a future search path from repeating the bug."""
+@pytest.mark.parametrize(
+    "call",
+    ["FullTextScore(c.content, 'hotels')", "FULLTEXTSCORE(c.content, 'hotels')", "fulltextscore (c.content, 'hotels')"],
+    ids=["mixed-case", "upper-case", "lower-case-with-a-space"],
+)
+def test_a_full_text_query_sent_with_a_partition_key_is_rejected(call):
+    """The Python SDK would return it unranked; failing loudly keeps a future search path from repeating the bug."""
     store, containers = _store()
 
-    with pytest.raises(ValidationError, match="42241"):
+    with pytest.raises(ValidationError, match=r"Python SDK .*42241"):
         store.query(
-            "SELECT TOP 1 c.id FROM c ORDER BY RANK FullTextScore(c.content, 'hotels')",
+            f"SELECT TOP 1 c.id FROM c ORDER BY RANK {call}",
             [],
             container_key=ContainerKey.MEMORIES,
             partition_key=["u1", "t1"],
         )
     containers[ContainerKey.MEMORIES].query_items.assert_not_called()
+
+
+def test_a_query_that_only_names_a_field_like_the_function_keeps_its_partition_key():
+    store, containers = _store()
+
+    store.query(
+        "SELECT TOP 1 c.id FROM c WHERE c.fulltextscore = 1",
+        [],
+        container_key=ContainerKey.MEMORIES,
+        partition_key=["u1", "t1"],
+    )
+
+    (call,) = _calls(containers[ContainerKey.MEMORIES])
+    assert call["partition_key"] == ["u1", "t1"]
 
 
 def test_a_callers_own_full_text_query_keeps_the_default_statistics():

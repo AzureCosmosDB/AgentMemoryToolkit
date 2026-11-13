@@ -104,7 +104,14 @@ def _make_pipeline() -> AsyncPipelineService:
     p._commit_fold = AsyncMock(side_effect=lambda survivor, losers, **kwargs: [doc["id"] for doc in losers])
     p._mark_superseded = AsyncMock(return_value=True)
     p._container = MagicMock()
-    p._container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="no dedup cursor yet"))
+    p._docs = {}  # the facts a re-read returns, by id (filled by `_run`); anything else is not found
+
+    def read_item(item, partition_key):
+        if item not in p._docs:
+            raise CosmosResourceNotFoundError(message="not found")
+        return dict(p._docs[item])
+
+    p._container.read_item = AsyncMock(side_effect=read_item)
     p._container.create_item = AsyncMock(side_effect=lambda body: body)
     p._container.replace_item = AsyncMock()
     p._memories_container = p._container
@@ -113,7 +120,16 @@ def _make_pipeline() -> AsyncPipelineService:
     return p
 
 
-async def _run(p, seeds, neighbors, model, *, deadline=None):
+async def _run(p, seeds, neighbors, model, *, deadline=None, changed=None):
+    # The facts the pass read are still there, unchanged, when it re-reads them before writing; `changed`
+    # maps a fact's ID to what it became meanwhile, or to None when it was deleted.
+    p._docs.update({doc["id"]: doc for doc in [*seeds, *(doc for docs in neighbors.values() for doc in docs)]})
+    for fact_id, replacement in (changed or {}).items():
+        if replacement is None:
+            p._docs.pop(fact_id, None)
+        else:
+            p._docs[fact_id] = replacement
+
     def query_items(query, parameters, **kwargs):
         params = {item["name"]: item["value"] for item in parameters}
         if "VectorDistance" in query:
@@ -312,6 +328,55 @@ class TestAsyncCombine:
         result = await _run(p, seeds, neighbours, model)
 
         assert result["synthesized"] == 3 and model.max_active == workers
+
+
+class TestAsyncAMemberChangedSinceThePassReadIt:
+    @pytest.mark.parametrize(
+        "change",
+        [
+            pytest.param(None, id="deleted"),
+            pytest.param({"_etag": "etag-newer"}, id="edited"),
+            pytest.param({"superseded_by": "other"}, id="retired"),
+        ],
+    )
+    async def test_the_combined_fact_is_not_written(self, change):
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        replacement = None if change is None else {**partner, **change}
+        model = _Model(verdicts, [_write(["M1", "M2"], BOTH)], [_holds(2)])
+
+        result = await _run(p, [seed], {"f2": [partner]}, model, changed={"f1": replacement})
+
+        assert _created(p) == [] and _retired(p) == []
+        assert (result["synthesized"], result["combined"], result["combine_failed"]) == (0, 0, 1)
+
+
+class TestAsyncACombinedFactIsRedactedBeforeItIsEmbedded:
+    async def test_the_vector_survives_the_write_guard_and_matches_the_stored_text(self):
+        token = "ghp_" + "A1b2" * 9  # built here so the source holds no token literal
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        model = _Model(verdicts, [_write(["M1", "M2"], f"{BOTH} Its token is {token}.")], [_holds(2)])
+
+        await _run(p, [seed], {"f2": [partner]}, model)
+
+        [body] = _created(p)
+        assert token not in body["content"] and "[REDACTED-SECRET]" in body["content"]
+        assert body["embedding"] == [0.1, 0.2, 0.3]
+        assert token not in p._embed_one.call_args.args[0]
+
+
+class TestAsyncReconcilePoolExcludesCombinedFacts:
+    async def test_the_pool_query_leaves_out_combined_and_agent_facts(self):
+        p = AsyncPipelineService.__new__(AsyncPipelineService)
+        p._memories_container = MagicMock()
+        p._query_items = AsyncMock(return_value=[])
+
+        await p._active_memories_for_reconcile("u1", "fact", 50)
+
+        query = p._query_items.call_args.kwargs["query"]
+        assert "NOT ARRAY_CONTAINS(c.tags, 'sys:combined')" in query
+        assert "NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact')" in query
 
 
 class TestAsyncCommitCombine:

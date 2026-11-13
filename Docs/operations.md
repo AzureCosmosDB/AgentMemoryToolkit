@@ -12,9 +12,9 @@ Runtime knobs for an Agent-Memory-Toolkit deployment. Most ops levers live in `.
 | user_summary | never | container default |
 | fact | never | container default; supersession handles aging |
 | procedural | never | container default; supersession handles aging |
-| counter | 90 d | container default (counter container) |
+| counter | 90 d | container default (counter container; every document in it) |
 
-The counter container's TTL is set when the container is created, by `create_memory_store()` or the Bicep template. A container that already exists keeps its current setting, because `create_container_if_not_exists` does not change it. A counter idle for 90 days expires, and its thread starts counting again from zero.
+The counter container's TTL is set when the container is created, by `create_memory_store()` or the Bicep template. It is the container's default, so it applies to every document in it, not only thread counters: user counters and the extraction watermark kept on a thread counter go with them, each 90 days after its last update. A container that already exists keeps its current setting, because `create_container_if_not_exists` does not change it. When a counter expires, its thread or user starts counting again from zero.
 
 Facts and procedures have no default expiry. Deleting one with `delete_memory` also deletes the records folded into it: duplicates, combined-fact sources and facts retired into a procedure (see [`public_api.md`](public_api.md)).
 

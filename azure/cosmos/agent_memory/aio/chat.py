@@ -175,7 +175,8 @@ class AsyncChatClient:
             If the endpoint or credentials are missing.
         LLMError
             If the reply is still empty after the last retry, or the model returns
-            content filtering, a refusal, or an unexpected tool-only response.
+            content filtering, a refusal, an unexpected tool-only response, or an
+            empty reply cut off at the output limit (``finish_reason="length"``).
         openai.RateLimitError, openai.APIError
             Propagated from the SDK after retries are exhausted.
         """

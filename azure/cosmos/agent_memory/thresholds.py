@@ -102,7 +102,7 @@ DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "fact": -1,
     "procedural": -1,
 }
-# Turn counters expire 90 days after their last update: the counter container's default TTL.
+# Counter documents expire 90 days after their last update: the counter container's default TTL.
 COUNTER_TTL_SECONDS = 7_776_000
 
 _TRUTHY = {"true", "1", "yes", "on", "t", "y"}

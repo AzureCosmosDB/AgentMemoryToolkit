@@ -38,7 +38,7 @@ from azure.cosmos.agent_memory.services._dedup import (
     specifics_preserved,
     without_system_fields,
 )
-from azure.cosmos.agent_memory.services._pipeline_helpers import clamp_unit_interval
+from azure.cosmos.agent_memory.services._pipeline_helpers import clamp_unit_interval, is_retryable_llm_error
 
 PROCEDURAL_THREAD_ID = "__procedural__"
 PROCEDURE_CURSOR_ID = "procedure_cursor"
@@ -63,6 +63,18 @@ STANDING_RULES_MAX = 10
 STANDING_RULES_MAX_BYTES = 2048
 STANDING_HEADER = "# Standing instructions from the user"
 SITUATIONAL_HEADER = "## Apply only when the situation matches"
+
+# Statuses of a failed embedding call or Cosmos write that a later run can expect to get past.
+_TRANSIENT_STATUSES = frozenset({408, 429, 449, 500, 502, 503, 504})
+
+
+def is_transient_write_failure(exc: BaseException) -> bool:
+    """Whether a failed embedding call or Cosmos write is worth retrying on a later run:
+    throttling, a timeout, a server error or a connection failure, but not a bad request or a conflict."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUSES
+    return is_retryable_llm_error(exc)
 
 
 @dataclass(frozen=True)
@@ -407,13 +419,14 @@ def with_support(
     out = dict(doc)
     out["source_fact_ids"] = sorted(fact_ids)
     out["source_episodic_ids"] = sorted(episode_ids)
-    dates = {source_date(source) for source in new} - {"unknown"}
-    out["support_dates"] = sorted({*(doc.get("support_dates") or []), *dates})
     user_facts = [s for s in new if s.get("type") != "episodic" and source_speaker(s) == "user"]
+    good_episodes = [s for s in new if s.get("type") == "episodic" and _outcome_status(s) in GOOD_OUTCOMES]
+    # Support dates count the user's own statements and episodes that went well, not what the
+    # assistant said or episodes that failed, so a habit cannot become active on assistant-only evidence.
+    dates = {source_date(s) for s in [*user_facts, *good_episodes]} - {"unknown"}
+    out["support_dates"] = sorted({*(doc.get("support_dates") or []), *dates})
     out["user_support_count"] = int(doc.get("user_support_count") or 0) + len(user_facts)
-    practiced = {source_date(s) for s in new if s.get("type") == "episodic" and _outcome_status(s) in GOOD_OUTCOMES} - {
-        "unknown"
-    }
+    practiced = {source_date(s) for s in good_episodes} - {"unknown"}
     out["practiced_dates"] = sorted({*(doc.get("practiced_dates") or []), *practiced})
     out["evidence"] = sorted({*(doc.get("evidence") or []), *([evidence] if supported else [])})
     out["status"] = "active" if doc.get("status") == "active" else procedure_status(out)
@@ -665,9 +678,11 @@ def standing_rules(procedures: Iterable[Mapping[str, Any]], today: str) -> tuple
     kept: list[dict[str, Any]] = []
     used = 0
     for doc in rules:
-        size = len(f"- {rendered_rule(doc)}\n".encode())
-        if len(kept) == STANDING_RULES_MAX or used + size > STANDING_RULES_MAX_BYTES:
+        if len(kept) == STANDING_RULES_MAX:
             break
+        size = len(f"- {rendered_rule(doc)}\n".encode())
+        if used + size > STANDING_RULES_MAX_BYTES:
+            continue  # one oversized rule must not empty the block; later, smaller ones may still fit
         kept.append(doc)
         used += size
     return kept, len(rules) - len(kept)

@@ -11,7 +11,13 @@ from azure.cosmos.agent_memory._container_routing import (
     ContainerKey,
     container_key_for_type,
 )
-from azure.cosmos.agent_memory._curation import mark_secret, sanitize_record, sanitize_text
+from azure.cosmos.agent_memory._curation import (
+    drop_secret_tags,
+    embedding_text,
+    mark_secret,
+    sanitize_record,
+    sanitize_text,
+)
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
     _build_memory_query_builder,
@@ -44,6 +50,7 @@ from azure.cosmos.agent_memory.store._search_helpers import (
     query_scope,
     require_search_terms,
     top_literal,
+    uses_full_text_score,
 )
 from azure.cosmos.agent_memory.thresholds import default_ttl_for
 
@@ -127,6 +134,39 @@ class MemoryStore:
         """Return the container that owns documents of ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
 
+    def _embed_for_write(self, record_id: Any, text: str, *, operation: str) -> Optional[list[float]]:
+        """Return the vector of ``text``; ``None`` when there is no text or embeddings client, or embedding fails."""
+        if not text or self._embeddings_client is None:
+            return None
+        try:
+            return self._embeddings_client.generate(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "%s: embedding generation failed for %s (%s); proceeding without embedding",
+                operation,
+                record_id,
+                describe_exception(exc),
+            )
+            return None
+
+    def _refresh_embedding(self, doc: dict[str, Any], built_from: str, vectors: dict[str, list[float]]) -> None:
+        """Keep the vector of an updated ``doc`` in step with its text.
+
+        ``built_from`` is the text the stored vector encodes. The write guard drops the vector when it redacts that
+        text, and a changed text leaves it stale. Either way it is rebuilt from the text now stored, or left off the
+        record when that cannot be done. ``vectors`` remembers what was embedded, so a retry does not embed it again.
+        """
+        text = embedding_text(doc)
+        if doc.get("embedding") and text == built_from:
+            return
+        doc.pop("embedding", None)
+        if text not in vectors:
+            vector = self._embed_for_write(doc.get("id"), text, operation="update")
+            if vector is None:
+                return
+            vectors[text] = vector
+        doc["embedding"] = vectors[text]
+
     def read_item(self, item_id: str, partition_key: Any, *, container_key: ContainerKey) -> dict[str, Any]:
         """Point-read a document from the explicitly selected split container."""
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -170,10 +210,11 @@ class MemoryStore:
         operation: str,
         container: Any = None,
     ) -> list[dict[str, Any]]:
-        if partition_key is not None and "FullTextScore(" in query:
+        if partition_key is not None and uses_full_text_score(query):
             raise ValidationError(
-                "Cosmos DB ignores FullTextScore ranking in a query sent with a partition key "
-                "(Azure/azure-sdk-for-python#42241); filter on the partition key fields in the WHERE clause instead"
+                "The Python SDK runs a query sent with a partition key without planning it, so FullTextScore "
+                "ranking is ignored (Azure/azure-sdk-for-python#42241); filter on the partition key fields in the "
+                "WHERE clause instead"
             )
         kwargs: dict[str, Any] = {"query": query, "parameters": parameters or None}
         if partition_key is not None:
@@ -189,7 +230,11 @@ class MemoryStore:
             raise CosmosOperationError(f"{operation} failed: {exc}") from exc
 
     def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
-        """Upsert a pre-built Cosmos memory document and return the stored body."""
+        """Upsert a pre-built Cosmos memory document and return the stored body.
+
+        When the write guard redacts the text of a record that carries a vector, the vector is rebuilt from the
+        redacted text; without an embeddings client (or if embedding fails) the record is stored without one.
+        """
         body = self._prepare_doc(record)
         memory_type = body.get("type")
         if memory_type not in _CONTAINER_FOR_TYPE:
@@ -197,6 +242,10 @@ class MemoryStore:
                 f"upsert_memory: record id={body.get('id')!r} has invalid type={memory_type!r}. "
                 f"Set 'type' to one of {sorted(_CONTAINER_FOR_TYPE)} before calling upsert_memory."
             )
+        if record.get("embedding") and not body.get("embedding"):
+            vector = self._embed_for_write(body.get("id"), embedding_text(body), operation="upsert_memory")
+            if vector is not None:
+                body["embedding"] = vector
         container = self._container_for_type(memory_type)
         try:
             response = container.upsert_item(body=body)
@@ -431,7 +480,12 @@ class MemoryStore:
         role: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Update a memory document via point read in the container for ``memory_type``."""
+        """Update a memory document via point read in the container for ``memory_type``.
+
+        The write guard redacts credentials in the stored document, which drops its vector. A vector is also stale
+        once the text it was built from changes. Either way it is rebuilt from the redacted text, or left off the
+        record when the store has no embeddings client or embedding fails.
+        """
         import random
         import time
 
@@ -444,6 +498,7 @@ class MemoryStore:
         container = self._container_for_type(memory_type)
         max_attempts = 5
         attempts = 0
+        vectors: dict[str, list[float]] = {}
         while True:
             try:
                 doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
@@ -456,6 +511,7 @@ class MemoryStore:
             if actual_type != memory_type:
                 raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
 
+            built_from = embedding_text(doc) if doc.get("embedding") else None
             if content is not None:
                 doc["content"] = content
             if role is not None:
@@ -465,6 +521,8 @@ class MemoryStore:
             redacted = sanitize_record(doc)
             if redacted:
                 logger.warning("redacted literal secrets before write id=%s patterns=%s", memory_id, redacted)
+            if built_from is not None:
+                self._refresh_embedding(doc, built_from, vectors)
             doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             kwargs: dict[str, Any] = {"item": doc["id"], "body": doc}
@@ -718,6 +776,11 @@ class MemoryStore:
 
         _validate_taggable_type(memory_type)
         container = self._container_for_type(memory_type)
+        secret_patterns: list[str] = []
+        if add:
+            tags, secret_patterns = drop_secret_tags(tags)
+            if secret_patterns:
+                logger.warning("redacted literal secrets before write id=%s patterns=%s", memory_id, secret_patterns)
         normalized = {t.strip().lower() for t in tags if t and t.strip()}
         max_attempts = 5
         attempts = 0
@@ -726,6 +789,7 @@ class MemoryStore:
                 doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
             except CosmosResourceNotFoundError as exc:
                 raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+            mark_secret(doc, secret_patterns)
             existing_tags = set(doc.get("tags", []))
             if add:
                 existing_tags.update(normalized)
@@ -1298,6 +1362,7 @@ class MemoryStore:
             container_key=ContainerKey.MEMORIES,
             partition_key=partition_key,
             cross_partition=cross_partition,
+            full_text_score_scope=FULL_TEXT_SCORE_SCOPE if keywords else None,
         )
 
     def _embed(self, text: str) -> list[float]:

@@ -13,6 +13,7 @@ import time
 import pytest
 
 from azure.cosmos.agent_memory import CosmosMemoryClient
+from azure.cosmos.agent_memory.services._procedures import procedure_status
 
 pytestmark = [
     pytest.mark.integration,
@@ -204,19 +205,27 @@ def test_live_procedural_synthesis_retrieval_and_context(
         result = procedural_memory.synthesize_procedural(unique_user_id)
         assert result.get("status") == "synthesized", result
         assert result.get("procedures_created", 0) >= 1, result
+        counts = {"procedures_updated", "procedures_reinforced", "procedures_skipped", "facts_retired"}
+        assert counts <= set(result), result
 
         procedures = procedural_memory.get_procedural_memories(unique_user_id)
         assert len(procedures) >= result.get("procedures_created", 0)
         for procedure in procedures:
             assert procedure.get("type") == "procedural"
             assert procedure.get("name")
-            assert procedure.get("procedure_kind")
+            assert procedure.get("procedure_kind") in {"instruction", "habit", "skill"}
+            assert procedure.get("applies") in {"always", "when"}
             assert procedure.get("status") in {"active", "candidate"}
             assert procedure.get("retrieval_text")
+            # The status follows from the evidence gathered; the model never sets it.
+            assert procedure.get("status") == procedure_status(procedure), procedure
 
         active = [procedure for procedure in procedures if procedure.get("status") == "active"]
         candidates = [procedure for procedure in procedures if procedure.get("status") == "candidate"]
-        assert active, f"Expected at least one active procedure from explicit requirements, got {procedures}"
+        assert active, (
+            "Expected the user's directive to always confirm before deleting to become an active procedure, "
+            f"got {procedures}"
+        )
 
         fact_only = [
             procedure
@@ -233,11 +242,21 @@ def test_live_procedural_synthesis_retrieval_and_context(
         if episode_only:
             assert all(procedure.get("status") == "candidate" for procedure in episode_only), episode_only
 
+        # A run reads only what is new, so with nothing written since, another makes no model call.
+        again = procedural_memory.synthesize_procedural(unique_user_id)
+        assert again.get("status") == "unchanged", again
+
         task = "delete destructive irreversible confirmation before deleting data"
         active_ids = {procedure["id"] for procedure in active}
         retrieved = _wait_for_procedure_retrieval(procedural_memory, unique_user_id, task, active_ids)
         assert retrieved, "Expected retrieve_procedures to return an active procedure"
         assert retrieved[0].get("id") in active_ids, retrieved
+
+        # Search shows a procedure only while it is active.
+        searched = procedural_memory.search_cosmos(
+            search_terms=task, user_id=unique_user_id, memory_types=["procedural"], top_k=10
+        )
+        assert {hit["id"] for hit in searched} <= active_ids, searched
 
         context = procedural_memory.build_procedural_context(unique_user_id, task=task)
         assert context.strip()

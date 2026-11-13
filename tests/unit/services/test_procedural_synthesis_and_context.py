@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from azure.cosmos.exceptions import (
     CosmosAccessConditionFailedError,
+    CosmosHttpResponseError,
     CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
@@ -771,6 +772,29 @@ def test_synthesize_procedural_skips_an_unusable_answer_and_moves_on() -> None:
     assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs)
 
 
+@pytest.mark.parametrize(
+    ("failure", "status", "cursor_moved"),
+    [
+        (CosmosHttpResponseError(status_code=429, message="throttled"), "deferred", False),
+        (CosmosHttpResponseError(status_code=503, message="unavailable"), "deferred", False),
+        (CosmosHttpResponseError(status_code=400, message="bad request"), "synthesized", True),
+    ],
+    ids=["throttled", "unavailable", "bad-request"],
+)
+def test_a_failed_procedure_write_moves_the_cursor_only_when_a_retry_could_succeed(
+    failure, status, cursor_moved
+) -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+    service._embedded_procedure = MagicMock(side_effect=failure)  # type: ignore[method-assign]
+
+    result = service.synthesize_procedural("u1")
+
+    assert result["status"] == status
+    assert procedures_by_name(memories) == {}
+    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs) is cursor_moved
+
+
 def _twelve_facts() -> list[dict[str, Any]]:
     return [fact(f"fact-{i:02d}", f"The user stated rule {i}.", ts=i + 1) for i in range(12)]
 
@@ -958,6 +982,16 @@ def test_build_procedural_context_is_empty_when_a_task_finds_nothing_and_there_a
     service, _ = _service(Memories([rule("Draft", applies="when", status="candidate")]), [])
 
     assert service.build_procedural_context("u1", task="anything") == ""
+
+
+def test_build_procedural_context_keeps_the_standing_rules_when_the_situational_lookup_fails(caplog) -> None:
+    service, _ = _service(Memories([rule("Always"), rule("Reviews", applies="when", embedding=[0.0, 1.0])]), [])
+    service._embeddings.generate = MagicMock(side_effect=RuntimeError("quoted-model-text"))  # type: ignore[method-assign]
+
+    context = service.build_procedural_context("u1", task="review this pull request")
+
+    assert context.splitlines() == [STANDING_HEADER, "- Always rule."]
+    assert "RuntimeError" in caplog.text and "quoted-model-text" not in caplog.text
 
 
 def test_build_procedural_context_never_lists_the_steps_of_a_skill() -> None:

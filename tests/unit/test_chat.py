@@ -298,6 +298,9 @@ def test_all_transient_empty_reply_shapes_share_the_retry_budget(shape):
         ("tool_calls", "", None, "unexpected_tool_response"),
         ("tool_calls", "  \n", None, "unexpected_tool_response"),
         ("function_call", "", None, "unexpected_tool_response"),
+        ("length", None, None, "output_truncated"),
+        ("length", "", None, "output_truncated"),
+        ("length", "  \n", None, "output_truncated"),
     ],
 )
 def test_terminal_empty_replies_are_not_retried(reason, content, refusal, code):
@@ -308,6 +311,13 @@ def test_terminal_empty_replies_are_not_retried(reason, content, refusal, code):
 
     assert create.call_count == 1
     assert not is_retryable_llm_error(failure.value)
+
+
+def test_a_partial_reply_cut_off_at_the_output_limit_is_returned():
+    client, create = _client_replying(_reply('{"facts": [', finish_reason="length"))
+
+    assert client.generate(MESSAGES, max_retries=3, base_delay=0) == '{"facts": ['
+    assert create.call_count == 1
 
 
 def test_retry_warning_describes_the_error_without_its_message(monkeypatch, caplog):

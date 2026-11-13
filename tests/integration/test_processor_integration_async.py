@@ -14,6 +14,16 @@ from azure.cosmos.agent_memory.aio.processors import (
     ProcessThreadResult,
 )
 
+# What ``synthesize_procedural`` returns after a run that learned something: counts, never the procedures.
+SYNTHESIZED = {
+    "status": "synthesized",
+    "procedures_created": 1,
+    "procedures_updated": 0,
+    "procedures_reinforced": 0,
+    "procedures_skipped": 0,
+    "facts_retired": 0,
+}
+
 
 def _build_client(processor=None) -> AsyncCosmosMemoryClient:
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
@@ -48,7 +58,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
             }
         )
         pipeline.reconcile_memories = AsyncMock(return_value={"kept": 0, "merged": 0, "contradicted": 0})
-        pipeline.synthesize_procedural = AsyncMock(return_value={"id": "proc-1", "type": "procedural"})
+        pipeline.synthesize_procedural = AsyncMock(return_value=SYNTHESIZED)
         pipeline.generate_user_summary = AsyncMock(return_value={"id": "us-1", "type": "user_summary"})
 
         processor = AsyncInProcessProcessor(pipeline=pipeline)
@@ -73,14 +83,15 @@ class TestAsyncInProcessProcessNowEndToEnd:
             "episodic_count": 0,
             "updated_count": 0,
         }
+        assert result.procedural == SYNTHESIZED
         client.get_thread.assert_awaited_once_with(thread_id="thread-paris", user_id="u-paris")
         pipeline.generate_thread_summary.assert_awaited_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_awaited_once_with("u-paris", "thread-paris")
         assert pipeline.reconcile_memories.await_count == 2
         pipeline.reconcile_memories.assert_has_awaits(
             [
-                mock_call("u-paris", n=50, memory_type="fact", full_rebuild=False),
-                mock_call("u-paris", n=50, memory_type="episodic", full_rebuild=False),
+                mock_call("u-paris", n=50, memory_type="fact"),
+                mock_call("u-paris", n=50, memory_type="episodic"),
             ]
         )
 

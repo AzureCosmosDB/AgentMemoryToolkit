@@ -667,9 +667,9 @@ class ProceduralRecord(MemoryRecordBase):
     successful_uses: int = 0
     failed_uses: int = 0
 
-    # Support: the kinds of evidence seen, the distinct dates of supporting sources,
-    # how many supporting facts the user stated, and the distinct dates of supporting
-    # episodes whose outcome was successful or partially successful.
+    # Support: the kinds of evidence seen, the distinct dates on which the user's own statements or
+    # successful (or partially successful) episodes supported it, how many supporting facts the user
+    # stated, and the distinct dates of those successful episodes.
     evidence: list[ProcedureEvidence] = Field(default_factory=list)
     support_dates: list[str] = Field(default_factory=list)
     user_support_count: int = 0

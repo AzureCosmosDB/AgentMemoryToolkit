@@ -600,6 +600,15 @@ class TestReconcileNullCheckUsesIsNull:
         sql = (call.kwargs.get("query") or call.args[0]) if call else ""
         assert "NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact')" in sql
 
+    def test_reconcile_pool_excludes_combined_facts(self):
+        p = _make_pipeline()
+        p._container.query_items.return_value = iter([])
+        p._run_prompty = MagicMock(return_value=json.dumps({}))
+        p.reconcile_memories("u1")
+        call = p._container.query_items.call_args
+        sql = (call.kwargs.get("query") or call.args[0]) if call else ""
+        assert "NOT ARRAY_CONTAINS(c.tags, 'sys:combined')" in sql
+
 
 class TestFactsTextHandlesNullConfidence:
     """Pool facts with ``confidence=None`` / ``salience=None`` (legacy

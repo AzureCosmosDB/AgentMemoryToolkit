@@ -66,7 +66,8 @@ def count_tokens(text: str, model: str = "gpt-4o") -> int:
     encoding = _encoding_for_model(model)
     if encoding is None:
         return (len(text) // _FALLBACK_CHARS_PER_TOKEN) + 1
-    return len(encoding.encode(text))
+    # Text that spells a special token (a pasted chat template) is counted as the plain text it is.
+    return len(encoding.encode(text, disallowed_special=()))
 
 
 def truncate_text_to_token_budget(
@@ -106,7 +107,7 @@ def truncate_text_to_token_budget(
         )
         return text[:max_chars]
 
-    tokens = encoding.encode(text)
+    tokens = encoding.encode(text, disallowed_special=())
     if len(tokens) <= max_tokens:
         return text
     truncated = encoding.decode(tokens[:max_tokens])

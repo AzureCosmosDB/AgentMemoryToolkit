@@ -120,7 +120,7 @@ Search always uses hybrid vector/full-text ranking when keyword extraction finds
 
 If search returns documents but scores look poor, check that records have an `embedding` field and that the query uses similar language to the stored memory content.
 
-Keyword searches read across partitions. Cosmos DB ignores `FullTextScore` ranking in a query sent with a partition key ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)), so a keyword query filters on `c.user_id` and `c.thread_id` in the `WHERE` clause instead and sets `full_text_score_scope="Local"`. Results stay confined to the same user and thread, but a large container costs more RUs than a single-partition read. A vector-only query with both `user_id` and `thread_id` still reads one partition. If a custom query sent with a partition key raises a `ValidationError` that mentions `FullTextScore`, drop the partition key and filter on the partition key fields in the `WHERE` clause.
+Keyword searches read across partitions. The Python SDK skips query planning for a query sent with a partition key, so `FullTextScore` ranking is ignored ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)); a keyword query therefore filters on `c.user_id` and `c.thread_id` in the `WHERE` clause instead and sets `full_text_score_scope="Local"`. Results stay confined to the same user and thread, but a large container costs more RUs than a single-partition read. A vector-only query with both `user_id` and `thread_id` still reads one partition. If a custom query sent with a partition key raises a `ValidationError` that mentions `FullTextScore`, drop the partition key and filter on the partition key fields in the `WHERE` clause.
 
 Search hides some records on purpose:
 
@@ -157,7 +157,7 @@ The toolkit's own logs follow the same rule: no exception message, memory text, 
 
 Reconcile and procedure activities stop starting model calls after `ACTIVITY_TIME_BUDGET_SECONDS` (default `240`, minimum `30`) and continue from their cursors on the next run. If one still reaches the Function App timeout, lower the setting.
 
-An empty model reply is retried with exponential backoff (about a minute over six attempts) and then raises `LLMError`, so an activity can stay busy that long before it fails. A content-filtered, refused or tool-only reply raises `LLMError` at once and is not retried.
+An empty model reply is retried with exponential backoff (about a minute over six attempts) and then raises `LLMError`, so an activity can stay busy that long before it fails. A content-filtered, refused or tool-only reply, or one cut off at the output limit with no text, raises `LLMError` at once and is not retried.
 
 ---
 

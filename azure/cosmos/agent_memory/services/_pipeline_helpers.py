@@ -201,6 +201,7 @@ _NON_RETRYABLE_LLM_MARKERS = (
     "content_filter",
     "model_refusal",
     "unexpected_tool_response",
+    "output_truncated",
     "content management policy",
     "context_length_exceeded",
     "maximum context length",

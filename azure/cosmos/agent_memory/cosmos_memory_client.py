@@ -774,8 +774,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
         (see ``azure.cosmos.agent_memory._slots``): the user's best-matching preference fact
         not already shown, and their best-matching active situational procedure
         (``applies="when"``); procedures then leave the ranked results. Slot candidates are
-        ranked by vector similarity alone and use the search's own filters, and an empty
-        slot takes the next ranked result. A slotted result's ``retrieval`` dict names its
+        ranked by vector similarity alone and use the search's own filters (the procedure
+        slot ignores ``role``, ``tags_all``, ``tags_any``, ``min_salience`` and
+        ``min_confidence``, which no procedure can meet), and an empty slot takes the next
+        ranked result. A slotted result's ``retrieval`` dict names its
         ``slot`` (``preference``, ``procedure`` or ``backfill``) and its ``rank``. Slots need
         ``user_id`` and are skipped without it or with ``memory_id``; a search for procedures
         alone ranks them, so ``procedure_slot`` has no effect there. Search shows only

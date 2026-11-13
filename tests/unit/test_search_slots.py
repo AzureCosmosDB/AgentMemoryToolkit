@@ -19,6 +19,23 @@ RANKED = [{"id": f"fact_{i}", "content": f"memory {i}"} for i in range(5)]
 PREFERENCE = {"id": "pref_a", "content": "The user prefers pnpm.", "metadata": {"category": "preference"}}
 PROCEDURE = {"id": "proc_a", "content": "Run targeted tests before reporting success.", "type": "procedural"}
 CLIENT_LOGGER = "azure.cosmos.agent_memory.cosmos_memory_client"
+# A procedure has no salience or confidence, its role is "system" and its tags are the pipeline's own, so
+# these filters could never match one.
+FACT_ONLY_FILTERS = {
+    "role": "user",
+    "tags_all": ["work"],
+    "tags_any": ["travel"],
+    "min_salience": 0.2,
+    "min_confidence": 0.5,
+}
+# Filters that read fields every memory has.
+SCOPE_FILTERS = {
+    "thread_id": "t1",
+    "exclude_tags": ["sys:secret"],
+    "include_superseded": True,
+    "created_after": "2026-01-01T00:00:00+00:00",
+    "created_before": "2026-12-31T00:00:00+00:00",
+}
 
 
 # --- planning and composition --------------------------------------------------------------------
@@ -102,6 +119,30 @@ def test_the_slot_searches_reuse_the_searchs_arguments():
         "top_k": 1,
     }
     assert base["top_k"] == 5 and base["memory_types"] == ["fact"]
+
+
+def test_the_procedure_slot_drops_the_filters_no_procedure_can_meet():
+    base = {
+        "search_terms": "q",
+        "user_id": "u1",
+        "top_k": 5,
+        "memory_types": ["fact"],
+        "query_embedding": [0.1, 0.2],
+        **SCOPE_FILTERS,
+        **FACT_ONLY_FILTERS,
+    }
+
+    procedure = _slots.procedure_search(base)
+    preference = _slots.preference_search(base, 3)
+
+    assert set(FACT_ONLY_FILTERS).isdisjoint(procedure)
+    assert {key: procedure[key] for key in (*SCOPE_FILTERS, "user_id", "query_embedding")} == {
+        **SCOPE_FILTERS,
+        "user_id": "u1",
+        "query_embedding": [0.1, 0.2],
+    }
+    assert {key: preference[key] for key in FACT_ONLY_FILTERS} == FACT_ONLY_FILTERS, "facts keep every filter"
+    assert set(FACT_ONLY_FILTERS) <= set(base), "the search's own arguments are not edited"
 
 
 # --- store filters -------------------------------------------------------------------------------
@@ -209,6 +250,25 @@ def test_the_procedure_slot_search_is_a_vector_search_of_the_users_situational_p
     assert "partition_key" not in call, "procedures live under a sentinel thread, so a thread cannot key the query"
 
 
+def test_the_procedure_slot_query_asks_for_nothing_a_procedure_lacks():
+    store, memories, _ = _store()
+    search = {"search_terms": "Hotels in Lisbon", "user_id": "u1", "top_k": 5, "memory_types": ["fact"]}
+
+    store.search(**_slots.procedure_search({**search, **SCOPE_FILTERS, **FACT_ONLY_FILTERS}))
+
+    where = memories.query_items.call_args.kwargs["query"].split(" WHERE ", 1)[1]
+    for fact_only in (
+        "c.role =",
+        "c.salience >=",
+        "c.confidence >=",
+        "ARRAY_CONTAINS(c.tags, @tag_0)",
+        "ARRAY_CONTAINS(c.tags, @any_tag_0)",
+    ):
+        assert fact_only not in where
+    for scope in ("c.user_id = @user_id", "NOT ARRAY_CONTAINS(c.tags, @exc_tag_0)", "c.created_at >= @created_after"):
+        assert scope in where
+
+
 def test_a_supplied_query_embedding_is_not_embedded_again():
     store, memories, embeddings = _store()
 
@@ -308,40 +368,21 @@ def test_slot_searches_read_only_what_the_search_itself_may_read():
     client.search_cosmos(
         "q",
         user_id="u1",
-        thread_id="t1",
-        role="user",
         top_k=5,
-        tags_all=["work"],
-        tags_any=["travel"],
-        exclude_tags=["private"],
-        include_superseded=True,
-        min_salience=0.2,
-        min_confidence=0.5,
-        created_after="2026-01-01T00:00:00+00:00",
-        created_before="2026-12-31T00:00:00+00:00",
         preference_slot=True,
         procedure_slot=True,
+        **SCOPE_FILTERS,
+        **FACT_ONLY_FILTERS,
     )
 
-    shared = (
-        "search_terms",
-        "user_id",
-        "thread_id",
-        "role",
-        "tags_all",
-        "tags_any",
-        "exclude_tags",
-        "include_superseded",
-        "min_salience",
-        "min_confidence",
-        "created_after",
-        "created_before",
-        "active_procedures_only",
-    )
-    ranked, *slots = (call.kwargs for call in store.search.call_args_list)
-    assert len(slots) == 2
-    for slot in slots:
-        assert {key: slot[key] for key in shared} == {key: ranked[key] for key in shared}
+    shared = ("search_terms", "user_id", "active_procedures_only", *SCOPE_FILTERS)
+    ranked, preference, procedure = (call.kwargs for call in store.search.call_args_list)
+    # Facts can meet every filter. A procedure can meet only those every memory has a field for.
+    assert {key: preference[key] for key in (*shared, *FACT_ONLY_FILTERS)} == {
+        key: ranked[key] for key in (*shared, *FACT_ONLY_FILTERS)
+    }
+    assert {key: procedure[key] for key in shared} == {key: ranked[key] for key in shared}
+    assert all(procedure.get(key) is None for key in FACT_ONLY_FILTERS)
 
 
 def test_the_query_is_embedded_once_for_the_ranked_and_slot_searches():

@@ -94,6 +94,25 @@ def test_with_support_counts_only_new_sources_and_known_dates():
     assert with_support(out, sources, "repeated") is None
 
 
+def test_a_habit_needs_the_users_own_evidence_on_two_dates():
+    # What the assistant said and episodes that failed are not the user choosing the same way twice.
+    out = with_support(
+        {"procedure_kind": "habit", "status": "candidate"},
+        [
+            _source("a1", agent=True, day="2025-01-01"),
+            _source("a2", agent=True, day="2025-01-02"),
+            _source("e1", kind="episodic", day="2025-01-03", outcome="failed"),
+        ],
+        "repeated",
+    )
+
+    assert (out["support_dates"], out["status"]) == ([], "candidate")
+
+    out = with_support(out, [_source("f1", day="2025-02-01"), _source("f2", day="2025-02-02")], "repeated")
+
+    assert (out["support_dates"], out["status"]) == (["2025-02-01", "2025-02-02"], "active")
+
+
 def test_with_support_never_demotes_an_active_procedure():
     active = {"procedure_kind": "instruction", "status": "active", "evidence": ["taught"], "user_support_count": 0}
 
@@ -140,6 +159,29 @@ def test_standing_rules_stop_at_the_byte_cap():
     kept, left_out = standing_rules(docs, "2025-01-01")
 
     assert (len(kept), left_out) == (1, 2)
+
+
+def test_standing_rules_skip_a_rule_too_big_for_the_cap_and_keep_the_smaller_ones():
+    docs = [
+        {
+            "type": "procedural",
+            "status": "active",
+            "applies": "always",
+            "summary": "x" * (STANDING_RULES_MAX_BYTES + 1),
+            "updated_at": "2025-03-01",
+        },
+        {
+            "type": "procedural",
+            "status": "active",
+            "applies": "always",
+            "summary": "Reply in English",
+            "updated_at": "2025-02-01",
+        },
+    ]
+
+    kept, left_out = standing_rules(docs, "2025-01-01")
+
+    assert ([doc["summary"] for doc in kept], left_out) == (["Reply in English"], 1)
 
 
 def test_standing_rules_stop_at_the_rule_cap():

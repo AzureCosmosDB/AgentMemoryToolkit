@@ -187,13 +187,13 @@ The prompt also reads, as context only, up to 6 earlier turns of the thread, the
 
 Procedures are learned from evidence, not copied from one message. `synthesize_procedural` reads the behavioral facts and episode lessons written since its last run, and a procedure's `status` follows from the evidence it has gathered:
 
-| `procedure_kind` | Learned from                                                                   | Becomes `active` when                                                          |
-|------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| `instruction`    | The user taught the assistant how to act in future ("always ...", "never ...") | the user taught it                                                             |
-| `habit`          | The user corrected the assistant, or chose the same way repeatedly             | the user corrected the assistant, or sources on two different dates support it |
-| `skill`          | A method of two or more steps that worked in practice                          | it succeeded on two different dates, or the user endorsed it                   |
+| `procedure_kind` | Learned from                                                                   | Becomes `active` when                                                                                              |
+|------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `instruction`    | The user taught the assistant how to act in future ("always ...", "never ...") | the user taught or corrected it                                                                                    |
+| `habit`          | The user corrected the assistant, or chose the same way repeatedly             | the user corrected the assistant, or the user's own facts or successful episodes support it on two different dates |
+| `skill`          | A method of two or more steps that worked in practice                          | it succeeded in episodes on two different dates, or the user endorsed it                                           |
 
-Anything else stays a `candidate`, which search and prompt injection do not show. A procedure `applies` either `always` (nearly every interaction: language, tone, format) or `when` its activation conditions match, and may carry a `valid_until` date. `build_procedural_context(user_id)` returns the active, unexpired `always` rules as a system-prompt block, and `task=` adds the nearest situational rule:
+A habit's two dates count only facts the user stated and episodes with a successful or partially successful outcome: facts the assistant stated, and failed episodes, do not. A skill's two successes are episodes with a successful or partially successful outcome. Anything else stays a `candidate`, which search and prompt injection do not show. A procedure `applies` either `always` (nearly every interaction: language, tone, format) or `when` its activation conditions match, and may carry a `valid_until` date. `build_procedural_context(user_id)` returns the active, unexpired `always` rules as a system-prompt block, and `task=` adds the nearest situational rule:
 
 ```python
 print(memory.build_procedural_context(USER, task="Review this pull request"))
@@ -209,7 +209,7 @@ The pass runs after each reconcile (`PROCEDURAL_SYNTHESIS_AUTO`) or on demand wi
 
 #### Search slots
 
-A plain search can fill `top_k` with topically close facts and miss a standing preference or a relevant procedure. `preference_slot=True` and `procedure_slot=True` reserve a place inside `top_k` for the user's best-matching preference fact and best-matching active situational procedure, found by vector similarity with the search's own filters. An empty slot takes the next ranked result, and a slotted result carries `retrieval={"rank": ..., "slot": "preference" | "procedure" | "backfill"}`:
+A plain search can fill `top_k` with topically close facts and miss a standing preference or a relevant procedure. `preference_slot=True` and `procedure_slot=True` reserve a place inside `top_k` for the user's best-matching preference fact and best-matching active situational procedure, found by vector similarity with the search's own filters (the procedure slot ignores `role`, `tags_all`, `tags_any`, `min_salience` and `min_confidence`, which no procedure can meet). An empty slot takes the next ranked result, and a slotted result carries `retrieval={"rank": ..., "slot": "preference" | "procedure" | "backfill"}`:
 
 ```python
 hits = memory.search_cosmos(

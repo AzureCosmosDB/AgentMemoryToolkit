@@ -22,9 +22,23 @@ of them can fill a short search result. So the dedup pass on facts also:
    re-reads the members, keeping them as they are if one was deleted, edited or retired since the pass
    read it. Otherwise the fact is created (tagged ``sys:combined``, with ``merged_from`` naming its members), then
    each member is retired into it (``supersede_reason="combined"``). Its ID derives from its user and
-   members, so writing it twice (after a crash, or from a concurrent pass) cannot make two records.
+   members, so writing it twice (after a crash, or from a concurrent pass) cannot make two records. The fact
+   takes its newest member's date (``created_at``) and records its oldest member's (``combined_since``) and the
+   hash of the text it wrote (``combined_hash``).
 
 A combined fact is never combined again, and dedup never retires it (it has absorbed others).
+
+What a combined fact holds shapes how the contradiction pass treats it:
+
+* **Its date.** The pass lets the more recent fact win. A combined fact still holds what its oldest member said,
+  though its ``created_at`` is its newest member's, so the pass shows ``combined_since`` instead
+  (:func:`contradiction_created_at`). It then beats only a fact older than every one of its members. Against
+  any other it loses, its members come back and each is judged on its own: losing wrongly is recovered by
+  that, winning wrongly is not. Its ``created_at`` still orders the facts the pass reads, so a fresh combined
+  fact is among the most recent ones.
+* **Its text.** A combined fact that loses gets its members back first, unless an app edited its text since
+  combining wrote it (:func:`edited_since_combined`): the members hold the text from before the edit, so it is
+  retired alone.
 """
 
 from __future__ import annotations
@@ -281,9 +295,12 @@ def combined_record(members: Sequence[dict[str, Any]], text: str, *, lineage: Ma
 
     It takes its newest member's fields (date, thread, category and speaker), every member's tags (and
     source turns, on facts that record them), the highest salience and confidence, and ``merged_from``
-    naming the members (and what they had absorbed). Its ID derives from its user and members, not its
-    text: a second pass that combines the same group, after a crash or beside a concurrent pass, finds
-    the fact already there instead of making a second one.
+    naming the members (and what they had absorbed). ``created_at`` stays the newest member's date; the
+    oldest member's goes in ``combined_since`` (left out when no member has a date), which is what the
+    contradiction pass dates the fact by (:func:`contradiction_created_at`). ``combined_hash`` is the hash of
+    the text written, so that a later edit of it can be told apart (:func:`edited_since_combined`). Its ID
+    derives from its user and members, not its text: a second pass that combines the same group, after a crash
+    or beside a concurrent pass, finds the fact already there instead of making a second one.
     """
     newest = max(members, key=lambda doc: (str(doc.get("created_at") or ""), str(doc.get("id"))))
     record = survivor_patch(newest, [doc for doc in members if doc is not newest])
@@ -291,13 +308,35 @@ def combined_record(members: Sequence[dict[str, Any]], text: str, *, lineage: Ma
         record.pop(key, None)
     record["merged_from"] = sorted(set(record.get("merged_from") or []) | {doc["id"] for doc in members})
     record["content"] = text
-    record["content_hash"] = compute_content_hash(text)
+    record["content_hash"] = record["combined_hash"] = compute_content_hash(text)
+    dates = [str(doc["created_at"]) for doc in members if doc.get("created_at")]
+    if dates:
+        record["combined_since"] = min(dates)
     record["tags"] = sorted(set(record.get("tags") or []) | {COMBINED_TAG})
     record.update(lineage)
     names = "|".join(sorted(doc["id"] for doc in members))
     seed = ID_SEED_SEP.join((str(record.get("user_id")), "combine", names))
     record["id"] = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
     return record
+
+
+def contradiction_created_at(doc: Mapping[str, Any]) -> Optional[str]:
+    """The date the contradiction pass shows for ``doc``: ``combined_since`` (its oldest member's date) for a
+    combined fact, else ``created_at``, which is also what a combined fact that has no ``combined_since`` shows.
+
+    The pass lets the more recent fact win, and a combined fact holds details as old as its oldest member. Dated
+    by that member it beats only a fact older than every one of its members; against any other it loses, its
+    members come back and each is judged on its own."""
+    return doc.get("combined_since") or doc.get("created_at")
+
+
+def edited_since_combined(doc: Mapping[str, Any]) -> bool:
+    """Whether the text of the combined fact ``doc`` is no longer what combining wrote, because an app edited it.
+
+    An edit (``MemoryStore.update``) leaves ``content_hash`` as it was, so the text is checked against
+    ``combined_hash``. A fact without one counts as not edited."""
+    written = doc.get("combined_hash")
+    return bool(written) and compute_content_hash(str(doc.get("content") or "")) != written
 
 
 @dataclass(frozen=True)

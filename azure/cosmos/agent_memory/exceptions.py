@@ -151,10 +151,25 @@ class LLMError(AgentMemoryError):
     The chat client retries an empty reply (no choices or no content) with backoff and raises this
     only if it is still empty after its last attempt (``max_retries``, 6 by default). It raises it
     at once, without retrying, for a reply that was content-filtered (``content_filter``), refused
-    (``model_refusal``), tool-only (``unexpected_tool_response``) or cut off at the output limit
-    with no text (``output_truncated``); the message names the cause, and the pipeline treats these
-    as non-retryable. Parsing a reply raises it too: invalid or truncated JSON, or a root that is
-    not a JSON object.
+    (``model_refusal``) or tool-only (``unexpected_tool_response``); the message names the cause,
+    and the pipeline treats these as non-retryable. A reply cut off at the output limit raises the
+    subclass :class:`OutputTruncatedError` (``output_truncated``), non-retryable too. Parsing a
+    reply raises this as well: invalid JSON, or a root that is not a JSON object.
     """
 
     error_code = "llm"
+
+
+class OutputTruncatedError(LLMError):
+    """Raised when a model reply was cut off at the output limit.
+
+    The chat client raises it for a reply with no text that stopped at the limit
+    (``finish_reason="length"``, as when a reasoning model spends its whole budget thinking), and
+    parsing a reply raises it for JSON that stops part-way through. Asking again sends the same
+    input and gets a reply cut off at the same place, so the pipeline never retries it: during
+    extraction the batch that drew it is quarantined. Its ``error_code``, ``output_truncated``, is
+    what a log shows of it, as logs leave out messages. To fix it, raise ``maxOutputTokens`` in the
+    prompt that drew it, or send less input per call.
+    """
+
+    error_code = "output_truncated"

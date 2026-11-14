@@ -153,6 +153,9 @@ _STRUCTURAL_FIELDS = frozenset(
         "version",
         "priority",
         "merged_from",
+        # The oldest member's date on a combined fact: the suffixes below do not cover it, and rewriting it
+        # would change which facts the contradiction pass lets it beat.
+        "combined_since",
         "superseded_by",
         # The redaction's own markers; rewriting them would erase the record of what was found.
         "classification",

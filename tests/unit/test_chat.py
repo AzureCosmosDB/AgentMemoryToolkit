@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from azure.cosmos.agent_memory.chat import ChatClient
-from azure.cosmos.agent_memory.exceptions import ConfigurationError, LLMError
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, LLMError, OutputTruncatedError
+from azure.cosmos.agent_memory.logging import describe_exception
 from azure.cosmos.agent_memory.services._pipeline_helpers import is_retryable_llm_error
 
 MESSAGES = [{"role": "user", "content": "hi"}]
@@ -311,6 +312,18 @@ def test_terminal_empty_replies_are_not_retried(reason, content, refusal, code):
 
     assert create.call_count == 1
     assert not is_retryable_llm_error(failure.value)
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"])
+def test_a_blank_reply_cut_off_at_the_output_limit_raises_the_output_truncated_error(content):
+    client, create = _client_replying(_reply(content, finish_reason="length"))
+
+    with pytest.raises(OutputTruncatedError, match="output_truncated") as failure:
+        client.generate(MESSAGES, max_retries=3, base_delay=0)
+
+    assert create.call_count == 1
+    assert failure.value.error_code == "output_truncated"
+    assert "code=output_truncated" in describe_exception(failure.value), "a log shows the code, never the message"
 
 
 def test_a_partial_reply_cut_off_at_the_output_limit_is_returned():

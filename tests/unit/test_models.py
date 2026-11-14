@@ -373,6 +373,25 @@ class TestFactStructuredFields:
         assert (restored.assertion, restored.subject, restored.attribute) == ("stated", "Priya", "home city")
 
 
+class TestCombinedFactFields:
+    """What combining records on the fact it writes: the oldest member's date and the hash of its text."""
+
+    def test_a_combined_fact_keeps_both_through_a_round_trip(self):
+        original = FactRecord(**_fact_kwargs(combined_since="2026-05-01T09:00:00+00:00", combined_hash=_HEX32))
+
+        doc = original.to_doc()
+        restored = MemoryRecord.from_doc(doc)
+
+        assert (doc["combined_since"], doc["combined_hash"]) == ("2026-05-01T09:00:00+00:00", _HEX32)
+        assert isinstance(restored, FactRecord)
+        assert (restored.combined_since, restored.combined_hash) == ("2026-05-01T09:00:00+00:00", _HEX32)
+
+    def test_a_fact_that_was_not_combined_has_neither(self):
+        doc = FactRecord(**_fact_kwargs()).to_doc()
+
+        assert not {"combined_since", "combined_hash"} & set(doc)
+
+
 # ---------------------------------------------------------------------------
 # EpisodicRecord
 # ---------------------------------------------------------------------------

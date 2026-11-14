@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory._utils import compute_content_hash
 from azure.cosmos.agent_memory.aio.services import pipeline as pipeline_module
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.exceptions import LLMError
@@ -364,6 +365,41 @@ class TestAsyncACombinedFactIsRedactedBeforeItIsEmbedded:
         assert token not in body["content"] and "[REDACTED-SECRET]" in body["content"]
         assert body["embedding"] == [0.1, 0.2, 0.3]
         assert token not in p._embed_one.call_args.args[0]
+
+    async def test_the_hash_of_what_combine_wrote_is_that_of_the_text_that_is_stored(self):
+        token = "ghp_" + "A1b2" * 9
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        model = _Model(verdicts, [_write(["M1", "M2"], f"{BOTH} Its token is {token}.")], [_holds(2)])
+
+        await _run(p, [seed], {"f2": [partner]}, model)
+
+        [body] = _created(p)
+        assert token not in body["content"]
+        assert body["combined_hash"] == compute_content_hash(body["content"]), "redacting is not an edit"
+
+
+class TestAsyncTheContradictionPoolDatesACombinedFactByItsOldestMember:
+    async def test_a_combined_fact_is_dated_by_combined_since_and_any_other_fact_by_created_at(self):
+        p = AsyncPipelineService.__new__(AsyncPipelineService)
+        shown: list[str] = []
+
+        async def run_prompty(filename: str, inputs: dict) -> str:
+            shown.extend(line.rsplit("Created: ", 1)[1] for line in inputs["facts_text"].splitlines())
+            return json.dumps({"contradicted_pairs": [], "kept_ids": []})
+
+        p._run_prompty = run_prompty
+        tags = ["sys:fact", "sys:combined"]
+        combined = _fact(
+            "c1", BOTH, created_at="2023-11-20T00:00:00+00:00", combined_since="2023-11-01T00:00:00+00:00", tags=tags
+        )
+        written_before_the_field_existed = _fact("c2", BOTH, created_at="2023-11-21T00:00:00+00:00", tags=tags)
+        ordinary = _fact("f1", PLANS, created_at="2023-11-22T00:00:00+00:00")
+        undated = _fact("f2", START, created_at=None)
+
+        await p._reconcile_contradictions("u1", "fact", [combined, written_before_the_field_existed, ordinary, undated])
+
+        assert shown == ["2023-11-01T00:00:00+00:00", "2023-11-21T00:00:00+00:00", "2023-11-22T00:00:00+00:00", "N/A"]
 
 
 class TestAsyncReconcilePoolKeepsCombinedFacts:

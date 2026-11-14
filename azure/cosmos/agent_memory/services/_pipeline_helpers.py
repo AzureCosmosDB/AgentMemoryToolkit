@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory._embedding_tokens import count_tokens
 from azure.cosmos.agent_memory._utils import cosine_similarity, vector_centroid
-from azure.cosmos.agent_memory.exceptions import LLMError
+from azure.cosmos.agent_memory.exceptions import LLMError, OutputTruncatedError
 from azure.cosmos.agent_memory.logging import describe_turn_refs, get_logger
 
 logger = get_logger(__name__)
@@ -224,9 +224,12 @@ _NON_RETRYABLE_EXC_TYPES = (AttributeError, KeyError, TypeError, IndexError, Nam
 def is_retryable_llm_error(exc: BaseException) -> bool:
     """Classify an extraction LLM failure as retryable (transient) or not.
 
-    A programming error, or error text with one of the markers above, is not retryable. Anything else is,
-    including a reply that stays empty after the chat client's retries."""
+    A programming error, a reply cut off at the output limit (:class:`OutputTruncatedError`: asking again
+    gets it cut off at the same place), or error text with one of the markers above is not retryable.
+    Anything else is, including a reply that stays empty after the chat client's retries."""
     if isinstance(exc, _NON_RETRYABLE_EXC_TYPES):
+        return False
+    if isinstance(exc, OutputTruncatedError):
         return False
     text = str(exc).lower()
     return not any(marker in text for marker in _NON_RETRYABLE_LLM_MARKERS)
@@ -603,12 +606,14 @@ def ground_fact_sources(fact: Mapping[str, Any], *, turn_ids: list[Optional[str]
     """Resolve a fact's model-declared turn refs to real ids from its batch.
 
     ``turn_ids`` holds one slot per transcript line, ``None`` where the turn has no id, and
-    ``labels`` the label each line showed (see :func:`transcript_labels`). A ref is matched
-    against those labels first (exactly, then ignoring case), then read as a positional
-    ``turn-N``, so it resolves to exactly the line the model saw. A ref to an unidentified turn
-    or to anything outside the batch is dropped rather than recorded as provenance, so a fact
-    whose citations all fail records none, as episodes do. Only a fact that cites nothing (a v1
-    or v2 response) falls back to every identified turn in the batch.
+    ``labels`` the label each line showed (see :func:`transcript_labels`). A ref resolves only to a
+    label the transcript showed, matched exactly and then ignoring case; it is never read as a
+    position. A turn with an id is shown by that id, so ``turn-2`` is no label of it, and a line
+    forged inside some turn's text (``Turn turn-1: ...`` in a page a tool fetched) cannot borrow
+    the identity of the batch's first turn, which may be the user's. A ref to an unidentified turn
+    (shown as ``turn-N``) or to anything outside the batch is dropped rather than recorded as
+    provenance, so a fact whose citations all fail records none, as episodes do. Only a fact that
+    cites nothing (a v1 or v2 response) falls back to every identified turn in the batch.
     """
     identified = [turn_id for turn_id in turn_ids if turn_id]
     refs = fact.get("source_turn_ids")
@@ -618,16 +623,10 @@ def ground_fact_sources(fact: Mapping[str, Any], *, turn_ids: list[Optional[str]
         return identified
     by_label = dict(zip(labels, turn_ids))
     by_folded_label = {label.lower(): turn_id for label, turn_id in by_label.items()}
-    by_position = {f"turn-{i}": turn_id for i, turn_id in enumerate(turn_ids, start=1)}
     grounded: list[str] = []
     for raw in refs:
         ref = str(raw).strip()
-        if ref in by_label:
-            mapped = by_label[ref]
-        elif ref.lower() in by_folded_label:
-            mapped = by_folded_label[ref.lower()]
-        else:
-            mapped = by_position.get(ref.lower())
+        mapped = by_label[ref] if ref in by_label else by_folded_label.get(ref.lower())
         if mapped and mapped not in grounded:
             grounded.append(mapped)
     if not grounded:
@@ -673,7 +672,12 @@ def user_turn_ids(turns: Iterable[Mapping[str, Any]]) -> set[str]:
 
 
 def parse_llm_json(text: str | None) -> dict[str, Any]:
-    """Parse JSON from an LLM response, stripping markdown fences."""
+    """Parse JSON from an LLM response, stripping markdown fences.
+
+    A reply that stops part-way through its JSON, as when the model hits its output limit, raises
+    :class:`OutputTruncatedError`, which the pipeline does not retry. Any other unusable reply (no content,
+    invalid JSON, a root that is not an object) raises :class:`LLMError`.
+    """
     if text is None:
         raise LLMError("LLM returned no content (None response body)")
     cleaned = text.strip()
@@ -692,7 +696,7 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         # The decode error names only a position; the response itself stays out of the error, which is logged.
         if _looks_truncated(cleaned, exc):
-            raise LLMError(
+            raise OutputTruncatedError(
                 "LLM JSON output appears TRUNCATED (decode error at the very end of a "
                 f"{len(cleaned)}-char body - the model almost certainly hit its output-token "
                 "cap mid-object). Increase 'maxOutputTokens' in the calling prompty, or reduce "

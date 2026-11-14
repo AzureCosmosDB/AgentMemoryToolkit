@@ -19,7 +19,7 @@ from typing import Any
 
 from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
-from .exceptions import ConfigurationError, LLMError
+from .exceptions import ConfigurationError, LLMError, OutputTruncatedError
 
 logger = get_logger(__name__)
 
@@ -96,12 +96,13 @@ def extract_content(response: Any, model: str) -> str:
     """Pull the assistant content out of a chat-completions response.
 
     An empty reply (no choices, or no content) returns ``""`` so the caller can
-    retry it. A content-filtered reply, a refusal, a tool-only reply (tool calls
-    with no text, or only blank text) and a blank reply cut off at the output
-    limit (``finish_reason="length"``, as when a reasoning model spends its whole
-    budget thinking) raise :class:`LLMError` naming the cause (``content_filter``,
-    ``model_refusal``, ``unexpected_tool_response``, ``output_truncated``): asking
-    again gets the same answer, so the pipeline classifies them as non-retryable.
+    retry it. A content-filtered reply, a refusal and a tool-only reply (tool calls
+    with no text, or only blank text) raise :class:`LLMError` naming the cause
+    (``content_filter``, ``model_refusal``, ``unexpected_tool_response``). A blank
+    reply cut off at the output limit (``finish_reason="length"``, as when a
+    reasoning model spends its whole budget thinking) raises
+    :class:`OutputTruncatedError` (``output_truncated``). Asking again gets the same
+    answer, so the pipeline classifies all of them as non-retryable.
     """
     if not response.choices:
         return ""
@@ -117,7 +118,7 @@ def extract_content(response: Any, model: str) -> str:
     if blank and finish_reason in {"tool_calls", "function_call"}:
         raise LLMError(f"LLM unexpected_tool_response (model={model}, finish_reason={finish_reason})")
     if blank and finish_reason == "length":
-        raise LLMError(f"LLM output_truncated (model={model}, finish_reason={finish_reason})")
+        raise OutputTruncatedError(f"LLM output_truncated (model={model}, finish_reason={finish_reason})")
     return "" if content is None else content
 
 

@@ -8,7 +8,9 @@ container is behind awaitable methods as the async Cosmos client exposes it, and
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -21,10 +23,16 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.services._combine import COMBINED_TAG
 from tests.unit.services.test_reconcile_combined import (
+    AT_EIGHT,
     BOTH,
     CONCURRENT_CHANGES,
+    CORRECTION,
+    CRASH,
+    DEPARTURE_AND_SEAT,
     FLIGHT,
     GATE,
+    GYM,
+    INTERRUPTIONS,
     LEAVES,
     LINE_BREAKS,
     MOVED,
@@ -41,12 +49,17 @@ from tests.unit.services.test_reconcile_combined import (
     Embeddings,
     Model,
     assert_left_as_the_other_writer_left_it,
+    correction_fact,
+    departure_fact,
     dinner_facts,
     dinner_model,
     fact,
     flight_model,
     hostile_pool,
     moved_fact,
+    raise_unavailable,
+    seat_fact,
+    seat_model,
     without_system_fields,
 )
 
@@ -141,6 +154,14 @@ async def combined_dinner() -> tuple[Account, AsyncPipelineService, Model, dict[
     return account, service, model, account.combined()
 
 
+async def first_departure(n: int = 50) -> tuple[Account, AsyncPipelineService, Model]:
+    """The old departure alone, checked by a first run."""
+    account, model = Account([departure_fact()]), seat_model()
+    service = service_over(account, model)
+    await service.reconcile_memories(USER, n)
+    return account, service, model
+
+
 class TestACombinedFactCanBeCorrected:
     async def test_a_newer_contradicting_fact_retires_the_combined_fact_and_hands_back_its_members(self):
         account, service, model, combined = await combined_dinner()
@@ -221,6 +242,62 @@ class TestACombinedFactCanBeCorrected:
         assert account.retirements() == {combined["id"]: ("n1", "contradict")}
 
 
+class TestACombinedFactIsDatedByItsOldestMember:
+    async def test_a_correction_dated_between_its_members_beats_it_and_the_members_come_back(self):
+        account, service, model = await first_departure()
+        account.put(correction_fact("2026-05-20T09:00:00Z"))
+        account.put(seat_fact())
+
+        result = await service.reconcile_memories(USER)
+
+        combined = account.combined()
+        assert combined["content"] == DEPARTURE_AND_SEAT and (result["synthesized"], result["combined"]) == (1, 2)
+        assert combined["created_at"] == "2026-05-25T09:00:00Z", "it stays among the newest facts, so the pool reads it"
+        assert model.shown() == {combined["id"]: "2026-05-01T09:00:00Z", "n1": "2026-05-20T09:00:00Z"}
+        assert (result["contradicted"], result["kept"]) == (1, 1)
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"m1", "m2", "n1"}, "the correction is not lost, and the members are back"
+
+        await service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict"), "m1": ("n1", "contradict")}
+        assert account.active_ids() == {"m2", "n1"}, "the old departure is retired once it is judged by itself"
+
+    async def test_a_correction_judged_without_the_old_departure_is_not_lost_when_combining_pulls_it_back_in(self):
+        account, service, model = await first_departure(n=2)
+        account.put(fact("gym", GYM, [0.0, 0.0, 1.0], "2026-05-10T09:00:00Z", thread_id="t4"))
+        await service.reconcile_memories(USER, 2)
+        account.put(correction_fact("2026-05-20T09:00:00Z"))
+        await service.reconcile_memories(USER, 2)
+        assert model.pooled() == {CORRECTION, GYM}, "the pool holds two facts: the old departure was left out of it"
+        assert account.active_ids() == {"m1", "gym", "n1"}, "so both departures stayed active"
+        account.put(seat_fact())
+
+        result = await service.reconcile_memories(USER, 2)  # combining pulls the old departure back in
+
+        combined = account.combined()
+        assert (result["synthesized"], result["combined"], result["contradicted"]) == (1, 2, 1)
+        assert model.pooled() == {DEPARTURE_AND_SEAT, CORRECTION}
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"m1", "m2", "n1", "gym"}, "the correction is not retired; the members are back"
+
+    async def test_a_fact_older_than_every_member_loses_to_the_combined_fact(self):
+        account, service, _ = await first_departure()
+        account.put(correction_fact("2026-04-20T09:00:00Z"))  # said before the old departure
+        account.put(seat_fact())
+
+        result = await service.reconcile_memories(USER)
+
+        combined = account.combined()
+        assert (result["synthesized"], result["combined"], result["contradicted"]) == (1, 2, 1)
+        assert account.retirements() == {
+            "m1": (combined["id"], "combined"),
+            "m2": (combined["id"], "combined"),
+            "n1": (combined["id"], "contradict"),
+        }
+        assert account.active_ids() == {combined["id"]}
+
+
 class TestARestoreThatIsRaced:
     @pytest.mark.parametrize("change", list(CONCURRENT_CHANGES))
     async def test_a_member_that_changed_since_it_was_read_is_left_as_the_other_writer_left_it(self, change):
@@ -284,23 +361,27 @@ class TestARestoreThatIsRaced:
         assert account.retirements() == {"f2": (combined["id"], "combined")}, "the combined fact is not retired"
         assert account.active_ids() == {"f1", "n1", combined["id"]}
 
-    async def test_what_was_retired_into_the_combined_fact_for_another_reason_stays_retired(self):
+    async def test_what_was_folded_into_the_combined_fact_comes_back_with_its_members_but_earlier_versions_stay_retired(
+        self,
+    ):
         account, service, _, combined = await combined_dinner()
         retirement = {"superseded_by": combined["id"], "superseded_at": "2026-04-05T10:00:00Z"}
         duplicate = fact("d1", "The user dines with Alice and Bob on May 3.", [0.0, 0.7, 0.7], "2026-04-05T10:00:00Z")
         older = fact("o1", "The user's dinner with Alice and Bob is on May 1.", [0.0, 0.7, 0.7], "2026-03-01T10:00:00Z")
+        earlier = fact("e1", "The user's dinner with Alice and Bob is May 2.", [0.0, 0.7, 0.7], "2026-03-02T10:00:00Z")
         account.put({**duplicate, **retirement, "supersede_reason": "duplicate"})
         account.put({**older, **retirement, "supersede_reason": "contradict"})
+        account.put({**earlier, **retirement, "supersede_reason": "update"})
         account.put(moved_fact())
 
         await service.reconcile_memories(USER)
 
         assert account.retirements() == {
             combined["id"]: ("n1", "contradict"),
-            "d1": (combined["id"], "duplicate"),
             "o1": (combined["id"], "contradict"),
+            "e1": (combined["id"], "update"),
         }
-        assert account.active_ids() == {"f1", "f2", "n1"}, "only the facts the combined fact was written from"
+        assert account.active_ids() == {"f1", "f2", "d1", "n1"}, "a duplicate comes back; an earlier version does not"
 
     async def test_only_the_members_of_the_fact_that_lost_are_restored(self):
         account, service, _, combined = await combined_dinner()
@@ -342,6 +423,109 @@ class TestARestoreThatIsRaced:
         assert restores == [(fid, before[fid], MatchConditions.IfNotModified) for fid in ("f1", "f2")]
         members_query = next(q for q in account.queries if "supersede_reason IN" in q)
         assert "c.user_id = @user_id" in members_query and "c.superseded_by = @memory_id" in members_query
+
+
+class TestNothingIsLostWhenARestoreIsInterrupted:
+    @pytest.mark.parametrize("interruption", list(INTERRUPTIONS))
+    async def test_the_next_pass_folds_the_members_back_in_and_they_come_back_when_it_loses_again(self, interruption):
+        account, service, _, combined = await combined_dinner()
+        account.put(moved_fact())
+        INTERRUPTIONS[interruption](account, combined["id"])
+
+        with pytest.raises(RuntimeError) if interruption == CRASH else contextlib.nullcontext():
+            await service.reconcile_memories(USER)
+        assert combined["id"] in account.active_ids(), "the combined fact was not retired"
+
+        second = await service.reconcile_memories(USER)
+
+        assert second["merged"] >= 1, "the members that were written back were folded into the combined fact"
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}, "nothing was lost: both dinner details and the move"
+
+        await service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict"), "f1": ("n1", "contradict")}
+        assert account.active_ids() == {"f2", "n1"}, "7pm and May 5 stay; the date that was moved is retired"
+
+    async def test_a_member_whose_retirement_failed_while_combining_comes_back_when_the_combined_fact_loses(self):
+        account, model = Account(dinner_facts()), dinner_model()
+        service = service_over(account, model)
+        account.before_replace["f2"] = raise_unavailable  # the second member is not retired into the new fact
+
+        first = await service.reconcile_memories(USER)
+
+        combined = account.combined()
+        assert (first["synthesized"], first["combined"]) == (1, 1)
+        assert account.retirements() == {"f1": (combined["id"], "combined")}, "f2 is still active beside the fact"
+
+        second = await service.reconcile_memories(USER)  # a later pass folds it into the fact that holds its detail
+
+        assert second["merged"] == 1
+        assert account.retirements() == {"f1": (combined["id"], "combined"), "f2": (combined["id"], "duplicate")}
+        account.put(moved_fact())
+
+        await service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}, "the member folded in comes back with the other"
+
+
+async def update_through_the_store(account: Account, record: dict[str, Any], **changes: Any) -> None:
+    """What an app does with ``update_cosmos``: the async memory store's own update of a record. It edits only that
+    record, and leaves its ``content_hash`` as it was."""
+    containers = {
+        ContainerKey.MEMORIES: AsyncAccount(account),
+        ContainerKey.TURNS: MagicMock(),
+        ContainerKey.SUMMARIES: MagicMock(),
+    }
+    store = AsyncMemoryStore(containers=containers, embeddings_client=AsyncEmbeddings(VECTORS))
+    await store.update(
+        record["id"], user_id=record["user_id"], thread_id=record["thread_id"], memory_type="fact", **changes
+    )
+
+
+class TestAnEditedCombinedFactIsRetiredAlone:
+    async def test_the_members_stay_retired_and_nothing_is_written_back(self, caplog):
+        account, service, _, combined = await combined_dinner()
+        await update_through_the_store(account, combined, content=AT_EIGHT)
+        account.put(moved_fact())
+        members = {fid: account.get(fid) for fid in ("f1", "f2")}
+
+        with caplog.at_level(logging.INFO, logger="azure.cosmos.agent_memory"):
+            result = await service.reconcile_memories(USER)
+
+        assert (result["contradicted"], result["kept"]) == (1, 1)
+        assert account.retirements() == {
+            "f1": (combined["id"], "combined"),
+            "f2": (combined["id"], "combined"),
+            combined["id"]: ("n1", "contradict"),
+        }
+        assert account.active_ids() == {"n1"}
+        assert account.get(combined["id"])["content"] == AT_EIGHT
+        assert {fid: account.get(fid) for fid in members} == members, "no member was written, ETags and all"
+        assert "restored no members of a combined fact" in caplog.text
+        assert not [text for text in (AT_EIGHT, BOTH, PLACE, TIME, MOVED) if text in caplog.text], "no text is logged"
+
+    async def test_a_combined_fact_with_no_record_of_what_combine_wrote_has_its_members_restored_as_before(self):
+        account, service, _, combined = await combined_dinner()
+        await update_through_the_store(account, combined, content=AT_EIGHT)
+        account.put({key: value for key, value in account.get(combined["id"]).items() if key != "combined_hash"})
+        account.put(moved_fact())
+
+        await service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}
+
+    async def test_an_update_that_leaves_the_text_alone_is_not_an_edit(self):
+        account, service, _, combined = await combined_dinner()
+        await update_through_the_store(account, combined, metadata={**combined["metadata"], "reviewed": True})
+        account.put(moved_fact())
+
+        await service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}
 
 
 class TestAFactCannotSplitTheContradictionPrompt:

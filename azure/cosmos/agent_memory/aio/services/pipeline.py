@@ -62,6 +62,8 @@ from azure.cosmos.agent_memory.services._combine import (
     arun_combine_group,
     combined_record,
     comparable_candidates,
+    contradiction_created_at,
+    edited_since_combined,
     fold_verdicts,
     in_seed_order,
     plan_combine_groups,
@@ -2058,7 +2060,10 @@ class AsyncPipelineService:
         # Combined facts (sys:combined) stay in: this is read after the dedup pass
         # of the same run, so a fact combined there can retire an older one, and a
         # combined fact a newer fact contradicts is retired (its members first made
-        # active again) instead of staying active beside the outdated claim.
+        # active again) instead of staying active beside the outdated claim. They
+        # are ordered by created_at, which is their newest member's date, so a
+        # fresh combined fact is inside the window; the prompt shows combined_since
+        # (the oldest member's date) as their Created.
         query = (
             f"SELECT TOP {capped_n} * FROM c "
             "WHERE c.user_id = @user_id "
@@ -2116,9 +2121,12 @@ class AsyncPipelineService:
            ``contradicted_pairs`` - opposing claims about the same subject (e.g. "deadline March 1" vs
            "March 15"). Each loser is soft-deleted with ``supersede_reason="contradict"`` and
            ``superseded_by`` set to the winner. The pool is read after the first pass, so it holds the
-           combined facts that pass wrote: a combined fact can beat an older fact, and one that loses is
-           retired only after its members (the facts retired into it) are made active again, so a later
-           pass compares each of them with the winner and retires only the one it contradicts.
+           combined facts that pass wrote. The prompt lets the more recent ``Created`` win, and a combined
+           fact shows its oldest member's date (``combined_since``), so it beats only a fact older than
+           every one of its members. One that loses is retired only after its members (the facts retired
+           into it as combined, or folded into it as duplicates since) are made active again, so a later
+           pass compares each of them with the winner, while they are among the ``n`` most recent facts,
+           and retires each one it contradicts. A combined fact whose text was edited is retired alone.
 
         Episodic and procedural types are no-ops because they have no contradiction semantics.
         ``deadline`` (a ``time.monotonic()`` value) ends the passes early: the dedup pass applies the
@@ -2478,6 +2486,8 @@ class AsyncPipelineService:
             return CombineWrite("lost")
         # Redact before embedding: the write guard drops the vector of a record whose text it rewrites.
         self._redact_for_embedding(record)
+        # Redacting may have rewritten the text, and the text as stored is the one an edit is told apart from.
+        record["combined_hash"] = compute_content_hash(record["content"])
         try:
             record["embedding"] = await self._embed_one(record["content"])
         except Exception as exc:
@@ -2553,10 +2563,15 @@ class AsyncPipelineService:
         the dedup prompt/schema does not emit duplicate groups because the
         dedup pass that runs first (:meth:`consolidate_memories`) folds them,
         so this pass only retires losers: it mints no documents and is
-        convergent. A loser that is a combined fact first has its members made
-        active again (:meth:`_restore_combined_members`); if that fails, the
-        pair is left for a later pass. Returns ``{"kept", "merged": 0,
-        "contradicted"}``; the members made active again are counted nowhere.
+        convergent. The prompt lets the more recent ``Created`` win, and a
+        combined fact shows its oldest member's date (``combined_since``, see
+        :func:`~azure.cosmos.agent_memory.services._combine.contradiction_created_at`),
+        so it wins only against a fact older than every one of its members. A
+        loser that is a combined fact first has its members made active again
+        (:meth:`_restore_combined_members`) unless its text was edited, when it
+        is retired alone; if restoring fails, the pair is left for a later
+        pass. Returns ``{"kept", "merged": 0, "contradicted"}``; the members
+        made active again are counted nowhere.
         """
         if len(facts) <= 1:
             return {"kept": len(facts), "merged": 0, "contradicted": 0}
@@ -2568,8 +2583,7 @@ class AsyncPipelineService:
             sal_raw = cf.get("salience")
             conf_str = conf_raw if _is_real_number(conf_raw) else "N/A"
             sal_str = sal_raw if _is_real_number(sal_raw) else "N/A"
-            created_raw = cf.get("created_at")
-            created_str = created_raw if created_raw else "N/A"
+            created_str = contradiction_created_at(cf) or "N/A"
             lines.append(
                 f"{i}. ID: {cf['id']} | Content: {content_quoted} | "
                 f"Confidence: {conf_str} | Salience: {sal_str} | Created: {created_str}"
@@ -2632,13 +2646,17 @@ class AsyncPipelineService:
         """Make the members of the combined fact ``combined`` active again, ahead of retiring it.
 
         The fact is read again first: one that changed, or was retired or deleted, since the pool was read is left
-        for a later pass, which judges it afresh. The members are the records retired into it as combined, read
+        for a later pass, which judges it afresh. A fact whose text an app edited since combining wrote it
+        (:func:`~azure.cosmos.agent_memory.services._combine.edited_since_combined`) gets nothing restored: its
+        members hold the text from before the edit, which writing them back would undo, so it is retired alone.
+        Otherwise the members are the records retired into it as combined or folded into it as duplicates, read
         across the user's partitions. Each is written back without its supersession fields, only if it is unchanged
         since this read: one that was edited, deleted or retired another way meanwhile is left as it is.
 
         Returns ``False`` when the fact changed, or the members could not be read or one could not be written for
         another reason: the fact stays active and its pair is left for a later pass (members already written stay
-        active beside it).
+        active beside it, and that pass finds them again, folded into the fact as duplicates). Returns ``True``
+        when the fact may be retired, whatever was restored.
         """
         from azure.core import MatchConditions
 
@@ -2658,6 +2676,13 @@ class AsyncPipelineService:
                     "reconcile_memories left a combined fact: it changed since the pool was read user_id=%s", user_id
                 )
                 return False
+            if edited_since_combined(current):
+                logger.info(
+                    "reconcile_memories restored no members of a combined fact: its text was edited since it was "
+                    "written user_id=%s",
+                    user_id,
+                )
+                return True
             members = await self._query_items(self._memories_container, query=query, parameters=parameters)
             for member in members:
                 kwargs: dict[str, Any] = {"item": member["id"], "body": restored_member(member)}

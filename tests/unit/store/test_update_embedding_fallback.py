@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import copy
 import itertools
+import logging
 from typing import Any
+from unittest.mock import MagicMock
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.store import MemoryStore
+from tests.unit.store.test_secret_redaction import SECRET, TOKEN, _containers, _failing_embedder, _stored_doc
 
 
 class FakeMemories:
@@ -105,3 +108,25 @@ def test_a_failed_re_embed_keeps_the_record_in_vector_search_and_a_later_edit_re
     stored = memories.read_item("fact_1", ["u1", "t1"])
     assert stored["embedding"] == [float(len("I like oolong tea")), 1.0]
     assert embedder.texts == ["I like green tea", "I like oolong tea"]
+
+
+def test_an_etag_conflict_retry_drops_a_re_read_vector_built_from_a_secret_when_embedding_fails(monkeypatch, caplog):
+    """Each attempt judges the vector it keeps by the text of the record it has just read, not of the first one."""
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: None)
+    memories = MagicMock()
+    memories.read_item.side_effect = [
+        _stored_doc(embedding=[9.9], _etag="v1"),
+        # A writer without the guard (an older SDK) stored a credential, and its vector, meanwhile.
+        _stored_doc(content=f"Use {SECRET}", embedding=[7.7], _etag="v2"),
+    ]
+    memories.replace_item.side_effect = [CosmosAccessConditionFailedError(message="412", response=None), None]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=_failing_embedder())
+
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", metadata={"note": "rotated"})
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert memories.replace_item.call_count == 2
+    assert "embedding" not in body and TOKEN not in repr(body)
+    assert "dropping its previous vector" in caplog.text
+    assert TOKEN not in caplog.text

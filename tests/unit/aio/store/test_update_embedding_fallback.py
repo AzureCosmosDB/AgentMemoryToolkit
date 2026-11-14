@@ -8,13 +8,23 @@ from __future__ import annotations
 
 import copy
 import itertools
+import logging
 from typing import Any
+from unittest.mock import AsyncMock
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+from tests.unit.aio.store.test_secret_redaction import (
+    SECRET,
+    TOKEN,
+    _container,
+    _containers,
+    _failing_embedder,
+    _stored_doc,
+)
 
 
 class FakeMemories:
@@ -105,3 +115,35 @@ async def test_a_failed_re_embed_keeps_the_record_in_vector_search_and_a_later_e
     stored = await memories.read_item("fact_1", ["u1", "t1"])
     assert stored["embedding"] == [float(len("I like oolong tea")), 1.0]
     assert embedder.texts == ["I like green tea", "I like oolong tea"]
+
+
+async def test_an_async_etag_conflict_retry_drops_a_re_read_vector_built_from_a_secret_when_embedding_fails(
+    monkeypatch, caplog
+):
+    """Each attempt judges the vector it keeps by the text of the record it has just read, not of the first one."""
+    caplog.set_level(logging.DEBUG)
+
+    async def _noop_sleep(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+    memories = _container()
+    memories.read_item = AsyncMock(
+        side_effect=[
+            _stored_doc(embedding=[9.9], _etag="v1"),
+            # A writer without the guard (an older SDK) stored a credential, and its vector, meanwhile.
+            _stored_doc(content=f"Use {SECRET}", embedding=[7.7], _etag="v2"),
+        ]
+    )
+    memories.replace_item = AsyncMock(
+        side_effect=[CosmosAccessConditionFailedError(message="412", response=None), None]
+    )
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=_failing_embedder())
+
+    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", metadata={"note": "rotated"})
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert memories.replace_item.await_count == 2
+    assert "embedding" not in body and TOKEN not in repr(body)
+    assert "dropping its previous vector" in caplog.text
+    assert TOKEN not in caplog.text

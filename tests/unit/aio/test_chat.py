@@ -12,7 +12,8 @@ from azure.cosmos.agent_memory.aio.chat import (
     _is_async_credential,
     _make_sync_token_provider_for_async,
 )
-from azure.cosmos.agent_memory.exceptions import LLMError
+from azure.cosmos.agent_memory.exceptions import LLMError, OutputTruncatedError
+from azure.cosmos.agent_memory.logging import describe_exception
 from azure.cosmos.agent_memory.services._pipeline_helpers import is_retryable_llm_error
 
 MESSAGES = [{"role": "user", "content": "hi"}]
@@ -287,6 +288,19 @@ async def test_terminal_empty_replies_are_not_retried(reason, content, refusal, 
 
     assert create.await_count == 1
     assert not is_retryable_llm_error(failure.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [None, "", "  \n"])
+async def test_a_blank_reply_cut_off_at_the_output_limit_raises_the_output_truncated_error(content):
+    client, create = _client_replying(_reply(content, finish_reason="length"))
+
+    with pytest.raises(OutputTruncatedError, match="output_truncated") as failure:
+        await client.generate(MESSAGES, max_retries=3, base_delay=0)
+
+    assert create.await_count == 1
+    assert failure.value.error_code == "output_truncated"
+    assert "code=output_truncated" in describe_exception(failure.value), "a log shows the code, never the message"
 
 
 @pytest.mark.asyncio

@@ -388,6 +388,8 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
         "assertion",
         "subject",
         "attribute",
+        "combined_since",
+        "combined_hash",
     }
     drop_when_empty_list: set[str] = {"entities", "merged_from"}
     drop_when_zero = {"use_count"}
@@ -514,6 +516,11 @@ class FactRecord(MemoryRecordBase):
     fact about the same subject would replace), the names it mentions (``entities``) and the
     turns it came from (``source_turn_ids``). Facts from earlier prompts have no assertion,
     subject, attribute or entities.
+
+    A combined fact (tagged ``sys:combined``) also records ``combined_since``, the ``created_at`` of
+    its oldest member (its own ``created_at`` is its newest member's), and ``combined_hash``, the
+    content hash of the text combining wrote. The contradiction pass dates the fact by
+    ``combined_since``, and tells an edit of its text from the text as written by ``combined_hash``.
     """
 
     memory_type: Literal[MemoryType.fact] = Field(  # type: ignore[assignment]
@@ -531,6 +538,8 @@ class FactRecord(MemoryRecordBase):
     attribute: Optional[str] = None
     entities: list[str] = Field(default_factory=list)
     merged_from: list[str] = Field(default_factory=list)
+    combined_since: Optional[str] = None
+    combined_hash: Optional[str] = None
 
     _ID_PREFIX: ClassVar[Optional[str]] = "fact_"
 

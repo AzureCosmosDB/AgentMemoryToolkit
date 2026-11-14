@@ -4,24 +4,32 @@
 passes' queries the way Cosmos DB does (it applies every filter, the ``ORDER BY`` and the ``TOP``, keeps one ETag per
 record, rejects a conditional write whose ETag is stale, and finds a record only under its own partition) and a scripted
 model. A fake that ignored the pool's ``NOT ARRAY_CONTAINS`` filter or the ``superseded_by`` filter would prove nothing,
-so a predicate it does not understand fails the test.
+so a predicate it does not understand fails the test. The model that judges contradictions in the recency tests reads
+each fact's ``Created:`` off the pool text it is shown and lets the later date win, as ``dedup.prompty`` rule 1 says.
 
 Covers:
 * a combined fact is in the contradiction pool (an agent-sourced fact is not) and a newer fact that contradicts it
   retires it, handing its members back; a later pass retires only the member the new fact contradicts, and the group
   those members form again does not hide them (the combined fact it names is retired)
 * an older fact is retired by newer facts combined in the same run
+* the pool dates a combined fact by its oldest member, so it beats only a fact older than every member: a correction
+  dated between its members, or one the pool had no room for beside the old fact, is not retired by it
 * a member that was edited, deleted or retired meanwhile is left alone; a combined fact that changed while the model
   judged, whose member cannot be written, or whose retirement fails, is left for a later pass, with no member lost
+* a failed retirement, a lost race, a crash or a partial restore loses no member on the next pass, which folds the
+  restored members back into the combined fact as duplicates; those come back with the members when it loses
+* a combined fact whose text was edited is retired alone, its members left retired
 * only the members of the fact that lost are restored
 * the contradiction prompt cannot be split into more messages by a line break inside a fact
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import itertools
 import json
+import logging
 import math
 import re
 import threading
@@ -58,6 +66,17 @@ OLD_FLIGHT = "The user's flight to Paris departs June 1."
 GATE = "The user's flight to Paris now departs June 3 from gate B12."
 LEAVES = "The user's June 3 flight to Paris leaves at 9am."
 FLIGHT = "The user's flight to Paris departs June 3 at 9am from gate B12."
+
+# The flight again, for the date a combined fact is judged by: its departure, the correction that moves it, a detail
+# about the seat (which says nothing of the date), the fact that holds both, and a fact about something else.
+DEPARTURE = "The user's flight to Paris departs June 1."
+CORRECTION = "The user's flight to Paris was moved to June 3."
+SEAT = "The user's flight to Paris is with Delta, seat 12A."
+DEPARTURE_AND_SEAT = "The user's flight to Paris departs June 1 and is with Delta, seat 12A."
+GYM = "The user's gym membership is paid until the end of the year."
+
+# The dinner's combined fact after an app corrected the time in it.
+AT_EIGHT = "The user's dinner with Alice and Bob is on May 3 at Luigi's at 8pm."
 
 V_PLACE = [1.0, 0.0, 0.0]
 V_TIME = [0.75, math.sqrt(1 - 0.75**2), 0.0]  # 0.75 from V_PLACE: below the dedup floor, above the combine floor
@@ -225,13 +244,16 @@ class Account:
 # ---------------------------------------------------------------------------
 # The scripted model
 # ---------------------------------------------------------------------------
-_POOL_LINE = re.compile(r'\d+\. ID: (?P<id>.+?) \| Content: (?P<content>".*") \| Confidence: ')
+_POOL_LINE = re.compile(
+    r'\d+\. ID: (?P<id>.+?) \| Content: (?P<content>".*") \| Confidence: .+ \| Salience: .+ \| Created: (?P<created>.+)'
+)
 
 
 class Model:
     """The chat model as a script, answering by prompt: ``verify`` says how two facts relate, ``write`` picks the facts
     to combine from those offered and writes the combined one, and ``judge`` names the winner and loser of each
-    contradiction in a pool of ``(id, content)``."""
+    contradiction in a pool of ``(id, content)``. It keeps each pool it was shown, with the ``Created:`` printed on
+    every line, for ``judge`` to read and for the test to check."""
 
     def __init__(
         self,
@@ -241,6 +263,7 @@ class Model:
     ) -> None:
         self.verify, self.write, self.judge = verify, write, judge
         self.pools: list[list[tuple[str, str]]] = []
+        self.dates: list[dict[str, str]] = []
         self._lock = threading.Lock()
 
     def __call__(self, filename: str, inputs: dict[str, Any]) -> str:
@@ -269,9 +292,10 @@ class Model:
             labels = [memory["label"] for memory in offered if memory["text"] in picked]
             return json.dumps({"combine": labels, "memory": text} if len(labels) > 1 else {"combine": [], "memory": ""})
         assert filename == "dedup.prompty", filename
-        lines = inputs["facts_text"].splitlines()
-        pool = [(m["id"], json.loads(m["content"])) for m in map(_POOL_LINE.match, lines) if m]
+        lines = [m for m in map(_POOL_LINE.match, inputs["facts_text"].splitlines()) if m]
+        pool = [(m["id"], json.loads(m["content"])) for m in lines]
         self.pools.append(pool)
+        self.dates.append({m["id"]: m["created"] for m in lines})
         pairs = [{"winner_id": winner, "loser_id": loser, "reason": "newer"} for winner, loser in self.judge(pool)]
         return json.dumps({"contradicted_pairs": pairs, "kept_ids": []})
 
@@ -279,6 +303,11 @@ class Model:
         """The contents the contradiction prompt was shown in a run (the last by default)."""
         assert self.pools, "the contradiction prompt was never run"
         return {content for _, content in self.pools[run]}
+
+    def shown(self, run: int = -1) -> dict[str, str]:
+        """The ``Created:`` the contradiction prompt printed for each fact ID in a run (the last by default)."""
+        assert self.dates, "the contradiction prompt was never run"
+        return self.dates[run]
 
 
 def _dinner_verify(seed: str, other: str) -> str:
@@ -292,7 +321,7 @@ def _dinner_verify(seed: str, other: str) -> str:
 
 def _dinner_judge(pool: list[tuple[str, str]]) -> list[tuple[str, str]]:
     winners = [fid for fid, content in pool if content == MOVED]
-    return [(winners[0], fid) for fid, content in pool if winners and content in (PLACE, BOTH)]
+    return [(winners[0], fid) for fid, content in pool if winners and content in (PLACE, BOTH, AT_EIGHT)]
 
 
 def dinner_model() -> Model:
@@ -317,6 +346,39 @@ def flight_model() -> Model:
     return Model(_flight_verify, lambda texts: ([t for t in texts if t in (GATE, LEAVES)], FLIGHT), _flight_judge)
 
 
+def _departure(text: str) -> str | None:
+    found = re.search(r"June (\d+)", text)
+    return found[1] if found else None
+
+
+def _seat_verify(seed: str, other: str) -> str:
+    texts = {seed, other}
+    if DEPARTURE_AND_SEAT in texts:
+        return "seed_contains_candidate" if seed == DEPARTURE_AND_SEAT else "candidate_contains_seed"
+    if CORRECTION in texts:
+        return "update"
+    return "partial_overlap" if texts == {DEPARTURE, SEAT} else "unrelated"
+
+
+def seat_model() -> Model:
+    """A model that judges the way ``dedup.prompty`` says to. Two facts that give different departure dates contradict,
+    and rule 1 picks the winner: the one the pool prints with the later ``Created:``. It reads those dates off the
+    pool it was shown, so which fact is combined, or newest by its own record, does not matter to it."""
+
+    def judge(pool: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        dates = model.shown()
+        pairs: list[tuple[str, str]] = []
+        for (first, first_text), (second, second_text) in itertools.combinations(pool, 2):
+            if _departure(first_text) and _departure(second_text) and _departure(first_text) != _departure(second_text):
+                # "N/A" counts as older than any date, as the prompt says.
+                newer, older = sorted((first, second), key=lambda fid: "" if dates[fid] == "N/A" else dates[fid])[::-1]
+                pairs.append((newer, older))
+        return pairs
+
+    model = Model(_seat_verify, lambda texts: ([t for t in texts if t in (DEPARTURE, SEAT)], DEPARTURE_AND_SEAT), judge)
+    return model
+
+
 class Embeddings:
     """Embeds the combined facts; any other text would be a call the test did not plan for."""
 
@@ -327,7 +389,7 @@ class Embeddings:
         return list(self.vectors[text])
 
 
-VECTORS = {BOTH: V_BOTH, FLIGHT: V_BOTH}
+VECTORS = {BOTH: V_BOTH, FLIGHT: V_BOTH, DEPARTURE_AND_SEAT: V_BOTH, AT_EIGHT: V_BOTH}
 
 
 def fact(
@@ -392,6 +454,27 @@ def combined_dinner() -> tuple[Account, PipelineService, Model, dict[str, Any]]:
     first = service.reconcile_memories(USER)
     assert (first["synthesized"], first["combined"]) == (1, 2)
     return account, service, model, account.combined()
+
+
+# The flight's facts: the departure (the old fact, May 1), a correction that moves it, and the seat (May 25).
+def departure_fact() -> dict[str, Any]:
+    return fact("m1", DEPARTURE, V_PLACE, "2026-05-01T09:00:00Z", thread_id="t1")
+
+
+def correction_fact(created_at: str) -> dict[str, Any]:
+    return fact("n1", CORRECTION, V_MOVED, created_at, thread_id="t3")
+
+
+def seat_fact() -> dict[str, Any]:
+    return fact("m2", SEAT, V_TIME, "2026-05-25T09:00:00Z", thread_id="t2")
+
+
+def first_departure(n: int = 50) -> tuple[Account, PipelineService, Model]:
+    """The old departure alone, checked by a first run."""
+    account, model = Account([departure_fact()]), seat_model()
+    service = service_over(account, model)
+    service.reconcile_memories(USER, n)
+    return account, service, model
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +559,69 @@ class TestACombinedFactCanBeCorrected:
 
         assert model.pooled() == {MOVED, BOTH}, "the combined fact is in; the agent's own fact is not"
         assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+
+
+# ---------------------------------------------------------------------------
+# The date the pool shows for a combined fact
+# ---------------------------------------------------------------------------
+class TestACombinedFactIsDatedByItsOldestMember:
+    """The pool prints ``Created:`` and rule 1 lets the later date win. A combined fact still holds what its oldest
+    member said, so it is dated by that member: it beats a fact older than every member, and loses to any other."""
+
+    def test_a_correction_dated_between_its_members_beats_it_and_the_members_come_back(self):
+        account, service, model = first_departure()
+        account.put(correction_fact("2026-05-20T09:00:00Z"))
+        account.put(seat_fact())
+
+        result = service.reconcile_memories(USER)
+
+        combined = account.combined()
+        assert combined["content"] == DEPARTURE_AND_SEAT and (result["synthesized"], result["combined"]) == (1, 2)
+        assert combined["created_at"] == "2026-05-25T09:00:00Z", "it stays among the newest facts, so the pool reads it"
+        assert model.shown() == {combined["id"]: "2026-05-01T09:00:00Z", "n1": "2026-05-20T09:00:00Z"}
+        assert (result["contradicted"], result["kept"]) == (1, 1)
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"m1", "m2", "n1"}, "the correction is not lost, and the members are back"
+
+        service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict"), "m1": ("n1", "contradict")}
+        assert account.active_ids() == {"m2", "n1"}, "the old departure is retired once it is judged by itself"
+
+    def test_a_correction_judged_without_the_old_departure_is_not_lost_when_combining_pulls_it_back_in(self):
+        account, service, model = first_departure(n=2)
+        account.put(fact("gym", GYM, [0.0, 0.0, 1.0], "2026-05-10T09:00:00Z", thread_id="t4"))
+        service.reconcile_memories(USER, 2)
+        account.put(correction_fact("2026-05-20T09:00:00Z"))
+        service.reconcile_memories(USER, 2)
+        assert model.pooled() == {CORRECTION, GYM}, "the pool holds two facts: the old departure was left out of it"
+        assert account.active_ids() == {"m1", "gym", "n1"}, "so both departures stayed active"
+        account.put(seat_fact())
+
+        result = service.reconcile_memories(USER, 2)  # combining pulls the old departure back in
+
+        combined = account.combined()
+        assert (result["synthesized"], result["combined"], result["contradicted"]) == (1, 2, 1)
+        assert model.pooled() == {DEPARTURE_AND_SEAT, CORRECTION}
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"m1", "m2", "n1", "gym"}, "the correction is not retired; the members are back"
+
+    def test_a_fact_older_than_every_member_loses_to_the_combined_fact(self):
+        # The converse, which a combined fact that always lost (or showed no date) would get wrong.
+        account, service, _ = first_departure()
+        account.put(correction_fact("2026-04-20T09:00:00Z"))  # said before the old departure
+        account.put(seat_fact())
+
+        result = service.reconcile_memories(USER)
+
+        combined = account.combined()
+        assert (result["synthesized"], result["combined"], result["contradicted"]) == (1, 2, 1)
+        assert account.retirements() == {
+            "m1": (combined["id"], "combined"),
+            "m2": (combined["id"], "combined"),
+            "n1": (combined["id"], "contradict"),
+        }
+        assert account.active_ids() == {combined["id"]}
 
 
 # ---------------------------------------------------------------------------
@@ -583,23 +729,25 @@ class TestARestoreThatIsRaced:
         assert account.retirements() == {"f2": (combined["id"], "combined")}, "the combined fact is not retired"
         assert account.active_ids() == {"f1", "n1", combined["id"]}
 
-    def test_what_was_retired_into_the_combined_fact_for_another_reason_stays_retired(self):
+    def test_what_was_folded_into_the_combined_fact_comes_back_with_its_members_but_earlier_versions_stay_retired(self):
         account, service, _, combined = combined_dinner()
         retirement = {"superseded_by": combined["id"], "superseded_at": "2026-04-05T10:00:00Z"}
         duplicate = fact("d1", "The user dines with Alice and Bob on May 3.", [0.0, 0.7, 0.7], "2026-04-05T10:00:00Z")
         older = fact("o1", "The user's dinner with Alice and Bob is on May 1.", [0.0, 0.7, 0.7], "2026-03-01T10:00:00Z")
+        earlier = fact("e1", "The user's dinner with Alice and Bob is May 2.", [0.0, 0.7, 0.7], "2026-03-02T10:00:00Z")
         account.put({**duplicate, **retirement, "supersede_reason": "duplicate"})
         account.put({**older, **retirement, "supersede_reason": "contradict"})
+        account.put({**earlier, **retirement, "supersede_reason": "update"})
         account.put(moved_fact())
 
         service.reconcile_memories(USER)
 
         assert account.retirements() == {
             combined["id"]: ("n1", "contradict"),
-            "d1": (combined["id"], "duplicate"),
             "o1": (combined["id"], "contradict"),
+            "e1": (combined["id"], "update"),
         }
-        assert account.active_ids() == {"f1", "f2", "n1"}, "only the facts the combined fact was written from"
+        assert account.active_ids() == {"f1", "f2", "d1", "n1"}, "a duplicate comes back; an earlier version does not"
 
     def test_only_the_members_of_the_fact_that_lost_are_restored(self):
         # Another combined fact and its members, and another user's record that names the same combined fact.
@@ -624,8 +772,155 @@ class TestARestoreThatIsRaced:
         assert account.active_ids() == {"f1", "f2", "n1", "c2"}
 
 
+def raise_unavailable() -> None:
+    raise CosmosHttpResponseError(status_code=503, message="Service unavailable")
+
+
+def raise_crash() -> None:
+    raise RuntimeError("the host was recycled")
+
+
+def _the_retirement_is_refused(account: Account, combined_id: str) -> None:
+    account.before_replace[combined_id] = raise_unavailable
+
+
+def _a_concurrent_writer_gets_there_first(account: Account, combined_id: str) -> None:
+    account.before_replace[combined_id] = lambda: account.put(account.get(combined_id))  # type: ignore[arg-type]
+
+
+def _the_host_crashes_before_the_retirement(account: Account, combined_id: str) -> None:
+    account.before_replace[combined_id] = raise_crash
+
+
+def _the_second_member_cannot_be_written_back(account: Account, combined_id: str) -> None:
+    written: list[str] = []
+
+    def refuse_once_another_was_written(member: str) -> Callable[[], None]:
+        def hook() -> None:
+            if written:
+                raise_unavailable()
+            written.append(member)
+
+        return hook
+
+    for member in ("f1", "f2"):
+        account.before_replace[member] = refuse_once_another_was_written(member)
+
+
+CRASH = "the host crashes before the retirement"
+# What goes wrong once the members are being written back, or just after they were, by name.
+INTERRUPTIONS: dict[str, Callable[[Account, str], None]] = {
+    "the retirement is refused": _the_retirement_is_refused,
+    "a concurrent writer gets there first": _a_concurrent_writer_gets_there_first,
+    CRASH: _the_host_crashes_before_the_retirement,
+    "the second member cannot be written back": _the_second_member_cannot_be_written_back,
+}
+
+
+class TestNothingIsLostWhenARestoreIsInterrupted:
+    """The next dedup pass folds a restored member back into the combined fact it came from (that fact is still
+    active and holds it), so if the combined fact loses again the members that were folded in must come back too."""
+
+    @pytest.mark.parametrize("interruption", list(INTERRUPTIONS))
+    def test_the_next_pass_folds_the_members_back_in_and_they_come_back_when_it_loses_again(self, interruption):
+        account, service, _, combined = combined_dinner()
+        account.put(moved_fact())
+        INTERRUPTIONS[interruption](account, combined["id"])
+
+        with pytest.raises(RuntimeError) if interruption == CRASH else contextlib.nullcontext():
+            service.reconcile_memories(USER)
+        assert combined["id"] in account.active_ids(), "the combined fact was not retired"
+
+        second = service.reconcile_memories(USER)
+
+        assert second["merged"] >= 1, "the members that were written back were folded into the combined fact"
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}, "nothing was lost: both dinner details and the move"
+
+        service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict"), "f1": ("n1", "contradict")}
+        assert account.active_ids() == {"f2", "n1"}, "7pm and May 5 stay; the date that was moved is retired"
+
+    def test_a_member_whose_retirement_failed_while_combining_comes_back_when_the_combined_fact_loses(self):
+        account, model = Account(dinner_facts()), dinner_model()
+        service = service_over(account, model)
+        account.before_replace["f2"] = raise_unavailable  # the second member is not retired into the new fact
+
+        first = service.reconcile_memories(USER)
+
+        combined = account.combined()
+        assert (first["synthesized"], first["combined"]) == (1, 1)
+        assert account.retirements() == {"f1": (combined["id"], "combined")}, "f2 is still active beside the fact"
+
+        second = service.reconcile_memories(USER)  # a later pass folds it into the fact that holds its detail
+
+        assert second["merged"] == 1
+        assert account.retirements() == {"f1": (combined["id"], "combined"), "f2": (combined["id"], "duplicate")}
+        account.put(moved_fact())
+
+        service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}, "the member folded in comes back with the other"
+
+
+def update_through_the_store(account: Account, record: dict[str, Any], **changes: Any) -> None:
+    """What an app does with ``update_cosmos``: the memory store's own update of a record. It edits only that record,
+    and leaves its ``content_hash`` as it was."""
+    containers = {ContainerKey.MEMORIES: account, ContainerKey.TURNS: MagicMock(), ContainerKey.SUMMARIES: MagicMock()}
+    store = MemoryStore(containers=containers, embeddings_client=Embeddings(VECTORS))
+    store.update(record["id"], user_id=record["user_id"], thread_id=record["thread_id"], memory_type="fact", **changes)
+
+
+class TestAnEditedCombinedFactIsRetiredAlone:
+    """The members hold the text from before the edit: writing them back would undo it."""
+
+    def test_the_members_stay_retired_and_nothing_is_written_back(self, caplog):
+        account, service, _, combined = combined_dinner()
+        update_through_the_store(account, combined, content=AT_EIGHT)
+        account.put(moved_fact())
+        members = {fid: account.get(fid) for fid in ("f1", "f2")}
+
+        with caplog.at_level(logging.INFO, logger="azure.cosmos.agent_memory"):
+            result = service.reconcile_memories(USER)
+
+        assert (result["contradicted"], result["kept"]) == (1, 1)
+        assert account.retirements() == {
+            "f1": (combined["id"], "combined"),
+            "f2": (combined["id"], "combined"),
+            combined["id"]: ("n1", "contradict"),
+        }
+        assert account.active_ids() == {"n1"}
+        assert account.get(combined["id"])["content"] == AT_EIGHT
+        assert {fid: account.get(fid) for fid in members} == members, "no member was written, ETags and all"
+        assert "restored no members of a combined fact" in caplog.text
+        assert not [text for text in (AT_EIGHT, BOTH, PLACE, TIME, MOVED) if text in caplog.text], "no text is logged"
+
+    def test_a_combined_fact_with_no_record_of_what_combine_wrote_has_its_members_restored_as_before(self):
+        account, service, _, combined = combined_dinner()
+        update_through_the_store(account, combined, content=AT_EIGHT)
+        account.put({key: value for key, value in account.get(combined["id"]).items() if key != "combined_hash"})
+        account.put(moved_fact())
+
+        service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}
+
+    def test_an_update_that_leaves_the_text_alone_is_not_an_edit(self):
+        account, service, _, combined = combined_dinner()
+        update_through_the_store(account, combined, metadata={**combined["metadata"], "reviewed": True})
+        account.put(moved_fact())
+
+        service.reconcile_memories(USER)
+
+        assert account.retirements() == {combined["id"]: ("n1", "contradict")}
+        assert account.active_ids() == {"f1", "f2", "n1"}
+
+
 class TestTheMembersAreFoundAndWrittenBack:
-    def test_the_members_query_names_the_user_the_combined_fact_and_the_combined_reason(self):
+    def test_the_members_query_names_the_user_the_combined_fact_and_the_combined_and_duplicate_reasons(self):
         query, parameters = combined_members_query(USER, "c1")
 
         assert query.startswith("SELECT * FROM c WHERE c.user_id = @user_id AND c.superseded_by = @memory_id")
@@ -633,6 +928,7 @@ class TestTheMembersAreFoundAndWrittenBack:
             "@user_id": USER,
             "@memory_id": "c1",
             "@reason_0": "combined",
+            "@reason_1": "duplicate",
         }
 
     def test_a_restored_member_loses_what_retiring_it_set_and_the_system_fields_but_nothing_else(self):

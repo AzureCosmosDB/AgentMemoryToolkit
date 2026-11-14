@@ -87,7 +87,7 @@ When `DEPLOY_FUNCTION_APP=false`, the Bicep template automatically sets `MEMORY_
 azd env set MEMORY_PROCESSOR_OWNER inprocess
 ```
 
-The in-process auto-trigger counts turns in the `counter` container, which this mode does not create. Until it exists, each count fails with a warning and nothing triggers; `create_memory_store()` creates it.
+The in-process auto-trigger counts turns in the `counter` container, and the client's `create_memory_store()` also creates `leases`; this mode creates neither. `CosmosMemoryClient(cosmos_endpoint=...)` calls `create_memory_store()` when it is constructed, which creates any missing container. Cosmos DB allows that with key auth but rejects it for Azure AD data-plane roles, so the constructor then raises: create `counter` and `leases` first (settings as in `infra/modules/cosmos.bicep`), or connect once with key auth.
 
 ## Model / deployment names
 

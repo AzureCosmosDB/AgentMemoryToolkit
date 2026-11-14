@@ -221,7 +221,8 @@ def test_fact_citations_resolve_against_the_labels_shown() -> None:
     def ground(refs: Any) -> list[str]:
         return ground_fact_sources({"source_turn_ids": refs}, turn_ids=turn_ids, labels=labels)
 
-    assert ground(["c", "A", "turn-3"]) == ["c", "a"]
+    assert ground(["c", "A"]) == ["c", "a"], "a label is matched exactly, then ignoring case"
+    assert ground(["turn-1", "turn-3"]) == [], "a position is not a label the transcript showed for a turn with an id"
     assert ground(["turn-2", "made-up"]) == [], "a citation of the id-less turn, or of nothing, records nothing"
     assert ground("a") == ["a"]
     assert ground([]) == ["a", "c"] and ground(None) == ["a", "c"], "a fact citing nothing gets the batch"
@@ -975,13 +976,14 @@ def test_each_fact_keeps_only_the_turns_it_cited() -> None:
     assert {f["content"]: f["source_turn_ids"] for f in facts} == {"Fact A.": ["turn-0"], "Fact B.": ["turn-2"]}
 
 
-def test_positional_labels_resolve_to_real_turn_ids() -> None:
+def test_a_positional_label_does_not_resolve_to_a_turn_that_the_transcript_labels_by_its_id() -> None:
     turns = [{**turn, "id": f"real-{i}"} for i, turn in enumerate(_unextracted(3))]
-    service = _service_over(turns, _sourced_response(("Fact A.", ["turn-2"])))
+    service = _service_over(turns, _sourced_response(("Fact A.", ["turn-2"]), ("Fact B.", ["real-1", "REAL-2"])))
 
-    facts = service.extract_memories_durable("u1", "t1")["facts"]
+    facts = {f["content"]: f["source_turn_ids"] for f in service.extract_memories_durable("u1", "t1")["facts"]}
 
-    assert facts[0]["source_turn_ids"] == ["real-1"], "turn-2 is the 2nd turn, 1-indexed"
+    assert facts["Fact A."] == [], "the 2nd turn is shown as real-1, so turn-2 names no line the model was shown"
+    assert facts["Fact B."] == ["real-1", "real-2"], "an id is matched exactly, then ignoring case"
 
 
 def test_unknown_turn_refs_are_discarded() -> None:

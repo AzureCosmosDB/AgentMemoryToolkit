@@ -7,6 +7,7 @@ import logging
 import pytest
 
 from azure.cosmos.agent_memory.exceptions import LLMError
+from azure.cosmos.agent_memory.logging import describe_exception
 from azure.cosmos.agent_memory.services._pipeline_helpers import is_retryable_llm_error, parse_llm_json
 
 _HELPER_LOGGER = "azure.cosmos.agent_memory.services._pipeline_helpers"
@@ -76,12 +77,21 @@ class TestTruncationDetectionPreserved:
             parse_llm_json('{"facts": [], "note": "unterminated')
         assert "TRUNCATED" in str(exc.value)
 
-    def test_a_truncated_reply_stays_retryable(self) -> None:
-        # The error tells the operator to raise 'maxOutputTokens', and turns in a quarantined batch are never
-        # read again, so a batch that came back cut off is kept for a later run, not quarantined.
+    @pytest.mark.parametrize(
+        "reply",
+        ['{"facts": [{"text": "the user prefers', '{"facts": [], "note": "unterminated'],
+        ids=["unbalanced-braces", "unterminated-string"],
+    )
+    def test_a_truncated_reply_is_not_retryable_and_its_error_code_shows_in_a_log(self, reply: str) -> None:
+        # Asking again sends the same input and gets a reply cut off at the same place, so the batch that drew it is
+        # quarantined, not deferred to a run that fails the same way. describe_exception, which every log uses, leaves
+        # the message and its 'maxOutputTokens' advice out: the error code is what tells an operator what happened.
         with pytest.raises(LLMError) as exc:
-            parse_llm_json('{"facts": [{"text": "the user prefers')
-        assert is_retryable_llm_error(exc.value) is True
+            parse_llm_json(reply)
+        assert is_retryable_llm_error(exc.value) is False
+        assert exc.value.error_code == "output_truncated"
+        assert "code=output_truncated" in describe_exception(exc.value)
+        assert "maxOutputTokens" in str(exc.value)
 
 
 class TestGenuineErrors:

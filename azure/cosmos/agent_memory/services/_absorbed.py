@@ -11,8 +11,13 @@ They are deleted before the memory itself: if that fails, the memory stays and a
 replaced for another reason (``"update"``, ``"contradict"``) are earlier versions, not copies, and stay.
 
 A combined fact that a newer fact contradicts is retired, but its members are not copies of the part that is now wrong:
-each holds details the correction may not touch. So the members (the records retired into it as combined) are
-restored first (:func:`restored_member`): only the member the correction contradicts is retired in a later pass.
+each holds details the correction may not touch. So its members are restored first (:func:`restored_member`): the
+records retired into it as combined, and those folded into it as duplicates (:func:`combined_members_query`). A
+failed retirement, a lost race, a crash or a partial restore leaves restored members active beside the combined fact,
+and the next dedup pass folds them back into it; if it loses again they must come back again, not be lost with it.
+Only the member the correction contradicts is then retired, in a later pass. (Records retired into it as
+``"contradict"`` or ``"update"`` are earlier versions and stay retired; nothing is retired into a combined fact as
+``"procedure"``.)
 
 A user's memories sit in one partition per thread, so the records are looked up across the user's partitions and each
 is deleted, or written back, under its own thread.
@@ -49,9 +54,12 @@ def absorbed_query(
 
 
 def combined_members_query(user_id: str, combined_id: str) -> tuple[str, list[dict[str, Any]]]:
-    """The members of the combined fact ``combined_id``: the whole records retired into it as combined (run across the
-    user's partitions)."""
-    return absorbed_query(user_id, combined_id, reasons=("combined",), columns="*")
+    """The members of the combined fact ``combined_id``: the whole records retired into it as combined, and those
+    folded into it as duplicates (run across the user's partitions).
+
+    Both are members once a restore has been interrupted: the dedup pass folds a member that was written back
+    into the combined fact that is still active, so a restore that took only the ``combined`` ones would lose it."""
+    return absorbed_query(user_id, combined_id, reasons=("combined", "duplicate"), columns="*")
 
 
 def restored_member(member: Mapping[str, Any]) -> dict[str, Any]:

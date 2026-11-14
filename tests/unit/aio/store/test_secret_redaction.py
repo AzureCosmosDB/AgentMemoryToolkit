@@ -255,7 +255,7 @@ async def test_async_push_embeds_only_redacted_text(supplied):
     assert local[0]["embedding"] == [0.1, 0.2]
 
 
-async def test_async_update_without_an_embedder_redacts_new_content_and_metadata_and_drops_the_vector():
+async def test_async_update_without_an_embedder_redacts_new_content_and_metadata_and_keeps_the_previous_vector():
     memories = _container()
     memories.read_item = AsyncMock(
         return_value=_stored_doc(embedding=[9.9], content_hash=compute_content_hash("hello"))
@@ -270,13 +270,29 @@ async def test_async_update_without_an_embedder_redacts_new_content_and_metadata
     assert TOKEN not in repr(body)
     assert body["metadata"]["classification"] == "secret"
     assert body["content_hash"] == compute_content_hash(body["content"])
-    assert "embedding" not in body, "the store has no embeddings client to rebuild it with"
+    assert body["embedding"] == [9.9], "the store has no embeddings client to rebuild it with"
 
 
 def _update_store(stored, embeddings):
     memories = _container()
     memories.read_item = AsyncMock(side_effect=lambda **_kwargs: copy.deepcopy(stored))
     return AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings), memories
+
+
+def _failing_embedder():
+    embeddings = _embeddings()
+    embeddings.generate = AsyncMock(side_effect=RuntimeError(f"quota exceeded for {SECRET}"))
+    return embeddings
+
+
+async def test_async_update_without_an_embedder_keeps_the_previous_vector_when_the_content_changes():
+    store, memories = _update_store(_stored_doc(embedding=[9.9]), None)
+
+    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert body["content"] == "Prefers Ruff."
+    assert body["embedding"] == [9.9]
 
 
 async def test_async_update_rebuilds_the_vector_from_the_redacted_content():
@@ -338,6 +354,16 @@ async def test_async_update_does_not_embed_a_record_that_has_no_vector():
     assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
 
 
+async def test_async_update_drops_the_vector_of_a_record_whose_text_is_emptied_without_embedding_it():
+    embeddings = _embeddings()
+    store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
+
+    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="")
+
+    embeddings.generate.assert_not_called()
+    assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
+
+
 async def test_async_update_keeps_a_procedures_vector_when_only_its_content_changes():
     embeddings = _embeddings()
     stored = _stored_doc(type="procedural", retrieval_text="deploy the service", embedding=[9.9])
@@ -360,17 +386,80 @@ async def test_async_update_rebuilds_a_procedures_vector_from_its_retrieval_text
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [0.1, 0.2]
 
 
-async def test_async_update_drops_the_stale_vector_when_embedding_fails(caplog):
+@pytest.mark.parametrize(
+    "content",
+    ["Prefers Ruff.", f"Use {SECRET}"],
+    ids=["clean-content", "content-with-a-secret"],
+)
+async def test_async_update_keeps_the_previous_vector_when_embedding_fails(content, caplog):
     caplog.set_level(logging.DEBUG)
-    embeddings = _embeddings()
-    embeddings.generate = AsyncMock(side_effect=RuntimeError(f"quota exceeded for {SECRET}"))
-    store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
+    store, memories = _update_store(_stored_doc(embedding=[9.9]), _failing_embedder())
+
+    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content=content)
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert body["embedding"] == [9.9]
+    assert TOKEN not in repr(body)
+    assert "embedding generation failed for m1 (RuntimeError" in caplog.text
+    assert "keeping its previous vector" in caplog.text
+    assert TOKEN not in caplog.text and "quota exceeded" not in caplog.text, "a log never quotes the error's text"
+    assert "Prefers Ruff." not in caplog.text, "a log never quotes the memory"
+
+
+@pytest.mark.parametrize("embedder", ["fails", "missing"])
+@pytest.mark.parametrize(
+    "changes",
+    [{"metadata": {"note": "rotated"}}, {"content": "Prefers Ruff."}],
+    ids=["metadata-only", "clean-content"],
+)
+async def test_async_update_drops_a_vector_built_from_a_secret_when_it_cannot_be_rebuilt(changes, embedder, caplog):
+    caplog.set_level(logging.DEBUG)
+    embeddings = _failing_embedder() if embedder == "fails" else None
+    store, memories = _update_store(_stored_doc(content=f"Use {SECRET}", embedding=[9.9]), embeddings)
+
+    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", **changes)
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert "embedding" not in body
+    assert TOKEN not in repr(body)
+    assert "dropping its previous vector" in caplog.text
+    assert TOKEN not in caplog.text and "quota exceeded" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("retrieval_text", "expected"),
+    [("deploy the service", [9.9]), (f"deploy with {SECRET}", None)],
+    ids=["retrieval-text-clean", "retrieval-text-held-a-secret"],
+)
+async def test_async_update_judges_a_procedures_vector_by_the_text_it_was_built_from(retrieval_text, expected):
+    stored = _stored_doc(type="procedural", retrieval_text=retrieval_text, content=f"Use {SECRET}", embedding=[9.9])
+    store, memories = _update_store(stored, _failing_embedder())
+
+    await store.update("m1", user_id="u1", thread_id="t1", memory_type="procedural", metadata={"note": "rotated"})
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert body.get("embedding") == expected
+    assert TOKEN not in repr(body)
+
+
+async def test_an_async_etag_conflict_retry_keeps_the_vector_it_reads_again_when_embedding_fails(monkeypatch):
+    async def _noop_sleep(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _noop_sleep)
+    memories = _container()
+    memories.read_item = AsyncMock(
+        side_effect=[_stored_doc(embedding=[9.9], _etag="v1"), _stored_doc(embedding=[7.7], _etag="v2")]
+    )
+    memories.replace_item = AsyncMock(
+        side_effect=[CosmosAccessConditionFailedError(message="412", response=None), None]
+    )
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=_failing_embedder())
 
     await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
 
-    assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
-    assert "embedding generation failed" in caplog.text
-    assert TOKEN not in caplog.text and "quota exceeded" not in caplog.text, "a log never quotes the error's text"
+    assert memories.replace_item.await_count == 2
+    assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [7.7]
 
 
 async def test_an_async_etag_conflict_retry_does_not_embed_the_same_text_again(monkeypatch):

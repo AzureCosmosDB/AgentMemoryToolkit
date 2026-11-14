@@ -317,6 +317,21 @@ def is_real_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+# Line breaks that ``str.splitlines`` knows and ``json.dumps`` leaves raw; it escapes the rest (all below U+0020).
+_RAW_LINE_BREAKS = {ord(char): f"\\u{ord(char):04x}" for char in "\x85\u2028\u2029"}
+
+
+def json_text(value: Any, *, indent: Optional[int] = None) -> str:
+    """``json.dumps(value, ensure_ascii=False, indent=indent)`` that no text inside it can split into prompt messages.
+
+    The parser starts a new message at any line that holds only a role and a colon, and reads lines with
+    ``str.splitlines``. JSON escapes every line break below U+0020 but not U+0085, U+2028 or U+2029, so text inside a
+    JSON string could still end a line and forge one. Those three are escaped here; everything else, the layout
+    included, is as ``json.dumps`` writes it.
+    """
+    return json.dumps(value, ensure_ascii=False, indent=indent).translate(_RAW_LINE_BREAKS)
+
+
 def max_or_none(values: Any) -> Optional[float]:
     """Return max of numeric values, ignoring None / non-numeric / bool. None if empty."""
     nums = [float(v) for v in values if is_real_number(v)]
@@ -650,6 +665,11 @@ def _canonical_speaker(role: Any) -> str:
     """Normalize a free-form role to the canonical speaker label for prompts."""
     normalized = str(role or "").strip().lower()
     return _SPEAKER_ALIASES.get(normalized, str(role or "unknown"))
+
+
+def user_turn_ids(turns: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Ids of the turns a user wrote: role ``user`` or a synonym such as ``human`` (see ``_SPEAKER_ALIASES``)."""
+    return {str(turn["id"]) for turn in turns if turn.get("id") and _canonical_speaker(turn.get("role")) == "user"}
 
 
 def parse_llm_json(text: str | None) -> dict[str, Any]:

@@ -20,6 +20,7 @@ from typing import Any, Iterable, Literal, Mapping, Optional
 
 from azure.cosmos.exceptions import (
     CosmosAccessConditionFailedError,
+    CosmosHttpResponseError,
     CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
@@ -49,6 +50,7 @@ from azure.cosmos.agent_memory.models import (
 )
 from azure.cosmos.agent_memory.prompts._schemas import response_format_for
 from azure.cosmos.agent_memory.services import MemoryStoreProtocol
+from azure.cosmos.agent_memory.services._absorbed import combined_members_query, restored_member
 from azure.cosmos.agent_memory.services._combine import (
     COMBINE_PROMPT,
     COMBINED_TAG,
@@ -92,9 +94,9 @@ from azure.cosmos.agent_memory.services._extraction_context import (
     previous_turns_query,
     prior_turns,
     query_text,
-    structured_fields,
     summary_text,
     takes_context,
+    user_backed_fields,
     window_write_second,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
@@ -116,11 +118,13 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     ground_fact_sources,
     is_retryable_llm_error,
     is_valid_time_pair,
+    json_text,
     newest_window,
     parse_llm_json,
     segment_time_bounds,
     transcript_labels,
     turn_gap_seconds,
+    user_turn_ids,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
@@ -656,6 +660,7 @@ class PipelineService:
         fact_docs: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         exact_dedup_skipped = 0
+        user_ids = user_turn_ids(processed_turns)
 
         for fact, batch_turn_ids, batch_labels in facts:
             text = fact.get("text")
@@ -692,6 +697,7 @@ class PipelineService:
             fact_source = raw_source if raw_source in ("user", "agent") else "user"
             source_tags = [AGENT_FACT_TAG] if fact_source == "agent" else []
             confidence = fact.get("confidence")
+            source_turn_ids = ground_fact_sources(fact, turn_ids=batch_turn_ids, labels=batch_labels)
             doc: dict[str, Any] = {
                 "id": det_id,
                 "user_id": user_id,
@@ -709,8 +715,8 @@ class PipelineService:
                 },
                 "salience": clamp_unit_interval(fact.get("salience"), 0.5),
                 "tags": ["sys:fact", "sys:auto-extracted"] + source_tags + topic_tags,
-                "source_turn_ids": ground_fact_sources(fact, turn_ids=batch_turn_ids, labels=batch_labels),
-                **structured_fields(fact),
+                "source_turn_ids": source_turn_ids,
+                **user_backed_fields(fact, source_turn_ids, user_ids),
                 "created_at": doc_timestamp,
                 "updated_at": doc_timestamp,
             }
@@ -1446,10 +1452,11 @@ class PipelineService:
         time limit such as a Durable activity. ``force`` has no effect: a run only ever reads what is new.
 
         Returns ``status`` and ``procedures_created``. ``status`` is ``synthesized`` (a batch was
-        answered; the result also has ``procedures_updated``, ``procedures_reinforced``,
-        ``procedures_skipped`` and ``facts_retired``), ``unchanged``, ``skipped`` (every model call
-        failed or was unusable) or ``deferred`` (also when ``deadline`` had passed before any batch
-        was answered).
+        answered), ``unchanged``, ``skipped`` (every model call failed or was unusable) or
+        ``deferred`` (also when ``deadline`` had passed before any batch was answered). A
+        ``synthesized`` or ``deferred`` result also has ``procedures_updated``,
+        ``procedures_reinforced``, ``procedures_skipped`` and ``facts_retired``; a ``deferred`` run
+        counts what it wrote before it stopped, including the answers of the batch it stopped in.
         """
         del force
         if not user_id:
@@ -1474,15 +1481,16 @@ class PipelineService:
                 if deadline is not None and time.monotonic() >= deadline:
                     logger.info("synthesize_procedural stopped at its deadline user_id=%s", user_id)
                     if not answered:
-                        return {"status": "deferred", "procedures_created": 0}
+                        return self._procedure_result("deferred", counts)
                     break
                 state, outcomes = self._procedure_batch(user_id, scope, sources)
+                # A batch that stops partway still reports the answers it wrote: the next run skips them.
+                for outcome, number in outcomes.items():
+                    counts[outcome] += number
                 if state == "deferred":
-                    return {"status": "deferred", "procedures_created": counts["created"]}
+                    return self._procedure_result("deferred", counts)
                 if state == "answered":
                     answered += 1
-                    for outcome, number in outcomes.items():
-                        counts[outcome] += number
             cursor = self._advance_procedure_cursor(scope, cursor, facts, episodes)
 
         if not answered:
@@ -1497,8 +1505,14 @@ class PipelineService:
             counts["skipped"],
             counts["facts_retired"],
         )
+        return self._procedure_result("synthesized", counts)
+
+    @staticmethod
+    def _procedure_result(status: str, counts: Mapping[str, int]) -> dict[str, Any]:
+        """A run's ``status`` with what it wrote: procedures created, revised, reinforced and skipped, and the
+        facts retired into them."""
         return {
-            "status": "synthesized",
+            "status": status,
             "procedures_created": counts["created"],
             "procedures_updated": counts["updated"],
             "procedures_reinforced": counts["reinforced"],
@@ -1512,8 +1526,9 @@ class PipelineService:
         """One model call over a batch of sources, with its answers applied.
 
         Returns ``("answered", outcomes)``; ``("skipped", {})`` when the call failed for good or
-        its answer was unusable, which would fail the same way on a retry; or ``("deferred", {})``
-        after a retryable model error or a transient failure writing a procedure.
+        its answer was unusable, which would fail the same way on a retry; or ``("deferred", outcomes)``
+        after a retryable model error (nothing written yet) or a transient failure writing a
+        procedure (``outcomes`` counts the answers written before it).
         """
         source_inputs, labels = sources_input(sources)
         existing_text, existing_by_label = existing_procedures_input(self._related_procedures(scope, sources))
@@ -1545,7 +1560,7 @@ class PipelineService:
         for item in answers if isinstance(answers, list) else []:
             outcome, written = self._apply_procedure_answer(user_id, scope, item, labels, existing_by_label)
             if outcome == "deferred":
-                return "deferred", {}
+                return "deferred", dict(outcomes)
             outcomes[outcome] += 1
             if written is not None:
                 outcomes["facts_retired"] += self._retire_taught_facts(user_id, written, labels.values())
@@ -2097,10 +2112,13 @@ class PipelineService:
            (``supersede_reason="duplicate"``); it also combines facts about one specific thing into a
            new fact and retires them into it (``supersede_reason="combined"``).
         2. Up to ``n`` of the most recent active (non-superseded) ``memory_type`` records are then
-           read again, except agent-sourced (``sys:agent-fact``) and combined (``sys:combined``) facts,
-           and ``dedup.prompty`` identifies ``contradicted_pairs`` - opposing claims about the same
-           subject (e.g. "deadline March 1" vs "March 15"). Each loser is soft-deleted with
-           ``supersede_reason="contradict"`` and ``superseded_by`` set to the winner.
+           read again, except agent-sourced (``sys:agent-fact``) facts, and ``dedup.prompty`` identifies
+           ``contradicted_pairs`` - opposing claims about the same subject (e.g. "deadline March 1" vs
+           "March 15"). Each loser is soft-deleted with ``supersede_reason="contradict"`` and
+           ``superseded_by`` set to the winner. The pool is read after the first pass, so it holds the
+           combined facts that pass wrote: a combined fact can beat an older fact, and one that loses is
+           retired only after its members (the facts retired into it) are made active again, so a later
+           pass compares each of them with the winner and retires only the one it contradicts.
 
         Episodic and procedural types are no-ops because they have no contradiction semantics.
         ``deadline`` (a ``time.monotonic()`` value) ends the passes early: the dedup pass applies the
@@ -2111,7 +2129,8 @@ class PipelineService:
         left active (when that pass is skipped, the checked facts the dedup pass left active),
         ``merged`` counts the facts retired as duplicates - plus the dedup pass's ``checked``,
         ``compared``, ``vetoed``, ``combined`` (facts retired into a combined fact), ``synthesized``
-        (combined facts written), ``combine_groups`` and ``combine_failed`` counts.
+        (combined facts written), ``combine_groups`` and ``combine_failed`` counts. Members made
+        active again are not counted.
         """
         validate_consolidation_args(user_id, n, memory_type)
         if memory_type in {"episodic", "procedural"}:
@@ -2520,14 +2539,17 @@ class PipelineService:
         the dedup prompt/schema does not emit duplicate groups because the
         dedup pass that runs first (:meth:`consolidate_memories`) folds them,
         so this pass only retires losers: it mints no documents and is
-        convergent. Returns ``{"kept", "merged": 0, "contradicted"}``.
+        convergent. A loser that is a combined fact first has its members made
+        active again (:meth:`_restore_combined_members`); if that fails, the
+        pair is left for a later pass. Returns ``{"kept", "merged": 0,
+        "contradicted"}``; the members made active again are counted nowhere.
         """
         if len(facts) <= 1:
             return {"kept": len(facts), "merged": 0, "contradicted": 0}
 
         lines: list[str] = []
         for i, cf in enumerate(facts, 1):
-            content_quoted = json.dumps(cf.get("content", ""), ensure_ascii=False)
+            content_quoted = json_text(cf.get("content", ""))
             conf_raw = cf.get("confidence")
             sal_raw = cf.get("salience")
             conf_str = conf_raw if _is_real_number(conf_raw) else "N/A"
@@ -2572,6 +2594,10 @@ class PipelineService:
             loser_doc = facts_by_id.get(loser_id)
             if loser_doc is None:
                 continue
+            # A combined fact's members are hidden behind it. They go back first, so that a failure between the
+            # two writes leaves them beside the fact rather than hidden behind a retired one.
+            if COMBINED_TAG in (loser_doc.get("tags") or []) and not self._restore_combined_members(user_id, loser_doc):
+                continue
             if self._mark_superseded(loser_doc, winner_id, reason="contradict"):
                 contradicted += 1
                 consumed_loser_ids.add(loser_id)
@@ -2586,6 +2612,63 @@ class PipelineService:
         )
         return result
 
+    def _restore_combined_members(self, user_id: str, combined: dict[str, Any]) -> bool:
+        """Make the members of the combined fact ``combined`` active again, ahead of retiring it.
+
+        The fact is read again first: one that changed, or was retired or deleted, since the pool was read is left
+        for a later pass, which judges it afresh. The members are the records retired into it as combined, read
+        across the user's partitions. Each is written back without its supersession fields, only if it is unchanged
+        since this read: one that was edited, deleted or retired another way meanwhile is left as it is.
+
+        Returns ``False`` when the fact changed, or the members could not be read or one could not be written for
+        another reason: the fact stays active and its pair is left for a later pass (members already written stay
+        active beside it).
+        """
+        from azure.core import MatchConditions
+
+        query, parameters = combined_members_query(user_id, combined["id"])
+        restored = skipped = 0
+        try:
+            try:
+                current = self._memories_container.read_item(
+                    item=combined["id"], partition_key=[combined["user_id"], combined["thread_id"]]
+                )
+            except CosmosResourceNotFoundError:
+                current = {}
+            if not current or current.get("superseded_by") or current.get("_etag") != combined.get("_etag"):
+                logger.info(
+                    "reconcile_memories left a combined fact: it changed since the pool was read user_id=%s", user_id
+                )
+                return False
+            members = list(
+                self._memories_container.query_items(
+                    query=query, parameters=parameters, enable_cross_partition_query=True
+                )
+            )
+            for member in members:
+                kwargs: dict[str, Any] = {"item": member["id"], "body": restored_member(member)}
+                if member.get("_etag"):
+                    kwargs.update(etag=member["_etag"], match_condition=MatchConditions.IfNotModified)
+                try:
+                    self._memories_container.replace_item(**kwargs)
+                    restored += 1
+                except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError):
+                    skipped += 1
+        except CosmosHttpResponseError as exc:
+            logger.warning(
+                "reconcile_memories kept a combined fact: restoring its members stopped after %d: %s",
+                restored,
+                describe_exception(exc),
+            )
+            return False
+        logger.info(
+            "reconcile_memories restored %d members of a combined fact, %d changed since they were read user_id=%s",
+            restored,
+            skipped,
+            user_id,
+        )
+        return True
+
     def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
         # ---- Load up to N most recent active memories ----
         # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
@@ -2596,15 +2679,16 @@ class PipelineService:
         # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
         # agent did/recommended (historical events), not mutable user state, so
         # they must never be contradiction-superseded by a later user statement.
-        # Combined facts (sys:combined) are excluded too: retiring one as a loser
-        # would retire every detail it absorbed along with the conflicting one.
+        # Combined facts (sys:combined) stay in: this is read after the dedup pass
+        # of the same run, so a fact combined there can retire an older one, and a
+        # combined fact a newer fact contradicts is retired (its members first made
+        # active again) instead of staying active beside the outdated claim.
         query = (
             f"SELECT TOP {top_literal(n, name='reconcile_memories.n')} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = @memory_type "
             f"AND {_ACTIVE_DOC_FILTER} "
             "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
-            f"AND NOT ARRAY_CONTAINS(c.tags, '{COMBINED_TAG}') "
             "ORDER BY c.created_at DESC"
         )
         return list(

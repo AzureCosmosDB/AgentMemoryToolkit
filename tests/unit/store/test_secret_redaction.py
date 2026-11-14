@@ -254,7 +254,8 @@ def test_push_embeds_only_redacted_text(supplied):
     assert local[0]["embedding"] == [0.1, 0.2], "the caller gets the vector of the stored text"
 
 
-def test_update_without_an_embedder_redacts_new_content_and_metadata_and_drops_the_vector():
+def test_update_without_an_embedder_redacts_new_content_and_metadata_and_keeps_the_previous_vector():
+    """The guard drops the vector of an edit that held a secret, but the old one was built from clean text."""
     memories = MagicMock()
     memories.read_item.return_value = _stored_doc(embedding=[9.9], content_hash=compute_content_hash("hello"))
     store = MemoryStore(containers=_containers(memories=memories))
@@ -267,13 +268,29 @@ def test_update_without_an_embedder_redacts_new_content_and_metadata_and_drops_t
     assert TOKEN not in repr(body)
     assert body["metadata"]["classification"] == "secret"
     assert body["content_hash"] == compute_content_hash(body["content"])
-    assert "embedding" not in body, "the store has no embeddings client to rebuild it with"
+    assert body["embedding"] == [9.9], "the store has no embeddings client to rebuild it with"
 
 
 def _update_store(stored, embeddings):
     memories = MagicMock()
     memories.read_item.side_effect = lambda **_kwargs: copy.deepcopy(stored)
     return MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings), memories
+
+
+def _failing_embedder():
+    embeddings = MagicMock()
+    embeddings.generate.side_effect = RuntimeError(f"quota exceeded for {SECRET}")
+    return embeddings
+
+
+def test_update_without_an_embedder_keeps_the_previous_vector_when_the_content_changes():
+    store, memories = _update_store(_stored_doc(embedding=[9.9]), None)
+
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert body["content"] == "Prefers Ruff."
+    assert body["embedding"] == [9.9]
 
 
 def test_update_rebuilds_the_vector_from_the_redacted_content():
@@ -336,6 +353,17 @@ def test_update_does_not_embed_a_record_that_has_no_vector():
     assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
 
 
+def test_update_drops_the_vector_of_a_record_whose_text_is_emptied_without_embedding_it():
+    """There is no text left to embed, and the old vector describes text the record no longer has."""
+    embeddings = _embedder()
+    store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
+
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="")
+
+    embeddings.generate.assert_not_called()
+    assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
+
+
 def test_update_keeps_a_procedures_vector_when_only_its_content_changes():
     """A procedure is embedded from its retrieval_text, which a content update leaves as it was."""
     embeddings = _embedder()
@@ -360,17 +388,83 @@ def test_update_rebuilds_a_procedures_vector_from_its_retrieval_text():
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [0.1, 0.2]
 
 
-def test_update_drops_the_stale_vector_when_embedding_fails(caplog):
+@pytest.mark.parametrize(
+    "content",
+    ["Prefers Ruff.", f"Use {SECRET}"],
+    ids=["clean-content", "content-with-a-secret"],
+)
+def test_update_keeps_the_previous_vector_when_embedding_fails(content, caplog):
+    """Nothing gives a record without a vector one again, so a stale vector beats none.
+
+    The second case reaches the fallback after the guard has already dropped the vector of the edited text.
+    """
     caplog.set_level(logging.DEBUG)
-    embeddings = MagicMock()
-    embeddings.generate.side_effect = RuntimeError(f"quota exceeded for {SECRET}")
-    store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
+    store, memories = _update_store(_stored_doc(embedding=[9.9]), _failing_embedder())
+
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content=content)
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert body["embedding"] == [9.9]
+    assert TOKEN not in repr(body)
+    assert "embedding generation failed for m1 (RuntimeError" in caplog.text
+    assert "keeping its previous vector" in caplog.text
+    assert TOKEN not in caplog.text and "quota exceeded" not in caplog.text, "a log never quotes the error's text"
+    assert "Prefers Ruff." not in caplog.text, "a log never quotes the memory"
+
+
+@pytest.mark.parametrize("embedder", ["fails", "missing"])
+@pytest.mark.parametrize(
+    "changes",
+    [{"metadata": {"note": "rotated"}}, {"content": "Prefers Ruff."}],
+    ids=["metadata-only", "clean-content"],
+)
+def test_update_drops_a_vector_built_from_a_secret_when_it_cannot_be_rebuilt(changes, embedder, caplog):
+    """A record from before the guard holds the secret in its vector too; keeping that vector would keep the secret."""
+    caplog.set_level(logging.DEBUG)
+    embeddings = _failing_embedder() if embedder == "fails" else None
+    store, memories = _update_store(_stored_doc(content=f"Use {SECRET}", embedding=[9.9]), embeddings)
+
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", **changes)
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert "embedding" not in body
+    assert TOKEN not in repr(body)
+    assert "dropping its previous vector" in caplog.text
+    assert TOKEN not in caplog.text and "quota exceeded" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("retrieval_text", "expected"),
+    [("deploy the service", [9.9]), (f"deploy with {SECRET}", None)],
+    ids=["retrieval-text-clean", "retrieval-text-held-a-secret"],
+)
+def test_update_judges_a_procedures_vector_by_the_text_it_was_built_from(retrieval_text, expected):
+    """A procedure is embedded from its retrieval_text, so a secret in its content alone leaves the vector clean."""
+    stored = _stored_doc(type="procedural", retrieval_text=retrieval_text, content=f"Use {SECRET}", embedding=[9.9])
+    store, memories = _update_store(stored, _failing_embedder())
+
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="procedural", metadata={"note": "rotated"})
+
+    body = memories.replace_item.call_args.kwargs["body"]
+    assert body.get("embedding") == expected
+    assert TOKEN not in repr(body)
+
+
+def test_an_etag_conflict_retry_keeps_the_vector_it_reads_again_when_embedding_fails(monkeypatch):
+    """Each attempt starts from a fresh read, so the vector to keep is the one a concurrent writer left."""
+    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: None)
+    memories = MagicMock()
+    memories.read_item.side_effect = [
+        _stored_doc(embedding=[9.9], _etag="v1"),
+        _stored_doc(embedding=[7.7], _etag="v2"),
+    ]
+    memories.replace_item.side_effect = [CosmosAccessConditionFailedError(message="412", response=None), None]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=_failing_embedder())
 
     store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
 
-    assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
-    assert "embedding generation failed" in caplog.text
-    assert TOKEN not in caplog.text and "quota exceeded" not in caplog.text, "a log never quotes the error's text"
+    assert memories.replace_item.call_count == 2
+    assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [7.7]
 
 
 def test_an_etag_conflict_retry_does_not_embed_the_same_text_again(monkeypatch):

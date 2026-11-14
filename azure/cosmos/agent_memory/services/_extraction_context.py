@@ -12,10 +12,10 @@ a line of the prompt.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import AbstractSet, Any, Iterable, Mapping, Optional, Sequence
 
 from azure.cosmos.agent_memory._embedding_tokens import count_tokens
-from azure.cosmos.agent_memory.models import FACT_ASSERTIONS
+from azure.cosmos.agent_memory.models import FACT_ASSERTIONS, USER_ONLY_ASSERTIONS, FactAssertion
 from azure.cosmos.agent_memory.services._dedup import is_agent_sourced
 from azure.cosmos.agent_memory.services._pipeline_helpers import build_transcript
 from azure.cosmos.agent_memory.thresholds import (
@@ -245,3 +245,20 @@ def known_facts_text(docs: Iterable[Mapping[str, Any]]) -> str:
 def structured_fields(fact: Mapping[str, Any]) -> dict[str, Any]:
     """The v3 fields a model answer gave one fact, unnormalized; absent for older prompts."""
     return {key: fact[key] for key in STRUCTURED_FACT_FIELDS if key in fact}
+
+
+def user_backed_fields(fact: Mapping[str, Any], cited: Iterable[str], user_ids: AbstractSet[str]) -> dict[str, Any]:
+    """:func:`structured_fields` with a ``directive`` or ``correction`` kept only if a user wrote a turn the fact cites.
+
+    Procedures become standing instructions from these facts, so the claim does not rest on the model's
+    label: text a tool or the agent produced cannot teach or correct, whatever the model says it is. ``cited``
+    holds the turn ids the fact's citations resolve to (see ``ground_fact_sources``) and ``user_ids`` the ids of
+    the turns a user wrote (see ``user_turn_ids``). A fact that cites no turn has no evidence either. The
+    assertion is then recorded as ``stated``, as ``FactRecord`` does for a fact drawn from the agent.
+    """
+    fields = structured_fields(fact)
+    assertion = fields.get("assertion")
+    if isinstance(assertion, str) and assertion in USER_ONLY_ASSERTIONS:
+        if not fact.get("source_turn_ids") or user_ids.isdisjoint(cited):
+            fields["assertion"] = FactAssertion.stated.value
+    return fields

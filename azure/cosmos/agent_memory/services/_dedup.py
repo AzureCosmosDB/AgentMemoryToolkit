@@ -7,7 +7,9 @@ nearest neighbours:
 2. **Candidates**: a seed's nearest active facts whose cosine similarity reaches
    ``DEDUP_SIMILARITY_FLOOR``.
 3. **Verdicts**: ``dedup_verify.prompty`` labels each candidate's relation to the seed
-   and lists the details each side states that the other lacks.
+   and lists the details each side states that the other lacks. The seed and the candidates
+   reach it as JSON whose strings cannot end a line (``json_text``), so that no text in a memory can
+   start a line of the prompt.
 4. **Folds**: a fact is retired into another only when the two state the same claim or
    the other contains it, the model lists nothing it would lose, and
    :func:`specifics_preserved` agrees. The survivor keeps its content verbatim.
@@ -24,7 +26,6 @@ and negation checks, and the ranking of a seed's neighbours by similarity.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,7 +34,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from azure.cosmos.agent_memory._utils import cosine_similarity
 from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.models import AGENT_FACT_TAG, MAX_TAGS_PER_RECORD, USER_ONLY_ASSERTIONS
-from azure.cosmos.agent_memory.services._pipeline_helpers import is_real_number
+from azure.cosmos.agent_memory.services._pipeline_helpers import is_real_number, json_text
 from azure.cosmos.agent_memory.thresholds import DEDUP_MAX_NEIGHBORS, DEDUP_SIMILARITY_FLOOR
 
 DEDUP_PROMPT = "dedup_verify.prompty"
@@ -240,13 +241,14 @@ def memory_json(doc: Mapping[str, Any], label: Optional[str] = None) -> dict[str
 
 
 def verify_inputs(seed: Mapping[str, Any], candidates: Sequence[tuple[Mapping[str, Any], float]]) -> dict[str, str]:
-    """Prompt inputs: candidates are labeled ``C1..Cn`` so the model never handles IDs."""
+    """Prompt inputs: candidates are labeled ``C1..Cn`` so the model never handles IDs.
+
+    The seed and the candidates are each JSON whose strings cannot end a line (``json_text``), so that no text in a
+    memory can start a line of the prompt."""
     return {
-        "seed": json.dumps(memory_json(seed), ensure_ascii=False),
-        "candidates": json.dumps(
-            [memory_json(doc, f"C{i}") for i, (doc, _) in enumerate(candidates, start=1)],
-            ensure_ascii=False,
-            indent=1,
+        "seed": json_text(memory_json(seed)),
+        "candidates": json_text(
+            [memory_json(doc, f"C{i}") for i, (doc, _) in enumerate(candidates, start=1)], indent=1
         ),
     }
 

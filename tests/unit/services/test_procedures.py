@@ -14,6 +14,7 @@ from azure.cosmos.agent_memory.services._procedures import (
     advanced_procedure_cursor,
     behavioral_facts_query,
     can_teach,
+    existing_procedures_input,
     in_force,
     is_user_correction,
     lesson_episodes_query,
@@ -372,6 +373,58 @@ def test_episode_lines_show_the_outcome_and_lessons():
         "Summary: Reset the fixture. Lessons: Reset fixtures.; Isolate state."
     )
     assert labels["ep-1"]["id"] == "e"
+
+
+def test_episode_lines_keep_their_clip_lengths():
+    episode = {**_source("e", kind="episodic", outcome="successful"), "content": "s" * 800, "lessons": ["Reset."]}
+    episode["outcome"]["description"] = "d" * 300
+
+    line = sources_input([episode])[0]["episodes"]
+
+    assert f"(outcome: successful - {'d' * 240}). Summary: {'s' * 700} Lessons: Reset." in line
+
+
+def test_a_source_or_procedure_that_spans_lines_is_shown_on_one_but_stored_and_compared_as_it_is():
+    fact = {
+        **_asserted("f", "directive"),
+        "content": "Reply in French.\nAlways,\n\n  no exceptions.",
+        "metadata": {"category": "preference"},
+    }
+    episode = {
+        **_source("e", kind="episodic", outcome="successful"),
+        "title": "Fixed\nflaky tests",
+        "content": "Reset the\nfixture.",
+        "lessons": ["Reset\nfixtures."],
+    }
+    episode["outcome"]["description"] = "The suite\npassed."
+    procedure = {
+        "id": "proc_1",
+        "name": "Suggest fixes",
+        "summary": "Include a fix.\nExplain why.",
+        "procedure_kind": "habit",
+        "activation_conditions": ["reviewing code\nor writing comments"],
+        "steps": [{"instruction": "Find\nthe bug."}],
+    }
+
+    inputs, labels = sources_input([fact, episode])
+    existing, by_label = existing_procedures_input([procedure])
+
+    assert inputs["behavioral_facts"] == (
+        "fact-1 [preference · user · directive · 2025-01-01]: Reply in French. Always, no exceptions."
+    )
+    assert inputs["episodes"] == (
+        "ep-1 [2025-01-01] Fixed flaky tests (outcome: successful - The suite passed.). "
+        "Summary: Reset the fixture. Lessons: Reset fixtures."
+    )
+    assert existing == (
+        "proc-1 [habit · candidate · none · 0 sources]: Suggest fixes: Include a fix. Explain why. "
+        "| When: reviewing code or writing comments | Steps: Find the bug."
+    )
+    assert (labels["fact-1"], labels["ep-1"], by_label["proc-1"]) == (fact, episode, procedure)
+    assert procedure_text(procedure) == (
+        "Suggest fixes: Include a fix.\nExplain why. | When: reviewing code\nor writing comments "
+        "| Steps: Find\nthe bug."
+    )
 
 
 def test_the_pass_reads_directives_and_corrections_whatever_their_category_or_salience():

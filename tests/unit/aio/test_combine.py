@@ -366,8 +366,8 @@ class TestAsyncACombinedFactIsRedactedBeforeItIsEmbedded:
         assert token not in p._embed_one.call_args.args[0]
 
 
-class TestAsyncReconcilePoolExcludesCombinedFacts:
-    async def test_the_pool_query_leaves_out_combined_and_agent_facts(self):
+class TestAsyncReconcilePoolKeepsCombinedFacts:
+    async def test_the_pool_query_leaves_out_only_agent_facts(self):
         p = AsyncPipelineService.__new__(AsyncPipelineService)
         p._memories_container = MagicMock()
         p._query_items = AsyncMock(return_value=[])
@@ -375,8 +375,8 @@ class TestAsyncReconcilePoolExcludesCombinedFacts:
         await p._active_memories_for_reconcile("u1", "fact", 50)
 
         query = p._query_items.call_args.kwargs["query"]
-        assert "NOT ARRAY_CONTAINS(c.tags, 'sys:combined')" in query
-        assert "NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact')" in query
+        assert "sys:combined" not in query
+        assert query.count("ARRAY_CONTAINS") == 1 and "NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact')" in query
 
 
 class TestAsyncCommitCombine:

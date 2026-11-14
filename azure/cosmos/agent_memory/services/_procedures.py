@@ -14,6 +14,9 @@ with a successful or partially successful outcome, never what the assistant said
 failed. Anything else stays a candidate, which search does not show, until more evidence
 arrives. Reading only new sources means a source is distilled once; showing existing
 procedures lets the model revise or reinforce one instead of minting a paraphrase of it.
+Every source and existing procedure is shown on one line (see ``one_line``), so that nothing in a
+stored fact, episode or procedure can start a line of the prompt and forge a message of its own (the
+pass's output becomes standing rules). What is stored, compared and embedded keeps its text as it was.
 
 Teaching or correcting needs a fact extraction recorded as the user's ``directive`` or
 ``correction`` (facts extracted before assertions were recorded still count). Once an active
@@ -40,6 +43,7 @@ from azure.cosmos.agent_memory.services._dedup import (
     specifics_preserved,
     without_system_fields,
 )
+from azure.cosmos.agent_memory.services._extraction_context import one_line
 from azure.cosmos.agent_memory.services._pipeline_helpers import clamp_unit_interval, is_retryable_llm_error
 
 PROCEDURAL_THREAD_ID = "__procedural__"
@@ -106,7 +110,9 @@ class ProcedureScope:
 # ---------------------------------------------------------------- shared helpers
 def procedure_text(doc: Mapping[str, Any]) -> str:
     """The text a procedure is compared by: its name, summary, conditions, constraints and steps,
-    so a comparison cannot miss what only those state. (A fact is compared by its content alone.)"""
+    so a comparison cannot miss what only those state. (A fact is compared by its content alone.)
+    It keeps the text as stored, line breaks included; only the prompt line that shows it to the
+    model is put on one line (``existing_procedures_input``)."""
     head = str(doc.get("name") or "").strip()
     summary = str(doc.get("summary") or doc.get("content") or "").strip()
     parts = [f"{head}: {summary}" if head and summary else head or summary]
@@ -294,29 +300,34 @@ def _outcome_status(doc: Mapping[str, Any]) -> str:
 
 
 def _fact_line(label: str, doc: Mapping[str, Any]) -> str:
+    """A fact as one prompt line: its label, category, speaker, assertion and date, then its text."""
     metadata = doc.get("metadata")
     category = metadata.get("category") if isinstance(metadata, Mapping) else None
     category = category.strip() if isinstance(category, str) and category.strip() else "unknown"
     assertion = doc.get("assertion") if doc.get("assertion") in FACT_ASSERTIONS else None
     details = [category, source_speaker(doc), *([assertion] if assertion else []), source_date(doc)]
-    return f"{label} [{' · '.join(details)}]: {str(doc['content']).strip()}"
+    return one_line(f"{label} [{' · '.join(details)}]: {str(doc['content']).strip()}")
 
 
 def _episode_line(label: str, doc: Mapping[str, Any]) -> str:
+    """An episode as one prompt line: its label, date, title, outcome, summary and lessons."""
     outcome = doc.get("outcome") if isinstance(doc.get("outcome"), Mapping) else {}
     description = str(outcome.get("description") or "").strip()
     status = (_outcome_status(doc) or "none") + (f" - {description[:240]}" if description else "")
     lessons = "; ".join(
         lesson.strip() for lesson in doc.get("lessons") or [] if isinstance(lesson, str) and lesson.strip()
     )
-    return (
+    return one_line(
         f"{label} [{source_date(doc)}] {str(doc.get('title') or '').strip()} (outcome: {status}). "
         f"Summary: {str(doc.get('content') or '').strip()[:700]} Lessons: {lessons}"
     )
 
 
 def sources_input(batch: Sequence[Mapping[str, Any]]) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-    """Prompt inputs for a batch of sources, and the source each ``fact-N`` / ``ep-N`` label names."""
+    """Prompt inputs for a batch of sources, and the source each ``fact-N`` / ``ep-N`` label names.
+
+    Each source is one line, however many lines its text spans (see ``one_line``); the sources the labels
+    name are the stored documents, unchanged."""
     facts: list[str] = []
     episodes: list[str] = []
     labels: dict[str, dict[str, Any]] = {}
@@ -337,7 +348,10 @@ def support_count(doc: Mapping[str, Any]) -> int:
 
 
 def existing_procedures_input(procedures: Sequence[Mapping[str, Any]]) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Prompt lines labeled ``proc-N`` and the procedure each label names."""
+    """Prompt lines labeled ``proc-N`` and the procedure each label names.
+
+    Each procedure is one line, however many lines its text spans (see ``one_line``); ``procedure_text``, which a
+    revision is compared by, is not changed, and the procedures the labels name are as stored."""
     if not procedures:
         return "(none)", {}
     lines: list[str] = []
@@ -348,8 +362,10 @@ def existing_procedures_input(procedures: Sequence[Mapping[str, Any]]) -> tuple[
         evidence = "/".join(sorted(str(item) for item in doc.get("evidence") or [])) or "none"
         count = support_count(doc)
         lines.append(
-            f"{label} [{doc.get('procedure_kind') or 'unknown'} · {doc.get('status') or 'candidate'} · {evidence} · "
-            f"{count} source{'' if count == 1 else 's'}]: {procedure_text(doc)}"
+            one_line(
+                f"{label} [{doc.get('procedure_kind') or 'unknown'} · {doc.get('status') or 'candidate'} · "
+                f"{evidence} · {count} source{'' if count == 1 else 's'}]: {procedure_text(doc)}"
+            )
         )
     return "\n".join(lines), by_label
 

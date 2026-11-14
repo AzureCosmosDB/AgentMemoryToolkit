@@ -660,7 +660,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
         Replaces ``content``, ``role`` and ``metadata`` where given, on the memory in the container
         that holds ``memory_type``, which must be its stored type. Literal credentials are redacted
         before the write. A memory that has a vector gets a new one when its text changes or is
-        redacted, or none when no embeddings client is set or embedding fails.
+        redacted. If no embeddings client is set or embedding fails, it keeps its previous vector, unless the
+        text that vector was built from held a literal credential.
         """
         return self._get_store().update(
             memory_id,
@@ -1287,9 +1288,10 @@ class CosmosMemoryClient(_BaseMemoryClient):
         ``procedures_created``. ``status`` is ``synthesized``, ``unchanged``, ``skipped`` (every
         model answer failed or was unusable) or ``deferred`` (a retryable model error, or a
         transient embedding or Cosmos DB error while writing a procedure, stopped the run and
-        kept the cursor, so the next run retries). A ``synthesized`` result also has
+        kept the cursor, so the next run retries). A ``synthesized`` or ``deferred`` result also has
         ``procedures_updated``, ``procedures_reinforced``, ``procedures_skipped`` and
-        ``facts_retired``. ``force`` is accepted and has no effect.
+        ``facts_retired``; a ``deferred`` run counts what it wrote before it stopped. ``force`` is
+        accepted and has no effect.
 
         Only supported when the in-process backend owns processing; with the Durable Function app
         it raises ``NotImplementedError``, because the app runs it after each reconcile.

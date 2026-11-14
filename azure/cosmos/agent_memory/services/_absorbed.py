@@ -1,4 +1,4 @@
-"""Records folded into another memory, deleted with it.
+"""Records folded into another memory, deleted with it, and the members a combined fact gives back.
 
 Dedup retires a record that states the same claim as another into it (``supersede_reason="duplicate"``), combining
 retires the records a combined memory was written from into it (``supersede_reason="combined"``), and an active
@@ -10,29 +10,54 @@ them, and what the user deleted is gone.
 They are deleted before the memory itself: if that fails, the memory stays and a retry finds them again. Records
 replaced for another reason (``"update"``, ``"contradict"``) are earlier versions, not copies, and stay.
 
+A combined fact that a newer fact contradicts is retired, but its members are not copies of the part that is now wrong:
+each holds details the correction may not touch. So the members (the records retired into it as combined) are
+restored first (:func:`restored_member`): only the member the correction contradicts is retired in a later pass.
+
 A user's memories sit in one partition per thread, so the records are looked up across the user's partitions and each
-is deleted under its own thread.
+is deleted, or written back, under its own thread.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 ABSORBED_REASONS = ("duplicate", "procedure", "combined")
 # The memory types records are folded into: dedup and combining fold facts into facts (episodes are left alone),
 # and a procedure absorbs the statements it cites.
 ABSORBING_TYPES = frozenset({"fact", "procedural"})
+# What retiring a record sets (``MemoryStore.mark_superseded``); restoring one takes these away again.
+SUPERSEDED_FIELDS = ("superseded_by", "supersede_reason", "superseded_at")
 
 
-def absorbed_query(user_id: str, memory_id: str) -> tuple[str, list[dict[str, Any]]]:
-    """The records folded directly into ``memory_id`` (run across the user's partitions)."""
-    names = [f"@reason_{i}" for i in range(len(ABSORBED_REASONS))]
+def absorbed_query(
+    user_id: str,
+    memory_id: str,
+    *,
+    reasons: Sequence[str] = ABSORBED_REASONS,
+    columns: str = "c.id, c.type, c.thread_id",
+) -> tuple[str, list[dict[str, Any]]]:
+    """The records folded directly into ``memory_id`` (run across the user's partitions): by default every kind of
+    fold, with what deleting them needs (``columns``)."""
+    names = [f"@reason_{i}" for i in range(len(reasons))]
     query = (
-        "SELECT c.id, c.type, c.thread_id FROM c WHERE c.user_id = @user_id AND c.superseded_by = @memory_id "
+        f"SELECT {columns} FROM c WHERE c.user_id = @user_id AND c.superseded_by = @memory_id "
         f"AND c.supersede_reason IN ({', '.join(names)})"
     )
-    reasons = [{"name": name, "value": reason} for name, reason in zip(names, ABSORBED_REASONS)]
-    return query, [{"name": "@user_id", "value": user_id}, {"name": "@memory_id", "value": memory_id}, *reasons]
+    values = [{"name": name, "value": reason} for name, reason in zip(names, reasons)]
+    return query, [{"name": "@user_id", "value": user_id}, {"name": "@memory_id", "value": memory_id}, *values]
+
+
+def combined_members_query(user_id: str, combined_id: str) -> tuple[str, list[dict[str, Any]]]:
+    """The members of the combined fact ``combined_id``: the whole records retired into it as combined (run across the
+    user's partitions)."""
+    return absorbed_query(user_id, combined_id, reasons=("combined",), columns="*")
+
+
+def restored_member(member: Mapping[str, Any]) -> dict[str, Any]:
+    """``member`` as it was before it was retired: without the fields retiring it set, and without Cosmos DB's system
+    fields (``_etag``, ``_ts``, ...), which are not part of a body to write."""
+    return {k: v for k, v in member.items() if k not in SUPERSEDED_FIELDS and not k.startswith("_")}
 
 
 def delete_absorbed(container: Any, user_id: str, memory_id: str) -> list[dict[str, Any]]:

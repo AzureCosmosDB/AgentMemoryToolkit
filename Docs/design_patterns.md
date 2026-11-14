@@ -454,7 +454,7 @@ print(result["merged"], result["combined"], result["contradicted"])
 
 - Retired facts stay in the container with a `supersede_reason` (`duplicate`, `combined`, `contradict`); search hides them, `include_superseded=True` shows them, and `get_memory_history(memory_id, user_id)` walks a fact's chain.
 - A surviving duplicate keeps its wording and gains `merged_from`; a combined fact is tagged `sys:combined` and lists its sources in `merged_from`.
-- A user's statement is never retired into an agent-sourced fact, and agent-sourced facts are not part of the contradiction pass. A combined fact (`sys:combined`) is left out of the contradiction pass, so it cannot be retired together with the details it absorbed.
+- A user's statement is never retired into an agent-sourced fact, and agent-sourced facts are not part of the contradiction pass. A combined fact (`sys:combined`) is part of it: when a newer fact contradicts one, the facts it combined are made active again first, so a later pass retires only the one that conflicts.
 
 ### Cost and control
 

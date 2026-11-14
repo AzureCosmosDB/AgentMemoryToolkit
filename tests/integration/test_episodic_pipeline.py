@@ -97,6 +97,21 @@ def _delete_user_records(mem: CosmosMemoryClient, user_id: str) -> None:
                 pass
 
 
+def _write_turns(mem: CosmosMemoryClient, user_id: str, thread_id: str, turns: list[tuple[str, str]]) -> set[str]:
+    turn_ids = set()
+    for role, content in turns:
+        turn_ids.add(
+            mem.upsert_memory(
+                user_id=user_id,
+                role=role,
+                content=content,
+                memory_type="turn",
+                thread_id=thread_id,
+            )
+        )
+    return turn_ids
+
+
 def _write_hiking_thread(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> set[str]:
     turns = [
         (
@@ -137,18 +152,57 @@ def _write_hiking_thread(mem: CosmosMemoryClient, user_id: str, thread_id: str) 
             "would bring trekking poles for the steeper wet sections.",
         ),
     ]
-    turn_ids = set()
-    for role, content in turns:
-        turn_ids.add(
-            mem.upsert_memory(
-                user_id=user_id,
-                role=role,
-                content=content,
-                memory_type="turn",
-                thread_id=thread_id,
-            )
-        )
-    return turn_ids
+    return _write_turns(mem, user_id, thread_id, turns)
+
+
+def _write_export_fix_thread(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> set[str]:
+    """A thread in which the user and the assistant fix a recurring failure with a method that works.
+
+    The hiking trip's lessons are general advice from one outing, which the procedure pass rightly leaves
+    out. This is what it is meant to learn from an episode: a multi-step method specific to the user's
+    environment, carried out and successful.
+    """
+    turns = [
+        (
+            "user",
+            "Our nightly billing export in the finance-etl repo failed again with a lock timeout "
+            "on the staging Postgres database.",
+        ),
+        (
+            "agent",
+            "A lock timeout usually means a stale session is holding locks. Let's look for "
+            "idle-in-transaction sessions in pg_stat_activity.",
+        ),
+        (
+            "user",
+            "I ran SELECT pid, now() - xact_start AS age FROM pg_stat_activity WHERE state = "
+            "'idle in transaction' and found three sessions older than 10 minutes.",
+        ),
+        (
+            "agent",
+            "Terminate those three with pg_terminate_backend(pid), then rerun the export with make export-billing.",
+        ),
+        (
+            "user",
+            "Done: I terminated the three stale sessions with pg_terminate_backend and reran "
+            "make export-billing, and the export finished in 4 minutes.",
+        ),
+        (
+            "agent",
+            "Clearing the stale sessions fixed the run, so idle-in-transaction sessions caused the lock timeout.",
+        ),
+        (
+            "user",
+            "Good. Whenever the billing export fails on a lock timeout, we should first list the "
+            "idle-in-transaction sessions older than 10 minutes, terminate them, and only then rerun "
+            "make export-billing.",
+        ),
+        (
+            "agent",
+            "Understood: list the stale sessions, terminate them, then rerun make export-billing.",
+        ),
+    ]
+    return _write_turns(mem, user_id, thread_id, turns)
 
 
 def test_live_episodic_extraction_and_blended_search(
@@ -199,14 +253,17 @@ def test_live_episodic_lessons_feed_procedural_synthesis(
     Uses a fresh user with no extracted facts, so the only possible source for the
     procedure pass is episodic lessons - this isolates the episodic->procedural
     seam end-to-end against live Cosmos (real ``IS_DEFINED(c.lessons)`` filtering).
+    The thread is a multi-step fix that worked, which is what the pass learns from an
+    episode: a trip's lessons are general advice that it correctly leaves out.
 
     ``synthesize_procedural`` returns counts, never the procedures, and a run reads
     only the sources written since the last one. So: the first run must read the
-    episodes (``synthesized``, not ``unchanged``), whatever procedures it writes
-    cite only those episodes, and a second run has nothing new left to read.
+    episodes (``synthesized``, not ``unchanged``) and write at least one candidate
+    procedure that cites them (and only them), and a second run has nothing new
+    left to read.
     """
     try:
-        _write_hiking_thread(episodic_memory, unique_user_id, unique_thread_id)
+        _write_export_fix_thread(episodic_memory, unique_user_id, unique_thread_id)
         time.sleep(1)
 
         stats = episodic_memory.extract_episodes(unique_user_id, unique_thread_id, flush=True)
@@ -231,9 +288,15 @@ def test_live_episodic_lessons_feed_procedural_synthesis(
         counts = {"procedures_created", "procedures_updated", "procedures_reinforced", "procedures_skipped"}
         assert counts <= set(result), result
         assert result.get("facts_retired") == 0, "no fact was extracted, so none can be retired into a procedure"
+        assert result["procedures_created"] >= 1, (
+            f"Expected the model to learn at least one procedure from the episodes' lessons, got {result}"
+        )
 
         procedures = episodic_memory.get_procedural_memories(unique_user_id)
         assert len(procedures) >= result["procedures_created"], (result, procedures)
+        assert any(set(procedure.get("source_episodic_ids") or []) & lesson_bearing for procedure in procedures), (
+            f"Expected a stored procedure to cite the lesson-bearing episodes {lesson_bearing}, got {procedures}"
+        )
         for procedure in procedures:
             assert set(procedure.get("source_episodic_ids") or []) <= lesson_bearing, (
                 f"Expected a procedure to cite only lesson-bearing episodes {lesson_bearing}, got {procedure}"

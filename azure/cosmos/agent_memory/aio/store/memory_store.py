@@ -14,6 +14,7 @@ from azure.cosmos.agent_memory._container_routing import (
     container_key_for_type,
 )
 from azure.cosmos.agent_memory._curation import (
+    detect_secrets,
     drop_secret_tags,
     embedding_text,
     mark_secret,
@@ -119,23 +120,53 @@ class AsyncMemoryStore:
             )
             return None
 
-    async def _refresh_embedding(self, doc: dict[str, Any], built_from: str, vectors: dict[str, list[float]]) -> None:
+    async def _refresh_embedding(
+        self,
+        doc: dict[str, Any],
+        built_from: str,
+        previous: list[float],
+        vectors: dict[str, list[float]],
+    ) -> None:
         """Keep the vector of an updated ``doc`` in step with its text.
 
-        ``built_from`` is the text the stored vector encodes. The write guard drops the vector when it redacts that
-        text, and a changed text leaves it stale. Either way it is rebuilt from the text now stored, or left off the
-        record when that cannot be done. ``vectors`` remembers what was embedded, so a retry does not embed it again.
+        ``previous`` is the vector the record had before the update and ``built_from`` the text it encodes. The write
+        guard drops the vector when it redacts that text, and a changed text leaves it stale. Either way it is rebuilt
+        from the text now stored. When that cannot be done (the store has no embeddings client, or embedding fails)
+        the record keeps ``previous``, stale as it may be: an update never gives a record a vector it lacks, so a
+        record left without one would stay out of vector search. ``previous`` is dropped instead when ``built_from``
+        held a credential, because it encodes it. ``vectors`` remembers what was embedded, so a retry does not embed
+        it again.
         """
         text = embedding_text(doc)
         if doc.get("embedding") and text == built_from:
             return
         doc.pop("embedding", None)
-        if text not in vectors:
-            vector = await self._embed_for_write(doc.get("id"), text, operation="update")
-            if vector is None:
-                return
+        if not text:
+            return
+        vector = vectors.get(text)
+        failure = "no embeddings client"
+        if vector is None and self._embeddings_client is not None:
+            try:
+                vector = await self._embeddings_client.generate(text)
+            except Exception as exc:  # noqa: BLE001
+                failure = describe_exception(exc)
+        if vector is not None:
             vectors[text] = vector
-        doc["embedding"] = vectors[text]
+            doc["embedding"] = vector
+        elif detect_secrets(built_from):
+            logger.warning(
+                "update: embedding generation failed for %s (%s); dropping its previous vector, "
+                "which encodes a credential",
+                doc.get("id"),
+                failure,
+            )
+        else:
+            doc["embedding"] = previous
+            logger.warning(
+                "update: embedding generation failed for %s (%s); keeping its previous vector",
+                doc.get("id"),
+                failure,
+            )
 
     async def read_item(self, item_id: str, partition_key: Any, *, container_key: ContainerKey) -> dict[str, Any]:
         """Point-read a document from the explicitly selected split container."""
@@ -470,9 +501,10 @@ class AsyncMemoryStore:
     ) -> None:
         """Update a memory document via point read in the container for ``memory_type``.
 
-        The write guard redacts credentials in the stored document, which drops its vector. A vector is also stale
-        once the text it was built from changes. Either way it is rebuilt from the redacted text, or left off the
-        record when the store has no embeddings client or embedding fails.
+        A memory that has a vector is re-embedded when its text changes or the write guard redacts it. If the store
+        has no embeddings client or embedding fails, the memory keeps its previous vector, stale as it may be, unless
+        the text that vector was built from held a literal credential: then the vector is dropped, because it encodes
+        it. A memory without a vector is not given one.
         """
         import random
 
@@ -498,7 +530,8 @@ class AsyncMemoryStore:
             if actual_type != memory_type:
                 raise MemoryTypeMismatchError(memory_id=memory_id, expected=memory_type, actual=actual_type)
 
-            built_from = embedding_text(doc) if doc.get("embedding") else None
+            previous = doc.get("embedding")
+            built_from = embedding_text(doc)
             if content is not None:
                 doc["content"] = content
             if role is not None:
@@ -508,8 +541,8 @@ class AsyncMemoryStore:
             redacted = sanitize_record(doc)
             if redacted:
                 logger.warning("redacted literal secrets before write id=%s patterns=%s", memory_id, redacted)
-            if built_from is not None:
-                await self._refresh_embedding(doc, built_from, vectors)
+            if previous:
+                await self._refresh_embedding(doc, built_from, previous, vectors)
             doc["updated_at"] = datetime.now(timezone.utc).isoformat()
 
             kwargs: dict[str, Any] = {"item": doc["id"], "body": doc}

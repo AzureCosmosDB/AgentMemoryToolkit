@@ -179,7 +179,7 @@ high_conf_facts = memory.get_memories(user_id="u1", memory_types=["fact"], min_c
 
 `extract_memories` runs `extract_memories-v3.prompty` by default. Besides `content`, `salience`, `confidence` and `metadata.category` (`preference`, `requirement`, `biographical` or `other`), each fact records:
 
-- `assertion` - how the conversation put the fact forward: `stated`, `decided`, `suggested`, `observed`, `directive` (the user told the assistant how to act in future) or `correction` (the user corrected how the assistant did something). Only the user can direct or correct.
+- `assertion` - how the conversation put the fact forward: `stated`, `decided`, `suggested`, `observed`, `directive` (the user told the assistant how to act in future) or `correction` (the user corrected how the assistant did something). Only the user can direct or correct: a fact that does not cite a turn a user wrote is recorded as `stated`.
 - `subject`, `attribute`, `entities` - what the fact is about, the single-valued property it gives a value of (`home city`), and the names it mentions (at most 12).
 - `source_turn_ids` - the turns it came from.
 
@@ -230,7 +230,7 @@ Every write through the store or the pipeline, raw turns included, is scanned fo
 `reconcile(user_id, n=None)` (on the public client, where `n` defaults to `DEDUP_POOL_SIZE`; underlying pipeline method is `PipelineService.reconcile_memories`) keeps a user's fact pool clean in two passes, duplicates first and then contradictions:
 
 1. **Duplicates, without losing detail.** Each fact written since the last pass is compared with its nearest active facts (cosine similarity ≥ 0.85) in one model call. A fact is retired into another (`supersede_reason="duplicate"`) only when the two state the same claim or one contains the other, the model lists nothing that would be lost, and a numbers / names / negation check agrees. The survivor keeps its content verbatim and lists the retired fact in `merged_from`. The pass also combines facts about one specific thing that each hold details the others lack into one verified fact (tagged `sys:combined`), and retires its sources with `supersede_reason="combined"`.
-2. **Contradictions.** A single LLM pass over the `n` most-recent active facts (agent-sourced and combined facts are left out) soft-deletes each loser with `supersede_reason="contradict"`.
+2. **Contradictions.** A single LLM pass over the `n` most-recent active facts (agent-sourced facts are left out) soft-deletes each loser with `supersede_reason="contradict"`. A combined fact that loses gives back the facts it combined first, so only the detail that is wrong is retired.
 
 The pass returns `kept`, `merged` (duplicates retired), `contradicted`, and `checked`, `compared`, `vetoed`, `combined`, `synthesized`, `combine_groups` and `combine_failed` for the duplicate pass. Search hides retired records and `get_memory_history()` returns them; deleting a fact or procedure with `delete_memory()` also deletes the records retired into it. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
 

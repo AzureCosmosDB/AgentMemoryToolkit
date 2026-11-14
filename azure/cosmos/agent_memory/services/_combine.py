@@ -16,7 +16,8 @@ of them can fill a short search result. So the dedup pass on facts also:
    ``dedup_verify.prompty`` must then find that it contains each member it combines with nothing
    missing, and :func:`kept_specifics` that it keeps each member's numbers, names and negation, in at
    most ``COMBINE_MAX_CHARS`` characters. One retry lists what was missing; after that the members stay
-   as they are.
+   as they are. The facts reach both prompts as JSON whose strings cannot end a line (``json_text``), and the
+   retry lists each missing detail on one line, so that no text in a fact can start a line of a prompt.
 4. **Applies** (:func:`combined_record`): the pipeline redacts the combined fact before embedding it and
    re-reads the members, keeping them as they are if one was deleted, edited or retired since the pass
    read it. Otherwise the fact is created (tagged ``sys:combined``, with ``merged_from`` naming its members), then
@@ -29,7 +30,6 @@ A combined fact is never combined again, and dedup never retires it (it has abso
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Generator, Mapping, Optional, Sequence
@@ -55,7 +55,8 @@ from azure.cosmos.agent_memory.services._dedup import (
     survivor_patch,
     verify_inputs,
 )
-from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP, is_retryable_llm_error
+from azure.cosmos.agent_memory.services._extraction_context import one_line
+from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP, is_retryable_llm_error, json_text
 from azure.cosmos.agent_memory.thresholds import (
     COMBINE_MAX_CHARS,
     COMBINE_MAX_SOURCES,
@@ -190,11 +191,14 @@ class CombineDraft:
 
 def writer_inputs(docs: Sequence[Mapping[str, Any]], missing: Sequence[str] = ()) -> dict[str, str]:
     """``combine_memories.prompty`` inputs: the facts labeled ``M1..Mn`` (no IDs) and, on a retry, what the
-    previous fact left out."""
-    memories = json.dumps(
-        [memory_json(doc, f"M{index}") for index, doc in enumerate(docs, start=1)], ensure_ascii=False, indent=1
-    )
-    feedback = "\n\n" + _RETRY_NOTE + "\n" + "\n".join(f"- {item}" for item in missing) if missing else ""
+    previous fact left out.
+
+    The facts are JSON whose strings cannot end a line (``json_text``) and each missing detail is one line
+    (``one_line``), so that no text in a fact, or in what the check said was missing, can start a line of the
+    prompt."""
+    memories = json_text([memory_json(doc, f"M{index}") for index, doc in enumerate(docs, start=1)], indent=1)
+    details = "\n".join(f"- {one_line(str(item))}" for item in missing)
+    feedback = "\n\n" + _RETRY_NOTE + "\n" + details if missing else ""
     return {"memories": memories, "feedback": feedback}
 
 

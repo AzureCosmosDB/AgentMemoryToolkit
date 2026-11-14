@@ -7,6 +7,8 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
+import openai
 import pytest
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosHttpResponseError, CosmosResourceExistsError
 
@@ -28,6 +30,8 @@ from tests.unit.services.test_procedural_synthesis_and_context import (
     answer,
     containers_for,
     cursor_doc,
+    cursor_moved,
+    deferred,
     directive,
     episode,
     fact,
@@ -493,13 +497,11 @@ async def test_synthesize_procedural_reads_each_source_once() -> None:
 
 
 @pytest.mark.parametrize(
-    ("error", "status", "cursor_moved"),
-    [("rate limit", "deferred", False), ("content_filter", "skipped", True)],
+    ("error", "expected", "moved"),
+    [("rate limit", deferred(), False), ("content_filter", {"status": "skipped", "procedures_created": 0}, True)],
     ids=["retryable-keeps-the-sources", "non-retryable-skips-them"],
 )
-async def test_synthesize_procedural_moves_its_cursor_only_past_sources_it_is_done_with(
-    error, status, cursor_moved
-) -> None:
+async def test_synthesize_procedural_moves_its_cursor_only_past_sources_it_is_done_with(error, expected, moved) -> None:
     memories = Memories([fact()])
     service, _ = _service(memories, [])
 
@@ -509,8 +511,8 @@ async def test_synthesize_procedural_moves_its_cursor_only_past_sources_it_is_do
 
     service._run_prompty = fail  # type: ignore[method-assign]
 
-    assert await service.synthesize_procedural("u1") == {"status": status, "procedures_created": 0}
-    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs) is cursor_moved
+    assert await service.synthesize_procedural("u1") == expected
+    assert cursor_moved(memories) is moved
 
 
 async def test_synthesize_procedural_skips_an_unusable_answer_and_moves_on() -> None:
@@ -518,11 +520,11 @@ async def test_synthesize_procedural_skips_an_unusable_answer_and_moves_on() -> 
     service, _ = _service(memories, ["not json"])
 
     assert await service.synthesize_procedural("u1") == {"status": "skipped", "procedures_created": 0}
-    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs)
+    assert cursor_moved(memories)
 
 
 @pytest.mark.parametrize(
-    ("failure", "status", "cursor_moved"),
+    ("failure", "status", "moved"),
     [
         (CosmosHttpResponseError(status_code=429, message="throttled"), "deferred", False),
         (CosmosHttpResponseError(status_code=503, message="unavailable"), "deferred", False),
@@ -531,7 +533,7 @@ async def test_synthesize_procedural_skips_an_unusable_answer_and_moves_on() -> 
     ids=["throttled", "unavailable", "bad-request"],
 )
 async def test_a_failed_procedure_write_moves_the_cursor_only_when_a_retry_could_succeed(
-    failure, status, cursor_moved
+    failure, status, moved
 ) -> None:
     memories = Memories([fact()])
     service, _ = _service(memories, [{"procedures": [answer()]}])
@@ -541,7 +543,182 @@ async def test_a_failed_procedure_write_moves_the_cursor_only_when_a_retry_could
 
     assert result["status"] == status
     assert procedures_by_name(memories) == {}
-    assert any(doc.get("type") == "procedure_cursor" for doc in memories.docs) is cursor_moved
+    assert cursor_moved(memories) is moved
+
+
+# The failures above are injected into the pipeline; these come from the clients it calls.
+_EMBEDDINGS_REQUEST = httpx.Request("POST", "https://example.invalid/embeddings")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        openai.RateLimitError("rate limited", response=httpx.Response(429, request=_EMBEDDINGS_REQUEST), body=None),
+        openai.APITimeoutError(request=_EMBEDDINGS_REQUEST),
+    ],
+    ids=["embeddings-throttled", "embeddings-timeout"],
+)
+async def test_an_embeddings_failure_defers_the_batch_and_a_later_run_writes_the_procedure(failure) -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer()]}, {"procedures": [answer()]}])
+    embed = service._embeddings.generate
+    calls: list[str] = []
+
+    async def fails_once(text: str) -> list[float]:
+        calls.append(text)
+        if len(calls) == 1:
+            raise failure
+        return await embed(text)
+
+    service._embeddings.generate = fails_once  # type: ignore[method-assign]
+
+    assert (await service.synthesize_procedural("u1"))["status"] == "deferred"
+    assert procedures_by_name(memories) == {} and not cursor_moved(memories)
+
+    second = await service.synthesize_procedural("u1")
+
+    assert (second["status"], second["procedures_created"]) == ("synthesized", 1)
+    assert "Run targeted tests" in procedures_by_name(memories) and cursor_moved(memories)
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome", "moved"),
+    [(408, "deferred", False), (429, "deferred", False), (503, "deferred", False), (400, "synthesized", True)],
+    ids=["timeout", "throttled", "unavailable", "bad-request"],
+)
+async def test_a_create_that_fails_in_cosmos_moves_the_cursor_only_when_a_retry_could_succeed(
+    status, outcome, moved
+) -> None:
+    memories = Memories([fact()])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+    create = memories.create_item
+
+    def failing(*, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("type") == "procedural":
+            raise CosmosHttpResponseError(status_code=status, message="failed")
+        return create(body=body)
+
+    memories.create_item = failing  # type: ignore[method-assign]
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result["status"] == outcome
+    assert procedures_by_name(memories) == {}
+    assert cursor_moved(memories) is moved
+
+
+async def test_a_replace_that_fails_in_cosmos_defers_the_batch_that_reinforces_a_procedure() -> None:
+    habit = procedure("Use the logger", kind="habit", status="candidate", evidence=["repeated"])
+    later = fact("fact-new", "The user again asked for logger calls instead of print.", ts=5, day="2025-02-01")
+    memories = Memories([habit, later])
+    service, _ = _service(memories, [{"procedures": [answer("Use the logger", kind="habit", evidence="repeated")]}])
+    replace = memories.replace_item
+
+    def failing(**kwargs: Any) -> dict[str, Any]:
+        if kwargs["body"].get("type") == "procedural":
+            raise CosmosHttpResponseError(status_code=503, message="unavailable")
+        return replace(**kwargs)
+
+    memories.replace_item = failing  # type: ignore[method-assign]
+
+    assert (await service.synthesize_procedural("u1"))["status"] == "deferred"
+    assert not cursor_moved(memories)
+    assert procedures_by_name(memories)["Use the logger"]["source_fact_ids"] == ["fact-old"]
+
+
+def _second_source_and_answer() -> tuple[dict[str, Any], dict[str, Any]]:
+    return fact("fact-next", "The user wants commit messages short.", ts=2), answer(
+        "Short commit messages", summary="Keep commit messages short.", grounded_in=("fact-2",)
+    )
+
+
+def _fail_creating(memories: Memories, name: str) -> dict[str, bool]:
+    """Make creating the procedure ``name`` fail with a throttle until ``state["fail"]`` is cleared."""
+    state = {"fail": True}
+    create = memories.create_item
+
+    def throttled(*, body: dict[str, Any]) -> dict[str, Any]:
+        if state["fail"] and body.get("name") == name:
+            raise CosmosHttpResponseError(status_code=429, message="throttled")
+        return create(body=body)
+
+    memories.create_item = throttled  # type: ignore[method-assign]
+    return state
+
+
+async def test_a_batch_stopped_by_a_transient_failure_reports_the_answers_it_had_already_written() -> None:
+    source, second = _second_source_and_answer()
+    memories = Memories([directive(), source])
+    # The first answer is a taught directive: its procedure is created and the directive is retired into it.
+    service, chat = _service(memories, [{"procedures": [answer(), second]}])
+    state = _fail_creating(memories, "Short commit messages")
+
+    result = await service.synthesize_procedural("u1")
+
+    assert result == deferred(created=1, facts_retired=1)
+    assert set(procedures_by_name(memories)) == {"Run targeted tests"}
+    assert fact_doc(memories)["supersede_reason"] == "procedure"
+    assert not cursor_moved(memories), "the batch is tried again"
+
+    # The directive is retired, so the run that tries the batch again shows only the other fact.
+    state["fail"] = False
+    chat.responses.append({"procedures": [{**second, "grounded_in": ["fact-1"]}]})
+    rerun = await service.synthesize_procedural("u1")
+
+    assert (rerun["status"], rerun["procedures_created"], rerun["facts_retired"]) == ("synthesized", 1, 0)
+    assert set(procedures_by_name(memories)) == {"Run targeted tests", "Short commit messages"}
+    assert cursor_moved(memories)
+
+
+async def test_the_run_that_tries_a_deferred_batch_again_skips_the_answer_it_already_wrote() -> None:
+    source, second = _second_source_and_answer()
+    memories = Memories([fact(), source])
+    service, _ = _service(memories, [{"procedures": [answer(), second]}, {"procedures": [answer(), second]}])
+    state = _fail_creating(memories, "Short commit messages")
+
+    assert await service.synthesize_procedural("u1") == deferred(created=1)
+
+    state["fail"] = False
+    rerun = await service.synthesize_procedural("u1")
+
+    # Its procedure's ID follows from its kind and name, so the same answer now finds it, and cites nothing new.
+    assert (rerun["status"], rerun["procedures_created"], rerun["procedures_skipped"]) == ("synthesized", 1, 1)
+    assert len(procedures_by_name(memories)) == 2 and cursor_moved(memories)
+
+
+async def test_a_revision_written_before_a_batch_was_stopped_is_counted() -> None:
+    source, second = _second_source_and_answer()
+    shown = fact("fact-new", "The user wants the test command shown.", ts=1)
+    memories = Memories([procedure(), shown, source])
+    revision = answer(
+        action="update", updates="proc-1", summary="Run targeted tests before reporting success; show the command."
+    )
+    service, _ = _service(memories, [{"procedures": [revision, second]}])
+    _fail_creating(memories, "Short commit messages")
+
+    assert await service.synthesize_procedural("u1") == deferred(updated=1)
+    assert procedures_by_name(memories)["Run targeted tests"]["version"] == 2
+    assert not cursor_moved(memories)
+
+
+async def test_a_run_stopped_in_a_later_batch_reports_what_its_earlier_batches_wrote() -> None:
+    first_directive = directive("fact-00", ts=1)
+    facts = [first_directive, *(fact(f"fact-{i:02d}", f"The user stated rule {i}.", ts=i + 1) for i in range(1, 12))]
+    memories = Memories(facts)
+    service, _ = _service(memories, [])
+    replies = iter([json.dumps({"procedures": [answer()]})])
+
+    async def first_batch_only(filename: str, inputs: dict[str, Any]) -> str:
+        del filename, inputs
+        reply = next(replies, None)
+        if reply is None:
+            raise RuntimeError("rate limit")
+        return reply
+
+    service._run_prompty = first_batch_only  # type: ignore[method-assign]
+
+    assert await service.synthesize_procedural("u1") == deferred(created=1, facts_retired=1)
+    assert cursor_doc(memories)["facts"]["last_ts"] == 10
 
 
 def _twelve_facts() -> list[dict[str, Any]]:
@@ -562,7 +739,7 @@ async def test_a_stopped_run_keeps_the_batches_it_finished() -> None:
 
     service._run_prompty = first_batch_only  # type: ignore[method-assign]
 
-    assert await service.synthesize_procedural("u1") == {"status": "deferred", "procedures_created": 0}
+    assert await service.synthesize_procedural("u1") == deferred()
     assert cursor_doc(memories)["facts"] == {"last_ts": 10, "ids_at_last_ts": ["fact-09"]}
 
     shown: list[str] = []
@@ -596,7 +773,7 @@ async def test_a_deadline_stops_the_pass_between_batches(monkeypatch: pytest.Mon
 
     assert (result["status"], result["procedures_created"]) == ("synthesized", 0)
     assert cursor_doc(memories)["facts"]["last_ts"] == 10
-    assert await service.synthesize_procedural("u1", deadline=50.0) == {"status": "deferred", "procedures_created": 0}
+    assert await service.synthesize_procedural("u1", deadline=50.0) == deferred()
 
 
 @pytest.mark.parametrize(

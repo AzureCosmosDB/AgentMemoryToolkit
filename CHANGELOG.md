@@ -1,5 +1,34 @@
 ## Release History
 
+## [Unreleased]
+
+#### Features Added
+* **New extraction prompt.** `extract_memories-v3.prompty` is now the default. Set `AMT_EXTRACT_MEMORIES_PROMPT` to use an earlier prompt. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Duplicates are folded and combined.** Before resolving contradictions, `reconcile()` retires a fact into another that states everything it states (`supersede_reason="duplicate"`, with `merged_from` on the survivor) and combines facts about one specific thing into one `sys:combined` fact (`supersede_reason="combined"`). It returns counts for both passes, and `DEDUP_POOL_SIZE` limits how many new facts one pass checks. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Procedural memory is learned from conversations.** The toolkit learns standing instructions, habits and skills from what users teach and correct, and `build_procedural_context(user_id, task=None)` returns the rules to add to a prompt. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Search slots.** `search_cosmos(preference_slot=True, procedure_slot=True)` reserves places in `top_k` for the user's best-matching preference and situational procedure, so closer-matching facts do not crowd them out. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Secrets are redacted on write.** Common credential formats (keys, tokens, connection strings, private keys, passwords in URLs) are replaced with `[REDACTED-SECRET]` before text is embedded or stored, and the record is tagged `sys:secret`.
+* **Deleting a memory removes what was folded into it.** `delete_memory()` also deletes the records retired into the deleted fact or procedure. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Time-budgeted passes.** `PipelineService.reconcile_memories()`, `consolidate_memories()` and `synthesize_procedural()` accept a `deadline`. The Function App sets it from the new `ACTIVITY_TIME_BUDGET_SECONDS` (default 240), so a run stops before the function timeout and the next one continues. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Cosmos DB read regions.** `cosmos_preferred_locations` (or `COSMOS_DB_PREFERRED_REGIONS`) sets the regions the SDK reads from, closest first. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+
+#### Breaking Changes
+* **Procedural memory is reshaped** `procedure_kind` is now `instruction`, `habit` or `skill`, and a procedure's `status` follows from its evidence. `scope_type` / `scope_value`, `ProcedureScopeType` and `synthesize_procedural.prompty` are removed, `synthesize_procedural()` works incrementally, `build_procedural_context()` returns only standing rules (plus the nearest situational rule for a `task`), and `search_cosmos()` hides procedures that are not active. Delete or ignore procedural documents written by earlier betas. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Logs and failure messages no longer quote exception text.** JSON logs write `exc_detail` (type, error code and location) instead of `exc_msg`, so update any query or alert that reads `exc_msg`. A failed Function App activity now reports only `<code> (<ExcType>)` to Durable Functions. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* **Bicep creates `memories_summaries` with a vector and full-text index**, as `create_memory_store()` already does, so `search_summaries()` works on a deployment from the template. Cosmos DB sets a vector policy only when a container is created: an environment provisioned from an earlier template needs that container created again, and `azd up` over it can fail. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+
+#### Bugs Fixed
+* Procedure learning no longer ignores newer facts and episodes. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* Turns with the same `created_at`, as in an imported session, are processed in write order, and `recent_k` keeps the newest.
+* Empty model replies are retried, and content-filtered or refused replies raise an `LLMError` that names the cause instead of being retried on every run. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* The Function App parses boolean settings like the SDK does, and a `MAX_BATCH_SIZE` below 1 falls back to 20 instead of silently skipping the backlog. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+
+#### Other Changes
+* New prompts `extract_memories-v3`, `dedup_verify` and `combine_memories`; `extract_procedure` is rewritten. Every memory-writing prompt now tells the model never to write a literal secret. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* Search results include the new fact and procedure fields and `merged_from`, and `MemoryStore.search()` gains `categories`, `vector_only`, `active_procedures_only`, `applies` and `query_embedding`. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* Bicep adds the `dedupPoolSize`, `activityTimeBudgetSeconds`, `chatCapacity` and `embeddingCapacity` parameters (azd variables `DEDUP_POOL_SIZE`, `ACTIVITY_TIME_BUDGET_SECONDS`, `AI_FOUNDRY_CHAT_CAPACITY`, `AI_FOUNDRY_EMBEDDING_CAPACITY`). New `counter` containers expire their documents 90 days after the last update; existing containers are unchanged. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+* The SDK now requires `azure-cosmos>=4.16.3`. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)
+
 ## [0.3.0b2] (2026-08-17)
 
 #### Features Added

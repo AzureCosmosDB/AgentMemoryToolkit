@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
+from azure.cosmos.agent_memory.services._dedup import dedup_result
 
 ASYNC_LOGGER_NAME = "azure.cosmos.agent_memory.pipeline.aio"
 
@@ -106,7 +107,7 @@ async def test_async_reconcile_emits_outcome_log_line_on_zero_candidates(caplog)
         result = await p.reconcile_memories("u1")
 
     p._run_prompty.assert_not_called()
-    assert result == {"kept": 0, "merged": 0, "contradicted": 0}
+    assert result == dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
 
     records = _outcome_records(caplog)
     assert len(records) == 1

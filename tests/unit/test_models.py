@@ -26,8 +26,9 @@ from azure.cosmos.agent_memory.models import (
     MemoryType,
     OrchestrationResult,
     ProceduralRecord,
+    ProcedureApplies,
+    ProcedureEvidence,
     ProcedureKind,
-    ProcedureScopeType,
     ProcedureSourceKind,
     ProcedureStatus,
     ProcedureStep,
@@ -120,9 +121,9 @@ def _procedural_kwargs(**overrides: Any) -> dict[str, Any]:
         "name": "Be concise",
         "summary": "Prefer concise responses.",
         "retrieval_text": "Respond concisely when answering the user.",
-        "procedure_kind": "behavioral_policy",
+        "procedure_kind": "instruction",
         "version": 1,
-        "prompt_id": "synthesize_procedural.prompty",
+        "prompt_id": "extract_procedure.prompty",
     }
     base.update(overrides)
     return base
@@ -292,6 +293,105 @@ class TestFactRecord:
             FactRecord(**kwargs)
 
 
+class TestFactStructuredFields:
+    """The fields ``extract_memories-v3`` adds, normalized whatever the model wrote."""
+
+    def test_a_fact_without_them_keeps_the_v2_shape(self):
+        doc = FactRecord(**_fact_kwargs(assertion="bogus", entities=[])).to_doc()
+
+        assert not {"assertion", "subject", "attribute", "entities"} & set(doc)
+        assert doc["source_turn_ids"] == []
+
+    def test_they_are_normalized(self):
+        doc = FactRecord(
+            **_fact_kwargs(
+                assertion="decided",
+                subject="  The User ",
+                attribute="Home   City",
+                entities=["Priya", "priya", "the assistant", " Portland ", 7, ""],
+                source_turn_ids=["turn-1"],
+            )
+        ).to_doc()
+
+        assert (doc["assertion"], doc["subject"], doc["attribute"]) == ("decided", "user", "home city")
+        assert doc["entities"] == ["Priya", "Portland"]
+        assert doc["source_turn_ids"] == ["turn-1"]
+
+    def test_subjects_and_entities_are_bounded_and_aliased(self):
+        rec = FactRecord(
+            **_fact_kwargs(
+                subject="The Agent",
+                attribute="x" * 500,
+                entities=[f"entity {i}" for i in range(30)],
+            )
+        )
+
+        assert rec.subject == "assistant"
+        assert len(rec.attribute) == 120
+        assert rec.entities == [f"entity {i}" for i in range(12)]
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("stated", "stated"),
+            ("decided", "decided"),
+            ("suggested", "suggested"),
+            ("observed", "observed"),
+            ("directive", "directive"),
+            ("correction", "correction"),
+            ("Stated", None),
+            ("claimed", None),
+            (3, None),
+            (None, None),
+        ],
+    )
+    def test_assertion_keeps_only_a_known_value(self, value, expected):
+        rec = FactRecord(**_fact_kwargs(assertion=value))
+
+        assert rec.assertion == expected
+        assert rec.to_doc().get("assertion") == expected
+
+    @pytest.mark.parametrize("assertion", ["directive", "correction"])
+    def test_only_the_user_directs_or_corrects_the_assistant(self, assertion):
+        agent = FactRecord(**_fact_kwargs(assertion=assertion, metadata={"category": "other", "source": "agent"}))
+        tagged = construct_internal(FactRecord, _fact_kwargs(assertion=assertion, tags=["sys:agent-fact"]))
+        user = FactRecord(**_fact_kwargs(assertion=assertion, metadata={"category": "other", "source": "user"}))
+
+        assert (agent.assertion, tagged.assertion, user.assertion) == ("stated", "stated", assertion)
+
+    def test_an_agent_fact_keeps_the_other_assertions(self):
+        rec = FactRecord(**_fact_kwargs(assertion="suggested", metadata={"category": "other", "source": "agent"}))
+
+        assert rec.assertion == "suggested"
+
+    def test_they_survive_a_round_trip(self):
+        original = FactRecord(**_fact_kwargs(assertion="stated", subject="Priya", attribute="home city"))
+
+        restored = MemoryRecord.from_doc(original.to_doc())
+
+        assert isinstance(restored, FactRecord)
+        assert (restored.assertion, restored.subject, restored.attribute) == ("stated", "Priya", "home city")
+
+
+class TestCombinedFactFields:
+    """What combining records on the fact it writes: the oldest member's date and the hash of its text."""
+
+    def test_a_combined_fact_keeps_both_through_a_round_trip(self):
+        original = FactRecord(**_fact_kwargs(combined_since="2026-05-01T09:00:00+00:00", combined_hash=_HEX32))
+
+        doc = original.to_doc()
+        restored = MemoryRecord.from_doc(doc)
+
+        assert (doc["combined_since"], doc["combined_hash"]) == ("2026-05-01T09:00:00+00:00", _HEX32)
+        assert isinstance(restored, FactRecord)
+        assert (restored.combined_since, restored.combined_hash) == ("2026-05-01T09:00:00+00:00", _HEX32)
+
+    def test_a_fact_that_was_not_combined_has_neither(self):
+        doc = FactRecord(**_fact_kwargs()).to_doc()
+
+        assert not {"combined_since", "combined_hash"} & set(doc)
+
+
 # ---------------------------------------------------------------------------
 # EpisodicRecord
 # ---------------------------------------------------------------------------
@@ -413,8 +513,11 @@ class TestProceduralRecord:
     def test_minimal_valid(self):
         rec = ProceduralRecord(**_procedural_kwargs())
         assert rec.memory_type == "procedural"
-        assert rec.procedure_kind == "behavioral_policy"
+        assert rec.procedure_kind == "instruction"
         assert rec.status == "candidate"
+        assert rec.applies == "when"
+        assert rec.evidence == []
+        assert rec.user_support_count == 0
         assert rec.utility_score == 0.5
         assert rec.name == "Be concise"
         assert rec.summary == "Prefer concise responses."
@@ -426,25 +529,35 @@ class TestProceduralRecord:
         assert rec.source_fact_ids == []
         assert rec.source_episodic_ids == []
 
-    def test_workflow_without_steps_raises(self):
-        with pytest.raises(pydantic.ValidationError, match="requires at least one step"):
-            ProceduralRecord(**_procedural_kwargs(procedure_kind=ProcedureKind.workflow))
+    def test_skill_needs_two_steps(self):
+        one = [ProcedureStep(sequence=1, instruction="Check current context.")]
+        with pytest.raises(pydantic.ValidationError, match="at least two steps"):
+            ProceduralRecord(**_procedural_kwargs(procedure_kind=ProcedureKind.skill))
+        with pytest.raises(pydantic.ValidationError, match="at least two steps"):
+            ProceduralRecord(**_procedural_kwargs(procedure_kind=ProcedureKind.skill, steps=one))
 
-    def test_workflow_with_step_is_valid(self):
+    def test_skill_with_two_steps_is_valid(self):
         rec = ProceduralRecord(
             **_procedural_kwargs(
-                procedure_kind=ProcedureKind.workflow,
+                procedure_kind=ProcedureKind.skill,
                 steps=[
-                    ProcedureStep(
-                        sequence=1,
-                        instruction="Check current context.",
-                        expected_result="Context is understood.",
-                    )
+                    ProcedureStep(sequence=1, instruction="Check current context.", expected_result="Understood."),
+                    ProcedureStep(sequence=2, instruction="Apply the fix."),
                 ],
             )
         )
-        assert rec.procedure_kind == "workflow"
+        assert rec.procedure_kind == "skill"
         assert rec.steps[0].instruction == "Check current context."
+
+    @pytest.mark.parametrize(
+        ("value", "expected"), [("2030-05-01", "2030-05-01"), ("2030-05-01T09:00:00Z", "2030-05-01")]
+    )
+    def test_valid_until_keeps_an_iso_date(self, value, expected):
+        assert ProceduralRecord(**_procedural_kwargs(valid_until=value)).valid_until == expected
+
+    @pytest.mark.parametrize("value", [None, "", "soon", "2030-13-45", 20300501])
+    def test_valid_until_that_is_not_a_date_means_no_known_end(self, value):
+        assert ProceduralRecord(**_procedural_kwargs(valid_until=value)).valid_until is None
 
     @pytest.mark.parametrize(("input_score", "expected"), [(5.0, 1.0), (-1, 0.0), ("not a number", 0.5)])
     def test_utility_score_is_clamped(self, input_score, expected):
@@ -459,14 +572,27 @@ class TestProceduralRecord:
         with pytest.raises(pydantic.ValidationError):
             ProceduralRecord(**_procedural_kwargs(version=0))
 
+    @pytest.mark.parametrize(
+        "bad",
+        [{"procedure_kind": "workflow"}, {"evidence": ["guessed"]}, {"applies": "sometimes"}],
+        ids=["kind", "evidence", "applies"],
+    )
+    def test_rejects_values_outside_the_vocabulary(self, bad):
+        with pytest.raises(pydantic.ValidationError):
+            ProceduralRecord(**_procedural_kwargs(**bad))
+
     def test_round_trip_preserves_new_fields(self):
         rec = ProceduralRecord(
             **_procedural_kwargs(
-                procedure_kind=ProcedureKind.tool_usage,
-                scope_type=ProcedureScopeType.project,
-                scope_value="agent-memory-toolkit",
+                procedure_kind=ProcedureKind.habit,
+                applies=ProcedureApplies.always,
+                valid_until="2030-05-01",
                 status=ProcedureStatus.active,
-                source_kind=ProcedureSourceKind.explicit_user_instruction,
+                evidence=[ProcedureEvidence.corrected, ProcedureEvidence.repeated],
+                support_dates=["2025-01-01", "2025-02-01"],
+                user_support_count=2,
+                practiced_dates=["2025-02-01"],
+                source_kind=ProcedureSourceKind.observed_user_preference,
                 source_turn_ids=["turn-1"],
             )
         )
@@ -475,10 +601,15 @@ class TestProceduralRecord:
 
         assert isinstance(restored, ProceduralRecord)
         assert restored.name == "Be concise"
-        assert restored.procedure_kind == "tool_usage"
-        assert restored.scope_type == "project"
+        assert restored.procedure_kind == "habit"
+        assert restored.applies == "always"
+        assert restored.valid_until == "2030-05-01"
         assert restored.status == "active"
-        assert restored.source_kind == "explicit_user_instruction"
+        assert restored.evidence == ["corrected", "repeated"]
+        assert restored.support_dates == ["2025-01-01", "2025-02-01"]
+        assert restored.user_support_count == 2
+        assert restored.practiced_dates == ["2025-02-01"]
+        assert restored.source_kind == "observed_user_preference"
         assert restored.source_turn_ids == ["turn-1"]
 
 

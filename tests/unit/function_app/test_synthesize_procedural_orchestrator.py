@@ -63,27 +63,43 @@ class TestSynthesizeProceduralOrchestrator:
     [
         (
             {"user_id": "u1", "force": True},
-            {"status": "synthesized", "procedures_created": 2},
-            {"status": "synthesized", "procedures_created": 2},
+            {"status": "synthesized", "procedures_created": 2, "procedures_updated": 1, "facts_retired": 1},
+            {"status": "synthesized", "procedures_created": 2, "facts_retired": 1},
         ),
         (
             {"user_id": "u2", "force": False},
-            {"status": "unchanged", "procedures_created": 0},
-            {"status": "unchanged", "procedures_created": 0},
+            {"status": "skipped", "procedures_created": None},
+            {"status": "skipped", "procedures_created": 0, "facts_retired": 0},
         ),
     ],
+    ids=["extra-fields-dropped", "missing-count-is-zero"],
 )
 @patch.object(sp_mod, "get_pipeline")
 def test_activity_calls_pipeline_and_returns_slim_payload(mock_get_pipeline, payload, pipeline_result, expected):
+    """Durable records activity outputs in the job history, so only the status and counts may come back."""
     pipeline = MagicMock()
     pipeline.synthesize_procedural.return_value = pipeline_result
     mock_get_pipeline.return_value = pipeline
 
-    result = sp_mod.sp_SynthesizeProcedural(payload)
+    with patch.object(sp_mod.time, "monotonic", return_value=100.0):
+        result = sp_mod.sp_SynthesizeProcedural(payload)
 
+    # The pass stops starting model calls at the activity's time budget (240 s by default).
     pipeline.synthesize_procedural.assert_called_once_with(
-        user_id=payload["user_id"],
-        force=payload.get("force", False),
+        user_id=payload["user_id"], force=payload["force"], deadline=340.0
     )
     assert result == expected
-    assert "version" not in result
+    assert type(result["procedures_created"]) is int
+
+
+@patch.object(sp_mod, "get_pipeline")
+def test_activity_deadline_follows_the_configured_time_budget(mock_get_pipeline, monkeypatch):
+    monkeypatch.setenv("ACTIVITY_TIME_BUDGET_SECONDS", "90")
+    pipeline = MagicMock()
+    pipeline.synthesize_procedural.return_value = {"status": "unchanged", "procedures_created": 0}
+    mock_get_pipeline.return_value = pipeline
+
+    with patch.object(sp_mod.time, "monotonic", return_value=100.0):
+        sp_mod.sp_SynthesizeProcedural({"user_id": "u1"})
+
+    assert pipeline.synthesize_procedural.call_args.kwargs["deadline"] == 190.0

@@ -68,6 +68,7 @@ Produce a single, authoritative JSON summary that reflects the full state of the
 - Do not include meta-commentary about what changed (e.g., "The previous summary said X, but now...") - just output the updated summary.
 - Omit greetings, pleasantries, filler, and repetition from the new messages, exactly as you would in a fresh summary.
 - Do not include any content from the new messages that is speculative, hypothetical, or tangential unless it materially affects the thread's direction.
+- Never write a literal secret: passwords, passphrases, API keys, access tokens, connection strings, account keys, and private keys must never appear in any field, however short or ordinary the value, even when the new messages or the existing summary contain them. Say that a credential was shared or used, never its value, and drop any value the existing summary already holds.
 
 ## Tone and Style
 - **Factual and neutral** - no editorializing or interpretation of intent

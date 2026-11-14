@@ -67,7 +67,30 @@ def test_all_shipped_prompts_declare_version() -> None:
         "summarize_update.prompty": "v1",
         "user_summary.prompty": "v1",
         "user_summary_update.prompty": "v1",
-        "synthesize_procedural.prompty": "v1",
+        "extract_memories-v3.prompty": "v5-contextual",
+        "extract_procedure.prompty": "v6",
     }
     for filename, version in expected.items():
         assert loader.prompt_version(filename) == version
+
+
+def test_extract_memories_v3_renders_its_context_inputs_and_defaults_them() -> None:
+    loader = PromptyLoader()
+
+    bare, _ = loader.prepare("extract_memories-v3.prompty", inputs={"transcript": "[user]: Turn a: hi"})
+    full, params = loader.prepare(
+        "extract_memories-v3.prompty",
+        inputs={
+            "transcript": "[user]: Turn a: hi",
+            "previous_turns": "[user]: earlier",
+            "thread_summary": "A summary.",
+            "known_memories": "- (2026-03-02 · user) Known.",
+        },
+    )
+
+    assert (
+        "### Thread summary\n(none)\n\n### Earlier turns\n(none)\n\n### Stored memories\n(none)" in bare[-1]["content"]
+    )
+    assert "### Thread summary\nA summary.\n\n### Earlier turns\n[user]: earlier" in full[-1]["content"]
+    assert "- (2026-03-02 · user) Known.\n\n## New lines\n[user]: Turn a: hi" in full[-1]["content"]
+    assert params["max_completion_tokens"] == 16384 and params["seed"] == 42

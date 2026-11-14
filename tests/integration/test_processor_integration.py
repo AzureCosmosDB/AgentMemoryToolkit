@@ -18,6 +18,16 @@ from azure.cosmos.agent_memory.processors import (
     ProcessThreadResult,
 )
 
+# What ``synthesize_procedural`` returns after a run that learned something: counts, never the procedures.
+SYNTHESIZED = {
+    "status": "synthesized",
+    "procedures_created": 1,
+    "procedures_updated": 0,
+    "procedures_reinforced": 0,
+    "procedures_skipped": 0,
+    "facts_retired": 0,
+}
+
 
 def _build_client(processor=None) -> CosmosMemoryClient:
     """Build a CosmosMemoryClient with a fake container client attached."""
@@ -45,6 +55,7 @@ class TestInProcessProcessNowEndToEnd:
             "updated_count": 0,
         }
         pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+        pipeline.synthesize_procedural.return_value = SYNTHESIZED
 
         processor = InProcessProcessor(pipeline=pipeline)
         client = _build_client(processor=processor)
@@ -68,14 +79,15 @@ class TestInProcessProcessNowEndToEnd:
             "episodic_count": 0,
             "updated_count": 0,
         }
+        assert result.procedural == SYNTHESIZED
         client.get_thread.assert_called_once_with(thread_id="thread-paris", user_id="u-paris")
         pipeline.generate_thread_summary.assert_called_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_called_once_with("u-paris", "thread-paris")
         assert pipeline.reconcile_memories.call_count == 2
         pipeline.reconcile_memories.assert_has_calls(
             [
-                mock_call("u-paris", n=50, memory_type="fact", full_rebuild=False),
-                mock_call("u-paris", n=50, memory_type="episodic", full_rebuild=False),
+                mock_call("u-paris", n=50, memory_type="fact"),
+                mock_call("u-paris", n=50, memory_type="episodic"),
             ]
         )
 

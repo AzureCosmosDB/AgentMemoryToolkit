@@ -272,6 +272,38 @@ resource memoriesSummariesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDa
             }
           ]
         ]
+        // Same vector + full-text index as turns, so search_summaries works.
+        // The vector policy is fixed when the container is created.
+        vectorIndexes: [
+          {
+            path: '/embedding'
+            type: 'quantizedFlat'
+          }
+        ]
+        fullTextIndexes: [
+          {
+            path: '/content'
+          }
+        ]
+      }
+      vectorEmbeddingPolicy: {
+        vectorEmbeddings: [
+          {
+            path: '/embedding'
+            dataType: 'float32'
+            distanceFunction: 'cosine'
+            dimensions: embeddingDimensions
+          }
+        ]
+      }
+      fullTextPolicy: {
+        defaultLanguage: 'en-US'
+        fullTextPaths: [
+          {
+            path: '/content'
+            language: 'en-US'
+          }
+        ]
       }
     }
   }
@@ -307,6 +339,8 @@ resource counterContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
           '/thread_id'
         ]
       }
+      // 90 days: every counter document expires this long after its last update
+      // (create_memory_store() sets the same default).
       defaultTtl: 7776000
     }
   }

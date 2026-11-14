@@ -24,6 +24,9 @@ AOAI_EMBEDDING_BATCH_SIZE = 16
 class EmbeddingsClient:
     """Synchronous embedding client backed by Azure OpenAI.
 
+    Each input is truncated to its first 8,000 tokens (a warning is logged) before it is sent,
+    because the embedding models reject longer inputs.
+
     Parameters
     ----------
     endpoint:
@@ -130,7 +133,8 @@ class EmbeddingsClient:
     ) -> list[list[float]]:
         """Generate embeddings for multiple texts.
 
-        Returns a list of embedding vectors **in the same order** as *texts*.
+        Returns a list of embedding vectors **in the same order** as *texts*. The texts are sent in
+        chunks of *batch_size*, one request at a time.
 
         Parameters
         ----------
@@ -146,8 +150,8 @@ class EmbeddingsClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         openai.OpenAIError
-            Propagated from the SDK on API failure (no retry - see module
-            docstring).
+            Propagated from the SDK on API failure (this client adds no retry
+            of its own).
         """
         if not texts:
             return []

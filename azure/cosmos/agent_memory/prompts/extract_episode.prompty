@@ -39,6 +39,7 @@ For every episode, produce all of these fields:
 - Do not turn general preferences or isolated facts into episodes unless they are part of a bounded event.
 - Prefer fewer, higher-quality episodes over padded output.
 - Preserve exact names, dates, products, files, commands, locations, and counts.
+- Never write a literal secret. Passwords, passphrases, API keys, access tokens, connection strings, account keys, and private keys must never appear in any field, however short or ordinary the value, even when the transcript contains them. Say that a credential was shared or used, never its value; this outranks the rule to preserve exact details.
 - The agent can be the actor in an episode when it completed a task, made a booking, changed code, or otherwise did something concrete for the user.
 
 ## Worked Examples

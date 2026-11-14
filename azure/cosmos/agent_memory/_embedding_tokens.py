@@ -3,7 +3,7 @@
 Azure OpenAI embedding models (``text-embedding-3-*``) reject any single
 input that exceeds their 8192-token context window. Callers in this toolkit
 embed user-supplied and document-derived text of unbounded size - the
-dedup-context query in extraction, ``search_turns`` queries, and stored turn
+stored-facts lookup in extraction, ``search_turns`` queries, and stored turn
 vectors when ``enable_turn_embeddings`` is on - so an oversized string would
 otherwise crash the embed call or, at the write sites that swallow embed
 errors, silently persist a record with no vector.
@@ -66,7 +66,8 @@ def count_tokens(text: str, model: str = "gpt-4o") -> int:
     encoding = _encoding_for_model(model)
     if encoding is None:
         return (len(text) // _FALLBACK_CHARS_PER_TOKEN) + 1
-    return len(encoding.encode(text))
+    # Text that spells a special token (a pasted chat template) is counted as the plain text it is.
+    return len(encoding.encode(text, disallowed_special=()))
 
 
 def truncate_text_to_token_budget(
@@ -106,7 +107,7 @@ def truncate_text_to_token_budget(
         )
         return text[:max_chars]
 
-    tokens = encoding.encode(text)
+    tokens = encoding.encode(text, disallowed_special=())
     if len(tokens) <= max_tokens:
         return text
     truncated = encoding.decode(tokens[:max_tokens])

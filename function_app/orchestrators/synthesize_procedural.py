@@ -2,16 +2,22 @@
 
 Chain: ``SynthesizeProcedural``.
 
-The pipeline writes the procedural doc to Cosmos DB during
-``SynthesizeProcedural``; the Function App returns only a slim status payload
-because Durable persists activity outputs to orchestration history.
+The pipeline writes procedures to Cosmos DB during ``SynthesizeProcedural``, within a
+time budget (``ACTIVITY_TIME_BUDGET_SECONDS``): a ``deferred`` status (a retryable
+error, or the deadline passing) is not a failure, the next run continues from the
+cursor. The Function App returns only a slim status payload (``status``,
+``procedures_created`` and ``facts_retired``) because Durable persists activity
+outputs to orchestration history.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 import azure.durable_functions as df
+from shared import config
+from shared.error_redaction import redact_errors
 from shared.pipeline_factory import get_pipeline
 
 from ._retry import default_retry_options
@@ -49,21 +55,26 @@ def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def sp_SynthesizeProcedural(payload: dict) -> dict:
-    # Keep procedural synthesis single-activity for GA: chunked LLM rewrites already
-    # retry internally, and the full procedural body is too bulky for history wins.
+    # One activity: the pass moves its cursor after each batch of sources and stops
+    # starting model calls at the deadline, so a long backlog spreads over later runs
+    # instead of outrunning the function timeout.
     user_id = payload["user_id"]
     force = bool(payload.get("force", False))
     pipeline = get_pipeline()
-    result = pipeline.synthesize_procedural(user_id=user_id, force=force) or {}
+    deadline = time.monotonic() + config.get_activity_time_budget_seconds()
+    result = pipeline.synthesize_procedural(user_id=user_id, force=force, deadline=deadline) or {}
     slim = {
         "status": result.get("status"),
         "procedures_created": int(result.get("procedures_created") or 0),
+        "facts_retired": int(result.get("facts_retired") or 0),
     }
     logger.info(
-        "SynthesizeProcedural user=%s status=%s procedures_created=%s",
+        "SynthesizeProcedural user=%s status=%s procedures_created=%s facts_retired=%s",
         user_id,
         slim["status"],
         slim["procedures_created"],
+        slim["facts_retired"],
     )
     return slim

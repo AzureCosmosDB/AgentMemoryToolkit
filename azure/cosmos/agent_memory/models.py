@@ -5,9 +5,9 @@ Six concrete record types - :class:`TurnRecord`, :class:`ThreadSummaryRecord`,
 :class:`ProceduralRecord` - share :class:`MemoryRecordBase` and serialize
 to/from Cosmos DB-compatible dicts.
 
-``MemoryRecord`` is exported as the union type for return-signature use and
-also acts as a back-compat constructor that dispatches on the ``memory_type``
-field to the matching subclass.
+``MemoryRecord`` is a back-compat constructor, not a type: ``MemoryRecord(...)``
+builds the subclass that matches the ``memory_type`` (or ``type``) field, and
+``MemoryRecord.from_doc(...)`` parses a raw Cosmos document into one.
 """
 
 from __future__ import annotations
@@ -55,29 +55,37 @@ class MemoryType(str, Enum):
 
 
 class ProcedureKind(str, Enum):
-    """The kind of atomic procedural knowledge a procedure captures."""
+    """How a procedure was learned, which decides the evidence it needs to become active."""
 
-    behavioral_policy = "behavioral_policy"
-    workflow = "workflow"
-    decision_rule = "decision_rule"
-    tool_usage = "tool_usage"
-    recovery_strategy = "recovery_strategy"
+    instruction = "instruction"  # the user taught the assistant how to act from now on
+    habit = "habit"  # the user corrected the assistant, or chose the same way repeatedly
+    skill = "skill"  # a multi-step method that worked in practice, or that the user endorsed
 
 
-class ProcedureScopeType(str, Enum):
-    """How broadly a procedure applies. More specific scopes override broader ones."""
+class ProcedureEvidence(str, Enum):
+    """A kind of support a source gives a procedure."""
 
-    global_scope = "global"
-    user = "user"
-    agent = "agent"
-    domain = "domain"
-    project = "project"
-    workflow = "workflow"
-    tool = "tool"
+    taught = "taught"
+    corrected = "corrected"
+    repeated = "repeated"
+    practiced = "practiced"
+    endorsed = "endorsed"
+
+
+class ProcedureApplies(str, Enum):
+    """Whether a procedure applies to nearly every interaction or only in its activation conditions."""
+
+    always = "always"
+    when = "when"
 
 
 class ProcedureStatus(str, Enum):
-    """Lifecycle state of a procedure. Only ``active`` procedures are compiled/injected."""
+    """Lifecycle state of a procedure.
+
+    The procedure pass writes ``candidate`` or ``active``, derived from the evidence a procedure has;
+    ``deprecated`` and ``rejected`` are not written. Only ``active`` procedures are compiled by
+    ``build_procedural_context`` or shown by ``search_cosmos``.
+    """
 
     candidate = "candidate"
     active = "active"
@@ -86,7 +94,12 @@ class ProcedureStatus(str, Enum):
 
 
 class ProcedureSourceKind(str, Enum):
-    """Where a procedure came from - gates whether it may become active policy."""
+    """The kind of source a procedure's support comes from.
+
+    Set from the strongest evidence of an active procedure: ``explicit_user_instruction`` (taught or
+    endorsed), ``observed_user_preference`` (corrected or repeated) or ``episode_distillation``
+    (practiced). A candidate is ``agent_inference``; the other values are not set by the procedure pass.
+    """
 
     explicit_user_instruction = "explicit_user_instruction"
     observed_user_preference = "observed_user_preference"
@@ -97,25 +110,16 @@ class ProcedureSourceKind(str, Enum):
 
 
 class ProcedureSourceAuthority(str, Enum):
-    """How authoritative a procedure's source is, for conflict resolution and gating."""
+    """How authoritative a procedure's source is, set with its ``ProcedureSourceKind``.
+
+    ``high`` for taught or endorsed, ``medium`` for corrected, repeated or practiced, and ``low`` for a
+    candidate; ``mandatory`` is not set by the procedure pass.
+    """
 
     mandatory = "mandatory"
     high = "high"
     medium = "medium"
     low = "low"
-
-
-# Source kinds trusted enough to auto-activate a procedure as behavioral policy.
-# Untrusted kinds (document_content, agent_inference) stay ``candidate`` until
-# validated or explicitly approved - this stops an imperative sentence lifted
-# from a document, or a one-off agent guess, from silently becoming agent policy.
-TRUSTED_PROCEDURE_SOURCE_KINDS: frozenset[ProcedureSourceKind] = frozenset(
-    {
-        ProcedureSourceKind.explicit_user_instruction,
-        ProcedureSourceKind.observed_user_preference,
-        ProcedureSourceKind.organization_policy,
-    }
-)
 
 
 def _uuid4_str() -> str:
@@ -179,7 +183,11 @@ class MemoryRecordBase(BaseModel):
     confidence: Optional[float] = None
     content_hash: Optional[str] = None
     superseded_by: Optional[str] = None
-    supersede_reason: Optional[Literal["duplicate", "contradict", "update"]] = None
+    # Why a record was retired: ``contradict`` (a conflicting fact replaced it), ``duplicate`` (folded into a
+    # fact that states the same claim), ``combined`` (its details went into a combined fact) or ``procedure``
+    # (a directive or correction retired into the procedure that now holds it). ``update`` is accepted but
+    # nothing writes it.
+    supersede_reason: Optional[Literal["duplicate", "contradict", "update", "combined", "procedure"]] = None
     superseded_at: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
     source_memory_ids: list[str] = Field(default_factory=list)
@@ -377,8 +385,13 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
         "prompt_version",
         "last_used_at",
         "version",
+        "assertion",
+        "subject",
+        "attribute",
+        "combined_since",
+        "combined_hash",
     }
-    drop_when_empty_list: set[str] = set()
+    drop_when_empty_list: set[str] = {"entities", "merged_from"}
     drop_when_zero = {"use_count"}
 
     out: dict[str, Any] = {}
@@ -452,6 +465,23 @@ class UserSummaryRecord(MemoryRecordBase):
         return self
 
 
+class FactAssertion(str, Enum):
+    """How the conversation put forward an extracted fact."""
+
+    stated = "stated"  # a claim about how things are: the user, their world, their history, shared content
+    decided = "decided"  # a choice, plan or commitment the user or their team adopted
+    suggested = "suggested"  # a recommendation or proposal not (yet) adopted
+    observed = "observed"  # a result found or verified while working, or an action the agent completed
+    directive = "directive"  # the user told the assistant how to act in future, recurring situations
+    correction = "correction"  # the user corrected how the assistant did something, for next time
+
+
+FACT_ASSERTIONS = frozenset(assertion.value for assertion in FactAssertion)
+# Only the user can direct or correct the assistant.
+USER_ONLY_ASSERTIONS = frozenset({FactAssertion.directive.value, FactAssertion.correction.value})
+# Tags a fact drawn from what the agent said rather than the user's own words.
+AGENT_FACT_TAG = "sys:agent-fact"
+
 _FACT_ALLOWED_CATEGORIES = {
     "preference",
     "requirement",
@@ -459,9 +489,39 @@ _FACT_ALLOWED_CATEGORIES = {
     "other",
 }
 
+_FACT_KEY_MAX_CHARS = 120
+_FACT_MAX_ENTITIES = 12
+_SUBJECT_ALIASES = {
+    "user": "user",
+    "the user": "user",
+    "assistant": "assistant",
+    "the assistant": "assistant",
+    "agent": "assistant",
+    "the agent": "assistant",
+}
+
+
+def _clean_phrase(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())[:_FACT_KEY_MAX_CHARS].strip()
+    return text or None
+
 
 class FactRecord(MemoryRecordBase):
-    """A semantic fact about the user or environment, extracted by an LLM."""
+    """A semantic fact about the user or environment, extracted by an LLM.
+
+    Facts from ``extract_memories-v3`` also record how the claim was made (``assertion``),
+    what it is about (``subject``, and the single-valued ``attribute`` it sets, which a later
+    fact about the same subject would replace), the names it mentions (``entities``) and the
+    turns it came from (``source_turn_ids``). Facts from earlier prompts have no assertion,
+    subject, attribute or entities.
+
+    A combined fact (tagged ``sys:combined``) also records ``combined_since``, the ``created_at`` of
+    its oldest member (its own ``created_at`` is its newest member's), and ``combined_hash``, the
+    content hash of the text combining wrote. The contradiction pass dates the fact by
+    ``combined_since``, and tells an edit of its text from the text as written by ``combined_hash``.
+    """
 
     memory_type: Literal[MemoryType.fact] = Field(  # type: ignore[assignment]
         alias="type", default=MemoryType.fact
@@ -471,8 +531,58 @@ class FactRecord(MemoryRecordBase):
     confidence: float = 0.5
     prompt_id: str
     prompt_version: str = "v1"
+    source_turn_ids: list[str] = Field(default_factory=list)
+
+    assertion: Optional[FactAssertion] = None
+    subject: Optional[str] = None
+    attribute: Optional[str] = None
+    entities: list[str] = Field(default_factory=list)
+    merged_from: list[str] = Field(default_factory=list)
+    combined_since: Optional[str] = None
+    combined_hash: Optional[str] = None
 
     _ID_PREFIX: ClassVar[Optional[str]] = "fact_"
+
+    @field_validator("assertion", mode="before")
+    @classmethod
+    def _known_assertion(cls, v: Any) -> Any:
+        return v if isinstance(v, str) and v in FACT_ASSERTIONS else None
+
+    @field_validator("subject", mode="before")
+    @classmethod
+    def _clean_subject(cls, v: Any) -> Optional[str]:
+        subject = _clean_phrase(v)
+        return _SUBJECT_ALIASES.get(subject.casefold(), subject) if subject else None
+
+    @field_validator("attribute", mode="before")
+    @classmethod
+    def _clean_attribute(cls, v: Any) -> Optional[str]:
+        attribute = _clean_phrase(v)
+        return attribute.lower() if attribute else None
+
+    @field_validator("entities", mode="before")
+    @classmethod
+    def _clean_entities(cls, v: Any) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in v if isinstance(v, list) else []:
+            name = _clean_phrase(item)
+            if not name or name.casefold() in seen or name.casefold() in _SUBJECT_ALIASES:
+                continue
+            seen.add(name.casefold())
+            out.append(name)
+            if len(out) == _FACT_MAX_ENTITIES:
+                break
+        return out
+
+    @model_validator(mode="after")
+    def _user_only_assertions(self) -> "FactRecord":
+        agent = (isinstance(self.metadata, dict) and self.metadata.get("source") == "agent") or (
+            AGENT_FACT_TAG in self.tags
+        )
+        if agent and self.assertion in USER_ONLY_ASSERTIONS:
+            self.assertion = FactAssertion.stated.value
+        return self
 
     @model_validator(mode="after")
     def _require_category(self) -> "FactRecord":
@@ -547,13 +657,21 @@ class ProcedureStep(BaseModel):
 
 
 class ProceduralRecord(MemoryRecordBase):
-    """An atomic, reusable procedural memory: a behavioral policy or task skill.
+    """An atomic, reusable procedural memory: how the assistant should act for this user.
 
     Procedural memory answers "what should I do, and how should I do it" - stored
-    as many small, independently retrievable units (a policy/skill library), not
-    as one compiled system prompt. The runtime personalized system prompt is a
-    deterministic projection of the active, in-scope procedures (built by
-    ``build_procedural_context``); it is not stored as a record here.
+    as many small, independently retrievable units, not as one compiled system
+    prompt. ``procedure_kind`` says how it was learned (an instruction the user
+    taught, a habit from corrections or repeated choices, or a practiced skill);
+    the evidence fields record the support it has, and the procedure pass derives
+    ``status`` from them. ``applies`` separates standing rules for nearly every
+    interaction (compiled by ``build_procedural_context``) from situational ones
+    (matched to the task at hand).
+
+    The ``id`` starts with ``proc_`` and ``version`` is a positive integer (the procedure pass bumps it
+    each time it revises the procedure). A ``skill`` needs at least two ``steps``. ``valid_until`` keeps
+    only a leading ``YYYY-MM-DD`` date; anything else becomes ``None``, meaning no known end.
+    ``utility_score`` is clamped to 0.0-1.0.
     """
 
     memory_type: Literal[MemoryType.procedural] = Field(  # type: ignore[assignment]
@@ -565,8 +683,8 @@ class ProceduralRecord(MemoryRecordBase):
     retrieval_text: str
 
     procedure_kind: ProcedureKind
-    scope_type: ProcedureScopeType = ProcedureScopeType.user
-    scope_value: Optional[str] = None
+    applies: ProcedureApplies = ProcedureApplies.when
+    valid_until: Optional[str] = None
 
     activation_conditions: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
@@ -581,13 +699,21 @@ class ProceduralRecord(MemoryRecordBase):
     successful_uses: int = 0
     failed_uses: int = 0
 
+    # Support: the kinds of evidence seen, the distinct dates on which the user's own statements or
+    # successful (or partially successful) episodes supported it, how many supporting facts the user
+    # stated, and the distinct dates of those successful episodes.
+    evidence: list[ProcedureEvidence] = Field(default_factory=list)
+    support_dates: list[str] = Field(default_factory=list)
+    user_support_count: int = 0
+    practiced_dates: list[str] = Field(default_factory=list)
+
     source_kind: ProcedureSourceKind = ProcedureSourceKind.agent_inference
     source_authority: ProcedureSourceAuthority = ProcedureSourceAuthority.low
     source_turn_ids: list[str] = Field(default_factory=list)
 
     content_hash: Optional[str] = None
     prompt_id: Optional[str] = None
-    prompt_version: str = "v2"
+    prompt_version: str = "v6"
     version: int = 1
 
     _ID_PREFIX: ClassVar[Optional[str]] = "proc_"
@@ -600,6 +726,17 @@ class ProceduralRecord(MemoryRecordBase):
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             raise ValueError(f"ProceduralRecord.version must be a positive integer, got {v!r}")
         return v
+
+    @field_validator("valid_until", mode="before")
+    @classmethod
+    def _iso_date_or_none(cls, v: Any) -> Any:
+        # The model writes an ISO date; anything that is not one means "no known end".
+        if not isinstance(v, str):
+            return None
+        try:
+            return datetime.strptime(v.strip()[:10], "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
 
     @field_validator("utility_score", mode="before")
     @classmethod
@@ -616,11 +753,10 @@ class ProceduralRecord(MemoryRecordBase):
 
     @model_validator(mode="after")
     def _require_executable_steps(self) -> "ProceduralRecord":
-        # A workflow/recovery_strategy asserts a multi-step method; requiring at
-        # least one step keeps such procedures executable rather than empty.
+        # A skill is a multi-step method; without its steps it is not executable.
         # ``procedure_kind`` is a plain string here (model_config use_enum_values).
-        if self.procedure_kind in (ProcedureKind.workflow, ProcedureKind.recovery_strategy) and not self.steps:
-            raise ValueError(f"ProceduralRecord of kind {self.procedure_kind} requires at least one step")
+        if self.procedure_kind == ProcedureKind.skill and len(self.steps) < 2:
+            raise ValueError("A skill procedure requires at least two steps")
         return self
 
 
@@ -720,16 +856,20 @@ __all__ = [
     "ThreadSummaryRecord",
     "UserSummaryRecord",
     "FactRecord",
+    "FactAssertion",
+    "FACT_ASSERTIONS",
+    "USER_ONLY_ASSERTIONS",
+    "AGENT_FACT_TAG",
     "EpisodeEvent",
     "EpisodeOutcome",
     "EpisodicRecord",
     "ProcedureStep",
     "ProcedureKind",
-    "ProcedureScopeType",
+    "ProcedureEvidence",
+    "ProcedureApplies",
     "ProcedureStatus",
     "ProcedureSourceKind",
     "ProcedureSourceAuthority",
-    "TRUSTED_PROCEDURE_SOURCE_KINDS",
     "ProceduralRecord",
     "TYPED_RECORD_CLASSES",
     "TAG_PATTERN",

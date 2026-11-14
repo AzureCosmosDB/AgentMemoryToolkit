@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+from azure.cosmos.agent_memory._embedding_tokens import count_tokens
+from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     batch_turns_by_tokens,
     is_retryable_llm_error,
@@ -11,6 +15,15 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
 class TestIsRetryableLLMError:
     def test_content_filter_is_non_retryable(self) -> None:
         assert is_retryable_llm_error(Exception("Error code: 400 - content_filter triggered")) is False
+
+    @pytest.mark.parametrize("cause", ["model_refusal", "unexpected_tool_response", "output_truncated"])
+    def test_terminal_empty_reply_causes_are_non_retryable(self, cause: str) -> None:
+        assert is_retryable_llm_error(LLMError(f"LLM {cause} (model=gpt-4o-mini)")) is False
+
+    def test_empty_reply_after_retries_stays_retryable(self) -> None:
+        error = LLMError("LLM returned empty content after 6 attempts (model=gpt-4o-mini, finish_reason=stop)")
+
+        assert is_retryable_llm_error(error) is True
 
     def test_content_management_policy_is_non_retryable(self) -> None:
         assert is_retryable_llm_error(Exception("blocked by Azure content management policy")) is False
@@ -77,3 +90,14 @@ class TestBatchTurnsByTokens:
         batches = batch_turns_by_tokens(turns, 100)
         assert [t["id"] for b in batches for t in b] == ["big", "small"]
         assert len(batches) == 2
+
+    @pytest.mark.parametrize("model", ["gpt-5.4", "text-embedding-3-small"])
+    def test_turns_spelling_special_tokens_are_counted_not_rejected(self, model: str) -> None:
+        # tiktoken refuses "<|endoftext|>" by default; a turn that pastes a chat template must not stop the batching.
+        spelled = "<|endoftext|> <|endofprompt|> <|fim_prefix|> " * 20
+        turns = [{"id": "a", "content": spelled}, {"id": "b", "content": spelled}]
+        tokens = count_tokens(spelled, model)
+
+        assert tokens > 40
+        assert [[t["id"] for t in b] for b in batch_turns_by_tokens(turns, 2 * tokens, model=model)] == [["a", "b"]]
+        assert [[t["id"] for t in b] for b in batch_turns_by_tokens(turns, tokens + 1, model=model)] == [["a"], ["b"]]

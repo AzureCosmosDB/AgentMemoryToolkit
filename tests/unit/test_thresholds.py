@@ -41,16 +41,44 @@ def test_enable_turn_embeddings_defaults_to_false(monkeypatch) -> None:
     assert get_enable_turn_embeddings() is False
 
 
-@pytest.mark.parametrize("raw", ["true", "True", "1", "yes", "on"])
-def test_enable_turn_embeddings_truthy_values(monkeypatch, raw) -> None:
-    monkeypatch.setenv("ENABLE_TURN_EMBEDDINGS", raw)
-    assert get_enable_turn_embeddings() is True
+@pytest.mark.parametrize(
+    ("env_name", "getter_name"),
+    [
+        ("ENABLE_TURN_EMBEDDINGS", "get_enable_turn_embeddings"),
+        ("PROCEDURAL_SYNTHESIS_AUTO", "get_procedural_synthesis_auto"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("t", True),
+        ("y", True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+        ("f", False),
+        ("n", False),
+    ],
+)
+def test_bool_settings_accept_on_and_off_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    getter_name: str,
+    raw: str,
+    expected: bool,
+) -> None:
+    # The two settings have opposite defaults, so a token that is not recognized (and falls
+    # back to the default) fails for at least one of them.
+    monkeypatch.setenv(env_name, raw)
 
-
-@pytest.mark.parametrize("raw", ["false", "False", "0", "no", "off"])
-def test_enable_turn_embeddings_falsy_values(monkeypatch, raw) -> None:
-    monkeypatch.setenv("ENABLE_TURN_EMBEDDINGS", raw)
-    assert get_enable_turn_embeddings() is False
+    assert getattr(thresholds, getter_name)() is expected
 
 
 @pytest.mark.parametrize(

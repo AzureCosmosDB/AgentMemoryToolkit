@@ -1,4 +1,4 @@
-"""Shared retry options for activity calls (spec §8.6)."""
+"""Shared retry options for activity calls."""
 
 from __future__ import annotations
 

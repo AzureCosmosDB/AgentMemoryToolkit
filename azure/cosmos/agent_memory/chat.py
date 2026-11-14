@@ -17,9 +17,9 @@ import re
 import time
 from typing import Any
 
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
-from .exceptions import ConfigurationError, LLMError
+from .exceptions import ConfigurationError, LLMError, OutputTruncatedError
 
 logger = get_logger(__name__)
 
@@ -93,15 +93,33 @@ def retry_delay(exc: Exception | None, attempt: int, base_delay: float) -> float
 
 
 def extract_content(response: Any, model: str) -> str:
-    """Pull the assistant content out of a chat-completions response."""
+    """Pull the assistant content out of a chat-completions response.
+
+    An empty reply (no choices, or no content) returns ``""`` so the caller can
+    retry it. A content-filtered reply, a refusal and a tool-only reply (tool calls
+    with no text, or only blank text) raise :class:`LLMError` naming the cause
+    (``content_filter``, ``model_refusal``, ``unexpected_tool_response``). A blank
+    reply cut off at the output limit (``finish_reason="length"``, as when a
+    reasoning model spends its whole budget thinking) raises
+    :class:`OutputTruncatedError` (``output_truncated``). Asking again gets the same
+    answer, so the pipeline classifies all of them as non-retryable.
+    """
     if not response.choices:
-        raise LLMError(f"LLM returned no choices (model={model})")
+        return ""
     choice = response.choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "content_filter":
+        raise LLMError(f"LLM content_filter (model={model})")
+    refusal = getattr(choice.message, "refusal", None)
+    if isinstance(refusal, str) and refusal.strip():
+        raise LLMError(f"LLM model_refusal (model={model})")
     content = getattr(choice.message, "content", None)
-    if content is None:
-        finish_reason = getattr(choice, "finish_reason", "unknown")
-        raise LLMError(f"LLM returned no content (model={model}, finish_reason={finish_reason})")
-    return content
+    blank = content is None or (isinstance(content, str) and not content.strip())
+    if blank and finish_reason in {"tool_calls", "function_call"}:
+        raise LLMError(f"LLM unexpected_tool_response (model={model}, finish_reason={finish_reason})")
+    if blank and finish_reason == "length":
+        raise OutputTruncatedError(f"LLM output_truncated (model={model}, finish_reason={finish_reason})")
+    return "" if content is None else content
 
 
 class ChatClient:
@@ -202,8 +220,8 @@ class ChatClient:
     ) -> str:
         """Call chat completions and return the response content string.
 
-        Retries on rate limit (429) and transient errors (500, 503) with
-        exponential backoff.
+        Retries on rate limit (429), transient errors (500, 503) and empty
+        replies, with exponential backoff.
 
         Any additional keyword arguments (e.g. ``top_p``, ``seed``) are
         forwarded directly to ``client.chat.completions.create`` - this lets
@@ -215,8 +233,9 @@ class ChatClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         LLMError
-            If the response has no choices or no content (model-side issue
-            the SDK does not surface as an exception).
+            If the reply is still empty after the last retry, or the model returns
+            content filtering, a refusal, an unexpected tool-only response, or an
+            empty reply cut off at the output limit (``finish_reason="length"``).
         openai.RateLimitError, openai.APIError
             Propagated from the SDK after retries are exhausted.
         """
@@ -244,7 +263,26 @@ class ChatClient:
                         usage.completion_tokens,
                         usage.total_tokens,
                     )
-                return extract_content(response, self._model)
+                content = extract_content(response, self._model)
+                if content.strip():
+                    return content
+
+                finish_reason = getattr(response.choices[0] if response.choices else None, "finish_reason", "unknown")
+                if attempt < max_retries - 1:
+                    delay = retry_delay(None, attempt, base_delay)
+                    logger.warning(
+                        "LLM returned empty content (model=%s, finish_reason=%s); retrying in %.1fs.",
+                        self._model,
+                        finish_reason,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    attempt += 1
+                    continue
+                raise LLMError(
+                    f"LLM returned empty content after {attempt + 1} attempts "
+                    f"(model={self._model}, finish_reason={finish_reason})"
+                )
             except openai.RateLimitError as exc:
                 if attempt < max_retries - 1:
                     delay = retry_delay(exc, attempt, base_delay)
@@ -253,7 +291,7 @@ class ChatClient:
                         attempt + 1,
                         max_retries,
                         delay,
-                        exc,
+                        describe_exception(exc),
                     )
                     time.sleep(delay)
                     attempt += 1
@@ -283,7 +321,7 @@ class ChatClient:
                         attempt + 1,
                         max_retries,
                         delay,
-                        exc,
+                        describe_exception(exc),
                     )
                     time.sleep(delay)
                     attempt += 1

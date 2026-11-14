@@ -25,6 +25,9 @@ AOAI_EMBEDDING_BATCH_SIZE = 16
 class AsyncEmbeddingsClient:
     """Async embedding client backed by Azure OpenAI.
 
+    Takes the same arguments as :class:`azure.cosmos.agent_memory.embeddings.EmbeddingsClient`, and
+    truncates each input to its first 8,000 tokens (a warning is logged) before it is sent.
+
     Supports the async context-manager protocol::
 
         async with AsyncEmbeddingsClient(endpoint=..., credential=cred) as client:
@@ -130,7 +133,8 @@ class AsyncEmbeddingsClient:
     ) -> list[list[float]]:
         """Generate embeddings for multiple texts.
 
-        Returns a list of embedding vectors **in the same order** as *texts*.
+        Returns a list of embedding vectors **in the same order** as *texts*. The texts are split
+        into chunks of *batch_size* and all the chunks are requested concurrently.
 
         Parameters
         ----------
@@ -146,8 +150,8 @@ class AsyncEmbeddingsClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         openai.OpenAIError
-            Propagated from the SDK on API failure (no retry - see module
-            docstring).
+            Propagated from the SDK on API failure (this client adds no retry
+            of its own).
         """
         if not texts:
             return []

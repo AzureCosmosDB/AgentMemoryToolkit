@@ -25,6 +25,13 @@ class _QueryBuilder:
         self._conditions: list[str] = []
         self._parameters: list[dict[str, Any]] = []
 
+    def add_condition(self, condition: str, parameters: list[dict[str, Any]] | None = None) -> None:
+        """Add a pre-built parameterized condition."""
+        if not condition:
+            return
+        self._conditions.append(condition)
+        self._parameters.extend(parameters or [])
+
     def add_filter(self, field: str, param_name: str, value: Any) -> None:
         """Add a filter only when *value* is not ``None``."""
         if value is None:

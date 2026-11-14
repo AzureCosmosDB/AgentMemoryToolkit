@@ -102,7 +102,9 @@ class TestJsonFormatter:
             )
         payload = _render(record)
         assert payload["exc_type"] == "ValidationError"
-        assert payload["exc_msg"] == "bad input"
+        assert "exc_msg" not in payload
+        assert "bad input" not in payload["exc_detail"]
+        assert payload["exc_detail"].startswith("agent_memory.ValidationError(code=validation)")
         assert payload["error_code"] == "validation"
 
     def test_error_code_from_agent_memory_error_subclass(self):

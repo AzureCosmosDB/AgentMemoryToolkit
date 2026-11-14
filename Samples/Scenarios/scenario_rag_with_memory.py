@@ -57,7 +57,7 @@ def _format_memories(memories: list[dict[str, Any]]) -> str:
     for m in memories:
         role = m.get("role", "unknown")
         content = m.get("content", "")
-        mtype = m.get("memory_type", "")
+        mtype = m.get("type", "")
         lines.append(f"[{mtype}|{role}] {content}")
     return "\n".join(lines)
 
@@ -160,7 +160,7 @@ def run_demo() -> None:
     _print_section("Step 2: New user query")
 
     user_query = "What web framework and database should I use for my new project?"
-    print(f"  User asks: \"{user_query}\"")
+    print(f'  User asks: "{user_query}"')
 
     # ------------------------------------------------------------------
     # Step 3 - Search memory for relevant context
@@ -174,7 +174,7 @@ def run_demo() -> None:
     )
     print(f"  Found {len(memory_results)} relevant memories:")
     for m in memory_results:
-        print(f"    • [{m.get('memory_type')}] {m.get('content', '')[:80]}")
+        print(f"    • [{m.get('type')}] {m.get('content', '')[:80]}")
 
     # ------------------------------------------------------------------
     # Step 3b - Retrieve user summary (if one exists)
@@ -186,7 +186,7 @@ def run_demo() -> None:
         print("  Found user summary:")
         print(f"    • {summaries.get('content', '')[:120]}")
     else:
-        print("  No summary available yet (generate one via generate_thread_summary).")
+        print("  No summary available yet (generate one via generate_user_summary).")
 
     # ------------------------------------------------------------------
     # Step 4 - Build augmented prompt
@@ -195,17 +195,13 @@ def run_demo() -> None:
 
     # 4a. RAG retrieval
     rag_docs = simulated_rag_retrieve(user_query)
-    rag_context = "\n\n".join(
-        f"### {doc['title']}\n{doc['text']}" for doc in rag_docs
-    )
+    rag_context = "\n\n".join(f"### {doc['title']}\n{doc['text']}" for doc in rag_docs)
 
     # 4b. Memory context
     memory_context = _format_memories(memory_results)
 
     # 4c. User summary context
-    summary_context = (
-        summaries.get("content", "") if summaries else "No summary available."
-    )
+    summary_context = summaries.get("content", "") if summaries else "No summary available."
 
     augmented_prompt = textwrap.dedent(f"""\
         You are a helpful developer assistant. Use the following context to

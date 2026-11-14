@@ -1,25 +1,34 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``Extract`` -> ``Persist`` followed by an optional
-``ReconcileMemories`` activity, then a best-effort
-``SynthesizeProceduralOrchestrator`` sub-call.
+Chain: ``Extract`` -> ``Persist`` -> ``AdvanceExtractWatermark`` (when the
+change feed passes a count), then an optional ``ReconcileMemories`` activity,
+then a best-effort ``SynthesizeProceduralOrchestrator`` sub-call.
 Reconciliation is gated by the change-feed trigger (which tracks the
 per-user/thread turn counter) and signaled to the orchestrator via the
-``reconcile`` flag on its input payload. Procedural synthesis fires only
-after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO`` is enabled, so
-operators have a kill-switch for the extra LLM call. The prompt is always
-derived from the extracted fact pool. Redundant concurrent runs across threads
-are cheap because the pipeline short-circuits with ``status="unchanged"``
-when the source fact/episodic IDs have not moved.
+``reconcile`` flag on its input payload. It runs the duplicate pass (fold and
+combine) and then the contradiction pass within a time budget
+(``ACTIVITY_TIME_BUDGET_SECONDS``): once it has passed no new model call
+starts and the contradiction pass is skipped, and the next run continues from
+the dedup cursor. Procedural synthesis (its own activity, with the same time
+budget) fires only after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO``
+is enabled, so operators have a kill-switch for the extra LLM call. It learns
+from the behavioral facts and episode lessons written since the user's
+procedure cursor, not from the extracted fact pool, so redundant concurrent
+runs across threads are cheap: a run with nothing new after the cursor makes
+no model call and returns ``status="unchanged"``.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 import azure.durable_functions as df
 from shared import config
+from shared.error_redaction import redact_errors
 from shared.pipeline_factory import get_pipeline
+
+from azure.cosmos.agent_memory.logging import describe_exception
 
 from ._retry import default_retry_options
 
@@ -83,7 +92,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
                         "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
                         user_id,
                         thread_id,
-                        exc,
+                        describe_exception(exc),
                     )
 
     return {
@@ -95,6 +104,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def em_Extract(payload: dict) -> dict:
     """Load recent turns and run LLM extraction without embeddings or writes."""
     user_id = payload["user_id"]
@@ -119,6 +129,7 @@ def em_Extract(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def em_Persist(payload: dict) -> dict:
     """Persist extracted docs with embeddings and deterministic create semantics."""
     user_id = payload["user_id"]
@@ -131,12 +142,15 @@ def em_Persist(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 async def em_AdvanceExtractWatermark(payload: dict) -> bool:
     """Advance the extraction watermark after a successful extract->persist.
 
     Stamps ``last_extract_count`` on the thread counter so the next batch's
-    recent_k spans only turns added since this run, never skipping any.
-    Runs only on success (after persist) so failed extracts re-process.
+    recent_k spans the turns added since this run. Runs only on success
+    (after persist) so failed extracts re-process. The watermark also moves
+    past the turns of a batch the model deferred (``deferred_turn_count``),
+    so the Function App does not retry them (the in-process backend does).
     """
     from shared.cosmos_clients import get_counter_container_async
     from shared.counters import advance_extract_watermark, thread_counter_id
@@ -150,14 +164,20 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def em_ReconcileMemories(payload: dict) -> dict:
-    # GA keeps reconcile single-activity: its LLM dedup decisions and supersession
-    # operations are larger/more coupled than the extract/persist flow handled here.
+    # Reconcile is one activity: its model decisions and supersession writes are larger
+    # and more coupled than the extract/persist flow handled here.
+    # The deadline keeps it inside the function timeout: once it passes, the dedup pass
+    # stops starting model calls and keeps what it finished, the contradiction pass is
+    # skipped, and the next run continues from the dedup cursor.
+    # The episodic call is a no-op that returns zero counts.
     user_id = payload["user_id"]
     pipeline = get_pipeline()
     from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     n = get_dedup_pool_size()
-    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact") or {}
-    episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic") or {}
+    deadline = time.monotonic() + config.get_activity_time_budget_seconds()
+    facts = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="fact", deadline=deadline) or {}
+    episodic = pipeline.reconcile_memories(user_id=user_id, n=n, memory_type="episodic", deadline=deadline) or {}
     return {"fact": facts, "episodic": episodic}

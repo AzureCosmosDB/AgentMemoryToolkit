@@ -6,15 +6,21 @@ locally - instead, the sibling Azure Function app reads the Cosmos change
 feed and decides which orchestrator(s) to fire based on per-(user,thread)
 counters.
 
-Three orchestrators run independently, each gated on its own threshold:
+The orchestrators run independently, each gated on its own threshold:
 
-+--------------------------+---------+------------------------------------+
-| App setting              | Default | Effect (set 0 to disable)          |
-+--------------------------+---------+------------------------------------+
-| THREAD_SUMMARY_EVERY_N   |   4     | Summarize a thread every N turns   |
-| FACT_EXTRACTION_EVERY_N  |   4     | Extract facts/episodic/procedural  |
-| USER_SUMMARY_EVERY_N     |  20     | Roll up user profile every N turns |
-+--------------------------+---------+------------------------------------+
++--------------------------+---------+----------------------------------------------+
+| App setting              | Default | Effect (set 0 to disable)                    |
++--------------------------+---------+----------------------------------------------+
+| THREAD_SUMMARY_EVERY_N   |   10    | Summarize a thread every N turns             |
+| FACT_EXTRACTION_EVERY_N  |    2    | Extract facts every N turns                  |
+| DEDUP_EVERY_N            |    5    | Reconcile facts, then learn procedures,      |
+|                          |         | every Nth extraction                         |
+| EPISODE_EVAL_EVERY_N     |    4    | Look for an episode boundary every N turns   |
+| USER_SUMMARY_EVERY_N     |   20    | Roll up user profile every N turns           |
++--------------------------+---------+----------------------------------------------+
+
+Reconcile and procedure learning follow extraction, so ``FACT_EXTRACTION_EVERY_N=0``
+turns them off too.
 
 This sample writes a transcript long enough to cross the thread-level
 thresholds and uses :meth:`process_now_and_wait` to *poll* Cosmos until the
@@ -25,17 +31,22 @@ state.
 Prerequisites
 -------------
 * ``COSMOS_DB_ENDPOINT`` set, plus ``COSMOS_DB_KEY`` *or* a logged-in identity.
-* The sibling function app deployed (``azd up``) and running.
+* The sibling function app deployed (``azd up``, which also sets
+  ``MEMORY_PROCESSOR_OWNER=durable``) and running.
 * App settings tuned, e.g.::
 
       azd env set THREAD_SUMMARY_EVERY_N 4
       azd env set FACT_EXTRACTION_EVERY_N 4
       azd env set USER_SUMMARY_EVERY_N 20
-      azd deploy
+      azd up
+
+  Settings live in the Bicep template, so re-run ``azd up`` (not ``azd deploy``)
+  after changing one.
 
   Set any value to ``0`` to disable that orchestrator entirely (useful for
   cost control or for staged rollout).
 """
+
 from __future__ import annotations
 
 import os
@@ -47,7 +58,6 @@ from dotenv import load_dotenv
 from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
-
 
 
 def main() -> None:
@@ -68,11 +78,11 @@ def main() -> None:
     # function app will fire the thread-summary orchestrator on turn 4.
     # ------------------------------------------------------------------
     transcript = [
-        ("user",      "I'm planning a hiking trip to Olympic National Park."),
+        ("user", "I'm planning a hiking trip to Olympic National Park."),
         ("agent", "Great choice! Hoh Rainforest and Hurricane Ridge are must-sees."),
-        ("user",      "I'd like to camp 2 nights. Any permit guidance?"),
+        ("user", "I'd like to camp 2 nights. Any permit guidance?"),
         ("agent", "You'll need a wilderness permit from recreation.gov for the Hoh."),
-        ("user",      "Thanks - also, I'm vegetarian, please remember that."),
+        ("user", "Thanks - also, I'm vegetarian, please remember that."),
     ]
     print(f"Writing {len(transcript)} turns to Cosmos (thread={thread_id})...")
     for role, content in transcript:
@@ -103,8 +113,8 @@ def main() -> None:
     if not ok:
         print(
             "\nNo summary detected within timeout. Check that the function app "
-            "is running and that THREAD_SUMMARY_EVERY_N <= number of turns "
-            "written above."
+            "is running, that MEMORY_PROCESSOR_OWNER=durable, and that "
+            "THREAD_SUMMARY_EVERY_N <= number of turns written above."
         )
         return
 
@@ -130,7 +140,7 @@ def main() -> None:
     print(
         "\nTip: to disable an orchestrator entirely (e.g. for cost control "
         "during a rollout):\n"
-        "    azd env set FACT_EXTRACTION_EVERY_N 0 && azd deploy"
+        "    azd env set FACT_EXTRACTION_EVERY_N 0 && azd up"
     )
 
 

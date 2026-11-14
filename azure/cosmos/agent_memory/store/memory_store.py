@@ -188,7 +188,15 @@ class MemoryStore:
         cross_partition: bool = False,
         full_text_score_scope: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Run a query against the explicitly selected split container."""
+        """Run a query against the explicitly selected split container.
+
+        ``partition_key`` reads one partition; ``cross_partition`` lets the query fan out across
+        partitions. A query that calls ``FullTextScore`` raises ``ValidationError`` when it is sent
+        with a ``partition_key``: the Python SDK skips query planning for such a query, so the
+        ranking would be ignored (Azure/azure-sdk-for-python#42241). Filter on the partition key
+        fields in the ``WHERE`` clause instead (see ``query_scope``). ``full_text_score_scope``
+        (``"Local"`` or ``"Global"``) sets where the keyword ranking takes its BM25 statistics from.
+        """
         return self._query_items(
             query=sql,
             parameters=parameters,
@@ -271,7 +279,14 @@ class MemoryStore:
         embed: Optional[bool] = None,
         created_at: Optional[str | datetime] = None,
     ) -> str:
-        """Add a memory document to Cosmos DB and return its id."""
+        """Add a memory document to Cosmos DB and return its id.
+
+        Literal credentials are redacted before the memory is embedded or written, and the record is
+        then marked with the ``sys:secret`` tag and ``metadata.classification="secret"``. It is
+        embedded unless ``embed`` is False; ``embed`` defaults to on for every type but turns, which
+        follow ``enable_turn_embeddings``. A supplied ``embedding`` is kept, unless it was built from
+        text that held a credential.
+        """
         content, secret_patterns = sanitize_text(content)
         kwargs: dict[str, Any] = {
             "user_id": user_id,
@@ -341,7 +356,12 @@ class MemoryStore:
         return record.id
 
     def push(self, local_memory: list[dict[str, Any]], batch_size: int = 25) -> None:
-        """Upsert all local memory records to Cosmos DB in sequential batches."""
+        """Upsert all local memory records to Cosmos DB in sequential batches.
+
+        Each batch has literal credentials redacted, is embedded (turns only when
+        ``enable_turn_embeddings`` is on), then written; a batch that cannot be embedded is written
+        without vectors. ``local_memory`` keeps every record, each gaining the vector generated for it.
+        """
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0")
         logger.info(
@@ -556,9 +576,11 @@ class MemoryStore:
         Reads the doc first to verify its ``type`` matches ``memory_type`` and
         then issues the delete with ``If-Match`` on the read ETag, so a
         concurrent type mutation between read and delete is rejected (412)
-        rather than silently dropping the wrong document. The records folded
-        into a fact or procedure (merged duplicates and, for a procedure, the
-        statements it absorbed; see ``services._absorbed``) are deleted first.
+        rather than silently dropping the wrong document. The records retired
+        into a fact or procedure (duplicates, the sources of a combined fact
+        and, for a procedure, the directives and corrections it absorbed - and
+        anything retired into those; see ``services._absorbed``) are deleted
+        first.
         """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import (
@@ -821,7 +843,11 @@ class MemoryStore:
         memory_type: str,
         tags: list[str],
     ) -> None:
-        """Add tags to an existing memory document."""
+        """Add tags to an existing fact, episodic or procedural memory.
+
+        Tags are lower-cased. A tag that holds a literal credential is dropped, and the memory is
+        marked ``sys:secret``.
+        """
         self._mutate_tags(memory_id, user_id, thread_id, memory_type, tags, add=True)
 
     def remove_tags(
@@ -832,7 +858,7 @@ class MemoryStore:
         memory_type: str,
         tags: list[str],
     ) -> None:
-        """Remove tags from an existing memory document."""
+        """Remove tags from an existing fact, episodic or procedural memory."""
         self._mutate_tags(memory_id, user_id, thread_id, memory_type, tags, add=False)
 
     def mark_superseded(
@@ -888,7 +914,12 @@ class MemoryStore:
             return False
 
     def get_procedural_prompt(self, user_id: str) -> Optional[str]:
-        """Return the active synthesized procedural prompt for a user."""
+        """Return the ``content`` of the user's highest-``version`` procedure that is not retired, or None.
+
+        That is one procedure's rule text (candidates included), not the compiled standing
+        instructions: ``CosmosMemoryClient.get_procedural_prompt`` compiles those from the active
+        standing rules.
+        """
         qb = _QueryBuilder()
         qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
@@ -908,7 +939,12 @@ class MemoryStore:
         return items[0].get("content")
 
     def get_procedural_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Return synthesized procedural docs for a user, newest first."""
+        """Return up to ``limit`` of the user's procedures, retired (superseded) ones included.
+
+        Procedures still in place come first and retired ones last. Within each group the highest
+        ``version`` comes first, then the most recently written; ``status`` plays no part, so
+        candidates are mixed in with active procedures.
+        """
         if limit <= 0:
             return []
 
@@ -947,7 +983,13 @@ class MemoryStore:
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        """Retrieve active procedural memories for a user."""
+        """Retrieve the user's procedural memories, candidates included, newest first by ``created_at``.
+
+        Retired (superseded) procedures are left out unless ``include_superseded`` is True.
+        ``priority``, ``category`` and ``min_salience`` match ``metadata.priority``,
+        ``metadata.category`` and ``salience``, which procedures learned by
+        ``synthesize_procedural`` do not carry, so setting one leaves them out.
+        """
         qb = _QueryBuilder()
         qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
@@ -1007,6 +1049,12 @@ class MemoryStore:
         ``metadata.category`` values, ``applies`` procedures with that ``applies`` value, and
         ``vector_only`` ranks by vector similarity alone, without the keyword ranking.
         ``query_embedding`` is the query's embedding when the caller already has it.
+
+        ``thread_id`` limits facts to that thread; episodic and procedural memories stay user-wide.
+        A keyword query, or a thread-scoped search that includes those user-wide types, runs across
+        partitions with ``user_id`` and ``thread_id`` filters in the WHERE clause (keyword queries
+        also set ``full_text_score_scope="Local"``); a vector-only query over facts with both ids
+        reads one partition (see ``query_scope``).
         """
         terms = require_search_terms(search_terms, query)
         top = top_literal(top_k, name="top_k")
@@ -1072,9 +1120,9 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         """Return a memory's superseded predecessors, most-recently-superseded first.
 
-        AMT supersedes rather than deletes: when a fact is updated or
-        contradicted, the prior document is retained with ``superseded_by``
-        pointing at its replacement (see :meth:`mark_superseded`). This walks
+        AMT supersedes rather than deletes: when a fact is contradicted by a newer one, folded into
+        a duplicate or combined fact, or retired into a procedure, the prior document is retained
+        with ``superseded_by`` pointing at its replacement (see :meth:`mark_superseded`). This walks
         that chain backwards from *memory_id* so callers can reason about how a
         fact evolved - knowledge updates, preference reversals, relocations -
         instead of seeing only the current value.
@@ -1198,13 +1246,17 @@ class MemoryStore:
         *,
         query: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Vector-search the summaries container (thread_summary + user_summary).
+        """Search the summaries container (thread_summary + user_summary).
 
         Searches across *all* of the user's summary docs at once - the single
         user_summary and every per-thread thread_summary - ranked by relevance,
         so a holistic ("summarize everything"), a session-scoped, or a
-        topic-scoped summary question all surface the right summary. ``user_id``
-        is required. Pass ``thread_id`` to narrow to one thread's summary.
+        topic-scoped summary question all surface the right summary. Ranking is
+        by vector similarity, with full-text relevance added when the query has
+        keywords. ``user_id`` is required. Pass ``thread_id`` to narrow to one
+        thread's summary; as with :meth:`search_turns`, a keyword query then runs
+        across partitions with ``user_id`` and ``thread_id`` filters in the WHERE
+        clause, and a vector-only query targets the thread's partition.
         """
         if not user_id:
             raise ValidationError("user_id is required for search_summaries")
@@ -1329,7 +1381,14 @@ class MemoryStore:
         status: Optional[str] = "active",
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        """Semantic search across procedural memories for a user."""
+        """Search a user's procedural memories by relevance to ``search_terms``.
+
+        Ranks by vector similarity, with full-text relevance added when the query has keywords.
+        Only ``active`` procedures are returned unless ``status`` is changed (``None`` also returns
+        candidates); ``procedure_kind`` narrows to ``instruction``, ``habit`` or ``skill``, and
+        retired ones need ``include_superseded``. Procedures past ``valid_until`` are not filtered
+        out here (:meth:`search` hides them with ``active_procedures_only``).
+        """
         if not user_id:
             raise ValidationError("user_id is required for retrieve_procedures")
         terms = require_search_terms(search_terms)

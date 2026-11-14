@@ -2,9 +2,12 @@
 
 Chain: ``SynthesizeProcedural``.
 
-The pipeline writes the procedural doc to Cosmos DB during
-``SynthesizeProcedural``; the Function App returns only a slim status payload
-because Durable persists activity outputs to orchestration history.
+The pipeline writes procedures to Cosmos DB during ``SynthesizeProcedural``, within a
+time budget (``ACTIVITY_TIME_BUDGET_SECONDS``): a ``deferred`` status (a retryable
+error, or the deadline passing) is not a failure, the next run continues from the
+cursor. The Function App returns only a slim status payload (``status``,
+``procedures_created`` and ``facts_retired``) because Durable persists activity
+outputs to orchestration history.
 """
 
 from __future__ import annotations

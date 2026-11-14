@@ -4,9 +4,13 @@ Advanced Search Patterns - Agent Memory Toolkit
 Demonstrates vector, hybrid, and filtered search patterns using Cosmos DB
 with AI Foundry embeddings.
 
+By default ``search_cosmos()`` searches facts, not raw turns. The ``fact`` seeds below are
+searchable at once; with the default in-process processor, the auto-trigger also
+extracts facts from the ``turn`` seeds as they are written, and those reach the results.
+
 Required environment variables:
     COSMOS_DB_ENDPOINT  – Azure Cosmos DB endpoint URL
-    AI_FOUNDRY_ENDPOINT – Azure AI Foundry endpoint URL (for embeddings)
+    AI_FOUNDRY_ENDPOINT – Azure AI Foundry endpoint URL (for embeddings and chat)
 """
 
 import os

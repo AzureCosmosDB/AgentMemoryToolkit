@@ -586,6 +586,43 @@ async def test_async_extraction_sees_the_same_context_and_records_the_same_field
     assert all(fact["source_turn_ids"] == ["turn-5"] for fact in facts)
 
 
+class _StrictAsyncContainer:
+    """A raw async Cosmos container: its ``query_items`` rejects the sync-only ``enable_cross_partition_query``."""
+
+    def __init__(self, rows: list[dict[str, Any]]):
+        self.rows = rows
+
+    def query_items(self, query, parameters=None, partition_key=None, max_item_count=None, **kwargs):
+        if "enable_cross_partition_query" in kwargs:
+            raise TypeError("_request() got an unexpected keyword argument 'enable_cross_partition_query'")
+
+        async def rows():
+            for row in self.rows:
+                yield dict(row)
+
+        return rows()
+
+
+@pytest.mark.asyncio
+async def test_async_stored_facts_lookup_works_on_a_raw_async_container() -> None:
+    memories = _AsyncStore([])
+    service = AsyncPipelineService(
+        memories,
+        _AsyncChat([]),
+        _AsyncEmbeddings(),
+        containers={
+            **_async_containers_for_store(memories),
+            ContainerKey.MEMORIES: _StrictAsyncContainer(
+                [_fact("f-known", "The user's team runs on Azure.", "2026-03-02T10:00:00+00:00")]
+            ),
+        },
+    )
+
+    known = await service._known_memories("u1", _turns())
+
+    assert "The user's team runs on Azure." in known
+
+
 @pytest.mark.asyncio
 async def test_async_extraction_goes_on_without_context_it_cannot_read() -> None:
     class _AsyncUnreadable(_AsyncStore):

@@ -51,7 +51,14 @@ _OPTIONAL_EXTRA_KEYS: tuple[str, ...] = (
 
 
 class JsonFormatter(logging.Formatter):
-    """Serialize every log record to a fixed JSON shape on a single line."""
+    """Serialize every log record to a fixed JSON shape on a single line.
+
+    Every line has ``ts``, ``level``, ``logger`` and ``msg``, plus whichever of ``user_id``,
+    ``thread_id``, ``operation``, ``latency_ms``, ``ru_charge``, ``error_code``, ``prompt_id`` and
+    ``prompt_version`` the record carries as extras. A record with an exception adds ``exc_type`` and
+    ``exc_detail`` - from :func:`describe_exception`, never the exception's message - and the
+    exception's ``error_code`` when it has one and the record gave none.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()

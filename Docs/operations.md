@@ -6,12 +6,12 @@ Runtime knobs for an Agent-Memory-Toolkit deployment. Most ops levers live in `.
 
 | Type | Default TTL | Source |
 |---|---:|---|
-| turn | 30 d | container default (memories_turns) |
-| episodic | 90 d | per-doc ttl (memories container) |
-| thread_summary | never | container default (memories, -1) |
-| user_summary | never | container default |
-| fact | never | container default; supersession handles aging |
-| procedural | never | container default; supersession handles aging |
+| turn | 30 d | per-doc ttl set at write; the container default (memories_turns) covers documents without one |
+| episodic | 90 d | per-doc ttl set at write (memories container) |
+| thread_summary | never | container default (memories_summaries, -1) |
+| user_summary | never | container default (memories_summaries, -1) |
+| fact | never | container default (memories, -1); supersession handles aging |
+| procedural | never | container default (memories, -1); supersession handles aging |
 | counter | 90 d | container default (counter container; every document in it) |
 
 The counter container's TTL is set when the container is created, by `create_memory_store()` or the Bicep template. It is the container's default, so it applies to every document in it, not only thread counters: user counters and the extraction watermark kept on a thread counter go with them, each 90 days after its last update. A container that already exists keeps its current setting, because `create_container_if_not_exists` does not change it. When a counter expires, its thread or user starts counting again from zero.
@@ -20,9 +20,9 @@ Facts and procedures have no default expiry. Deleting one with `delete_memory` a
 
 Override per write:
 
-    client.add_memory(text, type="turn", ttl=60)   # expires in 60 seconds
+    client.upsert_memory("user-1", "user", text, memory_type="turn", thread_id="thread-1", ttl=60)   # expires in 60 seconds
 
-Override per container at provision time:
+Override the turns container default at provision time (it applies to documents written without a `ttl`; the SDK sets its own 30-day `ttl` on every turn):
 
     azd env set MEMORIES_TURNS_DEFAULT_TTL 86400   # 1 day
 

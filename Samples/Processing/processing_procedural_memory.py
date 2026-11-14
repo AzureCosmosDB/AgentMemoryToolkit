@@ -33,10 +33,11 @@ Required environment variables (.env supported via python-dotenv):
     COSMOS_DB_DATABASE
     COSMOS_DB_MEMORIES_CONTAINER
     AI_FOUNDRY_ENDPOINT
-    AI_FOUNDRY_API_KEY
     AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
     AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME
     AI_FOUNDRY_EMBEDDING_DIMENSIONS
+
+Optional: AI_FOUNDRY_API_KEY. Without it, AI Foundry calls use DefaultAzureCredential.
 
 Cosmos DB authentication uses DefaultAzureCredential. Do not pass a Cosmos DB
 key when local auth is disabled on the account.
@@ -83,8 +84,10 @@ def print_procedure(proc: dict[str, Any], *, index: int | None = None) -> None:
     print(f"      kind:        {proc.get('procedure_kind')}")
     print(f"      applies:     {proc.get('applies')}")
     print(f"      status:      {proc.get('status')}")
-    print(f"      evidence:    {', '.join(proc.get('evidence') or []) or '(none)'}")
-    print(f"      source_kind: {proc.get('source_kind')}")
+    # Search results (retrieve_procedures) do not carry the evidence fields.
+    if "evidence" in proc:
+        print(f"      evidence:    {', '.join(proc.get('evidence') or []) or '(none)'}")
+        print(f"      source_kind: {proc.get('source_kind')}")
     print(f"      summary:     {_short(proc.get('summary') or proc.get('content'))}")
     conditions = proc.get("activation_conditions") or []
     if conditions:
@@ -174,7 +177,6 @@ def main() -> None:
         "COSMOS_DB_DATABASE",
         "COSMOS_DB_MEMORIES_CONTAINER",
         "AI_FOUNDRY_ENDPOINT",
-        "AI_FOUNDRY_API_KEY",
         "AI_FOUNDRY_CHAT_DEPLOYMENT_NAME",
         "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME",
         "AI_FOUNDRY_EMBEDDING_DIMENSIONS",
@@ -190,7 +192,7 @@ def main() -> None:
         cosmos_database=os.environ["COSMOS_DB_DATABASE"],
         cosmos_container=os.environ["COSMOS_DB_MEMORIES_CONTAINER"],
         ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
-        ai_foundry_api_key=os.environ["AI_FOUNDRY_API_KEY"],
+        ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
         embedding_deployment_name=os.environ["AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME"],
         embedding_dimensions=int(os.environ["AI_FOUNDRY_EMBEDDING_DIMENSIONS"]),
         chat_deployment_name=os.environ["AI_FOUNDRY_CHAT_DEPLOYMENT_NAME"],

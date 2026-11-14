@@ -73,7 +73,7 @@ class CosmosOperationError(AgentMemoryError):
 
 
 class MemoryConflictError(AgentMemoryError):
-    """Raised when an optimistic-concurrency guarded memory update conflicts."""
+    """Raised when an optimistic-concurrency guarded write - an update, tag change or delete - conflicts."""
 
     error_code = "memory_conflict"
 
@@ -146,7 +146,15 @@ class MemoryTypeMismatchError(AgentMemoryError):
 
 
 class LLMError(AgentMemoryError):
-    """Raised when the LLM returns a response shape the SDK does not surface
-    as an exception (no choices, empty content, invalid JSON)."""
+    """Raised when a model reply cannot be used.
+
+    The chat client retries an empty reply (no choices or no content) with backoff and raises this
+    only if it is still empty after its last attempt (``max_retries``, 6 by default). It raises it
+    at once, without retrying, for a reply that was content-filtered (``content_filter``), refused
+    (``model_refusal``), tool-only (``unexpected_tool_response``) or cut off at the output limit
+    with no text (``output_truncated``); the message names the cause, and the pipeline treats these
+    as non-retryable. Parsing a reply raises it too: invalid or truncated JSON, or a root that is
+    not a JSON object.
+    """
 
     error_code = "llm"

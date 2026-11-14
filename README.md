@@ -21,9 +21,9 @@ Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming a
 ### 1. Install
 
 ```bash
-pip install azure-cosmos-agent-memory
+pip install azure-cosmos-agent-memory python-dotenv   # python-dotenv loads .env in the snippet and samples below
 
-# With dev/test dependencies (from a checkout)
+# With dev/test dependencies (from a checkout; includes python-dotenv)
 pip install ".[dev]"
 ```
 
@@ -36,7 +36,7 @@ The toolkit needs a Cosmos DB account, an Azure OpenAI / AI Foundry deployment, 
 ```bash
 # Prereqs: az + azd installed; subscription with quota for gpt-4o-mini
 # and text-embedding-3-large in your chosen region (default: eastus2,
-# also supported: swedencentral, westus3).
+# also supported: eastus, swedencentral, westus3).
 
 az login
 azd auth login
@@ -51,7 +51,7 @@ azd up
 # are provisioned. Outputs are written to .azure/memorytoolkit-dev/.env
 ```
 
-The Function app is always provisioned but only used when you opt into `DurableFunctionProcessor` - it sits idle (and bills nothing) for in-process workloads.
+The Function app is provisioned by default and is deployed with `MEMORY_PROCESSOR_OWNER=durable`: it processes new turns from the change feed, and SDK clients that load the generated `.env` skip their in-process auto-trigger. To process in your own process instead, run `azd env set MEMORY_PROCESSOR_OWNER inprocess` before `azd up` (see [Backend exclusivity](#backend-exclusivity-memory_processor_owner)).
 
 Load the generated env vars and you're ready to use the SDK:
 
@@ -59,7 +59,7 @@ Load the generated env vars and you're ready to use the SDK:
 set -a && . ./.azure/memorytoolkit-dev/.env && set +a
 ```
 
-To tear everything down later: `azd down --purge` (the `--purge` flag skips Cosmos / AI Foundry soft-delete so names are immediately reusable).
+To tear everything down later: `azd down --purge` (the `--purge` flag skips the AI Foundry / Log Analytics soft-delete window so names are immediately reusable).
 
 **Option B - Bring your own resources.** If you already have a Cosmos DB account and an AI Foundry / Azure OpenAI deployment, copy the env template and fill in the endpoints:
 
@@ -89,27 +89,27 @@ memory = CosmosMemoryClient(
     use_default_credential=True,
     # processor=InProcessProcessor()   # implicit default
 )
-memory.connect_cosmos()  # auto-creates database + containers if missing
+memory.connect_cosmos()  # connects to existing containers; create_memory_store() creates them if missing
 
 USER, THREAD = "user-001", str(uuid.uuid4())
 
-# Add raw turns to a conversation
+# Add raw turns to a conversation (role is "user", "agent", "tool" or "system")
 memory.upsert_memory(user_id=USER, thread_id=THREAD, role="user", content="I love Cosmos DB.")
-memory.upsert_memory(user_id=USER, thread_id=THREAD, role="assistant", content="It is fantastic.")
+memory.upsert_memory(user_id=USER, thread_id=THREAD, role="agent", content="It is fantastic.")
 
-# Run the processing pipeline (thread summary + fact extraction + user summary)
+# Run the processing pipeline (thread summary, facts, reconcile, procedures, user summary)
 memory.process_now(user_id=USER, thread_id=THREAD)
 
-# Search semantically across the stored memory
-hits = memory.search_cosmos(user_id=USER, query_text="Cosmos DB preferences", top=5)
+# Search semantically across the stored facts
+hits = memory.search_cosmos("Cosmos DB preferences", user_id=USER, top_k=5)
 for h in hits:
-    print(h["memory_type"], "-", h["content"][:80])
+    print(h["type"], "-", h["content"][:80])
 
 # Retrieve the cross-thread user profile
 print(memory.get_user_summary(user_id=USER))
 ```
 
-> Async API is identical - just `await` each call:
+> Async API is identical - just `await` each call (the local-buffer methods `add_local`, `get_local`, `update_local` and `delete_local` stay synchronous):
 > ```python
 > from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 > ```
@@ -128,7 +128,7 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 
 | Concept                   | What it is                                                                             | API                                                      |
 |---------------------------|----------------------------------------------------------------------------------------|----------------------------------------------------------|
-| **Turn**                  | One message (user or assistant) - the raw conversation atom                            | `upsert_memory(...)`, `add_local(...)`                   |
+| **Turn**                  | One message (role `user`, `agent` or `tool`) - the raw conversation atom               | `upsert_memory(...)`, `add_local(...)`                   |
 | **Thread summary**        | LLM-generated, incrementally updated rollup of a single thread                         | `generate_thread_summary(...)`                           |
 | **Fact**                  | Discrete, independently searchable assertion extracted from turns                      | `extract_memories(...)`                                  |
 | **Episodic**              | Bounded experience: situation → action → outcome, with lessons (90-day TTL)            | `extract_episodes(...)`                                  |
@@ -137,15 +137,17 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 | **User summary**          | Cross-thread profile of what's known about a user                                      | `generate_user_summary(...)`, `get_user_summary(...)`    |
 | **Search**                | Vector + full-text + filter over `fact` / `episodic` / `procedural`; optional slots    | `search_cosmos(...)`                                     |
 | **Reconcile**             | Fold duplicate facts, combine facts about one thing, retire contradicted facts         | `reconcile(...)`                                         |
-| **Process now**           | Run the full pipeline (summary → facts → reconcile → procedures → user profile)        | `process_now(...)`, `process_now_and_wait(...)`          |
+| **Process now**           | Run the full pipeline (summary → facts → reconcile → procedures → user profile)        | `process_now(...)`                                       |
 
 AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarchical `(user_id, thread_id)` keys:
 
-| Container            | Holds                                      | Notes                             |
-|----------------------|--------------------------------------------|-----------------------------------|
-| `memories_turns`     | raw `turn` documents                       | append-only conversation timeline |
-| `memories`           | `fact`, `episodic`, `procedural` documents | vector + full-text retrieval path |
-| `memories_summaries` | thread and user summaries                  | latest-summary point/read path    |
+| Container            | Holds                                      | Notes                                                                 |
+|----------------------|--------------------------------------------|-----------------------------------------------------------------------|
+| `memories_turns`     | raw `turn` documents                       | append-only conversation timeline                                     |
+| `memories`           | `fact`, `episodic`, `procedural` documents | vector + full-text retrieval path                                     |
+| `memories_summaries` | thread and user summaries                  | latest-summary point reads; vector + full-text for `search_summaries` |
+
+`create_memory_store()` also creates a `counter` container (the turn counters behind the auto-trigger) and a `leases` container (change feed checkpoints).
 
 ### Memory Type Taxonomy
 
@@ -193,7 +195,7 @@ Procedures are learned from evidence, not copied from one message. `synthesize_p
 | `habit`          | The user corrected the assistant, or chose the same way repeatedly             | the user corrected the assistant, or the user's own facts or successful episodes support it on two different dates |
 | `skill`          | A method of two or more steps that worked in practice                          | it succeeded in episodes on two different dates, or the user endorsed it                                           |
 
-A habit's two dates count only facts the user stated and episodes with a successful or partially successful outcome: facts the assistant stated, and failed episodes, do not. A skill's two successes are episodes with a successful or partially successful outcome. Anything else stays a `candidate`, which search and prompt injection do not show. A procedure `applies` either `always` (nearly every interaction: language, tone, format) or `when` its activation conditions match, and may carry a `valid_until` date. `build_procedural_context(user_id)` returns the active, unexpired `always` rules as a system-prompt block, and `task=` adds the nearest situational rule:
+A habit's two dates count only facts the user stated and episodes with a successful or partially successful outcome: facts the assistant stated, and failed episodes, do not. A skill's two successes are episodes with a successful or partially successful outcome. Anything else stays a `candidate`, which search and prompt injection do not show. A procedure `applies` either `always` (nearly every interaction: language, tone, format) or `when` its activation conditions match, and may carry a `valid_until` date. `build_procedural_context(user_id)` returns the active, unexpired `always` rules (at most 10 rules and 2,048 bytes) as a system-prompt block, and `task=` adds the nearest situational rule:
 
 ```python
 print(memory.build_procedural_context(USER, task="Review this pull request"))
@@ -205,7 +207,7 @@ print(memory.build_procedural_context(USER, task="Review this pull request"))
 # - When reviewing code for the user: Include a suggested fix with every review comment.
 ```
 
-The pass runs after each reconcile (`PROCEDURAL_SYNTHESIS_AUTO`) or on demand with `synthesize_procedural(user_id)`. When an active situational procedure holds a directive or correction fact it cites, that fact is retired into the procedure, so the rule is stored and retrieved once.
+The pass runs after each reconcile (`PROCEDURAL_SYNTHESIS_AUTO`) or, with the in-process backend, on demand with `synthesize_procedural(user_id)`. When an active situational procedure holds a directive or correction fact it cites, that fact is retired into the procedure, so the rule is stored and retrieved once.
 
 #### Search slots
 
@@ -225,14 +227,14 @@ Every write through the store or the pipeline, raw turns included, is scanned fo
 
 ### Memory Reconciliation
 
-`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `PipelineService.reconcile_memories`) keeps a user's fact pool clean in two passes, duplicates first and then contradictions:
+`reconcile(user_id, n=None)` (on the public client, where `n` defaults to `DEDUP_POOL_SIZE`; underlying pipeline method is `PipelineService.reconcile_memories`) keeps a user's fact pool clean in two passes, duplicates first and then contradictions:
 
 1. **Duplicates, without losing detail.** Each fact written since the last pass is compared with its nearest active facts (cosine similarity ≥ 0.85) in one model call. A fact is retired into another (`supersede_reason="duplicate"`) only when the two state the same claim or one contains the other, the model lists nothing that would be lost, and a numbers / names / negation check agrees. The survivor keeps its content verbatim and lists the retired fact in `merged_from`. The pass also combines facts about one specific thing that each hold details the others lack into one verified fact (tagged `sys:combined`), and retires its sources with `supersede_reason="combined"`.
-2. **Contradictions.** A single LLM pass over the `n` most-recent active facts soft-deletes each loser with `supersede_reason="contradict"`.
+2. **Contradictions.** A single LLM pass over the `n` most-recent active facts (agent-sourced and combined facts are left out) soft-deletes each loser with `supersede_reason="contradict"`.
 
 The pass returns `kept`, `merged` (duplicates retired), `contradicted`, and `checked`, `compared`, `vetoed`, `combined`, `synthesized`, `combine_groups` and `combine_failed` for the duplicate pass. Search hides retired records and `get_memory_history()` returns them; deleting a fact or procedure with `delete_memory()` also deletes the records retired into it. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
 
-> **Cost note.** A pass makes one duplicate check per new fact that has close neighbours (at most `n`, default 50, hard cap 500), up to four calls per combine group (write, check, and one retry of each), and one contradiction call over the `n` most-recent facts. With auto-trigger it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user, with `n` taken from `DEDUP_POOL_SIZE`. To bound LLM cost: raise `DEDUP_EVERY_N` (reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (fewer new facts checked per pass; the rest wait for the next one), or override `n` per call when invoking `reconcile()` directly. In the Function App, `ACTIVITY_TIME_BUDGET_SECONDS` (default 240) stops a pass from starting model calls near the function timeout, and the next pass continues where it stopped.
+> **Cost note.** A pass makes one duplicate check per new fact that has close neighbours (at most `n`, default 50, hard cap 500), up to four calls per combine group (write, check, and one retry of each), and one contradiction call over the `n` most-recent facts. With auto-trigger it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns of a thread, with `n` taken from `DEDUP_POOL_SIZE`. To bound LLM cost: raise `DEDUP_EVERY_N` (reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (fewer new facts checked per pass; the rest wait for the next one), or override `n` per call when invoking `reconcile()` directly. In the Function App, `ACTIVITY_TIME_BUDGET_SECONDS` (default 240) stops a pass from starting model calls near the function timeout, and the next pass continues where it stopped.
 
 | `MemoryRecord` field | Meaning                                                                                               |
 |----------------------|-------------------------------------------------------------------------------------------------------|
@@ -244,7 +246,7 @@ The pass returns `kept`, `merged` (duplicates retired), `contradicted`, and `che
 
 ### Auto-trigger (per-turn extraction)
 
-By default, the **InProcess processor** runs each pipeline step independently as its own threshold trips inside `push_to_cosmos()`:
+By default, the **InProcess processor** runs each pipeline step independently as its own threshold trips inside `push_to_cosmos()` and, for turns, `upsert_memory()`:
 
 | Env var                        | Default             | Step that fires                                                                                                                                                     | Async behavior                      |
 |--------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------|
@@ -254,11 +256,12 @@ By default, the **InProcess processor** runs each pipeline step independently as
 | `PROCEDURAL_SYNTHESIS_AUTO`    | `true`              | `synthesize_procedural` after each reconcile; `false` turns the chained procedure pass off                                                                          | scheduled via `asyncio.create_task` |
 | `THREAD_SUMMARY_EVERY_N`       | `10`                | `process_thread_summary`                                                                                                                                            | scheduled via `asyncio.create_task` |
 | `USER_SUMMARY_EVERY_N`         | `20`                | `process_user_summary`                                                                                                                                              | scheduled via `asyncio.create_task` |
+| `EPISODE_EVAL_EVERY_N`         | `4`                 | `process_extract_episodes` (checks the thread for an episode boundary; `0` turns episodic memory off)                                                               | scheduled via `asyncio.create_task` |
 | `ACTIVITY_TIME_BUDGET_SECONDS` | `240`               | **Function App only**: seconds a reconcile or procedure activity keeps starting model calls (minimum `30`; keep it below `functionTimeout`)                         | n/a                                 |
 
-Each `*_EVERY_N=0` disables only that step. Reconcile is gated independently of extract because it makes the most model calls per run (a duplicate check per new fact, combining, and the contradiction pass), and running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive, higher-volume production traffic. Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
+Each `*_EVERY_N=0` disables its step; reconcile and procedure learning run on multiples of the extraction cadence, so `FACT_EXTRACTION_EVERY_N=0` or `DEDUP_EVERY_N=0` turns both off. The `EPISODE_IDLE_GAP_SECONDS`, `EPISODE_TOPIC_DRIFT`, `EPISODE_MAX_TURNS` and `EPISODE_MIN_TURNS` settings (see `.env.template`) decide where an episode ends. Reconcile is gated independently of extract because it makes the most model calls per run (a duplicate check per new fact, combining, and the contradiction pass), and running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive, higher-volume production traffic. Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
 
-The async client (`AsyncCosmosMemoryClient.push_to_cosmos`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
+The async client (`AsyncCosmosMemoryClient.push_to_cosmos` and `upsert_memory`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
 
 #### Backend exclusivity (`MEMORY_PROCESSOR_OWNER`)
 
@@ -268,13 +271,13 @@ Set the env var on **both sides** to make ownership explicit:
 
 | `MEMORY_PROCESSOR_OWNER` | SDK behavior                      | Function-app behavior                  |
 |--------------------------|-----------------------------------|----------------------------------------|
-| _unset_ (default)        | runs auto-trigger                 | runs orchestrator (today's behavior)   |
+| _unset_ (default)        | runs auto-trigger                 | change-feed trigger skips batch + logs |
 | `inprocess`              | runs auto-trigger                 | change-feed trigger skips batch + logs |
 | `durable`                | auto-trigger logs warning + skips | runs orchestrator                      |
 
-The default (unset) preserves backward compatibility. For any production deployment we recommend setting it on both sides so a misconfiguration produces a loud log line instead of silent double-work.
+The Function app processes nothing until it is set to `durable` (the Bicep template and `local.settings.json.template` set it), so an SDK-only deployment can leave it unset. When a Function app is attached to the database, set `durable` on the SDK clients too: a client left unset or `inprocess` runs its own auto-trigger beside the Function app, so the same turns are processed twice.
 
-> **Advisory, not enforced.** `MEMORY_PROCESSOR_OWNER` is operator-configured exclusivity, not a server-side lock. Each backend reads its own env var; if the SDK is set to `inprocess` but the FA forgets to set `durable` (or vice versa), both still run. As a backstop, every counter write stamps `last_owner=<this backend>` on the doc - when the SDK observes a counter previously written by `durable` (or vice versa), it logs a one-shot `WARN` so misconfiguration surfaces in logs without spamming. Treat this as a configuration audit signal, not a hard guarantee.
+> **Advisory, not enforced.** `MEMORY_PROCESSOR_OWNER` is operator-configured exclusivity, not a server-side lock. Each backend reads its own env var; if an SDK client is unset or `inprocess` while the Function app is `durable`, both still run. As a backstop, every counter write stamps `last_owner=<this backend>` on the doc - when the SDK observes a counter previously written by `durable` (or vice versa), it logs a one-shot `WARN` so misconfiguration surfaces in logs without spamming. Treat this as a configuration audit signal, not a hard guarantee.
 
 ---
 
@@ -287,7 +290,7 @@ Pick at construction time via the `processor=` kwarg.
 | Infra                    | None - just `pip install`         | Sibling Azure Function app                           |
 | Best for                 | Prototypes, low TPS, single-agent | Fleet / multi-agent / high TPS                       |
 | `process_now()`          | Synchronous, returns when done    | No-op (work runs async on change feed)               |
-| `process_now_and_wait()` | Returns immediately after flush   | Polls until summary visible (RU-costly; tests/demos) |
+| `process_now_and_wait()` | Runs inline, then returns `True`  | Polls until summary visible (RU-costly; tests/demos) |
 
 ```python
 from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
@@ -336,7 +339,7 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 | `client.search_cosmos()`             | -                               | Vector + full-text search; `preference_slot` / `procedure_slot` reserve result slots     |
 | `client.reconcile()`                 | -                               | Fold duplicate facts, combine facts about one thing, retire contradicted facts           |
 | `client.build_procedural_context()`  | -                               | Standing instructions (plus the nearest situational rule with `task=`) as a prompt block |
-| `MemoryRecord`, `MemoryType`, `Role` | `azure.cosmos.agent_memory`     | Pydantic models / enums                                                                  |
+| `MemoryRecord`, `MemoryType`, `MemoryRole` | `azure.cosmos.agent_memory`     | Pydantic models / enums                                                                  |
 
 Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) live in `azure.cosmos.agent_memory.aio`.
 
@@ -344,14 +347,16 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 
 ## Documentation
 
-- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, threads, roles, embeddings, search slots, processing pipeline, reconciliation
-- **[Docs/design_patterns.md](Docs/design_patterns.md)** - Integration patterns for chat apps and multi-agent systems
+- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, threads, roles, embeddings, search slots, processing pipeline, secret redaction, reconciliation, change feed processing
+- **[Docs/design_patterns.md](Docs/design_patterns.md)** - Integration patterns for chat apps and multi-agent systems, including procedures, reconciliation and secrets
 - **[Docs/public_api.md](Docs/public_api.md)** - Client methods and options, fact and procedure fields, secret redaction
 - **[Docs/operations.md](Docs/operations.md)** - TTLs and runtime settings (thresholds, reconcile, procedures, extraction prompt)
 - **[Docs/local_testing.md](Docs/local_testing.md)** - Prerequisites, environment setup, running locally, debugging
 - **[Docs/azure_testing.md](Docs/azure_testing.md)** - Azure deployment, RBAC, cloud validation
 - **[infra/README.md](infra/README.md)** - `azd` deployment, Bicep modules, RBAC, counter-trigger tuning, SDK-only mode
+- **[Docs/architecture/orchestrators.md](Docs/architecture/orchestrators.md)** - Durable orchestrator activity chains, reconcile and procedure activities, failure reporting
 - **[Docs/troubleshooting.md](Docs/troubleshooting.md)** - Common issues and resolutions for setup, auth, Cosmos DB, embeddings, Durable Functions, vector search, change feed, etc.
+- **[Docs/RELEASING.md](Docs/RELEASING.md)** - Maintainer release process
 
 ---
 
@@ -375,7 +380,7 @@ tests/                  Unit + integration tests (pytest)
 - **`azure.cosmos.agent_memory.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
 - **New `processor=` kwarg.** Defaults to `InProcessProcessor()` - existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.
-- **Procedural memory is reshaped, with no migration.** `procedure_kind` is `instruction`, `habit` or `skill`; `scope_type` / `scope_value`, `ProcedureScopeType` and the `scope_*` arguments of `retrieve_procedures()` are gone; `build_procedural_context()` returns only standing (`applies="always"`) rules, plus the nearest situational rule when `task=` is given. Procedures written by earlier betas are not shown or migrated. See [CHANGELOG.md](CHANGELOG.md).
+- **Procedural memory is reshaped, with no migration.** `procedure_kind` is `instruction`, `habit` or `skill`; `scope_type` / `scope_value`, `ProcedureScopeType` and the `scope_*` arguments of `retrieve_procedures()` are gone; `build_procedural_context()` returns only standing (`applies="always"`) rules, plus the nearest situational rule when `task=` is given. Procedures written by earlier betas are not migrated, and `build_procedural_context()` ignores them. See [CHANGELOG.md](CHANGELOG.md).
 - **Structured logs: `exc_msg` is now `exc_detail`.** It describes an exception by type, error code, status and code location and never quotes its message. Failed Function App activities likewise report only `<code> (<ExcType>)` to Durable Functions.
 
 ## Trademark notice

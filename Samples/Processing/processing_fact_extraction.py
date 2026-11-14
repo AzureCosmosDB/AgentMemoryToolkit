@@ -1,9 +1,11 @@
-"""Demonstrate fact / procedural / episodic memory extraction.
+"""Demonstrate fact extraction.
 
 The Agent Memory Toolkit runs the extraction pipeline **in-process** via
 ``CosmosMemoryClient.extract_memories(...)``. The same pipeline also runs
 inside the Azure Functions change-feed trigger, so this script exercises
-identical code without needing a deployed Function.
+identical code without needing a deployed Function. Episodes and procedures
+come from their own calls - see ``processing_episodic_memory.py`` and
+``processing_procedural_memory.py``.
 
 Required environment variables (.env supported via python-dotenv):
 
@@ -45,6 +47,13 @@ def main() -> None:
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
         embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
         chat_deployment_name=os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
+        # Zero turns off the cadence-driven auto-trigger, so the explicit extract_memories() call below does the work.
+        cadence_thresholds={
+            "FACT_EXTRACTION_EVERY_N": 0,
+            "THREAD_SUMMARY_EVERY_N": 0,
+            "EPISODE_EVAL_EVERY_N": 0,
+            "USER_SUMMARY_EVERY_N": 0,
+        },
     )
     print("Connected to Cosmos DB.\n")
 
@@ -70,18 +79,17 @@ def main() -> None:
         print(f"  [{role:>5}] {content[:80]}")
     print()
 
-    print("Running extraction pipeline (facts / procedural / episodic)…")
+    print("Running fact extraction…")
     stats = mem.extract_memories(user_id=user_id, thread_id=thread_id)
     print(f"Extraction stats: {json.dumps(stats, indent=2)}\n")
 
-    for kind in ("fact", "procedural", "episodic"):
-        items = mem.get_memories(user_id=user_id, memory_types=[kind])
-        print(f"{kind.upper()}S ({len(items)}):")
-        for it in items:
-            tags = ", ".join(it.get("tags") or [])
-            sal = it.get("salience")
-            print(f"  • {it['content'][:90]}  [salience={sal} tags={tags}]")
-        print()
+    facts = mem.get_memories(user_id=user_id, memory_types=["fact"])
+    print(f"FACTS ({len(facts)}):")
+    for it in facts:
+        tags = ", ".join(it.get("tags") or [])
+        sal = it.get("salience")
+        print(f"  • {it['content'][:90]}  [assertion={it.get('assertion')} salience={sal} tags={tags}]")
+    print()
 
     print("Semantic search examples:")
     for q in [

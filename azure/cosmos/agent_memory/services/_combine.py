@@ -17,10 +17,11 @@ of them can fill a short search result. So the dedup pass on facts also:
    missing, and :func:`kept_specifics` that it keeps each member's numbers, names and negation, in at
    most ``COMBINE_MAX_CHARS`` characters. One retry lists what was missing; after that the members stay
    as they are.
-4. **Applies** (:func:`combined_record`): the combined fact is created (tagged ``sys:combined``, with
-   ``merged_from`` naming its members), then each member is retired into it
-   (``supersede_reason="combined"``). Its ID derives from its user and members, so writing it twice (after
-   a crash, or from a concurrent pass) cannot make two records.
+4. **Applies** (:func:`combined_record`): the pipeline redacts the combined fact before embedding it and
+   re-reads the members, keeping them as they are if one was deleted, edited or retired since the pass
+   read it. Otherwise the fact is created (tagged ``sys:combined``, with ``merged_from`` naming its members), then
+   each member is retired into it (``supersede_reason="combined"``). Its ID derives from its user and
+   members, so writing it twice (after a crash, or from a concurrent pass) cannot make two records.
 
 A combined fact is never combined again, and dedup never retires it (it has absorbed others).
 """
@@ -310,8 +311,10 @@ class CombineOutcome:
 @dataclass(frozen=True)
 class CombineWrite:
     """What writing a combined fact did: ``written`` (with the IDs of the members retired into it),
-    ``lost`` (it cannot be built or validated, or its embedding fails for good: the members stay) or
-    ``deferred`` (a retryable embedding error: a later pass tries the group again)."""
+    ``lost`` (it cannot be built or validated, its embedding fails for good, a member was deleted, edited
+    or retired since the pass read it, or the fact that is already there was retired: the members stay)
+    or ``deferred`` (a retryable embedding error: a later pass tries the group again). A group the writer
+    declined or that failed or was skipped is carried as that status."""
 
     status: str
     retired: tuple[str, ...] = ()

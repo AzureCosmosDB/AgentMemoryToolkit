@@ -78,6 +78,10 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
 def us_Extract(payload: dict) -> dict:
     """Generate a cross-thread user summary body only.
 
+    ``thread_ids`` (the threads whose turns crossed the threshold) is passed to the pipeline, which only
+    logs how many; it does not filter by them, so the summary reads everything the user wrote since the
+    last user summary.
+
     Returns a ``{"status": "no_memories_yet"}`` sentinel instead of raising when
     the user has no persisted memories yet, so the orchestrator can wait for
     extraction to land rather than exhausting its activity retries.

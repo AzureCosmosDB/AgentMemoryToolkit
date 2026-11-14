@@ -3,7 +3,7 @@
 Azure OpenAI embedding models (``text-embedding-3-*``) reject any single
 input that exceeds their 8192-token context window. Callers in this toolkit
 embed user-supplied and document-derived text of unbounded size - the
-dedup-context query in extraction, ``search_turns`` queries, and stored turn
+stored-facts lookup in extraction, ``search_turns`` queries, and stored turn
 vectors when ``enable_turn_embeddings`` is on - so an oversized string would
 otherwise crash the embed call or, at the write sites that swallow embed
 errors, silently persist a record with no vector.

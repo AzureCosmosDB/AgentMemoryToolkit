@@ -70,8 +70,11 @@ az functionapp create \
 
 az cosmosdb create \
   --name <cosmos-account-name> \
-  --resource-group <resource-group>
+  --resource-group <resource-group> \
+  --capabilities EnableServerless EnableNoSQLVectorSearch EnableNoSQLFullTextSearch
 ```
+
+Vector and full-text search must be enabled on the account before the containers are created. `EnableServerless` matches the default `serverless` throughput mode used below; leave it out for provisioned throughput and set `COSMOS_DB_THROUGHPUT_MODE=autoscale` (section 6).
 
 The toolkit can create the database and required containers later via `create_memory_store()`.
 
@@ -108,23 +111,21 @@ az functionapp config appsettings set \
     COSMOS_DB_MEMORIES_CONTAINER="memories" \
     COSMOS_DB_COUNTERS_CONTAINER="counter" \
     COSMOS_DB_LEASE_CONTAINER="leases" \
-    COSMOS_DB_THROUGHPUT_MODE="serverless" \
-    COSMOS_DB_AUTOSCALE_MAX_RU="1000" \
     AI_FOUNDRY_ENDPOINT="https://<openai-account-name>.openai.azure.com/" \
     AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME="text-embedding-3-large" \
     AI_FOUNDRY_EMBEDDING_DIMENSIONS="1536" \
     AI_FOUNDRY_CHAT_DEPLOYMENT_NAME="gpt-5-mini" \
     THREAD_SUMMARY_EVERY_N="10" \
-    FACT_EXTRACTION_EVERY_N="1" \
+    FACT_EXTRACTION_EVERY_N="2" \
     USER_SUMMARY_EVERY_N="20" \
     MEMORY_PROCESSOR_OWNER="durable"
 ```
 
-`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
+The Function App processes turns only when `MEMORY_PROCESSOR_OWNER=durable`; with any other value, or none, its change-feed trigger skips every batch. Set the same value in the SDK's `.env` (section 5) so any `CosmosMemoryClient` pointed at the same container skips its in-process auto-trigger and avoids double-extraction. See the README's section on backend exclusivity for details.
 
-`MEMORY_PROCESSOR_OWNER=durable` tells the SDK that the deployed Function App owns processing, so any `CosmosMemoryClient` pointed at the same container will skip its in-process auto-trigger and avoid double-extraction. See the README's processor-ownership table for details.
+`ACTIVITY_TIME_BUDGET_SECONDS` (default `240`, minimum `30`) must stay below the function app timeout. The Consumption plan created above times out after 5 minutes by default (10 at most); the Flex Consumption plan that `azd up` creates, after 30. On Consumption, set a lower budget, for example `120`.
 
-### Change feed settings (optional)
+### Change feed settings
 
 To enable automatic processing via the change feed trigger, add these settings:
 
@@ -136,8 +137,6 @@ az functionapp config appsettings set \
     COSMOS_DB__accountEndpoint="https://<cosmos-account-name>.documents.azure.com:443/" \
     COSMOS_DB_COUNTERS_CONTAINER="counter" \
     COSMOS_DB_LEASE_CONTAINER="leases" \
-    COSMOS_DB_THROUGHPUT_MODE="serverless" \
-    COSMOS_DB_AUTOSCALE_MAX_RU="1000" \
     THREAD_SUMMARY_EVERY_N="5" \
     FACT_EXTRACTION_EVERY_N="3" \
     USER_SUMMARY_EVERY_N="10"
@@ -145,7 +144,7 @@ az functionapp config appsettings set \
 
 Set any threshold to `"0"` to disable that processing type.
 
-The `leases` container is provisioned by `create_memory_store()` alongside the `memories` and `counter` containers, so the Function App should be configured to use that existing lease container.
+The `leases` container is provisioned by `create_memory_store()` alongside the other containers, so the Function App should be configured to use that existing lease container.
 
 The Function App authenticates to Cosmos DB and Azure OpenAI via its managed identity - there's no shared key or function-key handoff between the SDK and the Function App.
 
@@ -168,6 +167,8 @@ az functionapp function list \
   --resource-group <resource-group> \
   -o table
 ```
+
+The deployed app installs `azure-cosmos-agent-memory` from PyPI at the version pinned in `function_app/requirements.txt`, so it runs the released SDK, not your working tree.
 
 ---
 
@@ -258,7 +259,7 @@ await memory.connect_cosmos()
 await memory.create_memory_store()
 ```
 
-This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers.
+This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers. The Function App does not read either variable.
 
 ---
 
@@ -274,8 +275,8 @@ Bring the environment up in this order:
 6. test `get_memories(user_id=..., thread_id=...)` filtering
 7. test `search_cosmos()`
 8. deploy the Function App (e.g., via `azd up`) so the change-feed processor is running
-9. write a few turns and verify a thread `summary` memory appears
-10. write more turns and verify `fact` and `episodic` memories appear (a `procedural` memory appears only when the conversation teaches a preference or an instruction and reconcile has run, and it stays a `candidate` until the evidence for its kind has arrived)
+9. write a few turns and verify a `thread_summary` memory appears
+10. write more turns and verify `fact` memories appear (an `episodic` memory appears only once an episode closes: more than `EPISODE_IDLE_GAP_SECONDS` (default 1800) between two turns, or `EPISODE_MAX_TURNS` (default 40) turns in one episode; a `procedural` memory appears only when the conversation teaches a preference or an instruction and reconcile has run, and it stays a `candidate` until the evidence for its kind has arrived)
 11. verify a per-user `user_summary` memory appears once `USER_SUMMARY_EVERY_N` turns have accumulated for that user
 12. test deduplication by writing two near-duplicate facts (for example the paraphrases in `Samples/Scenarios/scenario_memory_reconciliation.py`), then call `reconcile(user_id)` or wait for the `DEDUP_EVERY_N` cadence, and confirm one is retired into the other (`superseded_by` set, `supersede_reason="duplicate"`) while the survivor keeps its text and lists the retired fact in `merged_from`; facts about one specific thing that hold different details may instead become one new fact tagged `sys:combined`
 
@@ -300,7 +301,7 @@ print(memory.search_cosmos("hello", user_id="user-1"))
 
 ### Durable processing (change-feed driven)
 
-Processing is no longer invoked directly from the SDK - write turns with `upsert_memory()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, and `user_summary` orchestrators per the configured thresholds.
+Processing is no longer invoked directly from the SDK - write turns with `upsert_memory()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, `user_summary` and `extract_episodes` orchestrators per the configured thresholds.
 
 ```python
 # Write enough turns to cross THREAD_SUMMARY_EVERY_N (default 10).
@@ -321,14 +322,14 @@ print(memory.get_user_summary(user_id="user-1"))
 
 ### Change feed auto-processing
 
-If you configured the change feed settings, verify automatic processing:
+With the change feed settings above, verify automatic processing:
 
 ```python
 import uuid
 
-# Use a threshold of 3 (THREAD_SUMMARY_EVERY_N=3) for testing
+# THREAD_SUMMARY_EVERY_N=5, as set above
 thread_id = str(uuid.uuid4())
-for i in range(3):
+for i in range(5):
     memory.upsert_memory(
         user_id="user-1",
         thread_id=thread_id,
@@ -357,13 +358,13 @@ print(memory.get_user_summary(user_id="user-1"))
 
 ## Monitoring and Troubleshooting
 
-Tail Function App logs:
+Stream Function App logs through Application Insights Live Metrics:
 
 ```bash
-az functionapp log tail \
-  --name <function-app-name> \
-  --resource-group <resource-group>
+func azure functionapp logstream <function-app-name> --browser
 ```
+
+Earlier logs are in the same Application Insights resource, in the `traces` table; `azd up` creates it, backed by a Log Analytics workspace.
 
 Common issues:
 
@@ -371,15 +372,15 @@ Common issues:
 |-----------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
 | 401 / 403 from Cosmos DB          | Missing Cosmos DB RBAC                                                                                                           |
 | 401 / 403 from Azure OpenAI       | Missing OpenAI RBAC                                                                                                              |
-| Durable Function starts but fails | Missing app settings or downstream RBAC                                                                                          |
+| Durable Function starts but fails | Missing app settings or downstream RBAC. The orchestration status shows a failed activity only as `<code> (<ExcType>)`; the details are in the Function App log, on the `Activity <name> failed error_code=<code>` line |
 | `No memories found`               | No turn memories exist, or all candidate turns predate the existing summary                                                      |
 | Search is slow                    | Embedding latency, index choice, or region mismatch (set `COSMOS_DB_PREFERRED_REGIONS` for the SDK client); keyword searches also read across partitions, which costs more RUs on a large container |
-| Change feed trigger not firing    | Verify `COSMOS_DB__accountEndpoint` is set and the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
-| Auto-processing not starting      | Check threshold settings are > 0 in Function App configuration                                                                   |
+| Change feed trigger not firing    | Verify `COSMOS_DB__accountEndpoint` is set, the `leases` container exists, and the function can write to it and to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
+| Auto-processing not starting      | Check threshold settings are > 0 and `MEMORY_PROCESSOR_OWNER` is `durable` in Function App configuration                        |
 
 Recommended checks:
 
 - enable Application Insights
 - confirm Function App managed identity roles
-- confirm `MEMORY_PROCESSOR_OWNER=durable` is set on any client pointed at a container that the Function App is also processing
+- confirm `MEMORY_PROCESSOR_OWNER=durable` is set on the Function App and on any client pointed at a container that it processes
 - confirm model deployment names are correct

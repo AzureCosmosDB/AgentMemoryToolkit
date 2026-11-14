@@ -1,11 +1,13 @@
-"""Async pipeline service for LLM-driven memory extraction, summaries, and reconciliation.
+"""Async pipeline service for LLM-driven memory extraction, summaries, reconciliation and procedures.
 
 This module is the asynchronous sibling of
 :class:`azure.cosmos.agent_memory.services.pipeline.PipelineService`. The two
 share all pure helpers via
-:mod:`azure.cosmos.agent_memory.services._pipeline_helpers`; only the IO call
-sites differ - every Cosmos query, chat completion, and embedding call is
-``await``-ed against the async clients/store.
+:mod:`azure.cosmos.agent_memory.services._pipeline_helpers` and the logic of the
+extraction context, dedup, combine and procedure passes in the sibling
+``_extraction_context``, ``_dedup``, ``_combine`` and ``_procedures`` modules;
+only the IO call sites differ - every Cosmos query, chat completion, and
+embedding call is ``await``-ed against the async clients/store.
 """
 
 from __future__ import annotations
@@ -309,7 +311,7 @@ class _AsyncStoreContainerAdapter:
 
 
 class AsyncPipelineService:
-    """Async LLM orchestration service backed by an async typed memory store."""
+    """Async LLM orchestration service over the injected containers, async memory store and model clients."""
 
     def __init__(
         self,
@@ -498,6 +500,11 @@ class AsyncPipelineService:
         turns before each batch, its summary when written before the window, and the user's
         stored facts nearest the batch (see ``_extraction_context``); facts still come only from
         the new turns, each recording the turns it cites.
+
+        Returns ``facts`` (the new fact docs), ``episodic`` (always empty: ``extract_episodes``
+        writes episodes), ``updates`` (``stats`` ops that carry ``exact_dedup_skipped``,
+        ``deferred_turn_count`` and ``quarantined_turn_count``) and ``processed_turn_docs`` (the
+        turns of the batches that were extracted or quarantined).
         """
         if not user_id:
             raise ValidationError("user_id is required")
@@ -539,12 +546,15 @@ class AsyncPipelineService:
         existing_fact_hashes: set[str] = set()
 
         # Token-bounded, per-batch extraction. Each batch is an independent LLM
-        # call, so a single poisoned turn fails only its own batch. Turns from
-        # succeeded and quarantined (non-retryable, e.g. content-filter) batches
-        # go into ``processed_turns``; the in-process caller marks them
-        # ``extracted_at`` so they are never re-processed (the Durable backend
-        # instead advances a count-based watermark). Turns from batches that fail
-        # with a *retryable* error are left out and retried on the next run.
+        # call, so (a) each stays small enough to extract faithfully and (b) a
+        # single poisoned turn fails only its own batch. Turns from succeeded and
+        # quarantined (non-retryable, e.g. content-filter) batches go into
+        # ``processed_turns``; the in-process caller marks them ``extracted_at``
+        # so they are never re-processed (the Durable backend instead advances a
+        # count-based watermark). Turns from batches that fail with a *retryable*
+        # error are left out and counted in ``deferred_turn_count``: the in-process
+        # caller leaves them unmarked, so the next run reads them again, while the
+        # Durable watermark still moves past them.
         batches = batch_turns_by_tokens(items, get_extraction_batch_max_tokens())
         facts: list[tuple[dict[str, Any], list[Optional[str]], list[str]]] = []
         processed_turns: list[dict[str, Any]] = []
@@ -778,9 +788,9 @@ class AsyncPipelineService:
             query, parameters = known_facts_query(
                 user_id, await self._embed_one(text), latest_created_at(batch), _ACTIVE_DOC_FILTER
             )
-            rows = await self._query_items(
-                self._memories_container, query=query, parameters=parameters, enable_cross_partition_query=True
-            )
+            # The async SDK queries across partitions when no partition key is given and rejects
+            # enable_cross_partition_query (the sync SDK takes it).
+            rows = await self._query_items(self._memories_container, query=query, parameters=parameters)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "extract_memories: extracting without stored memories user_id=%s err=%s",
@@ -887,11 +897,22 @@ class AsyncPipelineService:
         *,
         turns: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, int]:
-        """Extract facts and episodic memories from a thread and persist them."""
+        """Extract facts from a thread's turns and persist them.
+
+        Reads the thread's turns that have no ``extracted_at`` stamp (or the ``turns`` given), newest
+        ``recent_k`` of them (all when it is not set), creates the facts found in them and stamps the
+        turns it processed ``extracted_at``. No episodes are extracted: ``extract_episodes`` writes those.
+
+        Returns the counts of :meth:`persist_extracted_memories`: ``fact_count`` (facts created),
+        ``exact_dedup_skipped`` (repeats within the extraction), ``deferred_turn_count`` (turns left
+        unstamped for the next run after a retryable model error) and ``quarantined_turn_count`` (turns
+        stamped after a non-retryable one). ``episodic_count``, ``updated_count``, ``contradicted_count``
+        and ``dropped_episodic_count`` stay 0.
+        """
         extracted = await self.extract_memories_durable(user_id, thread_id, recent_k, turns=turns)
         # Capture the processed turns from the compute stage as the single source of
-        # truth for stamping. Stamping happens here (not inside persist) so no
-        # Persist uses this exact list for stamping after all creates finish.
+        # truth for stamping. Stamping happens here, not inside persist: it uses this
+        # exact list after all creates finish.
         processed_turns = extracted.get("processed_turn_docs") or []
         counts = await self.persist_extracted_memories(user_id, extracted)
         if processed_turns:
@@ -1300,8 +1321,9 @@ class AsyncPipelineService:
                 embeddings_for_docs = await self._embed_batch([str(doc["content"]) for doc in docs]) if docs else []
             except Exception as exc:  # noqa: BLE001
                 if is_retryable_llm_error(exc):
-                    # Transient provider error: leave the segment un-stamped and stop
-                    # this run so it is retried intact next time (mirror of the fact path).
+                    # Transient provider error: leave the watermark where it is and stop
+                    # this run so the segment is retried intact next time (mirror of the
+                    # fact path).
                     logger.warning(
                         "extract_episodes: deferring %d turns after retryable extraction error "
                         "(will retry next run) user_id=%s thread_id=%s err=%s",
@@ -1360,11 +1382,16 @@ class AsyncPipelineService:
 
         The cursor moves past each batch once it is done, so a run that stops early resumes where
         it stopped. A retryable model failure, or a transient embedding or Cosmos failure while
-        writing a procedure, stops the run (``deferred``) without moving the cursor, so the batch is
-        tried again; any other failure skips that batch. ``deadline``, a ``time.monotonic()`` value,
-        stops the run from starting
-        another model call once it has passed, for callers with a time limit such as a Durable
-        activity. ``force`` has no effect: a run only ever reads what is new.
+        writing a procedure, stops the run (``deferred``) before the cursor moves past that batch,
+        so it is tried again; any other failure skips that batch. ``deadline``, a ``time.monotonic()``
+        value, stops the run from starting another model call once it has passed, for callers with a
+        time limit such as a Durable activity. ``force`` has no effect: a run only ever reads what is new.
+
+        Returns ``status`` and ``procedures_created``. ``status`` is ``synthesized`` (a batch was
+        answered; the result also has ``procedures_updated``, ``procedures_reinforced``,
+        ``procedures_skipped`` and ``facts_retired``), ``unchanged``, ``skipped`` (every model call
+        failed or was unusable) or ``deferred`` (also when ``deadline`` had passed before any batch
+        was answered).
         """
         del force
         if not user_id:
@@ -1541,7 +1568,8 @@ class AsyncPipelineService:
     async def _retire_taught_facts(
         self, user_id: str, procedure: Mapping[str, Any], sources: Iterable[dict[str, Any]]
     ) -> int:
-        """Async mirror of :meth:`PipelineService._retire_taught_facts`."""
+        """Retire into ``procedure`` the user's directives and corrections it now holds in their
+        place (``supersede_reason="procedure"``); returns how many were retired."""
         sources = list(sources)
         retired = 0
         for fact in retirable_facts(procedure, sources):
@@ -1581,7 +1609,8 @@ class AsyncPipelineService:
         return "reinforced", with_support(reinforced, answer.sources, answer.evidence)
 
     async def _embedded_procedure(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """``doc`` validated as a procedure and embedded unless it already has a vector."""
+        """``doc`` validated as a procedure and redacted of literal secrets, then embedded from its
+        ``retrieval_text`` unless it still has a vector (redaction drops one built from text it rewrote)."""
         validated = construct_internal(ProceduralRecord, doc).to_doc()
         self._redact_for_embedding(validated)
         if not validated.get("embedding"):
@@ -1812,7 +1841,12 @@ class AsyncPipelineService:
         thread_ids: list[str] | None = None,
         recent_k: int | None = None,
     ) -> dict[str, Any]:
-        """Generate a user summary document without embedding or writing it."""
+        """Generate a user summary document without embedding or writing it.
+
+        ``thread_ids`` does not filter anything: it only appears in the log (``observed_thread_ids``, a
+        count). The query reads every memory and thread summary the user wrote since the last user
+        summary.
+        """
         if not user_id:
             raise ValidationError("user_id is required")
 
@@ -1957,7 +1991,10 @@ class AsyncPipelineService:
         thread_ids: list[str] | None = None,
         recent_k: int | None = None,
     ) -> dict[str, Any]:
-        """Generate or incrementally update a user summary and persist it."""
+        """Generate or incrementally update a user summary and persist it.
+
+        ``thread_ids`` only appears in the log; see :meth:`generate_user_summary_durable`.
+        """
         summary_doc = await self.generate_user_summary_durable(user_id, thread_ids=thread_ids, recent_k=recent_k)
         return await self.persist_user_summary(user_id, summary_doc)
 
@@ -1994,6 +2031,12 @@ class AsyncPipelineService:
 
     async def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
         capped_n = top_literal(n, name="reconcile_memories.n")
+        # ---- Load up to N most recent active memories ----
+        # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
+        # physical partitions and matches the dedup prompt's tiebreaker
+        # ("more recent created_at first"). Cosmos's _ts is the last-write
+        # timestamp, which would diverge from created_at after any UPDATE.
+        #
         # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
         # agent did/recommended (historical events), not mutable user state, so
         # they must never be contradiction-superseded by a later user statement.
@@ -2045,16 +2088,29 @@ class AsyncPipelineService:
     ) -> dict[str, int]:
         """Fold duplicate facts, then resolve contradictions among a user's most-recent active memories.
 
-        Async mirror of :meth:`~azure.cosmos.agent_memory.services.pipeline.PipelineService.reconcile_memories`:
-        :meth:`consolidate_memories` retires facts another fact states in full
-        (``supersede_reason="duplicate"``, and ``"combined"``), then one
-        contradiction call over the latest ``n`` active facts retires the loser of each
-        ``contradicted_pairs`` entry (``supersede_reason="contradict"``). Episodic and procedural types
-        are no-ops. ``deadline`` (a ``time.monotonic()`` value) ends the passes early.
+        Async mirror of :meth:`~azure.cosmos.agent_memory.services.pipeline.PipelineService.reconcile_memories`.
+        Two passes run in order:
 
-        Returns ``{"kept", "merged", "contradicted"}`` - ``merged`` counts the facts retired as
-        duplicates - plus the dedup pass's ``checked``, ``compared``, ``vetoed``, ``combined``,
-        ``synthesized``, ``combine_groups`` and ``combine_failed`` counts.
+        1. :meth:`consolidate_memories` checks the facts written since the last pass against their
+           nearest neighbours and retires a fact into another that states everything it states
+           (``supersede_reason="duplicate"``); it also combines facts about one specific thing into a
+           new fact and retires them into it (``supersede_reason="combined"``).
+        2. Up to ``n`` of the most recent active (non-superseded) ``memory_type`` records are then
+           read again, except agent-sourced (``sys:agent-fact``) and combined (``sys:combined``) facts,
+           and ``dedup.prompty`` identifies ``contradicted_pairs`` - opposing claims about the same
+           subject (e.g. "deadline March 1" vs "March 15"). Each loser is soft-deleted with
+           ``supersede_reason="contradict"`` and ``superseded_by`` set to the winner.
+
+        Episodic and procedural types are no-ops because they have no contradiction semantics.
+        ``deadline`` (a ``time.monotonic()`` value) ends the passes early: the dedup pass applies the
+        folds it found and moves its cursor past the facts it finished, and the contradiction pass is
+        skipped once it has passed.
+
+        Returns ``{"kept", "merged", "contradicted"}`` - ``kept`` is the facts the contradiction pass
+        left active (when that pass is skipped, the checked facts the dedup pass left active),
+        ``merged`` counts the facts retired as duplicates - plus the dedup pass's ``checked``,
+        ``compared``, ``vetoed``, ``combined`` (facts retired into a combined fact), ``synthesized``
+        (combined facts written), ``combine_groups`` and ``combine_failed`` counts.
         """
         validate_consolidation_args(user_id, n, memory_type)
         if memory_type in {"episodic", "procedural"}:
@@ -2085,16 +2141,30 @@ class AsyncPipelineService:
     async def consolidate_memories(
         self, user_id: str, n: int = 50, *, memory_type: str = "fact", deadline: Optional[float] = None
     ) -> dict[str, int]:
-        """Async mirror of
-        :meth:`~azure.cosmos.agent_memory.services.pipeline.PipelineService.consolidate_memories`:
-        fold duplicate facts written since the user's last dedup pass.
+        """Fold duplicate facts written since the user's last dedup pass.
 
-        Each fact checked is compared with its nearest active neighbours; one is retired into another
-        only when nothing it states would be lost. Contradictions are left to the contradiction pass of
-        :meth:`reconcile_memories`, and a fact that has absorbed others is never retired. It also
-        combines facts about one specific thing, as in the sync pipeline.
-        Episodic and procedural types are left alone. ``deadline`` ends the pass early, as in the sync
-        pipeline.
+        Async mirror of
+        :meth:`~azure.cosmos.agent_memory.services.pipeline.PipelineService.consolidate_memories`.
+        Checks up to ``n`` active facts written after the user's dedup cursor, oldest first, against
+        their nearest active neighbours (see :mod:`azure.cosmos.agent_memory.services._dedup`). A fact
+        is retired into another (``supersede_reason="duplicate"``) only when the two state the same
+        claim or the other contains it and nothing it states would be lost; the survivor keeps its
+        content verbatim and gains the retired fact's tags and ``merged_from``. Contradictions are
+        left to :meth:`reconcile_memories`' contradiction pass, and a fact that has absorbed others is
+        never retired, so merges never chain.
+
+        It also combines facts about one specific thing that each hold details the others lack (see
+        :mod:`azure.cosmos.agent_memory.services._combine`): a fact is also
+        compared with neighbours it could be combined with down to ``COMBINE_SIMILARITY_FLOOR``
+        (folds still need ``DEDUP_SIMILARITY_FLOOR``), and the groups are written after the folds, a
+        few at once, from the facts the folds left alone.
+
+        A retryable model error, or ``deadline`` (a ``time.monotonic()`` value) passing, ends the pass
+        early: the folds found so far are applied and the cursor stops after the last fact checked.
+        When combining, checking stops halfway to the deadline so the groups have time to be written,
+        and the cursor stops before the first fact of a group not tried, so a later pass checks it
+        again. Episodic and procedural types are left alone. Returns
+        :func:`~azure.cosmos.agent_memory.services._dedup.dedup_result` counts.
         """
         validate_consolidation_args(user_id, n, memory_type)
         if memory_type != "fact":
@@ -2305,7 +2375,8 @@ class AsyncPipelineService:
         self, user_id: str, groups: list[list[dict[str, Any]]], deadline: Optional[float]
     ) -> tuple[CombineCounts, list[list[dict[str, Any]]]]:
         """Async mirror of the sync ``_run_combine_groups``: write the planned groups, a few at once, until
-        ``deadline`` or a retryable model error; returns the counts and the groups not tried."""
+        ``deadline`` or a retryable model or embedding error; returns the counts and the groups not tried.
+        The model calls run as concurrent tasks; embedding and writing happen one group at a time."""
         import asyncio
 
         counts = CombineCounts()
@@ -2368,7 +2439,9 @@ class AsyncPipelineService:
             return {}
 
     async def _write_combined(self, draft: Optional[CombineDraft]) -> CombineWrite:
-        """Async mirror of the sync ``_write_combined``: validate, embed and apply a combined fact."""
+        """Validate, embed and apply a combined fact: ``written`` with the members retired into it; ``lost`` when it
+        cannot be built or validated, its embedding fails for good, or a member was deleted, edited or retired since
+        the pass read it; ``deferred`` after a retryable embedding error, so a later pass tries the group again."""
         if draft is None:
             return CombineWrite("lost")
         members = list(draft.members)
@@ -2422,8 +2495,14 @@ class AsyncPipelineService:
         return True
 
     async def _commit_combine(self, record: dict[str, Any], members: list[dict[str, Any]]) -> Optional[list[str]]:
-        """Async mirror of the sync ``_commit_combine``: create ``record``, then retire each of ``members`` into it
-        as combined. Returns the IDs retired, or ``None`` when the fact that is there was retired since."""
+        """Create ``record``, then retire each of ``members`` into it as combined.
+
+        There is no multi-document transaction, so the combined fact goes first: a crash between the writes leaves
+        it beside members that are still active, never members retired into a fact that does not exist. Its ID
+        derives from its user and members, so writing it again (after a crash, or from a concurrent pass) finds it
+        there and goes on to retire the members that are still active. Returns the IDs retired - a member that
+        changed since this pass read it stays active - or ``None`` when the fact that is there was retired since.
+        """
         try:
             await self._create_memory(record)
         except CosmosResourceExistsError:
@@ -2446,13 +2525,15 @@ class AsyncPipelineService:
     async def _reconcile_contradictions(
         self, user_id: str, memory_type: str, facts: list[dict[str, Any]]
     ) -> dict[str, int]:
-        """Async mirror: resolve only ``contradicted_pairs`` within the pool.
+        """Resolve contradictions within an explicit pool of same-type memories.
 
-        Paraphrases are not merged here; the dedup prompt/schema does not emit
-        duplicate groups because the dedup pass that runs first
-        (:meth:`consolidate_memories`) folds them, so no merged docs are minted
-        and the pass is convergent. Returns
-        ``{"kept", "merged": 0, "contradicted"}``.
+        Runs ``dedup.prompty`` over the pool and applies its
+        ``contradicted_pairs`` - the loser of each pair is soft-deleted with
+        ``superseded_by`` set to the winner. Paraphrases are not merged here;
+        the dedup prompt/schema does not emit duplicate groups because the
+        dedup pass that runs first (:meth:`consolidate_memories`) folds them,
+        so this pass only retires losers: it mints no documents and is
+        convergent. Returns ``{"kept", "merged": 0, "contradicted"}``.
         """
         if len(facts) <= 1:
             return {"kept": len(facts), "merged": 0, "contradicted": 0}
@@ -2491,7 +2572,9 @@ class AsyncPipelineService:
                     describe_shape(pair),
                 )
                 continue
-            # Guard chained contradictions (A>B then B>C) and re-supersession.
+            # Guard chained contradictions: never point a loser at a winner that
+            # was itself already superseded earlier this pass (A>B then B>C would
+            # tombstone C in favor of a now-dead B), and never re-supersede a loser.
             if winner_id in consumed_loser_ids or loser_id in consumed_loser_ids:
                 logger.info(
                     "reconcile_memories: skipping chained/duplicate contradiction pair %s "
@@ -2521,9 +2604,11 @@ class AsyncPipelineService:
 
         Lists the user's active procedures that apply to nearly every interaction and are not
         past ``valid_until``: taught before corrected before repeated, most recently updated
-        first, capped at ``STANDING_RULES_MAX`` rules in ``STANDING_RULES_MAX_BYTES``. With a
+        first, capped at ``STANDING_RULES_MAX`` rules in ``STANDING_RULES_MAX_BYTES`` (a rule that
+        would pass the byte cap is skipped, and a later, smaller one may still fit). With a
         ``task``, it also shows the active situational procedure nearest to it (by vector
-        similarity), rendered "When <conditions>: <rule>".
+        similarity), rendered "When <conditions>: <rule>"; if that lookup fails, the standing
+        rules are returned without it.
         """
         if not user_id:
             raise ValidationError("user_id is required")

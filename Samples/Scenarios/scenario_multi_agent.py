@@ -52,7 +52,7 @@ def print_thread(thread: list[dict], label: str = "Thread") -> None:
         role = msg.get("role", "?")
         agent = msg.get("metadata", {}).get("agent_id", "n/a")
         content = msg.get("content", "")
-        mem_type = msg.get("memory_type", "turn")
+        mem_type = msg.get("type", "turn")
         tag = f"[{role}|agent={agent}|type={mem_type}]"
         # Truncate long content for readability
         preview = (content[:100] + "…") if len(content) > 100 else content
@@ -140,7 +140,7 @@ def step3_researcher_performs_research(
     print(f"  Researcher found {len(planner_msgs)} message(s) from Planner.")
 
     plan_msg = next(
-        (m for m in planner_msgs if m.get("memory_type") == "plan"),
+        (m for m in planner_msgs if m.get("metadata", {}).get("category") == "plan"),
         None,
     )
     if plan_msg:

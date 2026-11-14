@@ -81,7 +81,12 @@ def add_result_filters(
     categories: Optional[list[str]] = None,
     applies: Optional[str] = None,
 ) -> None:
-    """Limit a search to procedures in force, to facts of ``categories``, or to procedures that apply ``applies``."""
+    """Add a search's optional result filters.
+
+    ``active_procedures_only`` hides procedures that are not active or are past ``valid_until`` (other
+    memory types pass through); ``categories`` keeps records whose ``metadata.category`` is one of them;
+    ``applies`` keeps records whose ``applies`` value matches.
+    """
     if active_procedures_only:
         qb.add_condition(
             PROCEDURES_IN_FORCE,

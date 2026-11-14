@@ -1,10 +1,12 @@
-"""Pipeline service for LLM-driven memory extraction, summaries, and reconciliation.
+"""Pipeline service for LLM-driven memory extraction, summaries, reconciliation and procedures.
 
-Owns LLM-call orchestration; all persistence goes through the injected memory
-store and all model calls go through the injected chat client. Pure helpers
-(chat-text extraction, transcript building, prompty handling, LLM JSON parsing)
-live in :mod:`azure.cosmos.agent_memory.services._pipeline_helpers` and are shared
-with :class:`azure.cosmos.agent_memory.aio.services.pipeline.AsyncPipelineService`.
+Owns LLM-call orchestration; reads and writes go to the injected containers, supersession goes
+through the injected memory store, and all model calls go through the injected chat client. Pure
+helpers (chat-text extraction, transcript building, prompty handling, LLM JSON parsing) live in
+:mod:`azure.cosmos.agent_memory.services._pipeline_helpers`, and the logic of the extraction
+context, dedup, combine and procedure passes in the sibling ``_extraction_context``, ``_dedup``,
+``_combine`` and ``_procedures`` modules. All are shared with
+:class:`azure.cosmos.agent_memory.aio.services.pipeline.AsyncPipelineService`.
 """
 
 from __future__ import annotations
@@ -160,9 +162,9 @@ logger = get_logger("azure.cosmos.agent_memory.pipeline")
 _cap_structured_summary = cap_structured_summary
 
 # Standard SQL predicate that selects "active" (non-superseded) docs.
-# Used in every query that should ignore superseded history. Kept as a single
-# constant so any tweak (e.g. switching to a computed property) only happens
-# once.
+# Used in the queries here that should ignore superseded history;
+# ``_dedup.ACTIVE_FILTER`` is the same predicate for the dedup and procedure
+# queries, so a tweak (e.g. switching to a computed property) must change both.
 _ACTIVE_DOC_FILTER = "(NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
 
 # Safety cap on how many episodes one extract_episodes call may close in a
@@ -277,7 +279,7 @@ class _StoreContainerAdapter:
 
 
 class PipelineService:
-    """LLM orchestration service backed by a typed memory store."""
+    """LLM orchestration service over the injected containers, memory store and model clients."""
 
     def __init__(
         self,
@@ -538,6 +540,11 @@ class PipelineService:
         turns before each batch, its summary when written before the window, and the user's
         stored facts nearest the batch (see ``_extraction_context``); facts still come only from
         the new turns, each recording the turns it cites.
+
+        Returns ``facts`` (the new fact docs), ``episodic`` (always empty: ``extract_episodes``
+        writes episodes), ``updates`` (``stats`` ops that carry ``exact_dedup_skipped``,
+        ``deferred_turn_count`` and ``quarantined_turn_count``) and ``processed_turn_docs`` (the
+        turns of the batches that were extracted or quarantined).
         """
         if not user_id:
             raise ValidationError("user_id is required")
@@ -586,7 +593,9 @@ class PipelineService:
         # ``processed_turns``; the in-process caller marks them ``extracted_at``
         # so they are never re-processed (the Durable backend instead advances a
         # count-based watermark). Turns from batches that fail with a *retryable*
-        # error are left out and retried on the next run.
+        # error are left out and counted in ``deferred_turn_count``: the in-process
+        # caller leaves them unmarked, so the next run reads them again, while the
+        # Durable watermark still moves past them.
         batches = batch_turns_by_tokens(items, threshold_config.get_extraction_batch_max_tokens())
         facts: list[tuple[dict[str, Any], list[Optional[str]], list[str]]] = []
         processed_turns: list[dict[str, Any]] = []
@@ -879,8 +888,8 @@ class PipelineService:
 
         Episode ids are DETERMINISTIC from the segment identity (its turn range)
         plus each episode's ordinal - not the summary text - so a re-run over the
-        same segment (e.g. after a crash between persist and turn-stamping)
-        collides on id and is skipped rather than duplicated.
+        same segment (e.g. after a crash between persist and advancing the episode
+        watermark) collides on id and is skipped rather than duplicated.
         """
         if not items:
             return []
@@ -1032,14 +1041,13 @@ class PipelineService:
 
     def _advance_episode_cursor(self, user_id: str, thread_id: str, last_turn: dict[str, Any]) -> None:
         """Advance the episodic watermark to ``last_turn`` (newest turn just
-        folded), never backwards. A single-doc write: unlike the former per-turn
-        stamp it cannot partially fail and leave the open segment torn, and it
-        writes to the memories container, never the change-feed-monitored turns
-        container. The advance is atomic - ETag ``IfNotModified`` with a re-read
-        retry - so a late, out-of-order concurrent ``episode:{u}:{t}:{count}``
-        orchestration cannot regress the cursor (a regressed cursor would, with
-        topic drift enabled, re-segment turns under a new segment key and
-        duplicate episodes).
+        folded), never backwards. A single-doc write, so it cannot partially
+        fail and leave the open segment torn, and it writes to the memories
+        container, never the change-feed-monitored turns container. The advance
+        is atomic - ETag ``IfNotModified`` with a re-read retry - so a late,
+        out-of-order concurrent ``episode:{u}:{t}:{count}`` orchestration cannot
+        regress the cursor (a regressed cursor would, with topic drift enabled,
+        re-segment turns under a new segment key and duplicate episodes).
         """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
@@ -1191,9 +1199,8 @@ class PipelineService:
         segment collides on id and the duplicate write is skipped (409). The
         watermark is a single doc advanced only after a segment's episodes are
         created, so a crash between the create and the advance simply re-loads
-        the same open segment next run (same turn set -> same ids -> 409); unlike
-        the former per-turn stamp there is no partial-stamp state that could shift
-        the boundary and admit a duplicate.
+        the same open segment next run (same turn set -> same ids -> 409); there
+        is no partial state that could shift the boundary and admit a duplicate.
         """
         if not user_id:
             raise ValidationError("user_id is required")
@@ -1224,8 +1231,9 @@ class PipelineService:
                 embeddings_for_docs = self._embed_batch([str(doc["content"]) for doc in docs]) if docs else []
             except Exception as exc:  # noqa: BLE001
                 if is_retryable_llm_error(exc):
-                    # Transient provider error: leave the segment un-stamped and stop
-                    # this run so it is retried intact next time (mirror of the fact path).
+                    # Transient provider error: leave the watermark where it is and stop
+                    # this run so the segment is retried intact next time (mirror of the
+                    # fact path).
                     logger.warning(
                         "extract_episodes: deferring %d turns after retryable extraction error "
                         "(will retry next run) user_id=%s thread_id=%s err=%s",
@@ -1373,11 +1381,22 @@ class PipelineService:
         *,
         turns: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, int]:
-        """Extract facts and episodic memories from a thread and persist them."""
+        """Extract facts from a thread's turns and persist them.
+
+        Reads the thread's turns that have no ``extracted_at`` stamp (or the ``turns`` given), newest
+        ``recent_k`` of them (all when it is not set), creates the facts found in them and stamps the
+        turns it processed ``extracted_at``. No episodes are extracted: ``extract_episodes`` writes those.
+
+        Returns the counts of :meth:`persist_extracted_memories`: ``fact_count`` (facts created),
+        ``exact_dedup_skipped`` (repeats within the extraction), ``deferred_turn_count`` (turns left
+        unstamped for the next run after a retryable model error) and ``quarantined_turn_count`` (turns
+        stamped after a non-retryable one). ``episodic_count``, ``updated_count``, ``contradicted_count``
+        and ``dropped_episodic_count`` stay 0.
+        """
         extracted = self.extract_memories_durable(user_id, thread_id, recent_k, turns=turns)
         # Capture the processed turns from the compute stage as the single source of
-        # truth for stamping. Stamping happens here (not inside persist) so no
-        # Persist uses this exact list for stamping after all creates finish.
+        # truth for stamping. Stamping happens here, not inside persist: it uses this
+        # exact list after all creates finish.
         processed_turns = extracted.get("processed_turn_docs") or []
         counts = self.persist_extracted_memories(user_id, extracted)
         if processed_turns:
@@ -1421,11 +1440,16 @@ class PipelineService:
 
         The cursor moves past each batch once it is done, so a run that stops early resumes where
         it stopped. A retryable model failure, or a transient embedding or Cosmos failure while
-        writing a procedure, stops the run (``deferred``) without moving the cursor, so the batch is
-        tried again; any other failure skips that batch. ``deadline``, a ``time.monotonic()`` value,
-        stops the run from starting
-        another model call once it has passed, for callers with a time limit such as a Durable
-        activity. ``force`` has no effect: a run only ever reads what is new.
+        writing a procedure, stops the run (``deferred``) before the cursor moves past that batch,
+        so it is tried again; any other failure skips that batch. ``deadline``, a ``time.monotonic()``
+        value, stops the run from starting another model call once it has passed, for callers with a
+        time limit such as a Durable activity. ``force`` has no effect: a run only ever reads what is new.
+
+        Returns ``status`` and ``procedures_created``. ``status`` is ``synthesized`` (a batch was
+        answered; the result also has ``procedures_updated``, ``procedures_reinforced``,
+        ``procedures_skipped`` and ``facts_retired``), ``unchanged``, ``skipped`` (every model call
+        failed or was unusable) or ``deferred`` (also when ``deadline`` had passed before any batch
+        was answered).
         """
         del force
         if not user_id:
@@ -1643,7 +1667,8 @@ class PipelineService:
         return "reinforced", with_support(reinforced, answer.sources, answer.evidence)
 
     def _embedded_procedure(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """``doc`` validated as a procedure and embedded unless it already has a vector."""
+        """``doc`` validated as a procedure and redacted of literal secrets, then embedded from its
+        ``retrieval_text`` unless it still has a vector (redaction drops one built from text it rewrote)."""
         validated = construct_internal(ProceduralRecord, doc).to_doc()
         self._redact_for_embedding(validated)
         if not validated.get("embedding"):
@@ -1871,7 +1896,12 @@ class PipelineService:
         thread_ids: list[str] | None = None,
         recent_k: int | None = None,
     ) -> dict[str, Any]:
-        """Generate a user summary document without embedding or writing it."""
+        """Generate a user summary document without embedding or writing it.
+
+        ``thread_ids`` does not filter anything: it only appears in the log (``observed_thread_ids``, a
+        count). The query reads every memory and thread summary the user wrote since the last user
+        summary.
+        """
         if not user_id:
             raise ValidationError("user_id is required")
 
@@ -2017,7 +2047,10 @@ class PipelineService:
         thread_ids: list[str] | None = None,
         recent_k: int | None = None,
     ) -> dict[str, Any]:
-        """Generate or incrementally update a user summary and persist it."""
+        """Generate or incrementally update a user summary and persist it.
+
+        ``thread_ids`` only appears in the log; see :meth:`generate_user_summary_durable`.
+        """
         summary_doc = self.generate_user_summary_durable(user_id, thread_ids=thread_ids, recent_k=recent_k)
         return self.persist_user_summary(user_id, summary_doc)
 
@@ -2061,20 +2094,24 @@ class PipelineService:
 
         1. :meth:`consolidate_memories` checks the facts written since the last pass against their
            nearest neighbours and retires a fact into another that states everything it states
-           (``supersede_reason="duplicate"``); it also combines facts about one specific thing
-           (``supersede_reason="combined"``).
-        2. Up to ``n`` active (non-superseded) ``memory_type`` records are then read again and the
-           dedup prompt identifies ``contradicted_pairs`` - opposing claims about the same subject
-           (e.g. "deadline March 1" vs "March 15"). Each loser is soft-deleted with
+           (``supersede_reason="duplicate"``); it also combines facts about one specific thing into a
+           new fact and retires them into it (``supersede_reason="combined"``).
+        2. Up to ``n`` of the most recent active (non-superseded) ``memory_type`` records are then
+           read again, except agent-sourced (``sys:agent-fact``) and combined (``sys:combined``) facts,
+           and ``dedup.prompty`` identifies ``contradicted_pairs`` - opposing claims about the same
+           subject (e.g. "deadline March 1" vs "March 15"). Each loser is soft-deleted with
            ``supersede_reason="contradict"`` and ``superseded_by`` set to the winner.
 
         Episodic and procedural types are no-ops because they have no contradiction semantics.
-        ``deadline`` (a ``time.monotonic()`` value) ends the passes early: the dedup pass keeps the
-        folds it found and its cursor, and the contradiction pass is skipped once it has passed.
+        ``deadline`` (a ``time.monotonic()`` value) ends the passes early: the dedup pass applies the
+        folds it found and moves its cursor past the facts it finished, and the contradiction pass is
+        skipped once it has passed.
 
-        Returns ``{"kept", "merged", "contradicted"}`` - ``merged`` counts the facts retired as
-        duplicates - plus the dedup pass's ``checked``, ``compared``, ``vetoed``, ``combined``,
-        ``synthesized``, ``combine_groups`` and ``combine_failed`` counts.
+        Returns ``{"kept", "merged", "contradicted"}`` - ``kept`` is the facts the contradiction pass
+        left active (when that pass is skipped, the checked facts the dedup pass left active),
+        ``merged`` counts the facts retired as duplicates - plus the dedup pass's ``checked``,
+        ``compared``, ``vetoed``, ``combined`` (facts retired into a combined fact), ``synthesized``
+        (combined facts written), ``combine_groups`` and ``combine_failed`` counts.
         """
         validate_consolidation_args(user_id, n, memory_type)
         if memory_type in {"episodic", "procedural"}:
@@ -2332,8 +2369,9 @@ class PipelineService:
     def _run_combine_groups(
         self, user_id: str, groups: list[list[dict[str, Any]]], deadline: Optional[float]
     ) -> tuple[CombineCounts, list[list[dict[str, Any]]]]:
-        """Write the planned groups, a few at once, until ``deadline`` or a retryable model error; returns the counts
-        and the groups not tried. The model calls run on workers; embedding and writing stay on this thread."""
+        """Write the planned groups, a few at once, until ``deadline`` or a retryable model or embedding
+        error; returns the counts and the groups not tried. The model calls run on workers; embedding and
+        writing stay on this thread."""
         from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
         counts = CombineCounts()
@@ -2476,13 +2514,13 @@ class PipelineService:
     def _reconcile_contradictions(self, user_id: str, memory_type: str, facts: list[dict[str, Any]]) -> dict[str, int]:
         """Resolve contradictions within an explicit pool of same-type memories.
 
-        Runs the dedup prompt over the pool and applies its
+        Runs ``dedup.prompty`` over the pool and applies its
         ``contradicted_pairs`` - the loser of each pair is soft-deleted with
         ``superseded_by`` set to the winner. Paraphrases are not merged here;
         the dedup prompt/schema does not emit duplicate groups because the
         dedup pass that runs first (:meth:`consolidate_memories`) folds them,
-        so no merged documents are minted and the pass is convergent. Returns
-        ``{"kept", "merged": 0, "contradicted"}``.
+        so this pass only retires losers: it mints no documents and is
+        convergent. Returns ``{"kept", "merged": 0, "contradicted"}``.
         """
         if len(facts) <= 1:
             return {"kept": len(facts), "merged": 0, "contradicted": 0}
@@ -2585,9 +2623,11 @@ class PipelineService:
 
         Lists the user's active procedures that apply to nearly every interaction and are not
         past ``valid_until``: taught before corrected before repeated, most recently updated
-        first, capped at ``STANDING_RULES_MAX`` rules in ``STANDING_RULES_MAX_BYTES``. With a
+        first, capped at ``STANDING_RULES_MAX`` rules in ``STANDING_RULES_MAX_BYTES`` (a rule that
+        would pass the byte cap is skipped, and a later, smaller one may still fit). With a
         ``task``, it also shows the active situational procedure nearest to it (by vector
-        similarity), rendered "When <conditions>: <rule>".
+        similarity), rendered "When <conditions>: <rule>"; if that lookup fails, the standing
+        rules are returned without it.
         """
         if not user_id:
             raise ValidationError("user_id is required")

@@ -491,10 +491,10 @@ def dedup_result(
     combine_groups: int = 0,
     combine_failed: int = 0,
 ) -> dict[str, int]:
-    """A pass's counts. ``contradicted`` stays 0: this pass never retires contradictions.
-    ``synthesized`` counts the combined facts written and ``combined`` the facts they retired;
-    ``combine_groups`` the groups tried and ``combine_failed`` those declined or left as they were
-    (see :mod:`azure.cosmos.agent_memory.services._combine`)."""
+    """A pass's counts. ``kept`` is the facts checked that stay active; ``contradicted`` stays 0, because
+    this pass never retires contradictions. ``synthesized`` counts the combined facts written and
+    ``combined`` the facts they retired; ``combine_groups`` the groups tried and ``combine_failed``
+    those declined or left as they were (see :mod:`azure.cosmos.agent_memory.services._combine`)."""
     return {
         "kept": checked - retired_seeds,
         "merged": merged,

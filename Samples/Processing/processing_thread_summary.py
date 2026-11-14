@@ -1,7 +1,7 @@
 """Demonstrate per-thread summarisation (incremental updates included).
 
 ``CosmosMemoryClient.generate_thread_summary(...)`` runs the same in-process
-ProcessingPipeline that the change-feed Azure Function uses - no Function
+PipelineService that the change-feed Azure Function uses - no Function
 deployment is required for this sample.
 
 Required env vars (.env supported):

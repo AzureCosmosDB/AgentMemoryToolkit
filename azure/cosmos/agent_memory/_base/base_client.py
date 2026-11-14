@@ -283,7 +283,9 @@ def is_transient_tail_step_error(exc: BaseException) -> bool:
     become silent ``WARNING`` lines).
 
     Transient (swallow):
-      * ``LLMError`` - LLM-side defensive raises (no-choices, no-content).
+      * ``LLMError`` - any error the chat client raises itself: a reply that
+        stayed empty through its retries, or one that was content-filtered,
+        refused, tool-only or cut off at the output limit.
       * ``openai.RateLimitError`` / ``APITimeoutError`` / ``APIConnectionError``.
       * Any exception with ``status_code`` in
         :data:`_TRANSIENT_HTTP_STATUS_CODES` (covers ``CosmosHttpResponseError``

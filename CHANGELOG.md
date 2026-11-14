@@ -9,7 +9,7 @@
 * **Search slots.** `search_cosmos(preference_slot=True, procedure_slot=True)` reserves places in `top_k` for the user's best-matching preference and situational procedure, so closer-matching facts do not crowd them out.
 * **Secrets are redacted on write.** Common credential formats (keys, tokens, connection strings, private keys, passwords in URLs) are replaced with `[REDACTED-SECRET]` before text is embedded or stored, and the record is tagged `sys:secret`.
 * **Deleting a memory removes what was folded into it.** `delete_memory()` also deletes the records retired into the deleted fact or procedure.
-* **Time-budgeted passes.** `reconcile_memories()`, `consolidate_memories()` and `synthesize_procedural()` accept a `deadline`. The Function App sets it from the new `ACTIVITY_TIME_BUDGET_SECONDS` (default 240), so a run stops before the function timeout and the next one continues.
+* **Time-budgeted passes.** `PipelineService.reconcile_memories()`, `consolidate_memories()` and `synthesize_procedural()` accept a `deadline`. The Function App sets it from the new `ACTIVITY_TIME_BUDGET_SECONDS` (default 240), so a run stops before the function timeout and the next one continues.
 * **Cosmos DB read regions.** `cosmos_preferred_locations` (or `COSMOS_DB_PREFERRED_REGIONS`) sets the regions the SDK reads from, closest first.
 
 #### Breaking Changes
@@ -27,6 +27,7 @@
 * New prompts `extract_memories-v3`, `dedup_verify` and `combine_memories`; `extract_procedure` is rewritten. Every memory-writing prompt now tells the model never to write a literal secret.
 * Search results include the new fact and procedure fields and `merged_from`, and `MemoryStore.search()` gains `categories`, `vector_only`, `active_procedures_only`, `applies` and `query_embedding`.
 * Bicep adds the `dedupPoolSize`, `activityTimeBudgetSeconds`, `chatCapacity` and `embeddingCapacity` parameters (azd variables `DEDUP_POOL_SIZE`, `ACTIVITY_TIME_BUDGET_SECONDS`, `AI_FOUNDRY_CHAT_CAPACITY`, `AI_FOUNDRY_EMBEDDING_CAPACITY`). New `counter` containers expire their documents 90 days after the last update; existing containers are unchanged.
+* The SDK now requires `azure-cosmos>=4.16.3`.
 
 ## [0.3.0b2] (2026-08-17)
 

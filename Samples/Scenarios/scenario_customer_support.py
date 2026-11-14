@@ -1,8 +1,8 @@
 """Customer-support scenario - build a unified customer profile across tickets.
 
-Walks through three support tickets for the same customer; after each
-ticket we extract memories and update the user profile, so the agent can
-greet returning customers with personalised context.
+Walks through three support tickets for the same customer; after each of the
+first two we extract memories and summarise the thread, then build the user
+profile, so the agent can greet returning customers with personalised context.
 
 In-process pipeline - no Azure Function deployment required.
 

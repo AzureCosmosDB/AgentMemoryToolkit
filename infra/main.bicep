@@ -30,7 +30,7 @@ param principalId string = ''
 ])
 param principalType string = 'User'
 
-@description('Whether to deploy the Function app. Defaults to true. Set false only if you have a strong reason to skip it (Flex Consumption is pay-per-execution - idle cost is ~$0).')
+@description('Whether to deploy the Function app, which processes new turns from the change feed when memoryProcessorOwner is durable (the default). Defaults to true. Set false only for SDK-only use (see infra/README.md).')
 param deployFunctionApp bool = true
 
 @description('Cosmos database name.')
@@ -63,16 +63,16 @@ param chatDeploymentName string = ''
 @description('Azure OpenAI REST API version pinned for both chat and embedding clients (SDK + function-app). Newer preview versions are required for strict JSON-schema response_format on gpt-5.x models.')
 param azureOpenAiApiVersion string = '2024-12-01-preview'
 
-@description('Embedding output dimensions. MUST equal the dimensions configured on the Cosmos memories container vectorEmbeddingPolicy. text-embedding-3-large natively returns 3072; we set 1536 here so the quantizedFlat vector indexes (also 1536 in cosmos.bicep) can match. Change this only if you also change cosmos.bicep.')
+@description('Embedding output dimensions. Used for the vector policy of the memories, turns and summaries containers and set as AI_FOUNDRY_EMBEDDING_DIMENSIONS on the function app, so they always match; set the same value for the SDK. text-embedding-3-large natively returns 3072; 1536 (the SDK default) is requested instead. A container keeps the dimensions it was created with.')
 param embeddingDimensions int = 1536
 
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int = 10
 
-@description('Run extract-memories every N turns within a (user_id, thread_id). Default 2 = extract every 2 turns (matches SDK + local template). Bump for cost-sensitive production deployments.')
+@description('Run fact extraction every N turns within a (user_id, thread_id); reconcile and procedure learning run on multiples of it (see dedupEveryN). Default 2 = every 2 turns (the SDK default). 0 = disabled, which disables all three. Bump for cost-sensitive production deployments.')
 param factExtractionEveryN int = 2
 
-@description('Run dedup once per N fact-extraction batches. Effective cadence = factExtractionEveryN * dedupEveryN turns.')
+@description('Once per N fact extractions, run reconcile (fold duplicates, combine facts, resolve contradictions), then procedure learning unless PROCEDURAL_SYNTHESIS_AUTO is false. Effective cadence = factExtractionEveryN * dedupEveryN turns. 0 = disabled.')
 param dedupEveryN int = 5
 
 @description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
@@ -93,10 +93,10 @@ param episodeMaxTurns int = 40
 @description('Minimum turns before a natural (idle/drift) boundary may close an episode.')
 param episodeMinTurns int = 2
 
-@description('Maximum number of change-feed items processed per orchestration batch.')
+@description('Newest items a summary run reads (turns for a thread summary, new memories per thread for a user summary). Extraction is not capped by it. At least 1; a lower value falls back to 20.')
 param maxBatchSize int = 20
 
-@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run (each costs a model call; the rest wait for the next run) and the size of its contradiction pool. 1-500.')
+@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run (each one with close neighbours costs a model call; facts beyond n wait for the next run) and the size of its contradiction pool. 1-500.')
 @minValue(1)
 @maxValue(500)
 param dedupPoolSize int = 50
@@ -195,7 +195,7 @@ module aiFoundry 'modules/ai-foundry.bicep' = {
   }
 }
 
-// --- Function app (full profile only) -------------------------------------
+// --- Function app (skipped when deployFunctionApp is false) ----------------
 
 module functions 'modules/functions.bicep' = if (deployFunctionApp) {
   scope: rg
@@ -244,7 +244,8 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
 //   - The function app's user-assigned managed identity (always; harmless
 //     when the function app isn't deployed because nothing is using it).
 //   - The deploying user (when principalId is supplied) so they can hit the
-//     Cosmos data plane and AI Foundry from local samples.
+//     Cosmos data plane and AI Foundry (and Blob Storage, when the function
+//     app is deployed) from local samples.
 
 module cosmosRbac 'modules/cosmos-rbac.bicep' = {
   scope: rg

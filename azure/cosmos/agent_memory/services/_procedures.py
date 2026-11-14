@@ -7,9 +7,11 @@ revises an existing one (``update``) or records new evidence for one (``reinforc
 cursor moves past each batch once it is done, so a run that stops early resumes there.
 
 A procedure's kind says how it was learned, and its status follows from the evidence it has
-gathered (``procedure_status``): an instruction is active once the user taught it, a habit
-after a correction or on two dates, a skill after two successful practices or a user
-endorsement. Anything else stays a candidate, which search does not show, until more evidence
+gathered (``procedure_status``): an instruction is active once the user taught or corrected it, a
+habit after a correction by the user or on two dates, a skill after two successful practices on
+different dates or a user endorsement. A habit's dates count only facts the user stated and episodes
+with a successful or partially successful outcome, never what the assistant said or an episode that
+failed. Anything else stays a candidate, which search does not show, until more evidence
 arrives. Reading only new sources means a source is distilled once; showing existing
 procedures lets the model revise or reinforce one instead of minting a paraphrase of it.
 
@@ -656,8 +658,10 @@ _AUTHORITY = {"taught": 0, "corrected": 1, "repeated": 2, "endorsed": 3, "practi
 def standing_rules(procedures: Iterable[Mapping[str, Any]], today: str) -> tuple[list[dict[str, Any]], int]:
     """The always-on procedures in force, best first and capped, and how many the cap left out.
 
-    Taught rules come before corrected, then repeated ones; within that, the most recently
-    updated first. The cap is ``STANDING_RULES_MAX`` rules in ``STANDING_RULES_MAX_BYTES``.
+    Taught rules come before corrected, repeated, endorsed and practiced ones, by the strongest evidence a
+    rule has; within that, the most recently updated first. The cap is ``STANDING_RULES_MAX`` rules in
+    ``STANDING_RULES_MAX_BYTES`` (counting each rule as its ``- <rule>`` line): a rule that would pass the byte
+    cap is skipped, and a later, smaller one may still fit.
     """
     rules = [
         dict(doc)

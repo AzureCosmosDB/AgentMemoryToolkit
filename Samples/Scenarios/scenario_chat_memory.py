@@ -3,11 +3,14 @@
 Demonstrates how an agent can:
 1. Carry on a multi-turn conversation, storing each turn in Cosmos DB.
 2. Retrieve the full conversation thread later (simulating a reconnect).
-3. Search past conversations by topic to recall relevant context.
+3. Search by topic to recall what past conversations taught it (the facts
+   extracted from them).
 
 Requirements:
     - Azure Cosmos DB account with vector-search enabled.
-    - Azure AI Foundry endpoint for embeddings.
+    - Azure AI Foundry endpoint for embeddings and chat. With the default
+      in-process processor, facts are extracted as turns are stored, and
+      search_cosmos() searches those facts.
     - Environment variables:
         COSMOS_DB_ENDPOINT  – Cosmos DB endpoint URL
         AI_FOUNDRY_ENDPOINT – AI Foundry endpoint URL

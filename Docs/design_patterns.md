@@ -92,7 +92,7 @@ result = await mem.generate_thread_summary(
     thread_id=THREAD_ID,
     recent_k=100,        # optional: limit to the most recent 100 turns
 )
-print(result["output"])  # orchestration result with the summary
+print(result["content"])  # the summary text; result is the stored summary document
 ```
 
 The summary is stored automatically in Cosmos with id `summary_user-1_thread-abc-123` and `type="thread_summary"`.
@@ -155,12 +155,11 @@ User summaries are also incremental. The pipeline merges only new thread data in
 ```python
 result = await mem.generate_user_summary(
     user_id="user-1",
-    thread_ids=["thread-abc-123", "thread-def-456"],  # optional: specific threads
-    recent_k=50,
+    recent_k=50,  # optional: use at most the newest 50 items per thread
 )
 ```
 
-The summary is stored with id `user_summary_user-1` and `thread_id="__user_summary__"`.
+The summary draws on the user's facts, episodes, procedures and thread summaries across all threads. It is stored with id `user_summary_user-1` and `thread_id="__user_summary__"`.
 
 ---
 
@@ -174,10 +173,10 @@ turns = await mem.get_thread(thread_id=THREAD_ID, user_id="user-1", recent_k=20)
 
 ### Semantic search
 
-Search across all memories (or filter by type) to find the most relevant context for a prompt.
+`search_cosmos` ranks a user's facts by default, by vector similarity and full-text relevance. Use `memory_types` to search other types, and `include_episodes`, `include_summaries` or `include_turns` (turn embeddings must be enabled) to bring in episodes, summaries and raw turns.
 
 ```python
-# Vector search for relevant facts
+# Facts, ranked by vector similarity and full-text relevance
 facts = await mem.search_cosmos(
     search_terms="database migration requirements",
     user_id="user-1",
@@ -185,11 +184,13 @@ facts = await mem.search_cosmos(
     top_k=10,
 )
 
-# Hybrid search (vector + full-text) across all memory types
+# Facts and episodes ranked together, with matching summaries added after them
 results = await mem.search_cosmos(
     search_terms="PostgreSQL to Cosmos DB",
     user_id="user-1",
     top_k=5,
+    include_episodes=True,
+    include_summaries=True,
 )
 ```
 
@@ -220,15 +221,17 @@ profile = await mem.get_user_summary(user_id="user-1")
 
 ### Query with filters
 
+`get_memories` reads a user's facts, episodes and procedures. Turns come from `get_thread` and summaries from `get_thread_summary` and `get_user_summary`.
+
 ```python
-# All summaries for a user
-summaries = await mem.get_memories(user_id="user-1", memory_types=["summary"])
+# A thread's summary, as a list (empty when none exists)
+summaries = await mem.get_thread_summary(user_id="user-1", thread_id=THREAD_ID)
 
 # All facts
 facts = await mem.get_memories(user_id="user-1", memory_types=["fact"])
 
-# Filter by thread_id
-thread_turns = await mem.get_memories(user_id="user-1", thread_id=THREAD_ID)
+# Facts and episodes extracted from one thread
+thread_memories = await mem.get_memories(user_id="user-1", thread_id=THREAD_ID)
 ```
 
 ---
@@ -308,7 +311,7 @@ In a multi-agent system, different agents share the same memory store but may re
 # Research agent stores findings as turns
 await mem.upsert_memory(
     user_id="user-1", thread_id="research-thread",
-    role="agent", agent_id="research-agent",
+    role="agent", metadata={"agent_id": "research-agent"},
     content="Found that the source DB has 12 tables with 3 foreign key chains.",
 )
 
@@ -326,7 +329,7 @@ facts = await mem.search_cosmos(
 # Planner writes its plan as a turn in its own thread
 await mem.upsert_memory(
     user_id="user-1", thread_id="planning-thread",
-    role="agent", agent_id="planner-agent",
+    role="agent", metadata={"agent_id": "planner-agent"},
     content=plan_text,
 )
 ```
@@ -337,10 +340,7 @@ Each agent writes to its own `thread_id`. Other agents discover relevant context
 
 ```python
 # After all agents finish
-await mem.generate_user_summary(
-    user_id="user-1",
-    thread_ids=["research-thread", "planning-thread", "execution-thread"],
-)
+await mem.generate_user_summary(user_id="user-1")
 ```
 
 ---
@@ -351,7 +351,7 @@ Instead of calling `generate_thread_summary()`, `extract_memories()`, or `genera
 
 ### How it works
 
-When a new turn is written to the `memories` container, the change feed trigger:
+When a new turn is written to the `memories_turns` container, the change feed trigger:
 
 1. Increments a counter document in the dedicated `counter` container for each relevant scope.
 2. Checks whether the counter has crossed a configured threshold.
@@ -367,11 +367,11 @@ Set these application settings (in `local.settings.json` locally or Function App
 | `FACT_EXTRACTION_EVERY_N=3` | Per `(user_id, thread_id)` | Extract facts every 3 turns |
 | `USER_SUMMARY_EVERY_N=10` | Per `user_id` | Update user profile every 10 turns across all threads |
 
-Set any value to `0` to disable that processing type. The defaults are `10`, `2` and `20` (see [Threshold settings](concepts.md#threshold-settings)). Reconcile (`DEDUP_EVERY_N`) and procedure learning (`PROCEDURAL_SYNTHESIS_AUTO`) follow extraction automatically; see [Section 9](#9-procedures-and-standing-instructions) and [Section 10](#10-keeping-the-fact-pool-clean).
+Set any value to `0` to disable that processing type. The defaults are `10`, `2` and `20` (see [Threshold settings](concepts.md#threshold-settings)). Reconcile (`DEDUP_EVERY_N`) and procedure learning (`PROCEDURAL_SYNTHESIS_AUTO`) follow extraction automatically; see [Section 9](#9-procedures-and-standing-instructions) and [Section 10](#10-keeping-the-fact-pool-clean). The Function App also needs `MEMORY_PROCESSOR_OWNER=durable` (the Bicep template and `local.settings.json.template` set it); without it the trigger skips every batch.
 
 ### Required infrastructure
 
-The change feed trigger needs two additional Cosmos DB containers beyond the existing `memories` container:
+The change feed trigger watches the `memories_turns` container, and the Function App writes derived memories to `memories` and `memories_summaries`. It needs two additional Cosmos DB containers:
 
 - **`counter`** - stores lightweight per-thread and per-user message counters used for threshold checks (90-day default TTL when the toolkit creates the container)
 - **`leases`** - auto-created by the Azure Functions runtime for change feed checkpointing
@@ -385,13 +385,13 @@ The `COSMOS_DB__accountEndpoint` setting must also be configured for the identit
 | **On-demand** | Full control, testing, one-off processing, chaining operations |
 | **Automatic** | Always-on background processing, fire-and-forget, production workloads |
 
-Both approaches use the same orchestrator and activities, so the output is identical.
+Both approaches run the same pipeline, so the output is identical.
 
 ---
 
 ## 9. Procedures and Standing Instructions
 
-Procedural memory records how the assistant should act for one user: instructions the user taught, habits learned from corrections or repeated choices, and skills that worked in practice. Procedures are learned from evidence, so one remark does not become a rule. See [Procedural](concepts.md#procedural) for the evidence each kind needs.
+Procedural memory records how the assistant should act for one user: instructions the user taught, habits learned from corrections or repeated choices, and skills that worked in practice. Procedures are learned from evidence, so a passing preference or a request about one task does not become a rule. See [Procedural](concepts.md#procedural) for the evidence each kind needs.
 
 ### How a procedure appears
 
@@ -497,7 +497,7 @@ await mem.delete_memory(memory_id="<fact id>", user_id="user-1", thread_id=THREA
 | Update a memory | `update_cosmos` | Correct or annotate an existing record |
 | Delete a memory | `delete_memory` | Remove incorrect or sensitive data; a fact or procedure takes the records retired into it along |
 | Get a thread | `get_thread` | Load recent conversation context |
-| Semantic search | `search_cosmos` | Find relevant facts or summaries for a prompt |
+| Semantic search | `search_cosmos` | Find relevant facts for a prompt; add episodes, summaries or turns with `include_*` |
 | Search with slots | `search_cosmos(preference_slot=True, procedure_slot=True)` | Always include a matching preference and procedure within `top_k` |
 | Summarize a thread | `generate_thread_summary` | End of conversation, periodically, or automatic via change feed |
 | Extract facts | `extract_memories` | After key exchanges, end of conversation, or automatic via change feed |

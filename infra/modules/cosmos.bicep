@@ -339,6 +339,8 @@ resource counterContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
           '/thread_id'
         ]
       }
+      // 90 days: every counter document expires this long after its last update
+      // (create_memory_store() sets the same default).
       defaultTtl: 7776000
     }
   }

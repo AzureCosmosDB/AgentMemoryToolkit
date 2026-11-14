@@ -19,8 +19,8 @@ from __future__ import annotations
 from typing import Any
 
 ABSORBED_REASONS = ("duplicate", "procedure", "combined")
-# The memory types records are folded into: dedup folds facts and procedures (episodes are left alone), and a
-# procedure absorbs the statements it cites.
+# The memory types records are folded into: dedup and combining fold facts into facts (episodes are left alone),
+# and a procedure absorbs the statements it cites.
 ABSORBING_TYPES = frozenset({"fact", "procedural"})
 
 

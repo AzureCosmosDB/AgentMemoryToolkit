@@ -197,6 +197,9 @@ def find_episode_boundary(
     return None
 
 
+# Error text that asking again will not fix: what ``chat.py`` raises for a content-filtered or refused reply, tool
+# calls with no text, or a blank reply cut off at the output limit, and what a provider says of a filtered or
+# over-long prompt.
 _NON_RETRYABLE_LLM_MARKERS = (
     "content_filter",
     "model_refusal",
@@ -219,7 +222,10 @@ _NON_RETRYABLE_EXC_TYPES = (AttributeError, KeyError, TypeError, IndexError, Nam
 
 
 def is_retryable_llm_error(exc: BaseException) -> bool:
-    """Classify an extraction LLM failure as retryable (transient) or not."""
+    """Classify an extraction LLM failure as retryable (transient) or not.
+
+    A programming error, or error text with one of the markers above, is not retryable. Anything else is,
+    including a reply that stays empty after the chat client's retries."""
     if isinstance(exc, _NON_RETRYABLE_EXC_TYPES):
         return False
     text = str(exc).lower()
@@ -261,8 +267,8 @@ def batch_turns_by_tokens(
 
 # Separator for deterministic id seeds. Using NUL ensures user_id /
 # thread_id values can never collide with literal section markers
-# (e.g. a thread literally named ``"merged"`` cannot collide with the
-# reconcile-merge id namespace). Defined as a module constant because
+# (e.g. a thread literally named ``"combine"`` cannot collide with the
+# combined-fact id namespace). Defined as a module constant because
 # escape sequences are not permitted inside f-strings on Python 3.11.
 ID_SEED_SEP = "\x00"
 
@@ -583,11 +589,11 @@ def ground_fact_sources(fact: Mapping[str, Any], *, turn_ids: list[Optional[str]
 
     ``turn_ids`` holds one slot per transcript line, ``None`` where the turn has no id, and
     ``labels`` the label each line showed (see :func:`transcript_labels`). A ref is matched
-    against those exact labels first, then read as a positional ``turn-N``, so it resolves to
-    exactly the line the model saw. A ref to an unidentified turn or to anything outside the
-    batch is dropped rather than recorded as provenance, so a fact whose citations all fail
-    records none, as episodes do. Only a fact that cites nothing (a v1 or v2 response) falls
-    back to every identified turn in the batch.
+    against those labels first (exactly, then ignoring case), then read as a positional
+    ``turn-N``, so it resolves to exactly the line the model saw. A ref to an unidentified turn
+    or to anything outside the batch is dropped rather than recorded as provenance, so a fact
+    whose citations all fail records none, as episodes do. Only a fact that cites nothing (a v1
+    or v2 response) falls back to every identified turn in the batch.
     """
     identified = [turn_id for turn_id in turn_ids if turn_id]
     refs = fact.get("source_turn_ids")

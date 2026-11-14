@@ -12,7 +12,7 @@ This guide covers the shortest path to running the library locally, then validat
 |------|-----------------|---------|
 | Python 3.11+ | `brew install python@3.13` | Runtime |
 | Azure CLI | `brew install azure-cli` | `az login` for `DefaultAzureCredential` |
-| Azure Functions Core Tools v4 | `brew install azure-functions-core-tools@4` | Run Functions locally |
+| Azure Functions Core Tools v4 | `brew tap azure/functions && brew install azure-functions-core-tools@4` | Run Functions locally |
 | Azurite | `npm install -g azurite` | Local storage emulator for Functions |
 | Node.js | `brew install node` | Required for Azurite |
 
@@ -20,7 +20,7 @@ This guide covers the shortest path to running the library locally, then validat
 
 ```bash
 pip install -e ".[dev]"
-pip install -r azure_functions/requirements.txt
+pip install -r function_app/requirements.txt
 ```
 
 ---
@@ -32,9 +32,9 @@ You need these before Cosmos DB or LLM-backed features will work:
 1. **Cosmos DB for NoSQL**
 2. **Azure AI Services / Azure OpenAI** with an embedding model and a chat model
 
-The toolkit can create the database and both containers for you with `create_memory_store()`.
+The toolkit can create the database and the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers for you with `create_memory_store()`.
 
-For automatic change feed processing, the function stores lightweight counter documents in a dedicated `counter` container. A `leases` container is created automatically by the Azure Functions runtime.
+For automatic change feed processing, the function stores lightweight counter documents in the `counter` container, and the change feed trigger keeps its checkpoints in the `leases` container.
 
 ### RBAC
 
@@ -77,35 +77,39 @@ COSMOS_DB_LEASE_CONTAINER=leases
 COSMOS_DB_THROUGHPUT_MODE=serverless
 COSMOS_DB_AUTOSCALE_MAX_RU=1000
 
-AI_FOUNDRY_ENDPOINT=https://<your-project>.services.ai.azure.com/
+AI_FOUNDRY_ENDPOINT=https://<your-account>.services.ai.azure.com/
 AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 AI_FOUNDRY_EMBEDDING_DIMENSIONS=1536
 AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-5-mini
-
-ADF_ENDPOINT=http://localhost:7071/api
-ADF_KEY=
 ```
 
-The Functions runtime uses `azure_functions/local.settings.json`, not `.env`, so mirror the same values there.
+The Functions host reads `function_app/local.settings.json`, not `.env`. Create it from the template and mirror the same values there:
 
-`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the required Cosmos containers without specifying RU/s. If you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the toolkit provisions the memories, counter, and lease containers with the shared max RU/s value from `COSMOS_DB_AUTOSCALE_MAX_RU`.
+```bash
+cp function_app/local.settings.json.template function_app/local.settings.json
+```
+
+`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the required Cosmos containers without specifying RU/s. If you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the toolkit provisions all five containers with the shared max RU/s value from `COSMOS_DB_AUTOSCALE_MAX_RU`. The snippets below pass these two values to the client as `cosmos_throughput_mode` and `cosmos_autoscale_max_ru`; the toolkit does not read them from the environment itself.
+
+Optionally, set `AZURE_OPENAI_API_VERSION` to pin the Azure OpenAI REST API version that the chat and embeddings clients use (default `2024-12-01-preview`).
 
 ### Change feed settings (optional)
 
-In `azure_functions/local.settings.json`, add these to enable automatic processing:
+In `function_app/local.settings.json`, add these to enable automatic processing:
 
 ```json
 "COSMOS_DB__accountEndpoint": "https://<your-account>.documents.azure.com:443/",
 "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 "COSMOS_DB_LEASE_CONTAINER": "leases",
-"COSMOS_DB_THROUGHPUT_MODE": "serverless",
-"COSMOS_DB_AUTOSCALE_MAX_RU": "1000",
+"MEMORY_PROCESSOR_OWNER": "durable",
 "THREAD_SUMMARY_EVERY_N": "5",
 "FACT_EXTRACTION_EVERY_N": "3",
 "USER_SUMMARY_EVERY_N": "10"
 ```
 
-Set any threshold to `"0"` to disable that processing type. See `azure_functions/local.settings.json.template` for the full template.
+The Function App skips every change feed batch unless `MEMORY_PROCESSOR_OWNER` is `durable`. Set `MEMORY_PROCESSOR_OWNER=durable` in the SDK's `.env` as well, so the SDK does not also process the same turns in-process.
+
+Set any threshold to `"0"` to disable that processing type. `USER_SUMMARY_WAIT_SECONDS` (default `120`) and `USER_SUMMARY_WAIT_INTERVAL_SECONDS` (default `10`) set how long a user-summary run waits, polling at that interval, for extraction to save a new user's first memories before it skips that cycle. See `function_app/local.settings.json.template` for the full template.
 
 ---
 
@@ -167,8 +171,7 @@ memory = CosmosMemoryClient(
     cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_deployment_name=os.getenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
-    adf_endpoint=os.getenv("ADF_ENDPOINT", "http://localhost:7071/api"),
-    adf_key=os.getenv("ADF_KEY", ""),
+    chat_deployment_name=os.getenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     use_default_credential=True,
     cosmos_credential=DefaultAzureCredential(),
 )
@@ -184,8 +187,8 @@ memory.push_to_cosmos()
 # Or add directly to Cosmos
 memory.upsert_memory(user_id="user-001", role="agent", thread_id=thread_id, content="Direct Cosmos write")
 
-# Query with filters including thread_id
-results = memory.get_memories(user_id="user-001", thread_id=thread_id)
+# Read the thread's turns back (get_memories returns facts, episodic memories and procedures)
+results = memory.get_thread(thread_id=thread_id, user_id="user-001")
 for r in results:
     print(f"  [{r['thread_id'][:8]}...] [{r['id'][:8]}...] role={r['role']:<6} {r['content'][:60]}")
 ```
@@ -210,8 +213,7 @@ memory = AsyncCosmosMemoryClient(
     cosmos_autoscale_max_ru=int(os.getenv("COSMOS_DB_AUTOSCALE_MAX_RU", "1000")),
     ai_foundry_endpoint=os.getenv("AI_FOUNDRY_ENDPOINT"),
     embedding_deployment_name=os.getenv("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
-    adf_endpoint=os.getenv("ADF_ENDPOINT", "http://localhost:7071/api"),
-    adf_key=os.getenv("ADF_KEY", ""),
+    chat_deployment_name=os.getenv("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
     use_default_credential=True,
     cosmos_credential=AsyncDefaultAzureCredential(),
 )
@@ -226,14 +228,14 @@ await memory.create_memory_store()
 
 thread_id = str(uuid.uuid4())
 await memory.upsert_memory(user_id="user-001", role="user", thread_id=thread_id, content="Async Cosmos write")
-results = await memory.get_memories(user_id="user-001", thread_id=thread_id)
+results = await memory.get_thread(thread_id=thread_id, user_id="user-001")
 for r in results:
     print(f"  [{r['thread_id'][:8]}...] [{r['id'][:8]}...] role={r['role']:<6} {r['content'][:60]}")
 
 await memory.close()
 ```
 
-`create_memory_store()` creates the database and required containers, configures the hierarchical partition key (`user_id`, `thread_id`) for memories and counters, gives a newly created counter container a 90-day default TTL, uses `/id` for the lease container, and applies either serverless or autoscale throughput based on `COSMOS_DB_THROUGHPUT_MODE`.
+`create_memory_store()` creates the database and the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. It configures the hierarchical partition key (`user_id`, `thread_id`) for the first four and `/id` for `leases`, gives a newly created `memories_turns` container a 30-day default TTL and a newly created `counter` container a 90-day one, and applies either serverless or autoscale throughput based on `cosmos_throughput_mode` (set from `COSMOS_DB_THROUGHPUT_MODE` above).
 
 ---
 
@@ -248,51 +250,24 @@ azurite --silent --location /tmp/azurite --debug /tmp/azurite/debug.log
 ### Start the Functions host
 
 ```bash
-cd azure_functions
-pip install -r azure_functions/requirements.txt
+cd function_app
+pip install -r requirements.txt
 func start
 ```
 
-Expected functions include:
+Expected functions:
 
-- `memory_orchestrator`
-- `load_memories`
-- `generate_embeddings`
-- `store_results`
-- `generate_thread_summary`
-- `extract_facts`
-- `generate_user_summary`
-- `http_start`
-- `on_memory_change` (change feed trigger - only active when `COSMOS_DB__accountEndpoint` is set)
+- `on_memory_change` (Cosmos DB change feed trigger on the turns container; needs `COSMOS_DB__accountEndpoint`)
+- Orchestrators: `ExtractMemoriesOrchestrator`, `ExtractEpisodesOrchestrator`, `ThreadSummaryOrchestrator`, `UserSummaryOrchestrator`, `SynthesizeProceduralOrchestrator`
+- Activities: `em_Extract`, `em_Persist`, `em_AdvanceExtractWatermark`, `em_ReconcileMemories`, `ee_ExtractEpisodes`, `ts_Extract`, `ts_PersistSummary`, `us_Extract`, `us_PersistUserSummary`, `sp_SynthesizeProcedural`
 
-### Function keys
-
-- **Local:** `func start` does not enforce `AuthLevel.FUNCTION`, so `ADF_KEY` can be empty.
-- **Azure:** a function key is required.
+The app registers no HTTP-triggered function, so there is no function key to set. Orchestrations start only from the change feed.
 
 ---
 
 ## 4. Trigger the Pipeline
 
-You can test through `curl` or through the Python client.
-
-### `curl` example
-
-```bash
-curl -X POST "http://localhost:7071/api/orchestrators/memory_orchestrator" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "thread_id": "test-thread-001",
-    "user_id": "user-1",
-    "content": "This is a test memory to embed and store.",
-    "role": "user",
-    "memory_type": "turn",
-    "metadata": {},
-    "thread_summary": false
-  }'
-```
-
-Poll the returned `statusQueryGetUri` to track progress.
+The Function App starts orchestrations only from the change feed (see [section 6](#6-test-change-feed-auto-processing)). To run the same steps on demand, call the client; these calls run in-process and do not need the Functions host.
 
 ### Python client example
 
@@ -318,7 +293,7 @@ print(result)
 
 ```python
 result = memory.generate_thread_summary(user_id="user-001", thread_id=thread_id)
-print(result.get("output", {}))
+print(result["content"])
 ```
 
 If a summary already exists, only newer memories are processed and merged into the existing summary.
@@ -326,9 +301,11 @@ If a summary already exists, only newer memories are processed and merged into t
 ### Fact extraction
 
 ```python
-result = memory.extract_facts(user_id="user-001", thread_id=thread_id)
-output = result.get("output", [])
-for fact in output:
+counts = memory.extract_memories(user_id="user-001", thread_id=thread_id)
+print(counts)
+
+facts = memory.get_memories(user_id="user-001", thread_id=thread_id, memory_types=["fact"])
+for fact in facts:
     print(f"  [{fact.get('thread_id', '')[:8]}...] user={fact.get('user_id', ''):<10} type={fact.get('type', ''):<8} {fact.get('content', '')[:80]}")
 ```
 
@@ -336,7 +313,7 @@ for fact in output:
 
 ```python
 result = memory.generate_user_summary(user_id="user-001")
-print(result.get("output", {}))
+print(result["content"])
 print(memory.get_user_summary(user_id="user-001"))
 ```
 
@@ -350,15 +327,15 @@ If you have configured the change feed settings above, you can test automatic pr
 
 ### Prerequisites
 
-1. Ensure `local.settings.json` has the change feed settings (see [Change feed settings](#change-feed-settings-optional) above).
+1. Ensure `function_app/local.settings.json` has the change feed settings, including `MEMORY_PROCESSOR_OWNER` (see [Change feed settings](#change-feed-settings-optional) above), and that the SDK's `.env` sets `MEMORY_PROCESSOR_OWNER=durable` too.
 
 2. Restart the Functions host (`func start`).
 
 ### Test steps
 
-1. Set a low threshold for testing, e.g. `THREAD_SUMMARY_EVERY_N=3`.
-2. Write turns to Cosmos (via the SDK or `curl`) until the threshold is crossed.
-3. Watch the Functions host logs - you should see the orchestrator being started automatically.
+1. Set a low threshold for testing, e.g. `THREAD_SUMMARY_EVERY_N=3` (restart the host after changing it).
+2. Write turns to Cosmos with the SDK until the threshold is crossed.
+3. Watch the Functions host logs - you should see the orchestrator being started automatically, for example `change-feed: starting ThreadSummaryOrchestrator instance=thread_summary:user-001:<thread-id>:3`.
 
 ```python
 import uuid
@@ -377,7 +354,7 @@ for i in range(3):
 5. Verify the summary was created:
 
 ```python
-result = memory.get_memories(user_id="user-001", thread_id=thread_id, memory_types=["summary"])
+result = memory.get_thread_summary(user_id="user-001", thread_id=thread_id)
 print(result)
 ```
 
@@ -390,7 +367,7 @@ print(result)
 1. Start Azurite.
 2. Press `F5`.
 3. Use the `func: host start` task.
-4. Set breakpoints in `azure_functions/activities.py` or `azure_functions/function_app.py`.
+4. Set breakpoints in the activities under `function_app/orchestrators/` or in `function_app/triggers/change_feed.py`.
 
 ---
 
@@ -405,9 +382,8 @@ print(result)
 | Azurite not found | Install Azurite and Node.js |
 | Functions cannot access storage | Start Azurite before `func start` |
 | OpenAI 401/403 | Check `Cognitive Services OpenAI User` role |
-| Function 401 in Azure | Set `ADF_KEY` or pass `?code=<key>` |
 | Change feed trigger not firing | Verify `COSMOS_DB__accountEndpoint` is set and matches your Cosmos account |
 | Counter updates fail | Verify the function can write to the configured `COSMOS_DB_COUNTERS_CONTAINER` container |
-| Auto-processing not starting | Check that threshold settings are > 0 and the Functions host shows `on_memory_change` at startup |
+| Auto-processing not starting | Check that threshold settings are > 0, `MEMORY_PROCESSOR_OWNER` is `durable`, and the Functions host shows `on_memory_change` at startup |
 
 For full cloud deployment and validation, see `Docs/azure_testing.md`.

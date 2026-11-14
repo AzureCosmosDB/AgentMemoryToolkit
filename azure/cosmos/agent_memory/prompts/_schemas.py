@@ -97,7 +97,7 @@ DEDUP_VERIFY_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# extract_memories.prompty - extract facts (user- or agent-sourced)
+# extract_memories.prompty and extract_memories-v2.prompty - extract facts (user- or agent-sourced)
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
     "type": "object",

@@ -96,7 +96,7 @@ A procedure says how the assistant should act for one user. It is a small, indep
 
 A procedure `applies` either `always` (nearly every interaction: response language, tone, format, a tool convention) or `when` its `activation_conditions` match. It also records an optional `valid_until` date (after which search and prompt injection no longer show it), its support (`evidence`, `support_dates`, `user_support_count`, `practiced_dates`) and a `version` that rises with every revision. Its id is derived from the user, kind and name, so a lesson that comes up again reinforces one record instead of adding a paraphrase.
 
-**Standing instructions.** `build_procedural_context(user_id, task=None)` compiles the user's active, unexpired `always` procedures into a block for the system prompt, or `""` when there are none. At most 10 rules and 2,048 bytes are included: taught rules first, then corrected, repeated, endorsed and practiced, newest first within each. Each rule appears as its summary; skill steps are not included. With a `task`, the nearest active situational (`when`) procedure by vector similarity is added, rendered with its conditions:
+**Standing instructions.** `build_procedural_context(user_id, task=None)` compiles the user's active, unexpired `always` procedures into a block for the system prompt, or `""` when there are none. At most 10 rules and 2,048 bytes are included: taught rules first, then corrected, repeated, endorsed and practiced, newest first within each. Each rule appears as its summary; skill steps are not included. With a `task`, the nearest active situational (`when`) procedure by vector similarity is added, rendered with its conditions; if that lookup fails, the standing rules are returned without it:
 
 ```
 # Standing instructions from the user
@@ -110,8 +110,6 @@ A procedure `applies` either `always` (nearly every interaction: response langua
 **How procedures are learned.** `synthesize_procedural()` runs after each reconcile (when `PROCEDURAL_SYNTHESIS_AUTO` is true) or on demand with the in-process backend. It reads the user's active preference and requirement facts, facts with salience of at least 0.8, `directive` and `correction` facts, and episodes with lessons, written since its cursor (the `procedure_cursor` document under `[user_id, "__procedural__"]`). A run reads at most 50 facts and 50 episodes and shows them to the model 10 at a time, each batch with the user's nearest existing procedures, so the model adds a procedure, revises one in place or records new evidence for one instead of writing a paraphrase. The cursor moves after each batch, so a run that stops early resumes where it stopped, and a run with nothing new makes no model call. A retryable model error, or a transient embedding or Cosmos DB error while writing a procedure, ends the run without moving the cursor past that batch, so the next run retries it. A revision that drops a number or a negation is discarded unless it records the user's correction.
 
 **Retiring taught facts.** When an active situational procedure cites a user's `directive` or `correction` fact, the fact is retired into the procedure (`supersede_reason="procedure"`), so the rule is stored and retrieved once. A standing rule leaves its facts searchable, because it reaches the agent through `build_procedural_context()`. Only facts extracted with an `assertion` are retired.
-
-Procedural documents written by earlier betas (kinds such as `behavioral_policy`, no `applies` or evidence) are not migrated: `build_procedural_context()` ignores them and `ProceduralRecord` rejects the old kinds.
 
 **Use for:** keeping standing instructions and learned methods out of the fact pool and in the prompt.
 
@@ -172,7 +170,7 @@ A ranked search can fill `top_k` with topically close facts and miss a standing 
 - `preference_slot=True` - the user's best-matching preference fact (`metadata.category="preference"`) that the ranked results do not already show.
 - `procedure_slot=True` - the user's best-matching active situational procedure (`applies="when"`). Procedures then leave the ranked results and come only through the slot.
 
-Slot candidates are ranked by vector similarity alone and use the search's own filters (user, thread, tags, salience, dates), so a slot can only return what the search itself could. The procedure slot ignores the filters no procedure can meet - `role`, `tags_all`, `tags_any`, `min_salience` and `min_confidence`, because a procedure has no salience or confidence, its `role` is `system` and its tags are the toolkit's own - and still applies the user, thread, date, `exclude_tags` and `include_superseded` filters. A slot with no candidate takes the next ranked result, so `top_k` stays filled: with `top_k=5` and both slots, a search returns 3 ranked results, 1 preference and 1 procedure. Each slotted result carries `retrieval={"rank": <1-based position>, "slot": "preference" | "procedure" | "backfill"}`; ranked results carry none.
+Slot candidates are ranked by vector similarity alone and use the search's own filters (user, thread, tags, salience, dates), so a slot can only return what the search itself could. The procedure slot ignores the filters no procedure can meet - `role`, `tags_all`, `tags_any`, `min_salience` and `min_confidence`, because a procedure has no salience or confidence, its `role` is `system` and its tags are the toolkit's own - and still applies the user, date, `exclude_tags` and `include_superseded` filters (a procedure matches on the user alone, whatever the `thread_id`). A slot with no candidate takes the next ranked result, so `top_k` stays filled: with `top_k=5` and both slots, a search returns 3 ranked results, 1 preference and 1 procedure. Each slotted result carries `retrieval={"rank": <1-based position>, "slot": "preference" | "procedure" | "backfill"}`; ranked results carry none.
 
 Slots need `user_id` and are skipped when `memory_id` is set or when they would leave no ranked result (`top_k` must exceed the number of slots). The preference slot applies only when facts are searched, and `procedure_slot` has no effect when only procedural types are searched, because those searches already rank procedures. Episodes never take a slot, and summaries and turns blended in with `include_summaries` / `include_turns` still follow the `top_k` results. A failed slot query is logged and the slot falls back to the next ranked result.
 
@@ -182,7 +180,7 @@ Slots need `user_id` and are skipped when `memory_id` is set or when they would 
 
 ### Keyword search and partition scope
 
-A keyword (hybrid) query ranks with `FullTextScore`, which is ignored in a query the Python SDK sends with a partition key, because it skips query planning ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)), so every question would get the same fixed order. A search that has keywords therefore runs across partitions with `c.user_id` (and `c.thread_id`, when given) in the `WHERE` clause, which confines it to the same records, and sets `full_text_score_scope="Local"` so BM25 statistics come from the partition ranges the query targets. This applies to `search_cosmos`, `search_turns` and `search_summaries` called with both `user_id` and `thread_id`; expect more RUs than a single-partition read on a large container. A query whose terms are all stopwords has no keywords, ranks by vector similarity alone and keeps the partition key. `MemoryStore.query()` raises `ValidationError` for a `FullTextScore` query sent with a partition key.
+A keyword (hybrid) query ranks with `FullTextScore`, which is ignored in a query the Python SDK sends with a partition key, because it skips query planning ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)), so every question would get the same fixed order. A search that has keywords therefore runs across partitions with `c.user_id` (and `c.thread_id`, when given) in the `WHERE` clause, which confines it to the same records, and sets `full_text_score_scope="Local"` so BM25 statistics come from the partition ranges the query targets. This applies to `search_cosmos`, `search_turns`, `search_summaries`, `search_episodic_memories` and `retrieve_procedures`; expect more RUs than a single-partition read on a large container. A query whose terms are all stopwords has no keywords and ranks by vector similarity alone; with both `user_id` and `thread_id` it still reads one partition, except a `search_cosmos` that searches episodic or procedural memories, which always runs across partitions (those memories match on the user alone, whatever the `thread_id`). `MemoryStore.query()` raises `ValidationError` for a `FullTextScore` query sent with a partition key.
 
 ---
 
@@ -211,7 +209,7 @@ The v3 prompt labels each new turn `Turn <id>` and also receives read-only conte
 | Context        | What it holds                                                                                                                                                                      | Bound                                                               |
 |----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
 | Earlier turns  | The turns just before the batch (the thread's turns before the window, then the window's earlier batches), shown without turn ids                                                  | Up to 6 turns within 1,500 tokens, each clipped to 1,200 characters |
-| Thread summary | Its overview and decisions, only when it was written before the new turns                                                                                                          | 1,500 characters                                                    |
+| Thread summary | Its overview and decisions, only when it summarizes nothing from the new turns                                                                                                     | 1,500 characters                                                    |
 | Stored facts   | The user's active facts nearest the batch by vector similarity, written no later than the batch, each with its date, `user` or `agent`, assertion, subject, attribute and entities | 15 facts                                                            |
 
 Facts still come only from the new turns, and each cites the turns it came from in `source_turn_ids` (a citation that does not resolve to a turn in the batch is dropped). Context is best-effort: a failed read costs only that part, and if the model call fails for a reason a retry would not fix (a content filter, an over-long prompt) the batch is retried once without context. It costs one embedding and one vector query per batch, plus one turns query and one summary read per extraction window. The v1 and v2 prompts see only the transcript, and a fact they extract records every identified turn of its batch in `source_turn_ids`.
@@ -224,7 +222,7 @@ An empty model reply is retried with backoff and raises `LLMError` if it stays e
 
 Every write through the store or the pipeline passes a guard before the record is embedded or stored: `upsert_memory()`, `push_to_cosmos()`, `update_cosmos()`, and the facts, episodes, summaries and procedures the pipeline writes. Raw turns pass it too, so a turn that contains a credential is stored with the marker, not the credential.
 
-The guard recognizes 12 formats whose shape cannot be mistaken for anything else: private-key blocks, Azure account keys and connection strings, SAS signatures and connection strings, JWTs, Bearer tokens, Basic authorization values, OpenAI keys, GitHub tokens, AWS access key ids, and passwords inside URLs. Every non-structural string of a record is scanned (ids, partition keys, timestamps and similar fields are not) and each match becomes `[REDACTED-SECRET]`. The record is tagged `sys:secret` and gets `metadata.classification="secret"` and `metadata.secret_patterns` (the format names). Derived state follows the text: `content_hash` is recomputed, and a vector built from the original text is dropped and rebuilt by embedding the redacted text, so no raw credential reaches the embedding endpoint and the record stays searchable. An update that changes the text of a record that has a vector re-embeds it as well; if embedding fails, is switched off (`embed=False`), or the store has no embeddings client, the record is written without a vector. A tag that holds a credential is dropped rather than redacted, including one passed to `add_tags`. Logs name the record and the formats, never the text.
+The guard recognizes 12 formats whose shape cannot be mistaken for anything else: private-key blocks, Azure account keys and connection strings, SAS signatures and connection strings, JWTs, Bearer tokens, Basic authorization values, OpenAI keys, GitHub tokens, AWS access key ids, and passwords inside URLs. Every non-structural string of a record is scanned (ids, partition keys, timestamps and similar fields are not) and each match becomes `[REDACTED-SECRET]`. The record is tagged `sys:secret` and gets `metadata.classification="secret"` and `metadata.secret_patterns` (the format names). Derived state follows the text: `content_hash` is recomputed, and a vector built from the original text is dropped and rebuilt by embedding the redacted text, so no raw credential reaches the embedding endpoint and the record stays searchable. An update that changes the text of a record that has a vector re-embeds it as well; if embedding fails, if `upsert_memory(embed=False)` switched it off, or if the store has no embeddings client, the record is written without a vector. A tag that holds a credential is dropped rather than redacted, including one passed to `add_tags`. Logs name the record and the formats, never the text.
 
 Credentials without a fixed format, such as `password: hunter2` typed into a chat, cannot be told from ordinary text by a pattern and are not matched. Every prompt that writes memory text (extraction, episodes, summaries, procedures, duplicate checks and combining) tells the model never to store a literal secret. A pattern can also redact legitimate text that looks like a credential.
 
@@ -232,7 +230,7 @@ Credentials without a fixed format, such as `password: hunter2` typed into a cha
 
 ## Memory Reconciliation
 
-Two passes keep the fact pool clean and convergent, and they run in order inside `reconcile_memories()`: a **duplicate pass** that retires duplicate facts, and combines facts about one specific thing, without losing any detail, and an **LLM contradiction pass** that resolves opposing claims. The contradiction pass reads its pool after the duplicate pass has retired facts, so the two never act on the same stale list. Neither runs at write time: extraction only creates facts, and reconcile cleans up behind it.
+Two passes keep the fact pool clean and convergent, and they run in order inside `reconcile_memories()` (the clients' `reconcile()`): a **duplicate pass** that retires duplicate facts, and combines facts about one specific thing, without losing any detail, and an **LLM contradiction pass** that resolves opposing claims. The contradiction pass reads its pool after the duplicate pass has retired facts, so the two never act on the same stale list. Neither runs at write time: extraction only creates facts, and reconcile cleans up behind it.
 
 ### Duplicate pass (lossless dedup)
 
@@ -277,11 +275,9 @@ A combined fact is never combined again, and the duplicate pass never retires it
 | `combine_groups` | Groups the combine step tried                                          |
 | `combine_failed` | Groups it declined or could not write, whose members stay as they were |
 
-`kept`, `merged` and `contradicted` are the original keys; `merged` was always `0` before the duplicate pass existed.
-
 ### Time budget (`deadline`)
 
-`reconcile_memories()`, `consolidate_memories()` and `synthesize_procedural()` accept a `deadline`, a `time.monotonic()` value for callers with a time limit. Once it has passed they start no new model call: the duplicate pass applies the folds it found and keeps its cursor, reconcile skips the contradiction pass, and procedure learning keeps what it wrote; the next run continues from the cursors. When combining, the duplicate checks stop halfway to the deadline so the combined facts have time to be written. The Function App sets it from `ACTIVITY_TIME_BUDGET_SECONDS`; the clients' `reconcile()` and the in-process auto-trigger set none.
+`PipelineService.reconcile_memories()`, `consolidate_memories()` and `synthesize_procedural()` accept a `deadline`, a `time.monotonic()` value for callers with a time limit. Once it has passed they start no new model call: the duplicate pass applies the folds it found and moves its cursor past the facts it checked, reconcile skips the contradiction pass, and procedure learning keeps what it wrote; the next run continues from the cursors. When combining, the duplicate checks stop halfway to the deadline so the combined facts have time to be written. The Function App sets it from `ACTIVITY_TIME_BUDGET_SECONDS`; the clients' `reconcile()` and the in-process auto-trigger set none.
 
 ### Loser preservation
 
@@ -289,7 +285,7 @@ Retired facts stay in the container with their `supersede_reason` (`contradict`,
 
 ### Deleting a memory
 
-`delete_memory()` removes one document. For a fact or procedure it first deletes the records retired into it (`supersede_reason` of `duplicate`, `combined` or `procedure`) and, transitively, anything retired into those, because they hold the same information as the memory they were folded into: what the user deleted is gone. The records are looked up across the user's partitions and deleted deepest first, each under its own `thread_id`, before the memory itself. The delete is sequential and best-effort: if one fails, the memory is kept and a retry resumes. Records retired for another reason (`contradict`, `update`) are earlier versions, not copies, and stay. Deleting a retired record deletes only that record, so to remove information delete the fact that is active now (the survivor or the combined fact). Records retired into a memory that was deleted before this behavior existed are not cleaned up. `delete_thread()` still deletes only a thread's turns and summary.
+`delete_memory()` removes one document. For a fact or procedure it first deletes the records retired into it (`supersede_reason` of `duplicate`, `combined` or `procedure`) and, transitively, anything retired into those, because they hold the same information as the memory they were folded into: what the user deleted is gone. The records are looked up across the user's partitions and deleted deepest first, each under its own `thread_id`, before the memory itself. The delete is sequential and best-effort: if one fails, the memory is kept and a retry resumes. Records retired for another reason (`contradict`, `update`) are earlier versions, not copies, and stay. Deleting a retired record deletes only that record, so to remove information delete the fact that is active now (the survivor or the combined fact). `delete_thread()` deletes only a thread's turns and summary.
 
 ### Exact duplicates at write time
 
@@ -297,10 +293,10 @@ Each fact written by `extract_memories` carries a `content_hash` (SHA-256 of nor
 
 ### Extraction gating (`extracted_at` + `recent_k`)
 
-Extraction only ever reads turns not yet stamped `extracted_at`; `persist` stamps every turn it consumed once the extracted memories are durably written. This `extracted_at` gate is the authoritative "what's left to extract" signal and is shared by both backends - a failed or lagging extract leaves its turns unstamped, so the full backlog is retried on the next run and no turns are skipped.
+Extraction only ever reads turns not yet stamped `extracted_at`. The in-process `extract_memories()` stamps every turn it consumed once the extracted memories are durably written, so this gate is its authoritative "what's left to extract" signal: a failed or lagging extract leaves its turns unstamped, so the full backlog is retried on the next run and no turns are skipped. The Function App does not stamp turns (a rewritten turn would reach the change feed again); it relies on the watermark below.
 
 - **In-process SDK auto-trigger** - calls extraction with `recent_k=None`, so it drains the entire unextracted backlog each run and relies purely on the `extracted_at` gate.
-- **Change-feed / Durable Function App** - additionally **sizes** `recent_k` from a per-thread **watermark** (`last_extract_count` on the counter doc): `recent_k = current_count − last_extract_count` (with `last_extract_count` treated as `0` before the first successful extract), then still applies the `extracted_at` filter. The watermark advances **only after a successful extract**. The window is deliberately **not** capped by `DEDUP_POOL_SIZE` (that knob governs the reconcile pool, not the extraction window) - capping would extract only the newest N and silently strand the oldest backlog turns.
+- **Change-feed / Durable Function App** - **sizes** `recent_k` from a per-thread **watermark** (`last_extract_count` on the counter doc): `recent_k = current_count − last_extract_count` (with `last_extract_count` treated as `0` before the first successful extract); turns stamped `extracted_at` are still skipped. The watermark advances **only after a successful extract**, and it moves past the turns of a batch the model deferred after a retryable error (`deferred_turn_count`), so a later run does not retry them. The window is deliberately **not** capped by `DEDUP_POOL_SIZE` (that knob governs the reconcile pool, not the extraction window) - capping would extract only the newest N and silently strand the oldest backlog turns.
 
 > **Caveat (rare, change-feed path):** the counter increment is best-effort - under sustained optimistic-concurrency contention it can drop an increment rather than block the user's write path (see `increment_counter_sync`). A dropped increment leaves `current_count` lagging the true turn count, which can under-size the watermark-derived `recent_k`. The Function App backend avoids stranding turns by raising to force change-feed redelivery; the in-process path is unaffected because it uses `recent_k=None` and the `extracted_at` gate, not the counter, to decide what to extract.
 
@@ -324,13 +320,13 @@ The similarity floors (0.85 to fold, 0.65 to combine), the neighbour count (5) a
 In addition to on-demand processing via the SDK, the toolkit includes a Cosmos DB change feed trigger that **automatically** starts processing orchestrations when enough new turns have been written.
 
 ```
-memories container
+memories_turns container
       │  (change feed)
       ▼
 on_memory_change trigger
       │
       ├── count turns per (user_id, thread_id)
-      │   └── crosses threshold? ──► start thread_summary / extract_memories
+      │   └── crosses threshold? ──► start thread_summary / extract_memories / extract_episodes
       │
       └── count turns per user_id
           └── crosses threshold? ──► start user_summary
@@ -338,8 +334,8 @@ on_memory_change trigger
 
 ### How it works
 
-1. The change feed trigger watches the `memories` container for new documents.
-2. Only documents with `type == "turn"` are counted (summaries, facts, and user summaries are ignored).
+1. The change feed trigger watches the `memories_turns` container for new documents.
+2. Only documents with `type == "turn"` are counted.
 3. Documents in the dedicated `counter` container track how many turns have been seen per scope using ETag-based optimistic concurrency.
 4. When a counter crosses a configured threshold, the corresponding Durable Functions orchestration is started automatically.
 
@@ -350,13 +346,14 @@ on_memory_change trigger
 | `THREAD_SUMMARY_EVERY_N`  | Per `(user_id, thread_id)`                                                      | `10`    |
 | `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)`                                                      | `2`     |
 | `DEDUP_EVERY_N`           | Per `(user_id, thread_id)`; reconcile every `FACT_EXTRACTION_EVERY_N × N` turns | `5`     |
+| `EPISODE_EVAL_EVERY_N`    | Per `(user_id, thread_id)`; checks for an episode boundary every N turns        | `4`     |
 | `USER_SUMMARY_EVERY_N`    | Per `user_id` (across all threads)                                              | `20`    |
 
 These defaults are shared by both backends (`function_app/shared/config.py` imports the same constants from `azure.cosmos.agent_memory.thresholds`), so the InProcess and Durable processors fire on the same turn boundaries unless overridden. Set any value to `0` to disable that processing type. For example, setting `THREAD_SUMMARY_EVERY_N=5` generates a thread summary every 5 new turns in each thread.
 
-An extraction orchestration runs extract and persist, then, when the reconcile threshold is crossed, a reconcile activity (facts and episodes), and then, when `PROCEDURAL_SYNTHESIS_AUTO` is true, procedure learning as a sub-orchestration. The reconcile and procedure activities stop starting model calls after `ACTIVITY_TIME_BUDGET_SECONDS` (default `240`), keep what they finished and continue from their cursors on the next run.
+An extraction orchestration runs extract and persist, then, when the reconcile threshold is crossed, a reconcile activity, and then, when `PROCEDURAL_SYNTHESIS_AUTO` is true, procedure learning as a sub-orchestration. The reconcile and procedure activities stop starting model calls after `ACTIVITY_TIME_BUDGET_SECONDS` (default `240`), keep what they finished and continue from their cursors on the next run.
 
-A failed activity reports only `<code> (<ExcType>)` to Durable Functions, never the original exception text, which can quote memory text or model output: the code is `write_conflict` for HTTP 412, `memory_not_found` for 404, the toolkit's own `error_code` when there is one, and `dependency_failure` otherwise. The Function App log keeps the exception's type, status and code locations, also without its message. The activity is still retried as before.
+A failed activity reports only `<code> (<ExcType>)` to Durable Functions, never the original exception text, which can quote memory text or model output: the code is `write_conflict` for HTTP 412, `memory_not_found` for 404, the toolkit's own `error_code` when there is one, and `dependency_failure` otherwise. The Function App log keeps the exception's type, status and code locations, also without its message. The activity is retried (3 attempts, 2 s first interval).
 
 ### Required containers
 
@@ -368,14 +365,14 @@ A failed activity reports only `<code> (<ExcType>)` to Durable Functions, never 
 | `counter`            | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing; 90-day default TTL when the toolkit creates it |
 | `leases`             | `/id`                                   | Change feed checkpointing container created by `create_memory_store()`                          |
 
-The 90-day TTL is the `counter` container's default, so it applies to every document in it - thread counters, user counters and the extraction watermark kept on a thread counter - and each expires 90 days after its last update. An existing `counter` container keeps its current TTL setting: `create_container_if_not_exists` does not change it. The `memories` container also holds the cursor documents that resume the duplicate pass (`dedup_cursor`, under `__dedup__`) and procedure learning (`procedure_cursor`, under `__procedural__`); they are not memories and `get_memories()` does not return them.
+The 90-day TTL is the `counter` container's default, so it applies to every document in it - thread counters, user counters and the extraction watermark kept on a thread counter - and each expires 90 days after its last update. An existing `counter` container keeps its current TTL setting: `create_container_if_not_exists` does not change it. The `memories` container also holds the cursor documents that resume the duplicate pass (`dedup_cursor`, under `__dedup__`), procedure learning (`procedure_cursor`, under `__procedural__`) and episode extraction (`episode_cursor`, one per thread); they are not memories and `get_memories()` does not return them.
 
 ### Throughput configuration
 
 The toolkit provisions all required Cosmos containers under one shared throughput mode:
 
 - `serverless` is the default. The toolkit creates the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers without specifying RU/s.
-- `autoscale` applies the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all five containers.
+- `autoscale` applies the shared `autoscale_max_ru` cap (default `1000`; the samples read it from `COSMOS_DB_AUTOSCALE_MAX_RU`) to all five containers.
 
 This keeps the change feed dependencies aligned with the main memory store instead of letting the Functions trigger create the lease container independently.
 
@@ -386,7 +383,7 @@ This keeps the change feed dependencies aligned with the main memory store inste
 | **On-demand (pull)** | SDK call (`generate_thread_summary()`, etc.) | Explicit control over when processing happens                               |
 | **Automatic (push)** | Change feed trigger                          | Fire-and-forget - processing happens in the background as turns are written |
 
-Both modes use the same Durable Functions orchestrator and activities, so prompts, incremental update logic, and stored outputs are identical.
+Both modes run the same pipeline code (`PipelineService`; the Function App's activities call it), so prompts, incremental update logic, and stored outputs are identical.
 
 ---
 

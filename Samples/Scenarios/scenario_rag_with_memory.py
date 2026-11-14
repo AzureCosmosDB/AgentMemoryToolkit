@@ -57,7 +57,7 @@ def _format_memories(memories: list[dict[str, Any]]) -> str:
     for m in memories:
         role = m.get("role", "unknown")
         content = m.get("content", "")
-        mtype = m.get("memory_type", "")
+        mtype = m.get("type", "")
         lines.append(f"[{mtype}|{role}] {content}")
     return "\n".join(lines)
 
@@ -174,7 +174,7 @@ def run_demo() -> None:
     )
     print(f"  Found {len(memory_results)} relevant memories:")
     for m in memory_results:
-        print(f"    • [{m.get('memory_type')}] {m.get('content', '')[:80]}")
+        print(f"    • [{m.get('type')}] {m.get('content', '')[:80]}")
 
     # ------------------------------------------------------------------
     # Step 3b - Retrieve user summary (if one exists)
@@ -186,7 +186,7 @@ def run_demo() -> None:
         print("  Found user summary:")
         print(f"    • {summaries.get('content', '')[:120]}")
     else:
-        print("  No summary available yet (generate one via generate_thread_summary).")
+        print("  No summary available yet (generate one via generate_user_summary).")
 
     # ------------------------------------------------------------------
     # Step 4 - Build augmented prompt

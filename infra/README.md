@@ -6,25 +6,25 @@ This folder provisions everything the Agent Memory Toolkit needs in a single Azu
 
 `azd up` creates **all** of the following:
 
-- **Cosmos DB for NoSQL** - serverless account with the `ai_memory` database and this container topology:
+- **Cosmos DB for NoSQL** - serverless account (vector and full-text search enabled) with the `ai_memory` database and this container topology:
 
   | Container | Purpose |
   | --- | --- |
   | `memories` | Facts, episodics, and procedural memories; vector + FTS index |
-  | `memories_turns` | Turns; minimal index, change-feed binding target |
+  | `memories_turns` | Turns; vector + FTS index, 30-day default TTL (`MEMORIES_TURNS_DEFAULT_TTL`, in seconds), change-feed binding target |
   | `memories_summaries` | Thread + user summaries; vector + FTS index (`search_summaries`), composite index for point reads |
   | `leases` | Change-feed checkpoints |
-  | `counter` | Atomic counters |
+  | `counter` | Atomic counters; 90-day default TTL |
 - **AI Foundry** (`Microsoft.CognitiveServices/accounts` with `kind: AIServices`) - with `gpt-4o-mini` and `text-embedding-3-large` deployments
 - **User-assigned managed identity (UAMI)** - used by the Function app
-- **RBAC role assignments** - Cosmos DB Built-in Data Reader + Contributor, Cognitive Services OpenAI User, Storage Blob/Queue/Table data roles, granted to both the UAMI and the deploying user (full table in [Identity & RBAC](#identity--rbac))
+- **RBAC role assignments** - Cosmos DB Built-in Data Reader + Contributor, Cognitive Services OpenAI User, Storage Blob/Queue/Table data roles, granted to the UAMI and (except the Storage Queue/Table roles) the deploying user (full table in [Identity & RBAC](#identity--rbac))
 - **Function app** - Flex Consumption (Python 3.11), Storage account, App Insights, Log Analytics
 
-The Function app is **always provisioned**, even if you plan to use `InProcessProcessor` only. Flex Consumption is pay-per-execution - at zero traffic the Function app is essentially free (idle cost is the Storage account, ~$0.05/month). The Function app sits idle and unused for in-process workloads.
+The Function app is provisioned by default and is deployed with `MEMORY_PROCESSOR_OWNER=durable`: it processes new turns from the change feed, and SDK clients that load the generated `.env` skip their in-process auto-trigger. To process in your own process instead, run `azd env set MEMORY_PROCESSOR_OWNER inprocess` before `azd up` (the Function app then skips every batch), or use the [SDK-only mode](#sdk-only-mode-skip-the-function-app) below. Flex Consumption is pay-per-execution: with no turns being written the Function app is essentially free (idle cost is the Storage account, ~$0.05/month); otherwise you pay for its executions and, under `durable`, the model calls it makes.
 
 > Advanced escape hatch: set `azd env set DEPLOY_FUNCTION_APP false` and run `azd provision` to skip the Function app + its supporting resources entirely. Not recommended unless you have a strong reason. See [SDK-only mode](#sdk-only-mode-skip-the-function-app) below for the full procedure.
 
-> **Bring-your-own-resources is not supported.** If you already have a Cosmos account or AI Foundry account you want to reuse, point the SDK and Function app at them via the standard `COSMOS_DB_ENDPOINT` / `AI_FOUNDRY_ENDPOINT` environment variables and skip `azd up` entirely - you only need the Bicep when you want the toolkit to manage the accounts for you. Wiring BYO accounts into this template proved fragile (cross-RG scoping, account-already-exists races, partial RBAC) for low real-world value.
+> **Bring-your-own-resources is not supported.** If you already have a Cosmos account or AI Foundry account you want to reuse, point the SDK and Function app at them via the standard `COSMOS_DB_ENDPOINT` / `AI_FOUNDRY_ENDPOINT` environment variables (the Cosmos account needs the `EnableNoSQLVectorSearch` and `EnableNoSQLFullTextSearch` capabilities) and skip `azd up` entirely - you only need the Bicep when you want the toolkit to manage the accounts for you. Wiring BYO accounts into this template proved fragile (cross-RG scoping, account-already-exists races, partial RBAC) for low real-world value.
 
 ## Prereqs
 
@@ -46,17 +46,20 @@ azd up
 # ~10 min later: provisioned + function code deployed
 ```
 
-`azd` writes resource outputs to `.azure/<env-name>/.env`:
+`azd` writes resource outputs to `.azure/<env-name>/.env`, including:
 
 ```
 COSMOS_DB_ENDPOINT=...
 COSMOS_DB_DATABASE=ai_memory
 COSMOS_DB_MEMORIES_CONTAINER=memories
+COSMOS_DB_TURNS_CONTAINER=memories_turns
+COSMOS_DB_SUMMARIES_CONTAINER=memories_summaries
 AI_FOUNDRY_ENDPOINT=...
 AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-4o-mini
 FUNCTION_APP_NAME=func-...
 FUNCTION_APP_URL=https://func-....azurewebsites.net
+MEMORY_PROCESSOR_OWNER=durable
 ```
 
 Source it before running samples or tests:
@@ -67,13 +70,13 @@ set -a && . ./.azure/memorytoolkit-dev/.env && set +a
 
 ## SDK-only mode (skip the Function app)
 
-If you only ever plan to use the in-process `MemoryProcessor` and want to keep the Bicep footprint minimal - no Function app, no Storage account, no App Insights, no Log Analytics:
+If you only ever plan to use `InProcessProcessor` and want to keep the Bicep footprint minimal - no Function app, no Storage account, no App Insights, no Log Analytics, no `leases` or `counter` container:
 
 ```bash
 azd env new memorytoolkit-sdkonly
 azd env set AZURE_LOCATION eastus2
 azd env set DEPLOY_FUNCTION_APP false
-azd provision   # skips Function app, Storage, App Insights, Log Analytics, storage RBAC
+azd provision   # skips Function app, Storage, App Insights, Log Analytics, storage RBAC, leases + counter containers
 ```
 
 > Use **`azd provision`** (not `azd up`) for SDK-only. `azd up` always invokes `azd deploy --all`, which looks for a resource tagged `azd-service-name: function_app`. With the Function app turned off there is no such resource and the deploy step fails. `azd provision` runs Bicep without the deploy step.
@@ -83,6 +86,8 @@ When `DEPLOY_FUNCTION_APP=false`, the Bicep template automatically sets `MEMORY_
 ```bash
 azd env set MEMORY_PROCESSOR_OWNER inprocess
 ```
+
+The in-process auto-trigger counts turns in the `counter` container, which this mode does not create. Until it exists, each count fails with a warning and nothing triggers; `create_memory_store()` creates it.
 
 ## Model / deployment names
 
@@ -96,7 +101,7 @@ Two concepts kept separate:
 Override either before `azd up`:
 
 ```bash
-# Use a different catalog model with the default deployment name
+# Use a different catalog model with the default deployment name (also set its version, below)
 azd env set AI_FOUNDRY_CHAT_MODEL_NAME gpt-4o
 
 # Or pin a custom deployment name (existing or to-be-created)
@@ -105,6 +110,8 @@ azd env set AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME my-prod-embed
 ```
 
 The `*_DEPLOYMENT_NAME` value is what the SDK and Function app pass as the `model=` argument to the Azure OpenAI client at runtime.
+
+The model versions are pinned in `infra/modules/ai-foundry.bicep` (`chatModelVersion` is `2024-07-18`, `embeddingModelVersion` is `1`), so a different model also needs its version set there. A newer model can also need a newer API version: `azd env set AZURE_OPENAI_API_VERSION <version>` (default `2024-12-01-preview`).
 
 ### Model capacity
 
@@ -127,16 +134,21 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact extraction every N turns within a `(user_id, thread_id)`. Reconcile and procedure learning run on multiples of it (see `DEDUP_EVERY_N`). `0` disables all three. |
 | `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run reconcile (fold duplicate facts, combine facts about one specific thing, resolve contradictions) every Nth fact-extraction, so it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns. Procedure learning is chained after it (unless `PROCEDURAL_SYNTHESIS_AUTO` is `false`). `0` disables both. |
 | `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
-| `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Maximum number of change-feed items processed per orchestration batch. At least 1; a lower value falls back to `20`. |
-| `DEDUP_POOL_SIZE` | `dedupPoolSize` | `50` | The `n` of the automatic reconcile: the most new facts its duplicate pass checks per run (each costs a model call; the rest wait for the next run) and the size of its contradiction pool. `1`-`500`. |
+| `EPISODE_EVAL_EVERY_N` | `episodeEvalEveryN` | `4` | Check a thread's open episode for a boundary every N turns within a `(user_id, thread_id)`. `0` disables episodic memory. |
+| `EPISODE_IDLE_GAP_SECONDS` | `episodeIdleGapSeconds` | `1800` | A gap longer than this between two consecutive turns closes the open episode. |
+| `EPISODE_TOPIC_DRIFT` | `episodeTopicDrift` | `0` | Cosine distance from the open episode's centroid past which a new turn closes it. `0` turns drift detection off, leaving the idle gap and the size cap. |
+| `EPISODE_MAX_TURNS` | `episodeMaxTurns` | `40` | An open episode is closed once it reaches this many turns. |
+| `EPISODE_MIN_TURNS` | `episodeMinTurns` | `2` | Fewest turns before an idle gap or topic drift may close an episode. |
+| `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Newest items a summary run reads: turns for a thread summary, new memories per thread for a user summary. Extraction is not capped by it; it reads every turn since its last successful run. At least 1; a lower value falls back to `20`. |
+| `DEDUP_POOL_SIZE` | `dedupPoolSize` | `50` | The `n` of the automatic reconcile: the most new facts its duplicate pass checks per run (each one with close neighbours costs a model call; facts beyond `n` wait for the next run) and the size of its contradiction pool. `1`-`500`. |
 | `ACTIVITY_TIME_BUDGET_SECONDS` | `activityTimeBudgetSeconds` | `240` | Seconds a reconcile or procedure-learning activity keeps starting model calls. It then saves what it finished and the next run continues from its cursor. At least `30`; keep it below the function app timeout (30 minutes by default on Flex Consumption). |
 | `MEMORY_PROCESSOR_OWNER` | `memoryProcessorOwner` | `durable` | Backend that owns processing. `durable` = this function-app fleet owns it; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing instead. |
 
 The Function-app defaults match the SDK in-process defaults so behavior is consistent across backends. The Function-app fleet pays real per-turn LLM cost on every orchestrator invocation; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive production traffic.
 
-`PROCEDURAL_SYNTHESIS_AUTO` (`true`) and `AMT_EXTRACT_MEMORIES_PROMPT` are Function-app settings that are not Bicep parameters, so the code defaults apply. Set them with `az functionapp config appsettings set`, or add them to `infra/modules/functions.bicep` so `azd up` keeps them. See [`Docs/operations.md`](../Docs/operations.md#reconcile-procedure-and-extraction-knobs).
+`PROCEDURAL_SYNTHESIS_AUTO` (`true`) and `AMT_EXTRACT_MEMORIES_PROMPT` (`extract_memories-v3.prompty`) are Function-app settings that are not Bicep parameters, so the code defaults apply. Set them with `az functionapp config appsettings set`, or add them to `infra/modules/functions.bicep` so `azd up` keeps them. See [`Docs/operations.md`](../Docs/operations.md#reconcile-procedure-and-extraction-knobs).
 
-Set any value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:
+Set any `*_EVERY_N` value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:
 
 ```bash
 azd env set THREAD_SUMMARY_EVERY_N 8
@@ -162,7 +174,7 @@ All Storage roles are skipped when `DEPLOY_FUNCTION_APP=false` (no Storage accou
 
 ## Cleanup
 
-For a same-name re-deploy, the simplest path is `azd down --purge` followed by `azd up`. `--purge` instructs `azd` to skip the Cosmos / AI Foundry soft-delete window so the names are free to reuse immediately.
+For a same-name re-deploy, the simplest path is `azd down --purge` followed by `azd up`. `--purge` instructs `azd` to skip the AI Foundry / Log Analytics soft-delete window so the names are free to reuse immediately.
 
 ```bash
 azd down --purge
@@ -176,6 +188,8 @@ Generate a GitHub Actions or Azure Pipelines pipeline for the same flow:
 azd pipeline config
 ```
 
+If the pipeline signs in as a service principal, also run `azd env set AZURE_PRINCIPAL_TYPE ServicePrincipal`. The default, `User`, makes the AI Foundry and Storage role assignments fail with `PrincipalTypeMismatch`.
+
 ## Gotchas
 
 | Gotcha | Mitigation |
@@ -185,7 +199,7 @@ azd pipeline config
 | AI Foundry region constraints - many regions don't have all features / models | Default `AZURE_LOCATION=eastus2`; supported: `eastus2`, `swedencentral`, `westus3`, `eastus` |
 | Model deployment quota - fails if the subscription has zero quota for the model in the chosen region | Request quota or change region; error from Azure points to the right doc |
 | Cosmos free-tier limit (one per subscription) | Default is **serverless** - no idle cost, no free-tier conflict |
-| AAD propagation - RBAC takes 30–90s; the Function app may briefly 403 on its first invocation after deploy | Retry after a minute. `dependsOn` chains in Bicep ensure roles exist before the Function app starts |
+| AAD propagation - RBAC takes 30–90s; the Function app may briefly 403 on its first invocation after deploy | Retry after a minute |
 | Resource naming rules - Storage ≤24 chars lowercase, AI Foundry has its own | Naming uses `take(uniqueString(...), 13)` and `toLower()` to satisfy all rules |
 
 ## Architecture choice - AI Foundry
@@ -197,7 +211,7 @@ The Bicep uses a single `Microsoft.CognitiveServices/accounts` resource with `ki
 ```
 infra/
 ├── main.bicep                        # subscription-scoped entry point
-├── main.parameters.json              # binds ${AZURE_*} env vars to Bicep params
+├── main.parameters.json              # binds `azd env` variables to Bicep params
 ├── abbreviations.json                # standard Azure name prefixes
 └── modules/
     ├── identity.bicep                # User-assigned managed identity
@@ -209,4 +223,4 @@ infra/
     └── storage-rbac.bicep            # Blob/Queue/Table role assignments for the function-app UAMI
 ```
 
-> Runtime ops (TTL tuning, monitoring, scaling beyond defaults) live in [`Docs/operations.md`](../Docs/operations.md). This README owns everything related to `azd up` / Bicep / deployment.
+> Runtime ops (TTL tuning, reconcile, procedure and extraction settings) live in [`Docs/operations.md`](../Docs/operations.md). This README owns everything related to `azd up` / Bicep / deployment.

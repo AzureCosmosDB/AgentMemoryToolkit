@@ -5,9 +5,9 @@ Six concrete record types - :class:`TurnRecord`, :class:`ThreadSummaryRecord`,
 :class:`ProceduralRecord` - share :class:`MemoryRecordBase` and serialize
 to/from Cosmos DB-compatible dicts.
 
-``MemoryRecord`` is exported as the union type for return-signature use and
-also acts as a back-compat constructor that dispatches on the ``memory_type``
-field to the matching subclass.
+``MemoryRecord`` is a back-compat constructor, not a type: ``MemoryRecord(...)``
+builds the subclass that matches the ``memory_type`` (or ``type``) field, and
+``MemoryRecord.from_doc(...)`` parses a raw Cosmos document into one.
 """
 
 from __future__ import annotations
@@ -80,7 +80,12 @@ class ProcedureApplies(str, Enum):
 
 
 class ProcedureStatus(str, Enum):
-    """Lifecycle state of a procedure. Only ``active`` procedures are compiled/injected."""
+    """Lifecycle state of a procedure.
+
+    The procedure pass writes ``candidate`` or ``active``, derived from the evidence a procedure has;
+    ``deprecated`` and ``rejected`` are not written. Only ``active`` procedures are compiled by
+    ``build_procedural_context`` or shown by ``search_cosmos``.
+    """
 
     candidate = "candidate"
     active = "active"
@@ -89,7 +94,12 @@ class ProcedureStatus(str, Enum):
 
 
 class ProcedureSourceKind(str, Enum):
-    """Where a procedure came from - gates whether it may become active policy."""
+    """The kind of source a procedure's support comes from.
+
+    Set from the strongest evidence of an active procedure: ``explicit_user_instruction`` (taught or
+    endorsed), ``observed_user_preference`` (corrected or repeated) or ``episode_distillation``
+    (practiced). A candidate is ``agent_inference``; the other values are not set by the procedure pass.
+    """
 
     explicit_user_instruction = "explicit_user_instruction"
     observed_user_preference = "observed_user_preference"
@@ -100,7 +110,11 @@ class ProcedureSourceKind(str, Enum):
 
 
 class ProcedureSourceAuthority(str, Enum):
-    """How authoritative a procedure's source is, for conflict resolution and gating."""
+    """How authoritative a procedure's source is, set with its ``ProcedureSourceKind``.
+
+    ``high`` for taught or endorsed, ``medium`` for corrected, repeated or practiced, and ``low`` for a
+    candidate; ``mandatory`` is not set by the procedure pass.
+    """
 
     mandatory = "mandatory"
     high = "high"
@@ -169,6 +183,10 @@ class MemoryRecordBase(BaseModel):
     confidence: Optional[float] = None
     content_hash: Optional[str] = None
     superseded_by: Optional[str] = None
+    # Why a record was retired: ``contradict`` (a conflicting fact replaced it), ``duplicate`` (folded into a
+    # fact that states the same claim), ``combined`` (its details went into a combined fact) or ``procedure``
+    # (a directive or correction retired into the procedure that now holds it). ``update`` is accepted but
+    # nothing writes it.
     supersede_reason: Optional[Literal["duplicate", "contradict", "update", "combined", "procedure"]] = None
     superseded_at: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
@@ -640,6 +658,11 @@ class ProceduralRecord(MemoryRecordBase):
     ``status`` from them. ``applies`` separates standing rules for nearly every
     interaction (compiled by ``build_procedural_context``) from situational ones
     (matched to the task at hand).
+
+    The ``id`` starts with ``proc_`` and ``version`` is a positive integer (the procedure pass bumps it
+    each time it revises the procedure). A ``skill`` needs at least two ``steps``. ``valid_until`` keeps
+    only a leading ``YYYY-MM-DD`` date; anything else becomes ``None``, meaning no known end.
+    ``utility_score`` is clamped to 0.0-1.0.
     """
 
     memory_type: Literal[MemoryType.procedural] = Field(  # type: ignore[assignment]

@@ -73,10 +73,10 @@ param azureOpenAiApiVersion string
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int
 
-@description('Run fact / episodic / procedural extraction every N turns within a (user_id, thread_id). 0 = disabled.')
+@description('Run fact extraction every N turns within a (user_id, thread_id); reconcile and procedure learning run on multiples of it. 0 = disabled (all three).')
 param factExtractionEveryN int
 
-@description('Run dedup once per N fact-extraction batches. Effective cadence = factExtractionEveryN * dedupEveryN turns.')
+@description('Once per N fact extractions, run reconcile, then procedure learning. Effective cadence = factExtractionEveryN * dedupEveryN turns. 0 = disabled.')
 param dedupEveryN int
 
 @description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
@@ -97,7 +97,7 @@ param episodeMaxTurns int
 @description('Minimum turns before a natural (idle/drift) boundary may close an episode.')
 param episodeMinTurns int
 
-@description('Maximum number of change-feed items processed per orchestration batch.')
+@description('Newest items a summary run reads (turns for a thread summary, new memories per thread for a user summary). Extraction is not capped by it. At least 1; a lower value falls back to 20.')
 param maxBatchSize int
 
 @description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run and the size of its contradiction pool.')
@@ -170,8 +170,8 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-// Deployment container used by Flex Consumption when WEBSITE_RUN_FROM_PACKAGE
-// flow falls back; harmless to pre-create.
+// Blob container Flex Consumption deploys the app package to
+// (functionAppConfig.deployment.storage below).
 resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
   parent: storage
   name: 'default'

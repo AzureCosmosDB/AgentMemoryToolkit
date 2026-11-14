@@ -4,7 +4,7 @@ A prompt that takes context (``extract_memories-v3``) sees, beside the new turns
 from, the turns just before them, the thread summary when it was written before them, and the
 user's stored facts nearest them. The context lets the model resolve references ("yes, do
 that"), keep the rationale a new turn points at, and skip what is already stored; facts still
-come only from the new turns. Each part is bounded, and each part predates the new turns, so
+come only from the new turns. Each part is bounded, and none is dated after the new turns, so
 extracting an old conversation never shows the model what came after it. Every earlier turn, the
 summary and every stored fact take one line (see ``one_line``), so that nothing in them can start
 a line of the prompt.
@@ -36,7 +36,8 @@ QUERY_TURN_MAX_CHARS = 1500
 QUERY_MAX_CHARS = 6000
 KNOWN_FACT_MAX_CHARS = 600
 
-# The fields a v3 answer gives each fact beyond the v2 ones; ``FactRecord`` normalizes them.
+# The fields a v3 answer gives each fact beyond the v2 ones, apart from ``source_turn_ids`` (resolved to turn
+# ids by ``ground_fact_sources``); ``FactRecord`` normalizes them.
 STRUCTURED_FACT_FIELDS = ("assertion", "subject", "attribute", "entities")
 
 
@@ -106,8 +107,8 @@ def previous_turns_query(
     before that second, as the earlier turns of the same session are. Turns are picked by event
     time, not by write time (``_ts``), which the "extracted" stamp rewrites for a whole batch at
     once. Cosmos orders by one field without a composite index, so turns that share an event time
-    are cut off at the limit in no particular order; ``prior_turns`` puts what comes back in write
-    order.
+    are cut off at the limit in no particular order; ``prior_turns`` sorts what comes back by event
+    time, then write order.
     """
     earlier = "c.created_at < @before"
     if before_ts is not None:

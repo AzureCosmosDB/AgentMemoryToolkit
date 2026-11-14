@@ -1,9 +1,11 @@
 """Per-step threshold auto-trigger logic for the in-process SDK client.
 
-The toolkit's slim ``CosmosMemoryClient`` schedules extract / summary /
-reconcile / user-summary work after each ``push_to_cosmos`` by tracking
-per-thread and per-user counters in a Cosmos container, then firing the
-corresponding pipeline steps when a threshold is crossed.
+The toolkit's slim ``CosmosMemoryClient`` schedules extract / episode /
+summary / reconcile / procedural / user-summary work after each
+``push_to_cosmos`` by tracking per-thread and per-user counters in a Cosmos
+container, then firing the corresponding pipeline steps when a threshold is
+crossed. Procedural synthesis is chained after each reconcile unless
+``PROCEDURAL_SYNTHESIS_AUTO`` is false.
 
 This module owns that orchestration. Both the sync and async clients
 import :func:`maybe_trigger_steps`; the async variant lives in
@@ -93,7 +95,9 @@ def maybe_trigger_steps(
     turn_counts:
         Map of ``(user_id, thread_id) -> turns_pushed_in_this_batch``.
     thresholds:
-        Optional override for the thresholds module (used in tests).
+        Optional override of the cadence thresholds: a module exposing ``get_*`` callables, a mapping
+        keyed by env-style names (the client's ``cadence_thresholds``), or an object with matching
+        attributes. Anything it leaves out falls back to the environment and defaults.
     """
     if counter_container is None or not turn_counts:
         return

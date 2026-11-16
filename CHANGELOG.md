@@ -1,6 +1,6 @@
 ## Release History
 
-## [Unreleased]
+## [0.4.0b1] (2026-11-16)
 
 #### Features Added
 * **New extraction prompt.** `extract_memories-v3.prompty` is now the default. Set `AMT_EXTRACT_MEMORIES_PROMPT` to use an earlier prompt. See [PR:#51](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/51)

@@ -4,9 +4,13 @@ Advanced Search Patterns - Agent Memory Toolkit
 Demonstrates vector, hybrid, and filtered search patterns using Cosmos DB
 with AI Foundry embeddings.
 
+By default ``search_cosmos()`` searches facts, not raw turns. The ``fact`` seeds below are
+searchable at once; with the default in-process processor, the auto-trigger also
+extracts facts from the ``turn`` seeds as they are written, and those reach the results.
+
 Required environment variables:
     COSMOS_DB_ENDPOINT  – Azure Cosmos DB endpoint URL
-    AI_FOUNDRY_ENDPOINT – Azure AI Foundry endpoint URL (for embeddings)
+    AI_FOUNDRY_ENDPOINT – Azure AI Foundry endpoint URL (for embeddings and chat)
 """
 
 import os
@@ -21,6 +25,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def print_header(title: str) -> None:
     """Print a formatted section header."""
@@ -46,6 +51,7 @@ def print_results(results: list) -> None:
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------
+
 
 def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None:
     """Populate the store with sample memories for searching."""
@@ -87,6 +93,7 @@ def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None
 # ---------------------------------------------------------------------------
 # Search patterns
 # ---------------------------------------------------------------------------
+
 
 def vector_search(mem: CosmosMemoryClient, user_id: str) -> None:
     """Pattern 1 - Semantic-style query (natural language, low keyword overlap)."""
@@ -183,14 +190,13 @@ def top_k_tuning(mem: CosmosMemoryClient, user_id: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     cosmos_endpoint = os.environ.get("COSMOS_DB_ENDPOINT")
     ai_foundry_endpoint = os.environ.get("AI_FOUNDRY_ENDPOINT")
 
     if not cosmos_endpoint or not ai_foundry_endpoint:
-        raise SystemExit(
-            "Error: Set COSMOS_DB_ENDPOINT and AI_FOUNDRY_ENDPOINT environment variables."
-        )
+        raise SystemExit("Error: Set COSMOS_DB_ENDPOINT and AI_FOUNDRY_ENDPOINT environment variables.")
 
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,

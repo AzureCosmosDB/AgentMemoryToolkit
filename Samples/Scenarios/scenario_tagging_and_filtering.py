@@ -10,15 +10,16 @@ time; at read time you can filter retrieval with three composable predicates:
 
 Tags are stored in Cosmos as a JSON array on the memory document. They work
 across every memory type (``turn``, ``fact``, ``episodic``, ``procedural``,
-``summary``, ``user_summary``) and compose freely with semantic / hybrid
+``thread_summary``, ``user_summary``) and compose freely with semantic / hybrid
 search and the other structural filters (``user_id``, ``thread_id``,
-``memory_type`` …).
+``memory_types`` …).
 
 Required environment variables:
     COSMOS_DB_ENDPOINT   – Azure Cosmos DB endpoint URL
     AI_FOUNDRY_ENDPOINT  – Azure AI Foundry endpoint URL (for embeddings)
     AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME – embedding model deployment name
 """
+
 from __future__ import annotations
 
 import os
@@ -63,20 +64,15 @@ def main() -> None:
     print_section("Seeding memories with tags")
     seeds = [
         # (memory_type, content, tags)
-        ("fact",       "User prefers Python over Java for backend work",
-         ["preference", "language", "work"]),
-        ("fact",       "User is allergic to peanuts",
-         ["preference", "diet", "health", "important"]),
-        ("fact",       "User lives in Seattle, WA",
-         ["profile", "location"]),
-        ("episodic",   "Last Friday the user shipped a Cosmos-backed search service",
-         ["work", "milestone"]),
-        ("episodic",   "User attended PyCon 2024 in Pittsburgh",
-         ["work", "travel", "conference"]),
-        ("procedural", "When the user says 'deploy', run `azd up` and tail the logs",
-         ["workflow", "ops"]),
-        ("procedural", "Always confirm before purging Cosmos containers",
-         ["workflow", "ops", "important"]),
+        ("fact", "User prefers Python over Java for backend work", ["preference", "language", "work"]),
+        ("fact", "User is allergic to peanuts", ["preference", "diet", "health", "important"]),
+        ("fact", "User lives in Seattle, WA", ["profile", "location"]),
+        ("episodic", "Last Friday the user shipped a Cosmos-backed search service", ["work", "milestone"]),
+        ("episodic", "User attended PyCon 2024 in Pittsburgh", ["work", "travel", "conference"]),
+        # Procedural memories are learned by synthesize_procedural(), not written by hand,
+        # so these standing rules are seeded as facts.
+        ("fact", "When the user says 'deploy', run `azd up` and tail the logs", ["workflow", "ops"]),
+        ("fact", "Always confirm before purging Cosmos containers", ["workflow", "ops", "important"]),
     ]
     for mem_type, content, tags in seeds:
         client.upsert_memory(
@@ -99,7 +95,7 @@ def main() -> None:
         tags_all=["workflow", "important"],
     )
     print_results(results)
-    # Expected: only the "Always confirm before purging" procedural memory.
+    # Expected: only the "Always confirm before purging" fact.
 
     # ------------------------------------------------------------------
     # 3. OR filter: tags_any=[...] - any listed tag may match
@@ -115,30 +111,32 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 4. NOT filter: exclude_tags=[...] - drop anything carrying these tags
     # ------------------------------------------------------------------
-    print_section("NOT filter - exclude_tags=['ops']  (memory_types=['procedural'])")
+    print_section("NOT filter - exclude_tags=['ops']  (memory_types=['fact'])")
     results = client.get_memories(
         user_id=user_id,
-        memory_types=["procedural"],
+        memory_types=["fact"],
         exclude_tags=["ops"],
     )
     print_results(results)
-    # Expected: empty - both procedural memories carry the 'ops' tag.
+    # Expected: the three facts without the 'ops' tag; both 'ops' facts are dropped.
 
     # ------------------------------------------------------------------
     # 5. Combine tag filters with semantic search
     #    search_cosmos() runs vector similarity against search_terms and
-    #    composes naturally with structural / tag filters.
+    #    composes naturally with structural / tag filters. It searches facts;
+    #    include_episodes=True adds episodes.
     # ------------------------------------------------------------------
     print_section("Semantic + tag filter - search_terms='shipping a service' tags_all=['work']")
     results = client.search_cosmos(
         search_terms="shipping a service",
         user_id=user_id,
         tags_all=["work"],
+        include_episodes=True,
         top_k=5,
     )
     print_results(results)
-    # Expected: ranked by vector similarity but constrained to memories
-    # tagged 'work'.
+    # Expected: ranked by relevance to the query but constrained to memories
+    # tagged 'work' (the Python fact and both episodes).
 
     # ------------------------------------------------------------------
     # 6. Compose AND + NOT filters across types

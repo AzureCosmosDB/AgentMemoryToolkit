@@ -258,8 +258,8 @@ class TestExtractMemoriesOrchestrator:
                 {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
                 {"fact_count": 2, "episodic_count": 0, "updated_count": 0},
                 {
-                    "fact": {"kept": 0, "merged": 1, "contradicted": 0},
-                    "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
+                    "fact": {"kept": 0, "merged": 1, "conflicts": 0},
+                    "episodic": {"kept": 1, "merged": 0, "conflicts": 0},
                 },
                 {"status": "synthesized", "version": 3},
             ],
@@ -273,8 +273,8 @@ class TestExtractMemoriesOrchestrator:
         ]
         assert ctx._yielded_sub_orchestrators[0][2] == {"user_id": "u1", "force": False}
         assert result["reconciled"] == {
-            "fact": {"kept": 0, "merged": 1, "contradicted": 0},
-            "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
+            "fact": {"kept": 0, "merged": 1, "conflicts": 0},
+            "episodic": {"kept": 1, "merged": 0, "conflicts": 0},
         }
         assert result["procedural"] == {"status": "synthesized", "version": 3}
 
@@ -300,8 +300,8 @@ class TestExtractMemoriesOrchestrator:
         # Yield 4: SynthesizeProceduralOrchestrator - throw an exception
         gen.send(
             {
-                "fact": {"kept": 0, "merged": 1, "contradicted": 0},
-                "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
+                "fact": {"kept": 0, "merged": 1, "conflicts": 0},
+                "episodic": {"kept": 1, "merged": 0, "conflicts": 0},
             }
         )
         try:
@@ -313,8 +313,8 @@ class TestExtractMemoriesOrchestrator:
 
         assert result["persisted"] is True
         assert result["reconciled"] == {
-            "fact": {"kept": 0, "merged": 1, "contradicted": 0},
-            "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
+            "fact": {"kept": 0, "merged": 1, "conflicts": 0},
+            "episodic": {"kept": 1, "merged": 0, "conflicts": 0},
         }
         assert result["procedural"] is None
 
@@ -423,24 +423,40 @@ class TestExtractMemoryActivities:
     def test_em_reconcile_memories_reconciles_fact_and_episodic(self):
         pipeline = MagicMock()
         pipeline.reconcile_memories.side_effect = [
-            {"kept": 2, "merged": 1, "contradicted": 0},
-            {"kept": 1, "merged": 0, "contradicted": 0},
+            {"kept": 2, "merged": 1, "conflicts": 0},
+            {"kept": 1, "merged": 0, "conflicts": 0},
         ]
 
         with (
             patch.object(em_mod, "get_pipeline", return_value=pipeline),
             patch("azure.cosmos.agent_memory.thresholds.get_dedup_pool_size", return_value=17),
+            patch.object(em_mod.config, "get_activity_time_budget_seconds", return_value=45),
+            patch.object(em_mod.time, "monotonic", return_value=1000.0),
         ):
             result = em_mod.em_ReconcileMemories({"user_id": "u1"})
 
+        # Both passes share one deadline: the activity's time budget from when it started.
         assert pipeline.reconcile_memories.call_args_list == [
-            call(user_id="u1", n=17, memory_type="fact"),
-            call(user_id="u1", n=17, memory_type="episodic"),
+            call(user_id="u1", n=17, memory_type="fact", deadline=1045.0),
+            call(user_id="u1", n=17, memory_type="episodic", deadline=1045.0),
         ]
         assert result == {
-            "fact": {"kept": 2, "merged": 1, "contradicted": 0},
-            "episodic": {"kept": 1, "merged": 0, "contradicted": 0},
+            "fact": {"kept": 2, "merged": 1, "conflicts": 0},
+            "episodic": {"kept": 1, "merged": 0, "conflicts": 0},
         }
+
+    def test_em_reconcile_memories_budget_comes_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("ACTIVITY_TIME_BUDGET_SECONDS", "90")
+        pipeline = MagicMock()
+        pipeline.reconcile_memories.return_value = {}
+
+        with (
+            patch.object(em_mod, "get_pipeline", return_value=pipeline),
+            patch.object(em_mod.time, "monotonic", return_value=10.0),
+        ):
+            em_mod.em_ReconcileMemories({"user_id": "u1"})
+
+        assert {c.kwargs["deadline"] for c in pipeline.reconcile_memories.call_args_list} == {100.0}
 
     def test_em_advance_extract_watermark_stamps_counter(self):
         import asyncio

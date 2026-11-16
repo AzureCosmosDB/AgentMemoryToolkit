@@ -6,6 +6,7 @@ sibling Azure Function app handles summarization via the Cosmos change feed.
 
 See ``scenario_remote_processor.py`` for the prerequisites and behavior notes.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -59,9 +60,7 @@ async def main() -> None:
 
         # Optional: poll until the function app produces a summary. RU-costly.
         print("\nWaiting for the function app to produce a summary...")
-        ok = await client.process_now_and_wait(
-            user_id=user_id, thread_id=thread_id, timeout=60.0
-        )
+        ok = await client.process_now_and_wait(user_id=user_id, thread_id=thread_id, timeout=60.0)
         print(f"Summary available: {ok}")
     finally:
         await client.close()

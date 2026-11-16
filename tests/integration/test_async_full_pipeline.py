@@ -28,6 +28,21 @@ import pytest
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from tests.conftest import INTEGRATION_ENABLED
 
+# What ``reconcile`` returns: the facts checked that stay active (``kept``), the duplicates folded (``merged``),
+# the conflicting pairs linked (``conflicts``), and the pass's other counts, including the facts combined into one.
+RECONCILE_KEYS = {
+    "kept",
+    "merged",
+    "conflicts",
+    "checked",
+    "compared",
+    "vetoed",
+    "combined",
+    "synthesized",
+    "combine_groups",
+    "combine_failed",
+}
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -206,8 +221,8 @@ class TestAsyncEndToEnd:
 
             reconcile_stats = await mem.reconcile(user_id=unique_user_id)
             assert isinstance(reconcile_stats, dict)
-            assert {"kept", "merged", "contradicted"} <= set(reconcile_stats), (
-                f"reconcile should return kept/merged/contradicted, got {reconcile_stats}"
+            assert RECONCILE_KEYS <= set(reconcile_stats), (
+                f"reconcile should return the duplicate, combine and conflict counts, got {reconcile_stats}"
             )
 
             results = await mem.search_cosmos(

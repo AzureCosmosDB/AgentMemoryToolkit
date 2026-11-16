@@ -3,7 +3,7 @@ azure-functions
 azure-functions-durable
 
 azure-cosmos-agent-memory==0.3.0b2
-azure-cosmos>=4.16.0
+azure-cosmos>=4.16.3
 azure-identity>=1.20
 
 # LLM + prompty (used transitively by azure.cosmos.agent_memory.services.pipeline)

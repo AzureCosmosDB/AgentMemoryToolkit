@@ -2,7 +2,7 @@
 
 Runs ``CosmosMemoryClient.generate_user_summary(...)`` which synthesises
 a single user profile from per-thread summaries and extracted facts -
-again, all in-process via the shared ProcessingPipeline.
+again, all in-process via the shared PipelineService.
 
 Required env vars (.env supported):
 
@@ -95,8 +95,9 @@ def main() -> None:
     # ---------- generate user summary across all threads ----------
     _banner("User profile - synthesis across all 3 threads")
     doc = mem.generate_user_summary(user_id=user_id, thread_ids=[t1, t2, t3])
-    print(f"id           : {doc['id']}")
-    print(f"source_count : {doc.get('metadata', {}).get('source_count')}")
+    print(f"id                  : {doc['id']}")
+    print(f"source_thread_count : {doc.get('metadata', {}).get('source_thread_count')}")
+    print(f"source_memory_count : {doc.get('metadata', {}).get('source_memory_count')}")
     print("structured profile:")
     print(json.dumps(doc.get("metadata", {}).get("structured_summary"), indent=2))
 

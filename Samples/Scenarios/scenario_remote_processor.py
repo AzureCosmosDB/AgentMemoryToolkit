@@ -2,15 +2,16 @@
 
 This sample shows how to wire :class:`DurableFunctionProcessor` so the SDK only
 writes raw turns to Cosmos DB, and a sibling Azure Function app (deployed via
-``azd up`` with the full profile) picks them up from the Cosmos change feed and
-produces summaries / facts / user profiles asynchronously.
+``azd up``) picks them up from the Cosmos change feed and produces
+summaries / facts / user profiles asynchronously.
 
 Prerequisites
 -------------
 * ``COSMOS_DB_ENDPOINT`` (and ``COSMOS_DB_KEY`` *or* a logged-in identity) set.
 * The sibling function app deployed and running, configured against the same
-  Cosmos account / database / container, with at least one threshold > 0
-  (e.g. ``THREAD_SUMMARY_EVERY_N=4``).
+  Cosmos account / database / container, with ``MEMORY_PROCESSOR_OWNER=durable``
+  (``azd up`` sets it) and ``THREAD_SUMMARY_EVERY_N`` no larger than the number of
+  turns written below (the default is 10, so set e.g. ``THREAD_SUMMARY_EVERY_N=4``).
 
 Behavior notes
 --------------
@@ -19,6 +20,7 @@ Behavior notes
 * :meth:`CosmosMemoryClient.process_now_and_wait` *polls* Cosmos for the resulting
   summary; that costs RUs so it's opt-in and intended for demos / tests.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,7 +30,6 @@ from dotenv import load_dotenv
 from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcessor
 
 load_dotenv()
-
 
 
 def main() -> None:

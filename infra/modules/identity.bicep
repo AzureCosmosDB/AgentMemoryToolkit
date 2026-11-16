@@ -1,5 +1,5 @@
 // User-assigned managed identity used by the Function app and granted RBAC
-// to Cosmos, AI Foundry, and Storage by rbac.bicep.
+// to Cosmos, AI Foundry, and Storage by the *-rbac.bicep modules.
 
 @description('Name of the UAMI to create.')
 param name string

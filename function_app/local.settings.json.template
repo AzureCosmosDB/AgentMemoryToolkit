@@ -14,28 +14,51 @@
     "COSMOS_DB_LEASE_CONTAINER": "leases",
     "COSMOS_DB_COUNTERS_CONTAINER": "counter",
 
-    "// --- Azure AI Foundry / Azure OpenAI (MI auth) ---": "",
+    "// --- Azure AI Foundry / Azure OpenAI (MI auth). Use the account-level endpoint, not a project-scoped Foundry URL. ---": "",
     "AI_FOUNDRY_ENDPOINT": "https://<foundry>.openai.azure.com/",
     "AI_FOUNDRY_CHAT_DEPLOYMENT_NAME": "gpt-4o-mini",
     "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME": "text-embedding-3-large",
+    "AI_FOUNDRY_EMBEDDING_DIMENSIONS": "1536",
+
+    "// --- Optional: pin the Azure OpenAI REST API version for chat and embeddings. Blank keeps the default (2024-12-01-preview). ---": "",
+    "AZURE_OPENAI_API_VERSION": "",
 
     "// --- Threshold knobs (set to 0 to disable that orchestrator) ---": "",
     "THREAD_SUMMARY_EVERY_N": "10",
-    "FACT_EXTRACTION_EVERY_N": "1",
+    "FACT_EXTRACTION_EVERY_N": "2",
     "DEDUP_EVERY_N": "5",
     "USER_SUMMARY_EVERY_N": "20",
+
+    "// --- Episodic memory (boundary-based segmentation). EPISODE_EVAL_EVERY_N=0 disables it. ---": "",
+    "EPISODE_EVAL_EVERY_N": "4",
+    "EPISODE_IDLE_GAP_SECONDS": "1800",
+    "EPISODE_TOPIC_DRIFT": "0",
+    "EPISODE_MAX_TURNS": "40",
+    "EPISODE_MIN_TURNS": "2",
 
     "// --- Processor ownership: 'durable' (FA owns) or 'inprocess' (SDK owns). FA skips processing if not set to 'durable' to avoid double-fire when an SDK install runs against the same Cosmos. ---": "",
     "MEMORY_PROCESSOR_OWNER": "durable",
 
-    "// --- Batch knob ---": "",
+    "// --- Batch knob: the newest items a summary run reads (at least 1; a lower value falls back to 20) ---": "",
     "MAX_BATCH_SIZE": "20",
+
+    "// --- Reconcile: DEDUP_POOL_SIZE is the most facts one run checks (max 500). ---": "",
+    "DEDUP_POOL_SIZE": "50",
+
+    "// --- Learn procedures after each reconcile. false turns it off. ---": "",
+    "PROCEDURAL_SYNTHESIS_AUTO": "true",
+
+    "// --- Seconds a reconcile or procedure activity keeps starting model calls (minimum 30). Keep it below functionTimeout; the next run continues from the saved cursor. ---": "",
+    "ACTIVITY_TIME_BUDGET_SECONDS": "240",
 
     "// --- UserSummaryOrchestrator waits this long (seconds) for extraction to persist the first memories of a brand-new user before skipping the cadence; polls every interval. ---": "",
     "USER_SUMMARY_WAIT_SECONDS": "120",
     "USER_SUMMARY_WAIT_INTERVAL_SECONDS": "10",
 
-    "// --- Turn vector search: embed raw turns on write so search_turns() works. Turns container is always vector-indexed; default false. ---": "",
+    "// --- Optional: fact-extraction prompt. Blank keeps extract_memories-v3.prompty; extract_memories-v2.prompty and extract_memories.prompty select the earlier prompts. ---": "",
+    "AMT_EXTRACT_MEMORIES_PROMPT": "",
+
+    "// --- Turn vector search: the SDK embeds raw turns when it writes them, so search_turns() works. Set this in the SDK's .env; the Function App does not read it. Default false. ---": "",
     "ENABLE_TURN_EMBEDDINGS": "false"
   }
 }

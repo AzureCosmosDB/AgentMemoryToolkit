@@ -7,7 +7,8 @@ import logging
 import pytest
 
 from azure.cosmos.agent_memory.exceptions import LLMError
-from azure.cosmos.agent_memory.services._pipeline_helpers import parse_llm_json
+from azure.cosmos.agent_memory.logging import describe_exception
+from azure.cosmos.agent_memory.services._pipeline_helpers import is_retryable_llm_error, parse_llm_json
 
 _HELPER_LOGGER = "azure.cosmos.agent_memory.services._pipeline_helpers"
 
@@ -76,6 +77,22 @@ class TestTruncationDetectionPreserved:
             parse_llm_json('{"facts": [], "note": "unterminated')
         assert "TRUNCATED" in str(exc.value)
 
+    @pytest.mark.parametrize(
+        "reply",
+        ['{"facts": [{"text": "the user prefers', '{"facts": [], "note": "unterminated'],
+        ids=["unbalanced-braces", "unterminated-string"],
+    )
+    def test_a_truncated_reply_is_not_retryable_and_its_error_code_shows_in_a_log(self, reply: str) -> None:
+        # Asking again sends the same input and gets a reply cut off at the same place, so the batch that drew it is
+        # quarantined, not deferred to a run that fails the same way. describe_exception, which every log uses, leaves
+        # the message and its 'maxOutputTokens' advice out: the error code is what tells an operator what happened.
+        with pytest.raises(LLMError) as exc:
+            parse_llm_json(reply)
+        assert is_retryable_llm_error(exc.value) is False
+        assert exc.value.error_code == "output_truncated"
+        assert "code=output_truncated" in describe_exception(exc.value)
+        assert "maxOutputTokens" in str(exc.value)
+
 
 class TestGenuineErrors:
     def test_none_raises(self) -> None:
@@ -121,3 +138,23 @@ class TestNonObjectRoot:
     def test_scalar_string_root_raises(self) -> None:
         with pytest.raises(LLMError):
             parse_llm_json('"just a sentence"')
+
+
+_MODEL_TEXT = "zx-model-ana-prefers-window-seats-9902"
+
+
+class TestErrorTextHoldsNoModelOutput:
+    """The error names a position and size, never the response: it is logged and can reach Durable history."""
+
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            pytest.param(f'{{"facts": [{{"text": "{_MODEL_TEXT}"}}', "TRUNCATED", id="truncated"),
+            pytest.param(f'{{"facts": {_MODEL_TEXT}}}', "invalid JSON", id="invalid"),
+            pytest.param(f'["{_MODEL_TEXT}"]', "non-object JSON root", id="non-object-root"),
+        ],
+    )
+    def test_unparseable_model_output_stays_out_of_the_error(self, response: str, expected: str) -> None:
+        with pytest.raises(LLMError, match=expected) as exc:
+            parse_llm_json(response)
+        assert _MODEL_TEXT not in str(exc.value)

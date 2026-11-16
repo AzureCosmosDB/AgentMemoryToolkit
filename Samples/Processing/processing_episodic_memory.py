@@ -8,8 +8,8 @@ topic shift, or a max-size cap) - the caller never signals "session end". This
 sample writes a short single-topic conversation and calls
 ``CosmosMemoryClient.extract_episodes(..., flush=True)`` to finalize the open
 segment at the end of the conversation, prints the resulting episode shape,
-demonstrates blended retrieval with episodic results, and then cleans up all
-created records.
+demonstrates blended retrieval with episodic results, and then deletes the
+turns, memories and summaries it created.
 
 Required environment variables (.env supported via python-dotenv):
 
@@ -17,10 +17,11 @@ Required environment variables (.env supported via python-dotenv):
     COSMOS_DB_DATABASE
     COSMOS_DB_MEMORIES_CONTAINER
     AI_FOUNDRY_ENDPOINT
-    AI_FOUNDRY_API_KEY
     AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
     AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME
     AI_FOUNDRY_EMBEDDING_DIMENSIONS
+
+Optional: AI_FOUNDRY_API_KEY. Without it, AI Foundry calls use DefaultAzureCredential.
 
 Cosmos DB authentication uses DefaultAzureCredential. Do not pass a Cosmos DB
 key when local auth is disabled on the account.
@@ -146,7 +147,6 @@ def main() -> None:
         "COSMOS_DB_DATABASE",
         "COSMOS_DB_MEMORIES_CONTAINER",
         "AI_FOUNDRY_ENDPOINT",
-        "AI_FOUNDRY_API_KEY",
         "AI_FOUNDRY_CHAT_DEPLOYMENT_NAME",
         "AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME",
         "AI_FOUNDRY_EMBEDDING_DIMENSIONS",
@@ -161,7 +161,7 @@ def main() -> None:
         cosmos_database=os.environ["COSMOS_DB_DATABASE"],
         cosmos_container=os.environ["COSMOS_DB_MEMORIES_CONTAINER"],
         ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
-        ai_foundry_api_key=os.environ["AI_FOUNDRY_API_KEY"],
+        ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
         embedding_deployment_name=os.environ["AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME"],
         embedding_dimensions=int(os.environ["AI_FOUNDRY_EMBEDDING_DIMENSIONS"]),
         chat_deployment_name=os.environ["AI_FOUNDRY_CHAT_DEPLOYMENT_NAME"],

@@ -49,6 +49,7 @@ Your summary must cover all of the following that are present in the thread:
 - Speculation or hypotheticals, unless they were central to the discussion
 - Tangents that did not influence the outcome or decisions
 - Verbatim quotes, unless a specific phrasing is critically important
+- Never write a literal secret: passwords, passphrases, API keys, access tokens, connection strings, account keys, and private keys must never appear in any field, however short or ordinary the value, even when the thread contains them. Say that a credential was shared or used, never its value.
 
 ## Tone and Style
 - **Factual and neutral** - Do not editorialize, interpret intent, or add opinions

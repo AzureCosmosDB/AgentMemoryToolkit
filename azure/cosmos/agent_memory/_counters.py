@@ -8,12 +8,17 @@ Counter document shape::
 
     # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
     { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
+      "created_at": str, "updated_at": str,
       "last_batch_lsn": int|None, "last_batch_old_count": int,
+      "last_extract_count": int,   # only once the Function App has extracted
       "last_failure_at": str|None, "last_failure_reason": str|None,
       "last_owner": str|None }
 
     # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
-    { ... same fields ... }
+    { ... same fields, without "last_extract_count" ... }
+
+The counter container's default TTL (``COUNTER_TTL_SECONDS``) expires a counter 90 days after its
+last update.
 
 Unlike the FA-side helper, the SDK clients drive these counters without LSN
 replay protection because each ``push_to_cosmos()`` call is its own atomic
@@ -34,7 +39,7 @@ from typing import Any, Optional
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
 logger = get_logger(__name__)
 
@@ -121,8 +126,8 @@ def increment_counter_sync(
     on shared deployments. Stamps ``last_owner`` (advisory) when *owner*
     is provided.
 
-    Returns ``(0, 0)`` and logs a warning if the container is unreachable -
-    auto-trigger failures must never block the user's primary write path.
+    Returns ``(0, 0)`` and logs a warning if the increment fails (the container is unreachable, or
+    every retry conflicted) - auto-trigger failures must never block the user's primary write path.
     """
     partition_key = [user_id, thread_id]
 
@@ -310,7 +315,8 @@ def stamp_failure_sync(
     Uses Cosmos ``patch_item`` so only the failure fields are touched -
     concurrent counter increments cannot lose updates here. Failures are
     logged and swallowed; we never want failure-stamping itself to break
-    the user's write path.
+    the user's write path. ``reason`` is stored as given, so it must describe
+    the failure (``describe_exception``), never quote an exception's text.
     """
     partition_key = [user_id, thread_id]
     patch_ops = [
@@ -324,7 +330,7 @@ def stamp_failure_sync(
             patch_operations=patch_ops,
         )
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("stamp_failure_sync failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("stamp_failure_sync failed counter_id=%s: %s", counter_id, describe_exception(exc))
 
 
 async def stamp_failure_async(
@@ -347,7 +353,7 @@ async def stamp_failure_async(
             patch_operations=patch_ops,
         )
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("stamp_failure_async failed counter_id=%s: %s", counter_id, describe_exception(exc))
 
 
 __all__ = [

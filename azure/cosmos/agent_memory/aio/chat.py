@@ -19,8 +19,8 @@ from azure.cosmos.agent_memory.chat import (
     retry_delay,
     unsupported_param,
 )
-from azure.cosmos.agent_memory.exceptions import ConfigurationError
-from azure.cosmos.agent_memory.logging import get_logger
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, LLMError
+from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
 logger = get_logger(__name__)
 
@@ -163,8 +163,8 @@ class AsyncChatClient:
     ) -> str:
         """Call chat completions and return the response content string.
 
-        Retries on rate limit (429) and transient errors (500, 503) with
-        exponential backoff using ``asyncio.sleep``.
+        Retries on rate limit (429), transient errors (500, 503) and empty
+        replies, with exponential backoff using ``asyncio.sleep``.
 
         Any additional keyword arguments are forwarded directly to the OpenAI
         client - typically sourced from a prompty file's ``model.parameters``.
@@ -174,9 +174,10 @@ class AsyncChatClient:
         ConfigurationError
             If the endpoint or credentials are missing.
         LLMError
-            If the response has no choices or no content (model-side issue
-            the SDK does not surface as an exception).
-            openai.RateLimitError, openai.APIError
+            If the reply is still empty after the last retry, or the model returns
+            content filtering, a refusal, an unexpected tool-only response, or an
+            empty reply cut off at the output limit (``finish_reason="length"``).
+        openai.RateLimitError, openai.APIError
             Propagated from the SDK after retries are exhausted.
         """
         import openai
@@ -203,7 +204,26 @@ class AsyncChatClient:
                         usage.completion_tokens,
                         usage.total_tokens,
                     )
-                return extract_content(response, self._model)
+                content = extract_content(response, self._model)
+                if content.strip():
+                    return content
+
+                finish_reason = getattr(response.choices[0] if response.choices else None, "finish_reason", "unknown")
+                if attempt < max_retries - 1:
+                    delay = retry_delay(None, attempt, base_delay)
+                    logger.warning(
+                        "LLM returned empty content (model=%s, finish_reason=%s); retrying in %.1fs.",
+                        self._model,
+                        finish_reason,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                raise LLMError(
+                    f"LLM returned empty content after {attempt + 1} attempts "
+                    f"(model={self._model}, finish_reason={finish_reason})"
+                )
             except openai.RateLimitError as exc:
                 if attempt < max_retries - 1:
                     delay = retry_delay(exc, attempt, base_delay)
@@ -212,7 +232,7 @@ class AsyncChatClient:
                         attempt + 1,
                         max_retries,
                         delay,
-                        exc,
+                        describe_exception(exc),
                     )
                     await asyncio.sleep(delay)
                     attempt += 1
@@ -238,7 +258,7 @@ class AsyncChatClient:
                         attempt + 1,
                         max_retries,
                         delay,
-                        exc,
+                        describe_exception(exc),
                     )
                     await asyncio.sleep(delay)
                     attempt += 1

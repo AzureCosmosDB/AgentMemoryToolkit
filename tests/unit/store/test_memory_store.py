@@ -535,7 +535,7 @@ def test_search_with_episodic_and_thread_id_forces_cross_partition():
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
 
 
-def test_search_fact_only_with_thread_id_uses_partition_path():
+def test_search_fact_only_with_thread_id_filters_instead_of_using_partition_key():
     memories = MagicMock()
     memories.query_items.return_value = []
     embeddings = MagicMock()
@@ -549,9 +549,13 @@ def test_search_fact_only_with_thread_id_uses_partition_path():
         memory_types=["fact"],
     )
 
+    # A keyword query sent with a partition key comes back unranked (azure-sdk-for-python#42241), so the user and
+    # thread filters in the WHERE clause confine it instead.
     call_kwargs = memories.query_items.call_args.kwargs
-    assert call_kwargs.get("partition_key") == ["u1", "t1"]
-    assert "enable_cross_partition_query" not in call_kwargs
+    assert "partition_key" not in call_kwargs
+    assert call_kwargs["enable_cross_partition_query"] is True
+    assert "c.user_id = @user_id" in call_kwargs["query"]
+    assert "c.thread_id = @thread_id" in call_kwargs["query"]
 
 
 def test_add_turn_skips_embedding_by_default():
@@ -664,7 +668,7 @@ def test_search_summaries_requires_user_id():
         store.search_summaries(search_terms="x")
 
 
-def test_search_turns_scopes_to_single_partition_with_thread_id():
+def test_vector_only_search_turns_scopes_to_single_partition_with_thread_id():
     turns = MagicMock()
     turns.query_items.return_value = []
     embeddings = MagicMock()
@@ -674,11 +678,31 @@ def test_search_turns_scopes_to_single_partition_with_thread_id():
         embeddings_client=embeddings,
     )
 
+    # "hello" has no keywords, so the search ranks by vector alone and keeps its partition key.
     store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
 
     kwargs = turns.query_items.call_args.kwargs
     assert kwargs["partition_key"] == ["u1", "t1"]
     assert "enable_cross_partition_query" not in kwargs
+
+
+def test_keyword_search_turns_with_thread_id_filters_instead_of_using_partition_key():
+    turns = MagicMock()
+    turns.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(
+        containers=_containers(turns=turns),
+        embeddings_client=embeddings,
+    )
+
+    store.search_turns(search_terms="hotels in lisbon", user_id="u1", thread_id="t1")
+
+    kwargs = turns.query_items.call_args.kwargs
+    assert "partition_key" not in kwargs
+    assert kwargs["enable_cross_partition_query"] is True
+    assert "c.user_id = @user_id" in kwargs["query"]
+    assert "c.thread_id = @thread_id" in kwargs["query"]
 
 
 def test_search_turns_fans_out_across_partitions_without_thread_id():

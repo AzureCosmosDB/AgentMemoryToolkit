@@ -143,7 +143,7 @@ class TestMarkSupersededDoesNotMutate:
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
 
-        result = pipeline._mark_superseded(old_doc, "fact-2", reason="contradict")
+        result = pipeline._mark_superseded(old_doc, "fact-2", reason="duplicate")
 
         assert result is False
         assert old_doc == snapshot

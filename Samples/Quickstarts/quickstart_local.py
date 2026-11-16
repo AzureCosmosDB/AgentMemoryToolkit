@@ -13,12 +13,18 @@ def main():
     # --- Add memories ---
     mem.add_local(user_id="user1", role="user", content="I prefer dark mode.", memory_type="fact", thread_id="t1")
     mem.add_local(
-        user_id="user1", role="agent", content="Noted! I'll remember that.",
-        memory_type="turn", thread_id="t1",
+        user_id="user1",
+        role="agent",
+        content="Noted! I'll remember that.",
+        memory_type="turn",
+        thread_id="t1",
     )
     mem.add_local(
-        user_id="user2", role="user", content="My favorite language is Python.",
-        memory_type="fact", thread_id="t2",
+        user_id="user2",
+        role="user",
+        content="My favorite language is Python.",
+        memory_type="fact",
+        thread_id="t2",
     )
     print("✅ Added 3 memories\n")
 

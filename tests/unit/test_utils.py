@@ -17,6 +17,7 @@ from azure.cosmos.agent_memory._utils import (
     compute_content_hash,
     extract_keywords,
     normalize_ai_foundry_endpoint,
+    resolve_cosmos_preferred_locations,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
@@ -382,6 +383,35 @@ def test_build_cosmos_user_agent_suffixes_toolkit_behind_custom():
     assert result == f"MyApp/1.2.3 {COSMOS_USER_AGENT}"
     assert result.startswith("MyApp/1.2.3 ")
     assert result.endswith(COSMOS_USER_AGENT)
+
+
+# ---------------------------------------------------------------------------
+# Preferred-region helper
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cosmos_preferred_locations_prefers_explicit_argument(monkeypatch):
+    monkeypatch.setenv("COSMOS_DB_PREFERRED_REGIONS", "West US 2")
+    assert resolve_cosmos_preferred_locations("West US 3") == ["West US 3"]
+    assert resolve_cosmos_preferred_locations(["West US 3", "East US"]) == ["West US 3", "East US"]
+    assert resolve_cosmos_preferred_locations([]) == []
+
+
+def test_resolve_cosmos_preferred_locations_reads_the_environment_in_order(monkeypatch):
+    monkeypatch.setenv("COSMOS_DB_PREFERRED_REGIONS", "West US 3,West US 2")
+    assert resolve_cosmos_preferred_locations() == ["West US 3", "West US 2"]
+
+
+def test_resolve_cosmos_preferred_locations_defaults_to_the_account_order(monkeypatch):
+    # An empty list, not None: the Cosmos SDK iterates it when the first account read fails.
+    monkeypatch.delenv("COSMOS_DB_PREFERRED_REGIONS", raising=False)
+    assert resolve_cosmos_preferred_locations() == []
+
+
+def test_resolve_cosmos_preferred_locations_discards_blank_entries(monkeypatch):
+    monkeypatch.delenv("COSMOS_DB_PREFERRED_REGIONS", raising=False)
+    assert resolve_cosmos_preferred_locations(" , ,") == []
+    assert resolve_cosmos_preferred_locations("West US 3, ,") == ["West US 3"]
 
 
 class TestNormalizeCreatedAtIso:

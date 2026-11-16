@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from azure.cosmos.agent_memory.chat import ChatClient
-from azure.cosmos.agent_memory.exceptions import ConfigurationError
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, LLMError, OutputTruncatedError
+from azure.cosmos.agent_memory.logging import describe_exception
+from azure.cosmos.agent_memory.services._pipeline_helpers import is_retryable_llm_error
+
+MESSAGES = [{"role": "user", "content": "hi"}]
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -236,6 +241,112 @@ def test_generate_retryable_api_error_falls_back_without_retry_after(monkeypatch
 
     assert result == "recovered"
     assert sleeps == [1.6]
+
+
+# ---------------------------------------------------------------------------
+# generate() – empty and terminal replies
+# ---------------------------------------------------------------------------
+
+
+def _reply(content, *, finish_reason="stop", refusal=None, choices=True):
+    choice = SimpleNamespace(message=SimpleNamespace(content=content, refusal=refusal), finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice] if choices else [], usage=None)
+
+
+def _client_replying(*replies):
+    client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
+    create = MagicMock(side_effect=list(replies))
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    return client, create
+
+
+def test_generate_retries_on_empty_content(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.random.random", lambda: 0.0)
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.time.sleep", sleeps.append)
+    client, create = _client_replying(_reply(""), _reply('{"status": "recovered"}'))
+
+    result = client.generate(MESSAGES, max_retries=2, base_delay=0.01)
+
+    assert result == '{"status": "recovered"}'
+    assert create.call_count == 2
+    assert sleeps == [0.008]
+
+
+@pytest.mark.parametrize("shape", ["no-choices", "null-content", "empty-string", "whitespace"])
+def test_all_transient_empty_reply_shapes_share_the_retry_budget(shape):
+    content = {"null-content": None, "empty-string": "", "whitespace": "  "}.get(shape)
+    empty = _reply(content, choices=shape != "no-choices")
+    client, create = _client_replying(empty, _reply("recovered"))
+
+    assert client.generate(MESSAGES, max_retries=2, base_delay=0) == "recovered"
+    assert create.call_count == 2
+
+    create.reset_mock()
+    create.side_effect = None
+    create.return_value = empty
+    with pytest.raises(LLMError, match="empty content after 2 attempts"):
+        client.generate(MESSAGES, max_retries=2, base_delay=0)
+    assert create.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("reason", "content", "refusal", "code"),
+    [
+        ("content_filter", None, None, "content_filter"),
+        ("stop", None, "refused", "model_refusal"),
+        ("tool_calls", None, None, "unexpected_tool_response"),
+        ("tool_calls", "", None, "unexpected_tool_response"),
+        ("tool_calls", "  \n", None, "unexpected_tool_response"),
+        ("function_call", "", None, "unexpected_tool_response"),
+        ("length", None, None, "output_truncated"),
+        ("length", "", None, "output_truncated"),
+        ("length", "  \n", None, "output_truncated"),
+    ],
+)
+def test_terminal_empty_replies_are_not_retried(reason, content, refusal, code):
+    client, create = _client_replying(_reply(content, finish_reason=reason, refusal=refusal))
+
+    with pytest.raises(LLMError, match=code) as failure:
+        client.generate(MESSAGES, max_retries=3, base_delay=0)
+
+    assert create.call_count == 1
+    assert not is_retryable_llm_error(failure.value)
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"])
+def test_a_blank_reply_cut_off_at_the_output_limit_raises_the_output_truncated_error(content):
+    client, create = _client_replying(_reply(content, finish_reason="length"))
+
+    with pytest.raises(OutputTruncatedError, match="output_truncated") as failure:
+        client.generate(MESSAGES, max_retries=3, base_delay=0)
+
+    assert create.call_count == 1
+    assert failure.value.error_code == "output_truncated"
+    assert "code=output_truncated" in describe_exception(failure.value), "a log shows the code, never the message"
+
+
+def test_a_partial_reply_cut_off_at_the_output_limit_is_returned():
+    client, create = _client_replying(_reply('{"facts": [', finish_reason="length"))
+
+    assert client.generate(MESSAGES, max_retries=3, base_delay=0) == '{"facts": ['
+    assert create.call_count == 1
+
+
+def test_retry_warning_describes_the_error_without_its_message(monkeypatch, caplog):
+    import openai
+
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.time.sleep", lambda _: None)
+    client, _ = _client_replying(
+        openai.RateLimitError(message="quoted-model-text", response=MagicMock(status_code=429), body=None),
+        _reply("recovered"),
+    )
+
+    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.chat"):
+        client.generate(MESSAGES, max_retries=2, base_delay=0)
+
+    assert "RateLimitError" in caplog.text
+    assert "quoted-model-text" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

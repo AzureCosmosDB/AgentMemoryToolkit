@@ -26,33 +26,52 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# dedup.prompty - reconcile a pool of active facts
+# dedup_verify.prompty - one memory's relation to each of its nearest neighbours
+#
+# One entry per candidate label: the relation, and the details each side states
+# that the other lacks. A memory is retired only when it would lose nothing.
 # ---------------------------------------------------------------------------
-DEDUP_SCHEMA: dict[str, Any] = {
+_DEDUP_RELATIONS = [
+    "same_claim",
+    "seed_contains_candidate",
+    "candidate_contains_seed",
+    "partial_overlap",
+    "update",
+    "inconsistent",
+    "related",
+    "unrelated",
+]
+
+DEDUP_VERIFY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "contradicted_pairs": {
+        "candidates": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "winner_id": {"type": "string"},
-                    "loser_id": {"type": "string"},
-                    "reason": {"type": "string"},
+                    "label": {"type": "string"},
+                    "relation": {"type": "string", "enum": _DEDUP_RELATIONS},
+                    "seed_details_missing_from_candidate": {"type": "array", "items": {"type": "string"}},
+                    "candidate_details_missing_from_seed": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["winner_id", "loser_id", "reason"],
+                "required": [
+                    "label",
+                    "relation",
+                    "seed_details_missing_from_candidate",
+                    "candidate_details_missing_from_seed",
+                ],
                 "additionalProperties": False,
             },
         },
-        "kept_ids": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["contradicted_pairs", "kept_ids"],
+    "required": ["candidates"],
     "additionalProperties": False,
 }
 
 
 # ---------------------------------------------------------------------------
-# extract_memories.prompty - extract facts (user- or agent-sourced)
+# extract_memories.prompty and extract_memories-v2.prompty - extract facts (user- or agent-sourced)
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
     "type": "object",
@@ -93,6 +112,47 @@ EXTRACT_MEMORIES_SCHEMA: dict[str, Any] = {
     "properties": {
         "facts": {"type": "array", "items": _FACT_ITEM},
     },
+    "required": ["facts"],
+    "additionalProperties": False,
+}
+
+# extract_memories-v3.prompty - the v2 fact plus how it was asserted, what it is about, the
+# names it mentions and the turns it came from. Keys are in the order the model should write
+# them: strict mode emits properties in schema order, so each field follows the ones it depends on.
+_FACT_ITEM_V3_ORDER = (
+    "text",
+    "category",
+    "source",
+    "assertion",
+    "subject",
+    "attribute",
+    "entities",
+    "confidence",
+    "salience",
+    "temporal_context",
+    "tags",
+    "source_turn_ids",
+)
+_FACT_ITEM_V3_NEW = {
+    "assertion": {
+        "type": "string",
+        "enum": ["stated", "decided", "suggested", "observed", "directive", "correction"],
+    },
+    "subject": {"type": "string"},
+    "attribute": {"type": ["string", "null"]},
+    "entities": {"type": "array", "items": {"type": "string"}},
+    "source_turn_ids": {"type": "array", "items": {"type": "string"}},
+}
+_FACT_ITEM_V3 = {
+    "type": "object",
+    "properties": {key: {**_FACT_ITEM["properties"], **_FACT_ITEM_V3_NEW}[key] for key in _FACT_ITEM_V3_ORDER},
+    "required": list(_FACT_ITEM_V3_ORDER),
+    "additionalProperties": False,
+}
+
+EXTRACT_MEMORIES_V3_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"facts": {"type": "array", "items": _FACT_ITEM_V3}},
     "required": ["facts"],
     "additionalProperties": False,
 }
@@ -172,7 +232,7 @@ EXTRACT_EPISODE_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# extract_procedure.prompty - distill atomic procedural memories (skills/rules)
+# extract_procedure.prompty - learn procedures (instructions, habits, skills) from sources
 # ---------------------------------------------------------------------------
 _PROCEDURE_STEP = {
     "type": "object",
@@ -190,52 +250,42 @@ _PROCEDURE_STEP = {
 _PROCEDURE_ITEM = {
     "type": "object",
     "properties": {
+        # "add" for a new procedure; "update" revises and "reinforce" re-cites the existing
+        # procedure ``updates`` names.
+        "action": {"type": "string", "enum": ["add", "update", "reinforce"]},
+        "updates": {"type": ["string", "null"]},
+        "kind": {"type": "string", "enum": ["instruction", "habit", "skill"]},
+        "evidence": {"type": "string", "enum": ["taught", "corrected", "repeated", "practiced", "endorsed"]},
         "name": {"type": "string"},
         "summary": {"type": "string"},
-        "retrieval_text": {"type": "string"},
-        "procedure_kind": {
-            "type": "string",
-            "enum": ["behavioral_policy", "workflow", "decision_rule", "tool_usage", "recovery_strategy"],
-        },
-        "scope_type": {
-            "type": "string",
-            "enum": ["global", "user", "agent", "domain", "project", "workflow", "tool"],
-        },
-        "scope_value": {"type": ["string", "null"]},
+        "applies": {"type": "string", "enum": ["always", "when"]},
         "activation_conditions": {"type": "array", "items": {"type": "string"}},
         "preconditions": {"type": "array", "items": {"type": "string"}},
         "steps": {"type": "array", "items": _PROCEDURE_STEP},
         "success_conditions": {"type": "array", "items": {"type": "string"}},
         "failure_conditions": {"type": "array", "items": {"type": "string"}},
         "safety_constraints": {"type": "array", "items": {"type": "string"}},
-        "source_kind": {
-            "type": "string",
-            "enum": [
-                "explicit_user_instruction",
-                "observed_user_preference",
-                "organization_policy",
-                "episode_distillation",
-                "document_content",
-                "agent_inference",
-            ],
-        },
+        "retrieval_text": {"type": "string"},
+        "valid_until": {"type": ["string", "null"]},
         "grounded_in": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "number"},
     },
     "required": [
+        "action",
+        "updates",
+        "kind",
+        "evidence",
         "name",
         "summary",
-        "retrieval_text",
-        "procedure_kind",
-        "scope_type",
-        "scope_value",
+        "applies",
         "activation_conditions",
         "preconditions",
         "steps",
         "success_conditions",
         "failure_conditions",
         "safety_constraints",
-        "source_kind",
+        "retrieval_text",
+        "valid_until",
         "grounded_in",
         "confidence",
     ],
@@ -344,35 +394,27 @@ USER_SUMMARY_UPDATE_SCHEMA: dict[str, Any] = USER_SUMMARY_SCHEMA
 
 
 # ---------------------------------------------------------------------------
-# synthesize_procedural.prompty - agent self-improvement / procedural prompt
+# Prompts that deliberately run with their prompty's plain ``json_object`` format and no fixed seed.
+# ``combine_memories`` writes a combined fact that ``dedup_verify`` and a deterministic check then audit
+# against its sources, and an unusable answer combines nothing, so a malformed answer costs one retry.
 # ---------------------------------------------------------------------------
-SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "system_prompt": {"type": "string"},
-    },
-    "required": ["system_prompt"],
-    "additionalProperties": False,
-}
+PLAIN_JSON_PROMPTS: frozenset[str] = frozenset({"combine_memories.prompty"})
 
 
 # ---------------------------------------------------------------------------
 # Registry - maps prompty filename → (schema_name, schema_dict)
 # ---------------------------------------------------------------------------
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
-    "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),
+    "dedup_verify.prompty": ("DedupVerifyOutput", DEDUP_VERIFY_SCHEMA),
     "extract_episode.prompty": ("ExtractEpisodesOutput", EXTRACT_EPISODE_SCHEMA),
     "extract_procedure.prompty": ("ExtractProceduresOutput", EXTRACT_PROCEDURE_SCHEMA),
     "extract_memories.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
     "extract_memories-v2.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
+    "extract_memories-v3.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_V3_SCHEMA),
     "summarize.prompty": ("SummarizeOutput", SUMMARIZE_SCHEMA),
     "summarize_update.prompty": ("SummarizeUpdateOutput", SUMMARIZE_UPDATE_SCHEMA),
     "user_summary.prompty": ("UserSummaryOutput", USER_SUMMARY_SCHEMA),
     "user_summary_update.prompty": ("UserSummaryUpdateOutput", USER_SUMMARY_UPDATE_SCHEMA),
-    "synthesize_procedural.prompty": (
-        "SynthesizeProceduralOutput",
-        SYNTHESIZE_PROCEDURAL_SCHEMA,
-    ),
 }
 
 

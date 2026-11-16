@@ -12,6 +12,7 @@ from azure.cosmos.agent_memory.exceptions import (
     MemoryConflictError,
     MemoryNotFoundError,
     MemoryTypeMismatchError,
+    OutputTruncatedError,
     ValidationError,
 )
 from azure.cosmos.agent_memory.models import MemoryRecord, MemoryRole, MemoryType, SearchResult
@@ -65,6 +66,7 @@ __all__ = [
     "MemoryConflictError",
     "MemoryNotFoundError",
     "MemoryTypeMismatchError",
+    "OutputTruncatedError",
     "ValidationError",
     "DEFAULT_EPISODE_EVAL_EVERY_N",
     "DEFAULT_EPISODE_IDLE_GAP_SECONDS",

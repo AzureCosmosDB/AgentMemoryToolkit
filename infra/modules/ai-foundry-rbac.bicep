@@ -2,7 +2,7 @@
 // principalId) on a single AI Foundry / Cognitive Services account.
 //
 // This module must be scoped to the resource group that contains the AI
-// Foundry account - even when that's not the toolkit's own RG.
+// Foundry account.
 //
 // Built-in role:
 //   - 5e0bd9bd-7b93-4f28-af87-19fc36ad61bd - Cognitive Services OpenAI User.

@@ -1,8 +1,10 @@
 """Container routing primitive for the 3-container hard split.
 
 Single source of truth for which Cosmos DB container holds which memory
-document type. See `docs/architecture/` and the container split spec for
-rationale.
+document type. ``Docs/concepts.md`` ("Required containers") describes the
+layout.
+
+Default container names (each can be changed on the client):
 
 * ``ContainerKey.TURNS``      → ``memories_turns``      (type=turn)
 * ``ContainerKey.MEMORIES``   → ``memories``            (type ∈ {fact, episodic, procedural})

@@ -11,8 +11,12 @@ Defaults:
 * ``EPISODE_MAX_TURNS``            - default 40
 * ``EPISODE_MIN_TURNS``            - default 2
 * ``USER_SUMMARY_EVERY_N``         - default 20
+* ``DEDUP_EVERY_N``                - default 5 (reconcile every 5 extraction cycles)
 * ``PROCEDURAL_SYNTHESIS_AUTO``    - default true
 * ``MAX_BATCH_SIZE``               - default 20
+* ``ACTIVITY_TIME_BUDGET_SECONDS`` - default 240 (minimum 30)
+* ``USER_SUMMARY_WAIT_SECONDS``    - default 120
+* ``USER_SUMMARY_WAIT_INTERVAL_SECONDS`` - default 10 (minimum 1)
 
 The fact-extraction default of ``2`` extracts facts every second turn.
 Operators can raise this for cost-sensitive workloads. Summaries default to
@@ -20,7 +24,8 @@ Operators can raise this for cost-sensitive workloads. Summaries default to
 the most expensive per-call operation.
 
 Setting any ``*_EVERY_N`` env var to ``"0"`` disables that orchestrator
-entirely. ``PROCEDURAL_SYNTHESIS_AUTO=false`` disables the chained
+entirely (``DEDUP_EVERY_N``: the reconcile step and the procedural synthesis
+that follows it). ``PROCEDURAL_SYNTHESIS_AUTO=false`` disables the chained
 procedural-synthesis sub-orchestrator. When an env var is unset or invalid the
 documented default is applied (so an out-of-the-box deploy actually
 summarizes/extracts) and a warning is logged for invalid values. Use the
@@ -32,11 +37,15 @@ A single change-feed batch advances each counter by the entire batch's
 contribution in one ETag-guarded write. Even if the resulting jump crosses
 several ``EVERY_N`` boundaries (e.g. ``EVERY_N=10`` and a batch of 100
 turns advances a counter from 0 → 100), exactly **one** orchestrator is
-started - keyed on the new counter value - and it folds in only the
-trailing ``MAX_BATCH_SIZE`` items. For high-throughput bursts this means
-summarization is coarser than ``EVERY_N`` alone implies. Operators who
-need finer per-boundary fan-out should lower ``MAX_BATCH_SIZE`` and raise
-``EVERY_N`` proportionally, or process upstream in smaller batches.
+started - keyed on the new counter value. A summary orchestrator folds in
+only the trailing ``MAX_BATCH_SIZE`` items; fact extraction reads every turn
+counted since its extraction watermark (``last_extract_count``), however large
+the burst. The watermark moves past a batch the model deferred on a retryable
+error, so the Function App does not retry those turns (the in-process backend
+does). For high-throughput bursts this means summarization is coarser than
+``EVERY_N`` alone implies. Operators who need finer per-boundary fan-out
+should lower ``MAX_BATCH_SIZE`` and raise ``EVERY_N`` proportionally, or
+process upstream in smaller batches.
 """
 
 from __future__ import annotations
@@ -63,7 +72,7 @@ USER_COUNTER_THREAD_ID = "__counters__"
 
 
 # ---------------------------------------------------------------------------
-# Defaults documented in local.settings.json.template
+# Defaults shared with the SDK's thresholds
 # ---------------------------------------------------------------------------
 
 from azure.cosmos.agent_memory.thresholds import (  # noqa: E402
@@ -77,6 +86,8 @@ from azure.cosmos.agent_memory.thresholds import (  # noqa: E402
     DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
     DEFAULT_THREAD_SUMMARY_EVERY_N,
     DEFAULT_USER_SUMMARY_EVERY_N,
+    # The SDK's own parser, so one setting reads the same in-process and in the Function App.
+    _parse_bool,
 )
 
 DEFAULT_MAX_BATCH_SIZE = 20
@@ -88,6 +99,10 @@ DEFAULT_MAX_BATCH_SIZE = 20
 # extraction lands, instead of failing after the short activity-retry window.
 DEFAULT_USER_SUMMARY_WAIT_SECONDS = 120
 DEFAULT_USER_SUMMARY_WAIT_INTERVAL_SECONDS = 10
+
+# How long one reconcile or procedure activity keeps starting model calls. It must stay below the
+# app's functionTimeout; the activity then saves what it finished and the next run continues from there.
+DEFAULT_ACTIVITY_TIME_BUDGET_SECONDS = 240
 
 
 def _parse_threshold(name: str, default: int) -> int:
@@ -135,19 +150,6 @@ def _parse_int(name: str, default: int) -> int:
         return default
 
 
-def _parse_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"true", "1", "yes", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "off"}:
-        return False
-    logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
-    return default
-
-
 def _parse_threshold_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -177,7 +179,19 @@ def _parse_threshold_float(name: str, default: float) -> float:
 
 
 def get_max_batch_size() -> int:
-    return _parse_int("MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE)
+    """Recent items a summary pass reads, and an extraction window when its input has no ``recent_k``
+    (the change-feed trigger always sends one). Below 1 would read nothing and silently skip the
+    backlog, so it falls back to the default."""
+    size = _parse_int("MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE)
+    if size < 1:
+        logger.warning("MAX_BATCH_SIZE=%d must be at least 1; using default %d", size, DEFAULT_MAX_BATCH_SIZE)
+        return DEFAULT_MAX_BATCH_SIZE
+    return size
+
+
+def get_activity_time_budget_seconds() -> int:
+    """Seconds a consolidation or procedure activity keeps starting model calls; at least 30."""
+    return max(30, _parse_threshold("ACTIVITY_TIME_BUDGET_SECONDS", DEFAULT_ACTIVITY_TIME_BUDGET_SECONDS))
 
 
 def get_user_summary_wait_seconds() -> int:
@@ -269,7 +283,7 @@ def get_dedup_every_n() -> int:
 
 
 def get_procedural_synthesis_auto() -> bool:
-    """Enable chained procedural synthesis after extraction."""
+    """Enable chained procedural synthesis after each reconcile."""
     return _parse_bool(
         "PROCEDURAL_SYNTHESIS_AUTO",
         DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
@@ -280,8 +294,8 @@ def get_cosmos_endpoint() -> str:
     """Return the Cosmos data-plane endpoint.
 
     The trigger binding uses ``COSMOS_DB__accountEndpoint`` (Azure Functions
-    identity-based connection convention); all of our own clients use the
-    plain ``COSMOS_DB_ENDPOINT`` env var.
+    identity-based connection convention); all of our own clients read the
+    plain ``COSMOS_DB_ENDPOINT`` env var and fall back to ``COSMOS_DB__accountEndpoint``.
     """
     endpoint = os.environ.get("COSMOS_DB_ENDPOINT") or os.environ.get("COSMOS_DB__accountEndpoint")
     if not endpoint:

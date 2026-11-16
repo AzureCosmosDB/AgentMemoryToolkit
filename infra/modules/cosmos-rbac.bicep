@@ -3,7 +3,7 @@
 //
 // Cosmos data-plane access is granted via sqlRoleAssignments (children of
 // the account), so this module must be scoped to the resource group that
-// contains the Cosmos account - even when that's not the toolkit's own RG.
+// contains the Cosmos account.
 //
 // Built-in roles:
 //   - 00000000-0000-0000-0000-000000000001 - Cosmos DB Built-in Data Reader.

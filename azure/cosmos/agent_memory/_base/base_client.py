@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -16,6 +17,7 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_embedding_dimensions,
     build_cosmos_user_agent,
     normalize_ai_foundry_endpoint,
+    resolve_cosmos_preferred_locations,
 )
 from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
 from azure.cosmos.agent_memory.logging import configure_logging, get_logger
@@ -51,6 +53,7 @@ class _BaseMemoryClient:
         enable_turn_embeddings: Optional[bool] = None,
         user_agent: Optional[str] = None,
         default_credential_module: str = "azure.identity",
+        cosmos_preferred_locations: Optional[str | Iterable[str]] = None,
     ) -> None:
         """Initialize shared local state, config values, and default credentials."""
         configure_logging()
@@ -84,6 +87,7 @@ class _BaseMemoryClient:
             enable_turn_embeddings if enable_turn_embeddings is not None else get_enable_turn_embeddings()
         )
         self._cosmos_user_agent = build_cosmos_user_agent(user_agent)
+        self._cosmos_preferred_locations = resolve_cosmos_preferred_locations(cosmos_preferred_locations)
 
         self._owns_cosmos_credential = False
         self._owns_ai_foundry_credential = False
@@ -279,7 +283,9 @@ def is_transient_tail_step_error(exc: BaseException) -> bool:
     become silent ``WARNING`` lines).
 
     Transient (swallow):
-      * ``LLMError`` - LLM-side defensive raises (no-choices, no-content).
+      * ``LLMError`` - any error the chat client raises itself: a reply that
+        stayed empty through its retries, or one that was content-filtered,
+        refused, tool-only or cut off at the output limit.
       * ``openai.RateLimitError`` / ``APITimeoutError`` / ``APIConnectionError``.
       * Any exception with ``status_code`` in
         :data:`_TRANSIENT_HTTP_STATUS_CODES` (covers ``CosmosHttpResponseError``

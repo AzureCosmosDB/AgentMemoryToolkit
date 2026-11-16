@@ -2,7 +2,7 @@
 
 Filters to ``type == "turn"`` documents, increments per-thread and per-user
 counters, then starts the matching orchestrator with a deterministic instance
-ID whenever a configured threshold is crossed. Spec §8.3 / §8.4 / §8.5.
+ID whenever a configured threshold is crossed.
 
 The trigger is registered as a :class:`df.Blueprint` and wired into the
 top-level :class:`df.DFApp` from ``function_app.py``. The pure-logic entry
@@ -31,13 +31,15 @@ from shared.counters import (
     user_counter_id,
 )
 
+from azure.cosmos.agent_memory.logging import describe_exception
+
 logger = logging.getLogger(__name__)
 
 bp = df.Blueprint()
 
-# Module-level one-shot guard so the per-batch INFO log doesn't spam when
+# Module-level one-shot guard so the per-batch skip warning doesn't spam when
 # the SDK owns processing (potentially many batches per minute). Function
-# instances are short-lived, so worst case is one INFO per cold start.
+# instances are short-lived, so worst case is one warning per cold start.
 _warned_owner_skip: bool = False
 
 _topology_validated: bool = False
@@ -56,18 +58,19 @@ async def _ensure_topology() -> None:
 
         db = await get_cosmos_database_async()
         for name in (config.TURNS_CONTAINER, config.MEMORIES_CONTAINER, config.SUMMARIES_CONTAINER):
+            problem = None
             try:
                 container = db.get_container_client(name)
                 await container.read()
-            except CosmosResourceNotFoundError as exc:
-                raise RuntimeError(
-                    f"Topology error: container {name!r} does not exist. "
-                    "Run azd up to provision the 3-container split or fix env vars."
-                ) from exc
+            except CosmosResourceNotFoundError:
+                problem = (
+                    f"container {name!r} does not exist. Run azd up to provision the 3-container split or fix env vars."
+                )
             except Exception as exc:
-                raise RuntimeError(
-                    f"Topology error: cannot read container {name!r}: {type(exc).__name__}: {exc}"
-                ) from exc
+                problem = f"cannot read container {name!r}: {describe_exception(exc)}"
+            if problem:
+                # Raised after the handler, so the host's log of this error carries no SDK error or its text.
+                raise RuntimeError(f"Topology error: {problem}")
         _topology_validated = True
 
 
@@ -140,9 +143,10 @@ async def process_changefeed_batch(
     thread_max_lsn: dict[tuple[str, str], int] = {}
     user_max_lsn: dict[str, int] = {}
 
-    # Track which threads contributed to each user counter so the user-summary
-    # orchestrator can scope its query to those threads (avoids a full
-    # cross-partition scan on the user's whole memory set).
+    # Track which threads contributed to each user counter. The user-summary orchestrator
+    # passes them to the pipeline, which only logs how many (``observed_thread_ids``): it
+    # does not filter by them, and its query reads every memory and thread summary the
+    # user wrote since the last user summary.
     user_thread_ids: dict[str, set[str]] = defaultdict(set)
 
     for doc in documents:
@@ -213,10 +217,10 @@ async def process_changefeed_batch(
                 instance_id = f"extract:{user_id}:{thread_id}:{new_count}"
                 should_reconcile = bool(n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns))
                 watermark = await read_extract_watermark(counter_container, cid, user_id, thread_id)
-                # Not capped: new_count - watermark is exactly the unextracted backlog
-                # and the orchestrator advances the watermark to new_count, so capping
-                # would strand the oldest turns (DEDUP_POOL_SIZE is the reconcile knob,
-                # not the extraction window). Bootstrap: with no watermark yet, base=0
+                # Not capped: new_count - watermark is exactly the turns the watermark has
+                # not covered, and the orchestrator advances the watermark to new_count, so
+                # capping would strand the oldest turns (DEDUP_POOL_SIZE is the reconcile
+                # knob, not the extraction window). Bootstrap: with no watermark yet, base=0
                 # so recent_k = new_count covers every turn so far - using only this
                 # batch (new_count - old_count) would strand turns added during earlier
                 # failed extracts once the watermark first advances to new_count.
@@ -273,9 +277,13 @@ async def process_changefeed_batch(
                     orchestration_errors,
                 )
 
-    # Re-raise so the change-feed batch is retried & thresholds re-fire.
+    # Re-raise so the change-feed batch is retried & thresholds re-fire. The host logs this error and any it was
+    # raised from, so it names the first failure safely instead of chaining the SDK error and its text.
     if orchestration_errors:
-        raise RuntimeError(f"Failed to start {len(orchestration_errors)} orchestration(s)") from orchestration_errors[0]
+        raise RuntimeError(
+            f"Failed to start {len(orchestration_errors)} orchestration(s): "
+            f"{describe_exception(orchestration_errors[0])}"
+        )
 
 
 async def _safe_start(
@@ -322,10 +330,11 @@ async def _safe_start(
                 exc_type,
             )
             return
-        logger.exception(
-            "change-feed: failed to start %s (exc_type=%s)",
+        logger.error(
+            "change-feed: failed to start %s (exc_type=%s): %s",
             instance_id,
             exc_type,
+            describe_exception(exc, stack=True),
         )
         errors.append(exc)
 
@@ -335,8 +344,7 @@ async def _safe_start(
 # ---------------------------------------------------------------------------
 
 
-# Bind directly to the turns container so only turn writes can fire this trigger;
-# the old mixed-container topology trap is structurally impossible.
+# Bind directly to the turns container so only turn writes can fire this trigger.
 @bp.cosmos_db_trigger(
     arg_name="documents",
     connection="COSMOS_DB",

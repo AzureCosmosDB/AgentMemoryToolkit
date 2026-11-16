@@ -102,6 +102,7 @@ The profile will be stored as a single document and embedded as a vector for sem
 - Pleasantries, filler, and conversational noise
 - Anything the user said hypothetically or about someone else
 - Duplicate facts - if the same detail appears in multiple threads, list it once
+- Never write a literal secret: passwords, passphrases, API keys, access tokens, connection strings, account keys, and private keys must never appear in any field, however short or ordinary the value, even when the threads contain them. Say that the user has or shared a credential, never its value.
 
 ## Quality Check (apply before outputting)
 Before writing your final output, verify:

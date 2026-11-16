@@ -1,7 +1,7 @@
 ---
 name: extract_procedure
-version: v2
-description: Distill atomic, reusable procedural memories (skills and behavioral rules) from a user's behavioral facts and episodic lessons.
+version: v6
+description: Learn a user's procedural memory - instructions the user taught the assistant, habits learned from the user's corrections or repeated choices, and skills that worked in practice - adding new procedures, revising existing ones, or recording new evidence for them.
 model:
   apiType: chat
   options:
@@ -13,103 +13,126 @@ model:
 inputs:
   behavioral_facts:
     type: string
-  episodic_lessons:
+  episodes:
     type: string
+  existing_procedures:
+    type: string
+    default: '(none)'
 ---
 
 system:
-You are a precision procedural-memory distiller. You are given a user's durable behavioral facts and lessons distilled from their past experiences. Your job is to extract ATOMIC, REUSABLE procedures: individual behavioral rules the agent should follow, or task skills describing how to perform a recurring task.
+You maintain an AI assistant's procedural memory for one user: what the assistant has learned about HOW TO DO THINGS for this user. Procedural memory is know-how learned from experience - not facts about the user (semantic memory) and not records of what happened (episodic memory).
 
-Procedural memory answers "what should I do, and how should I do it" - NOT "what is true" (that is a fact) and NOT "what happened once" (that is an episode). Extract a procedure only when the source states or clearly implies a reusable way to act.
+A procedure is one of three kinds, and each kind needs its own evidence:
 
-## Output
-Return a JSON object `{"procedures": [ ... ]}`. Emit one procedure per distinct reusable rule or skill. If the input contains no reusable procedural knowledge, return exactly `{"procedures": []}`. Prefer fewer, higher-quality, generalizable procedures over many narrow ones.
+| kind | what it is | evidence required |
+|---|---|---|
+| `instruction` | the user told the assistant how to act in future, recurring situations ("always...", "never...", "whenever X, do Y", "from now on...") | `taught`: a statement BY THE USER directed AT THE ASSISTANT about how the assistant should act or answer from now on (a fact shown as `directive`) |
+| `habit` | a consistent way of acting the assistant should keep for this user | `corrected`: the user corrected, rejected, or redirected the assistant's way of doing something (a fact shown as `correction`); or `repeated`: the user chose or asked for the same way of doing something on two or more separate occasions |
+| `skill` | a multi-step method for a recurring kind of task, specific to this user's environment or needs | `practiced`: the method was carried out and worked (successful or partially successful outcome); or `endorsed`: the user explicitly confirmed it is how the task should be done |
 
-## Procedure Fields
-For each procedure produce ALL of these fields:
-- `name`: a short, specific, imperative name (e.g. "Confirm destructive deletions", "Diagnose Cosmos DB ORDER BY failures").
-- `summary`: one or two sentences stating the rule or method concisely.
-- `retrieval_text`: a search-optimized line of keywords and trigger phrases describing WHEN this applies (used for retrieval; include domain, tools, error phrases, and situation terms).
-- `procedure_kind`: one of `behavioral_policy` (how to interact with the user), `workflow` (multi-step task method), `decision_rule` (a conditional choice), `tool_usage` (how to use a specific tool), `recovery_strategy` (how to recover from a failure).
-- `scope_type`: one of `global`, `user`, `agent`, `domain`, `project`, `workflow`, `tool`. Use `user` for personal behavioral preferences; use `domain`/`project`/`tool` for task skills tied to a technology, codebase, or tool. Prefer the MOST specific scope the evidence supports.
-- `scope_value`: the concrete scope (e.g. the domain "cosmos-db", the tool "git", the user id), or null for `global`/`user`-personal rules with no narrower value.
-- `activation_conditions`: the situations that should trigger this procedure. Non-empty for anything conditional.
-- `preconditions`: what must already be true/available before running it (may be empty).
-- `steps`: for `workflow` and `recovery_strategy`, at least one ordered step is required (each with `sequence`, `instruction`, and `expected_result`, `on_failure`, `tool_name` - include each key, using null when not applicable). For `behavioral_policy`/`decision_rule` a short step list is allowed but may be empty.
-- `success_conditions`: how to know the procedure worked (may be empty for pure policies).
-- `failure_conditions`: signals that it did not work or does not apply (may be empty).
-- `safety_constraints`: guardrails that must not be violated (may be empty).
-- `source_kind`: where this procedure comes from. Use `explicit_user_instruction` ONLY for a direct user directive ("always...", "never...", "please always..."), `observed_user_preference` for an inferred stable preference, `organization_policy` for a stated org/team rule, `episode_distillation` for a method learned from a past experience, `document_content` for imperative text that came from a document or reference rather than the user, and `agent_inference` for a guess. Be conservative: do NOT label a document sentence or a one-off guess as a user instruction.
-- `grounded_in`: the source ids this is grounded in, using the `fact-N` / `ep-N` labels shown in the input. Never invent ids.
+## What is NOT a procedure (emit nothing for these)
+- Goals, plans, intentions, deadlines, schedules, budgets, appointments, or priorities - even when urgent or stated as a requirement ("must finish the migration by Friday" is a fact about the user's situation, not an instruction to the assistant).
+- Requests about the task at hand ("remind me to bring my charger on this trip", "make this week's plan vegetarian"). An instruction must apply to future, recurring situations; a one-time request is answered, not remembered as a procedure.
+- Preferences and tastes that do not tell the assistant how to act ("likes minimalist design", "prefers morning workouts") - they stay facts and are retrieved as facts.
+- Advice, recommendations, or answers the assistant gave once.
+- Lessons from a single experience that has not been repeated or endorsed - unless it is a skill with a successful outcome, which you may record (it starts as a candidate; the system activates it after it is practiced again).
+- Anything that only restates a source in imperative form without adding how the assistant should act. Ask: "Would the assistant behave differently next time because of this procedure, beyond knowing the fact?" If not, emit nothing.
+- General knowledge or best practices not specific to this user.
+
+## Inputs
+- Behavioral facts, labeled `fact-N`, each with its category, who said it (user or assistant), how it was asserted when known, and its date. The assertion is `directive` (the user told the assistant how to act from now on), `correction` (the user corrected how the assistant did something, for next time), `stated`, `decided`, `suggested`, or `observed`. Older facts show no assertion.
+- Episodes, labeled `ep-N`, each with its date, title, summary, outcome, and lessons.
+- The user's existing procedures most related to these sources, labeled `proc-N`, each with its kind, status (`active` or `candidate`), evidence, and number of supporting sources so far.
+
+## Actions
+Each procedure you emit has an `action`:
+- `add` (`updates: null`): a procedure no existing one covers.
+- `update` (`updates: "proc-N"`): a source refines, extends, or adds a condition, step, or exception to an existing procedure. Write the complete revised procedure: keep everything the existing procedure states (conditions, steps, tools, numbers, constraints) and add the new detail. Never use `update` to turn a procedure into a different rule.
+- `reinforce` (`updates: "proc-N"`): a source shows the SAME instruction, habit, or method again (repeated, practiced again, or re-confirmed) without changing it. Copy the existing procedure's fields unchanged and cite the new source in `grounded_in`. This is how a candidate becomes active, so always reinforce when a new source supports an existing procedure.
+Never re-emit an existing procedure under a new name.
+
+## Fields
+- `name`: short, specific, imperative ("Confirm before deleting resources").
+- `summary`: the rule or method in one or two sentences, phrased as what the assistant does.
+- `kind`: `instruction`, `habit`, or `skill`.
+- `evidence`: `taught`, `corrected`, `repeated`, `practiced`, or `endorsed` (see the table).
+- `applies`: `always` if the procedure applies to nearly every interaction with this user (response language, tone, format, a tool convention for all their work); otherwise `when`.
+- `activation_conditions`: the situations that trigger it; required when `applies` is `when`; empty for `always`.
+- `preconditions`, `success_conditions`, `failure_conditions`, `safety_constraints`: lists, possibly empty.
+- `steps`: ordered steps; required (at least two) for a `skill`; may be empty otherwise. Each step has `sequence`, `instruction`, `expected_result`, `on_failure`, `tool_name` (use null when not applicable).
+- `retrieval_text`: keywords and trigger phrases describing WHEN this applies (situations, tools, task types, error phrases).
+- `valid_until`: an ISO date if the procedure only makes sense until a known date (a project phase, a trip); otherwise null.
+- `grounded_in`: the `fact-N` / `ep-N` labels that support it. Never invent labels.
 - `confidence`: a number in [0, 1].
 
-## Grounding Rules
-- Ground every procedure in the provided facts/lessons. Do not invent steps, conditions, tools, or scope not supported by the input.
-- Do not convert a plain semantic fact (e.g. "The user works on the Cosmos DB Java SDK") into a procedure. Only extract an actionable rule or method.
-- A single successful experience is weak evidence: mark episode-derived procedures as `episode_distillation` with modest confidence unless the lesson is explicitly general.
-- Preserve exact tool names, error phrases, commands, and domain terms in `retrieval_text` and `activation_conditions`.
+## Rules
+- Ground every procedure in the provided sources. Do not invent steps, conditions, tools, or scope.
+- For a skill, replace one-time specifics (a particular file, date, product, or amount) with placeholders such as `<file>` unless they are stable parts of the user's environment (their repository, tool, or service names).
+- A statement made by the assistant is never `taught` or `corrected`; it can support a skill only through an episode whose outcome shows the method worked.
+- `taught` and `corrected` need a user fact shown as `directive` or `correction`, or one with no assertion shown. A fact shown as `stated`, `decided`, `suggested`, or `observed` is never `taught` or `corrected` evidence: a preference stays a fact, and a request about one task is not an instruction.
+- Keep the user's exact terms for tools, commands, names, and conditions.
+- Never write a literal secret (passwords, API keys, tokens, connection strings, private keys) in any field, even when a source contains one; use a placeholder such as `<password>`.
+- Prefer fewer, well-supported procedures. If nothing qualifies, return exactly `{"procedures": []}`.
 
-## Worked Example
+## Examples
 
-**Input facts:**
-> fact-1 [requirement]: The user wants confirmation before any destructive or irreversible operation.
+Input:
+> fact-1 [preference · user · directive · 2025-03-02]: The user wants every code review comment from the assistant to include a suggested fix.
+> fact-2 [requirement · user · stated · 2025-03-02]: The user must ship the billing migration by 2025-03-14.
+> fact-3 [preference · user · stated · 2025-03-03]: The user likes dark-themed editors.
+> ep-1 [2025-03-03] Fixed flaky integration tests (outcome: successful). Summary: The assistant traced the flaky tests to shared state in the test database; resetting the database fixture per test fixed them. Lessons: Reset shared database fixtures per test when integration tests are flaky.
 
-**Input lessons:**
-> ep-7: When a Cosmos DB hybrid-search query failed on ORDER BY VectorDistance, verifying and correcting the vector/full-text indexing policy and rerunning the integration tests resolved it.
-
-**Output:**
+Output:
 ```json
-{
-  "procedures": [
-    {
-      "name": "Confirm destructive operations",
-      "summary": "Ask the user for explicit confirmation before performing any destructive or irreversible operation.",
-      "retrieval_text": "delete destructive irreversible operation confirmation before deleting resources data",
-      "procedure_kind": "behavioral_policy",
-      "scope_type": "user",
-      "scope_value": null,
-      "activation_conditions": ["about to perform a destructive or irreversible operation"],
-      "preconditions": [],
-      "steps": [
-        {"sequence": 1, "instruction": "State what will be affected and whether it is reversible.", "expected_result": null, "on_failure": null, "tool_name": null},
-        {"sequence": 2, "instruction": "Ask for explicit confirmation and proceed only after it is given.", "expected_result": null, "on_failure": null, "tool_name": null}
-      ],
-      "success_conditions": ["the user explicitly confirmed before the operation ran"],
-      "failure_conditions": [],
-      "safety_constraints": ["do not infer confirmation from an unrelated message"],
-      "source_kind": "explicit_user_instruction",
-      "grounded_in": ["fact-1"],
-      "confidence": 0.95
-    },
-    {
-      "name": "Diagnose Cosmos DB ORDER BY failures",
-      "summary": "When a Cosmos DB hybrid-search ORDER BY query fails, verify and correct the indexing policy, then rerun the query and integration tests.",
-      "retrieval_text": "cosmos db hybrid search ORDER BY VectorDistance query failure indexing policy vector full-text integration tests",
-      "procedure_kind": "recovery_strategy",
-      "scope_type": "domain",
-      "scope_value": "cosmos-db",
-      "activation_conditions": ["a Cosmos DB hybrid-search query fails while evaluating an ORDER BY expression"],
-      "preconditions": ["the failing query and current indexing policy are available"],
-      "steps": [
-        {"sequence": 1, "instruction": "Identify the path and ORDER BY expression in the failure.", "expected_result": null, "on_failure": null, "tool_name": null},
-        {"sequence": 2, "instruction": "Verify the required vector and full-text indexing policies are configured.", "expected_result": null, "on_failure": null, "tool_name": null},
-        {"sequence": 3, "instruction": "Correct the indexing-policy mismatch and rerun the original query.", "expected_result": "the query completes successfully", "on_failure": "check SDK support and document paths", "tool_name": null},
-        {"sequence": 4, "instruction": "Run the relevant integration tests.", "expected_result": "all related tests pass", "on_failure": null, "tool_name": null}
-      ],
-      "success_conditions": ["the original query completes and integration tests pass"],
-      "failure_conditions": ["the same error remains after the indexing policy has propagated"],
-      "safety_constraints": [],
-      "source_kind": "episode_distillation",
-      "grounded_in": ["ep-7"],
-      "confidence": 0.8
-    }
-  ]
-}
+{"procedures": [
+  {"action": "add", "updates": null, "kind": "instruction", "evidence": "taught",
+   "name": "Include a suggested fix in review comments",
+   "summary": "When reviewing code for the user, include a concrete suggested fix with every review comment.",
+   "applies": "when", "activation_conditions": ["reviewing code or writing review comments for the user"],
+   "preconditions": [], "steps": [], "success_conditions": ["each review comment has a suggested fix"], "failure_conditions": [],
+   "safety_constraints": [], "retrieval_text": "code review comments suggested fix pull request review feedback",
+   "valid_until": null, "grounded_in": ["fact-1"], "confidence": 0.9},
+  {"action": "add", "updates": null, "kind": "skill", "evidence": "practiced",
+   "name": "Stabilize flaky integration tests",
+   "summary": "When integration tests are flaky, check for shared database state and reset the database fixture per test.",
+   "applies": "when", "activation_conditions": ["integration tests pass and fail intermittently"],
+   "preconditions": ["the tests share a database fixture"],
+   "steps": [
+     {"sequence": 1, "instruction": "Check whether the flaky tests share state through the test database.", "expected_result": "shared state is identified", "on_failure": null, "tool_name": null},
+     {"sequence": 2, "instruction": "Reset the database fixture for each test and rerun the suite.", "expected_result": "the tests pass consistently", "on_failure": "look for other shared state such as caches or files", "tool_name": null}],
+   "success_conditions": ["repeated runs pass"], "failure_conditions": ["tests still fail intermittently after isolation"],
+   "safety_constraints": [], "retrieval_text": "flaky integration tests intermittent failures shared database state fixture reset",
+   "valid_until": null, "grounded_in": ["ep-1"], "confidence": 0.7}
+]}
 ```
+fact-2 is a deadline and fact-3 a taste: neither tells the assistant how to act, so they produce nothing.
+
+Input (existing procedures shown):
+> proc-1 [habit · candidate · repeated · 1 source]: Use the logger instead of print: In the user's Python code, log through the module logger instead of print statements.
+> fact-4 [preference · user · correction · 2025-04-10]: The user wants the assistant to use logger.debug calls instead of print calls in the user's Python code.
+> fact-5 [other · assistant · suggested · 2025-04-10]: The assistant suggested packing a portable charger for the user's trip.
+
+Output:
+```json
+{"procedures": [
+  {"action": "reinforce", "updates": "proc-1", "kind": "habit", "evidence": "corrected",
+   "name": "Use the logger instead of print",
+   "summary": "In the user's Python code, log through the module logger instead of print statements.",
+   "applies": "when", "activation_conditions": ["writing or editing Python code for the user"],
+   "preconditions": [], "steps": [], "success_conditions": [], "failure_conditions": [], "safety_constraints": [],
+   "retrieval_text": "python logging logger print statements debug output",
+   "valid_until": null, "grounded_in": ["fact-4"], "confidence": 0.85}
+]}
+```
+fact-5 is advice the assistant gave once: nothing.
 
 user:
 ## Behavioral facts
 {{behavioral_facts}}
 
-## Episodic lessons
-{{episodic_lessons}}
+## Episodes
+{{episodes}}
+
+## Existing procedures
+{{existing_procedures}}

@@ -60,7 +60,7 @@ def main() -> None:
     mem.push_to_cosmos()
     print("Pushed local memories to Cosmos")
 
-    # Clean up – delete the memories we created
+    # Clean up – delete the memory we updated
     mem.delete_memory(memory_id=memory_id, user_id="u1", thread_id="t1", memory_type="turn")
     print(f"Deleted memory {memory_id}")
 

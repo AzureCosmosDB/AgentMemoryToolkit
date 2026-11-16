@@ -1,8 +1,7 @@
 """Per-scope counter helpers (ETag concurrency + LSN replay dedup).
 
-Carried over and adapted from the original ``main`` branch
-``azure_functions/function_app.py``. The container client is injected (rather
-than fetched via a module-level singleton) so unit tests can mock it cleanly.
+The container client is injected (rather than fetched via a module-level
+singleton) so unit tests can mock it cleanly.
 
 Counter document shape::
 
@@ -13,6 +12,10 @@ Counter document shape::
     # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
     { "id": ..., "user_id": ..., "thread_id": "__counters__",
       "count": int, "last_batch_lsn": int|None, "last_batch_old_count": int }
+
+Both also carry ``created_at``, ``updated_at`` and ``last_owner`` (advisory). A thread counter gains
+``last_extract_count`` (the extraction watermark), and the SDK may add ``last_failure_at`` and
+``last_failure_reason``; an increment keeps all three.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ from typing import Any
 
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
+
+from azure.cosmos.agent_memory.logging import describe_exception
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +106,7 @@ async def increment_counter_by(
     * Preserves SDK-written failure breadcrumbs (``last_failure_at`` /
       ``last_failure_reason``) so monitors don't flap when the FA writes
       after an SDK failure stamp.
+    * Preserves the extraction watermark (``last_extract_count``).
     * Stamps ``last_owner=owner`` (advisory) so operators can detect
       double-write configurations across SDK and FA.
     """
@@ -271,17 +277,18 @@ async def read_extract_watermark(
 ) -> int | None:
     """Return the count value at the last successful extract, or ``None``.
 
-    Lets recent_k cover every turn since the previous extract succeeded so
-    turns are never skipped when extraction lags or transiently fails.
-    Best-effort: returns ``None`` on any read error so callers fall back to a
-    batch-based recent_k.
+    Lets recent_k cover every turn since the previous extract succeeded, so
+    turns are not skipped when extraction lags or an extract activity fails.
+    A batch the model deferred is the exception: the watermark moves past it.
+    Best-effort: returns ``None`` on any read error, which the change-feed
+    trigger treats as no watermark yet, so it extracts every turn counted so far.
     """
     try:
         doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
         value = doc.get("last_extract_count")
         return int(value) if value is not None else None
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("read_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("read_extract_watermark failed counter_id=%s: %s", counter_id, describe_exception(exc))
         return None
 
 
@@ -293,6 +300,10 @@ async def advance_extract_watermark(
     count: int,
 ) -> None:
     """Advance ``last_extract_count`` to ``count`` after a successful extract.
+
+    The watermark moves past every turn the run covered, including those of a
+    batch the model deferred (``deferred_turn_count``): the Function App does
+    not retry them.
 
     Monotonic: a conditional patch (``filter_predicate``) applies the new value
     only when it is strictly greater than the stored one, so an out-of-order
@@ -313,6 +324,6 @@ async def advance_extract_watermark(
     except CosmosHttpResponseError as exc:
         if exc.status_code == 412:
             return  # another run already advanced past this count
-        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, describe_exception(exc))
     except Exception as exc:  # pragma: no cover - best-effort
-        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, describe_exception(exc))

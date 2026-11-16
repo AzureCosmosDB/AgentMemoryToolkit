@@ -2,11 +2,11 @@
 
 Demonstrates the typical long-term-memory flow:
   1. Add raw conversation turns
-  2. Extract structured memories (facts / procedural / episodic)
+  2. Extract structured memories (facts)
   3. Generate a thread summary
   4. Delete raw turns - keeping only the compact derived memories
 
-Uses the in-process ProcessingPipeline (same code as the Azure Function
+Uses the in-process PipelineService (same code as the Azure Function
 change-feed trigger). No Function deployment required.
 
 Required env vars (.env supported):
@@ -78,7 +78,7 @@ def main() -> None:
         mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=thread_id)
     _print_memories(mem, user_id, thread_id)
 
-    _header(2, "Extract structured memories (facts / procedural / episodic)")
+    _header(2, "Extract structured memories (facts)")
     stats = mem.extract_memories(user_id=user_id, thread_id=thread_id)
     print(f"  extraction stats: {stats}")
 

@@ -6,6 +6,7 @@ import tiktoken
 
 from azure.cosmos.agent_memory._embedding_tokens import (
     EMBEDDING_MAX_INPUT_TOKENS,
+    count_tokens,
     truncate_text_to_token_budget,
 )
 from azure.cosmos.agent_memory.aio.embeddings import AsyncEmbeddingsClient
@@ -24,6 +25,14 @@ def _token_count(text: str) -> int:
 
 
 class TestTruncateHelper:
+    def test_text_that_spells_a_special_token_is_counted_and_truncated_as_plain_text(self) -> None:
+        # tiktoken refuses "<|endoftext|>" by default; a pasted chat template must not fail an embed or a batch.
+        spelled = "<|endoftext|> <|fim_prefix|> " * 5000
+
+        assert count_tokens("<|endoftext|>") > 1
+        truncated = truncate_text_to_token_budget(spelled, _MODEL)
+        assert len(truncated) < len(spelled) and count_tokens(truncated, _MODEL) <= EMBEDDING_MAX_INPUT_TOKENS
+
     def test_empty_string_unchanged(self) -> None:
         assert truncate_text_to_token_budget("", _MODEL) == ""
 

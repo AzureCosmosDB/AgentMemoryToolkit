@@ -27,7 +27,7 @@ param tags object = {}
 @description('Catalog name of the chat completion model (e.g. gpt-4o-mini).')
 param chatModelName string = 'gpt-4o-mini'
 
-@description('Chat model version.')
+@description('Chat model version. Must exist for chatModelName; main.bicep does not set it, so change this default when you change the model.')
 param chatModelVersion string = '2024-07-18'
 
 @description('Deployment name to expose the chat model under. Defaults to the model name when empty.')
@@ -39,7 +39,7 @@ param llmCapacity int = 30
 @description('Catalog name of the embedding model (e.g. text-embedding-3-large).')
 param embeddingModelName string = 'text-embedding-3-large'
 
-@description('Embedding model version.')
+@description('Embedding model version. Must exist for embeddingModelName; main.bicep does not set it, so change this default when you change the model.')
 param embeddingModelVersion string = '1'
 
 @description('Deployment name to expose the embedding model under. Defaults to the model name when empty.')

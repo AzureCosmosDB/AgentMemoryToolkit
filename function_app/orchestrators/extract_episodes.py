@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 import azure.durable_functions as df
+from shared.error_redaction import redact_errors
 from shared.pipeline_factory import get_pipeline
 
 from ._retry import default_retry_options
@@ -49,6 +50,7 @@ def ExtractEpisodesOrchestrator(context: df.DurableOrchestrationContext):
 
 
 @bp.activity_trigger(input_name="payload")
+@redact_errors
 def ee_ExtractEpisodes(payload: dict) -> dict:
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]

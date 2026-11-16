@@ -26,6 +26,7 @@ Every fact must be explicitly grounded in the provided content - never inferred,
 
 ## Extraction Discipline - Read This First
 
+- **Never write a literal secret into a memory.** Passwords, passphrases, API keys, access tokens, connection strings, account keys, and private keys must never appear in `content`, however short or ordinary the value, even when the user supplies it directly. Record the *fact* (for example, that the user shared credentials for an account), never the value. This rule outranks every capture and completeness instruction below.
 - **Extract only what was explicitly stated. Do not infer mental states.** Never manufacture a memory about what the user *thinks*, *feels*, *believes*, *wants*, *likes*, *enjoys*, *finds*, *prefers*, or *is worried/frustrated about* unless the user said so in those (or clearly equivalent) words. Turning "the API took 8 seconds" into "the user thinks the API is slow" is inference, not extraction - do not do it.
 - **When the user states a concrete fact, record that fact once - and stop.** Do not also emit a second, softer "the user thinks/feels X" memory derived from it. Record each piece of information once; don't restate the same fact under a different framing.
 - **Fewer, higher-value memories beat a long padded list.** If a passage is trivia, filler, or has no future-reference value, extract nothing from it. An empty array is a valid - and often the correct - answer for a given passage. You are not rewarded for volume.

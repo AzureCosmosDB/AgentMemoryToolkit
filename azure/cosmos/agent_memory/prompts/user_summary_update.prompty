@@ -94,6 +94,7 @@ The output should be indistinguishable from a freshly built profile - not a patc
 - One-off remarks that do not reflect a stable fact or persistent pattern
 - Pleasantries, filler, and conversational noise from the new threads
 - Duplicate facts - if a detail is confirmed again in the new threads, do not list it twice
+- Never write a literal secret: passwords, passphrases, API keys, access tokens, connection strings, account keys, and private keys must never appear in any field, however short or ordinary the value, even when the new threads or the existing profile contain them. Say that the user has or shared a credential, never its value, and drop any value the existing profile already holds.
 
 ## Formatting Rules for Array Entries
 - Use concise, self-contained strings - one fact per entry

@@ -1,7 +1,10 @@
 """Async variants of the Agent Memory Toolkit clients.
 
-This subpackage mirrors the sync API surface at ``azure.cosmos.agent_memory``
-and follows the ``azure.cosmos`` / ``azure.cosmos.aio`` convention.
+Exports :class:`AsyncCosmosMemoryClient`, :class:`AsyncEmbeddingsClient` and the async processors
+(:class:`AsyncMemoryProcessor`, :class:`AsyncInProcessProcessor`, :class:`AsyncDurableFunctionProcessor`),
+plus the shared :class:`ProcessThreadResult` and :class:`UserSummaryResult`. The async chat client is
+:class:`azure.cosmos.agent_memory.aio.chat.AsyncChatClient`; it is not re-exported here. The layout
+follows the ``azure.cosmos`` / ``azure.cosmos.aio`` convention.
 """
 
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient

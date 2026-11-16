@@ -77,6 +77,18 @@
     "maxBatchSize": {
       "value": "${MAX_BATCH_SIZE=20}"
     },
+    "dedupPoolSize": {
+      "value": "${DEDUP_POOL_SIZE=50}"
+    },
+    "activityTimeBudgetSeconds": {
+      "value": "${ACTIVITY_TIME_BUDGET_SECONDS=240}"
+    },
+    "chatCapacity": {
+      "value": "${AI_FOUNDRY_CHAT_CAPACITY=30}"
+    },
+    "embeddingCapacity": {
+      "value": "${AI_FOUNDRY_EMBEDDING_CAPACITY=30}"
+    },
     "memoryProcessorOwner": {
       "value": "${MEMORY_PROCESSOR_OWNER=durable}"
     }

@@ -11,6 +11,7 @@ import math
 import os
 import re
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -59,6 +60,28 @@ def build_cosmos_user_agent(custom_user_agent: Optional[str] = None) -> str:
     if custom:
         return f"{custom} {COSMOS_USER_AGENT}"
     return COSMOS_USER_AGENT
+
+
+def resolve_cosmos_preferred_locations(
+    preferred_locations: Optional[str | Iterable[str]] = None,
+) -> list[str]:
+    """Return the ordered Cosmos read regions; an empty list keeps the account's default order.
+
+    Falls back to the ``COSMOS_DB_PREFERRED_REGIONS`` environment variable, which accepts a
+    comma-separated list such as ``"West US 3,West US 2"``. Ordering is significant: the SDK
+    reads from the first reachable region, so list the region closest to the caller first.
+
+    The result is never ``None``: the Cosmos SDK iterates its preferred locations when the
+    first account read fails, so ``None`` would replace the real connection error with a
+    ``TypeError``.
+    """
+    value: Optional[str | Iterable[str]] = preferred_locations
+    if value is None:
+        value = os.getenv("COSMOS_DB_PREFERRED_REGIONS")
+    if value is None:
+        return []
+    parts = value.split(",") if isinstance(value, str) else list(value)
+    return [region for region in (str(part).strip() for part in parts) if region]
 
 
 def new_id(memory_type: str) -> str:

@@ -19,7 +19,7 @@ class ProcessThreadResult:
     """Outcome of a single ``process_thread`` invocation.
 
     ``extracted_counts`` carries the per-type extraction telemetry returned by
-    :meth:`ProcessingPipeline.extract_memories` (e.g.
+    :meth:`PipelineService.extract_memories` (e.g.
     ``{"fact_count": 2, "episodic_count": 0, "updated_count": 0}``).
     The actual extracted memory documents are persisted to Cosmos DB by the
     pipeline; query them back via the SDK's ``get_memories`` if you need the
@@ -29,8 +29,7 @@ class ProcessThreadResult:
     :meth:`CosmosMemoryClient.process_now` only when the in-process processor
     is active and only after the per-thread steps complete. They are ``None``
     for the durable processor (which runs them async out-of-band) and for the
-    auto-trigger cadence path (which records them via the counter container,
-    not on this dataclass).
+    auto-trigger cadence path (which does not build this dataclass).
     """
 
     thread_summary: Optional[dict[str, Any]] = None
@@ -57,12 +56,15 @@ class MemoryProcessor(Protocol):
 
     The protocol exposes both a fused :meth:`process_thread` (used by
     :meth:`CosmosMemoryClient.process_now`) and per-step methods
-    (:meth:`process_extract_memories`, :meth:`process_thread_summary`,
-    :meth:`process_user_summary`, :meth:`process_reconcile`) used by the
+    (:meth:`process_extract_memories`, :meth:`process_extract_episodes`,
+    :meth:`process_thread_summary`, :meth:`process_user_summary`,
+    :meth:`process_reconcile`, :meth:`synthesize_procedural`) used by the
     auto-trigger path so that ``FACT_EXTRACTION_EVERY_N`` /
-    ``THREAD_SUMMARY_EVERY_N`` / ``USER_SUMMARY_EVERY_N`` actually fire
+    ``EPISODE_EVAL_EVERY_N`` / ``THREAD_SUMMARY_EVERY_N`` /
+    ``USER_SUMMARY_EVERY_N`` / ``DEDUP_EVERY_N`` actually fire
     independently per their own cadence - matching the function-app
-    split-orchestrator behavior.
+    split-orchestrator behavior. Procedural synthesis follows each reconcile
+    unless ``PROCEDURAL_SYNTHESIS_AUTO`` is false.
     """
 
     def process_thread(

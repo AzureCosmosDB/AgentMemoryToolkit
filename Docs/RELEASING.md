@@ -19,7 +19,9 @@ This project uses [PEP 440](https://peps.python.org/pep-0440/) versioning:
 
 Before cutting a release:
 
-1. **CI green on `main`** - every workflow in `.github/workflows/` passes.
+1. **CI green on `main`** - the `CI` workflow (`.github/workflows/ci.yml`:
+   lint, unit tests on Python 3.11-3.13, and the Function app import smoke
+   test) passes.
 2. **Unit tests pass locally** in a fresh venv:
    ```bash
    python -m venv /tmp/release-venv
@@ -32,23 +34,28 @@ Before cutting a release:
    ```bash
    AGENT_MEMORY_RUN_INTEGRATION=true pytest tests/integration -q
    ```
+   The change-feed test also needs `AGENT_MEMORY_RUN_CHANGEFEED=true` and a
+   running Functions host; without it the test is skipped.
 4. **Samples and notebooks work** - every script under `Samples/` runs to
    completion against the live environment.
 5. **No uncommitted local changes** - `git status` clean.
 
 ## Cutting a release
 
-1. **Bump the version** in `pyproject.toml`:
-2. **Update `CHANGELOG.md`** - add a new section with the version, the
-   date, and a summary of changes. Move entries from the unreleased
-   section if you keep one.
+1. **Bump the version** in `pyproject.toml`, in the `metadata.template` line
+   of `azure.yaml` (`azure-cosmos-agent-memory@<NEW_VERSION>`), and in
+   `uv.lock` (run `uv lock` to refresh the package's own entry).
+2. **Update `CHANGELOG.md`** - rename the unreleased section to
+   `## [<NEW_VERSION>] (<date>)`, or add a new section with the version, the
+   date, and a summary of changes if there is none.
 3. **Bump the Function app's SDK pin** in `function_app/requirements.txt`
    to match - `azure-cosmos-agent-memory==<NEW_VERSION>`. The FA installs
    the SDK from PyPI, so the pin must move in lockstep with the SDK
    release. (If the release workflow fails after merge, the FA will be
    pinned to a non-existent version until you cut a follow-up patch -
    coordinate the merge + release-workflow run together.)
-4. **Open a PR** with the version bump + CHANGELOG + updated FA pin.
+4. **Open a PR** with the version bump (`pyproject.toml`, `azure.yaml`,
+   `uv.lock`) + CHANGELOG + updated FA pin.
    Suggested title: `Release v<NEW_VERSION>`. Get it reviewed and merged
    to `main`.
 5. **Trigger the release workflow**:
@@ -86,10 +93,10 @@ but never the standalone `azure/__init__.py` or `azure/cosmos/__init__.py`.
 
 If a release ships a regression:
 
-1. **Yank** the version on PyPI (does not delete; marks installs as a warning):
-   ```bash
-   twine yank azure-cosmos-agent-memory --version <BAD_VERSION>
-   ```
+1. **Yank** the version on PyPI (does not delete; installers skip it unless
+   it is pinned exactly). `twine` has no yank command, so use the web UI: open
+   <https://pypi.org/manage/project/azure-cosmos-agent-memory/releases/>,
+   choose **Options → Yank** next to `<BAD_VERSION>`, and give a reason.
 2. **Cut a new patch release** with the fix and updated CHANGELOG.
 3. Add a deprecation note to the GitHub Release pointing at the
    replacement version.

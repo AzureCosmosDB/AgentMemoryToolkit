@@ -52,7 +52,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "azure-cosmos>=4.16.0",
+    "azure-cosmos>=4.16.3",
     "azure-identity>=1.20",
     "openai>=1.60",
     "aiohttp>=3.10",

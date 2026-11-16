@@ -318,7 +318,8 @@ class TestWhichVerdictsFold:
         )
 
         p._commit_fold.assert_not_called()
-        assert (result["merged"], result["contradicted"]) == (0, 0)
+        assert (result["merged"], result["kept"]) == (0, 1)
+        assert result["conflicts"] == (1 if relation in ("update", "inconsistent") else 0)
 
     def test_unknown_and_repeated_labels_are_ignored(self):
         p = _make_pipeline()

@@ -5,8 +5,7 @@ Covers:
   dedup floor, and folds still at the dedup floor
 * which facts may be combined and how groups form
 * writing a combined fact: the writer's inputs, the check, the retry, the veto, the length cap, and the record
-  (with the oldest member's date and the hash of its text) and the ordered writes it commits
-* the date the contradiction pool prints for a combined fact: its oldest member's
+  and the ordered writes it commits
 * the model failing, a lost race, the deadline, and where the cursor stops
 
 The pipelines are built with ``__new__`` and patched in place, as in ``test_consolidate_memories.py``.
@@ -25,12 +24,12 @@ from unittest.mock import MagicMock
 import pytest
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
-from azure.cosmos.agent_memory._curation import sanitize_record
 from azure.cosmos.agent_memory._utils import compute_content_hash
 from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.services import pipeline as pipeline_module
 from azure.cosmos.agent_memory.services._combine import (
     COMBINE_PROMPT,
+    CombineDraft,
     CombineWrite,
     combinable_pair,
     combined_record,
@@ -40,7 +39,7 @@ from azure.cosmos.agent_memory.services._combine import (
     plan_combine_groups,
     settled_seeds,
 )
-from azure.cosmos.agent_memory.services._dedup import Verdict, survivor_patch
+from azure.cosmos.agent_memory.services._dedup import Verdict
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 NEAR = [1.0, 0.0, 0.0]
@@ -488,7 +487,7 @@ class TestCombinedRecord:
         other_user = [{**a, "user_id": "u2"}, {**b, "user_id": "u2"}]
         assert first != combined_record(other_user, BOTH, lineage=self.LINEAGE)["id"]
 
-    def test_it_records_the_oldest_members_date_and_keeps_the_newest_members_as_its_own(self):
+    def test_it_takes_the_newest_members_date_and_records_no_other(self):
         oldest = _fact("f1", PLANS, created_at="2023-11-01T00:00:00+00:00")
         middle = _fact("f3", PLANS, created_at="2023-11-10T00:00:00+00:00")
         newest = _fact("f2", START, created_at="2023-11-20T00:00:00+00:00")
@@ -497,28 +496,12 @@ class TestCombinedRecord:
             record = combined_record(members, BOTH, lineage=self.LINEAGE)
 
             assert record["created_at"] == "2023-11-20T00:00:00+00:00"
-            assert record["combined_since"] == "2023-11-01T00:00:00+00:00"
+            assert not {"combined_since", "combined_hash"} & set(record)
 
-    def test_a_member_without_a_date_leaves_it_to_the_others_and_none_without_one_leaves_it_out(self):
-        dated = _fact("f1", PLANS, created_at="2023-11-01T00:00:00+00:00")
-        undated = _fact("f2", START, created_at=None)
-
-        assert combined_record([dated, undated], BOTH, lineage=self.LINEAGE)["combined_since"] == dated["created_at"]
-        assert "combined_since" not in combined_record([undated, {**undated, "id": "f3"}], BOTH, lineage=self.LINEAGE)
-
-    def test_it_records_the_hash_of_the_text_it_wrote(self):
+    def test_it_hashes_the_text_it_wrote(self):
         record = combined_record([_fact("f1", PLANS), _fact("f2", START)], BOTH, lineage=self.LINEAGE)
 
-        assert record["combined_hash"] == compute_content_hash(BOTH)
-
-    def test_a_fold_into_a_combined_fact_keeps_when_and_what_it_was_combined(self):
-        record = combined_record([_fact("f1", PLANS), _fact("f2", START)], BOTH, lineage=self.LINEAGE)
-        duplicate = _fact("f3", START, created_at="2024-02-01T00:00:00+00:00")
-
-        patch = survivor_patch(record, [duplicate])
-
-        assert (patch["combined_since"], patch["combined_hash"]) == (record["combined_since"], record["combined_hash"])
-        assert patch["content"] == BOTH
+        assert record["content_hash"] == compute_content_hash(BOTH)
 
 
 class TestCommitCombine:
@@ -655,32 +638,6 @@ class TestACombinedFactIsRedactedBeforeItIsEmbedded:
         assert token not in body["content"] and "[REDACTED-SECRET]" in body["content"]
         assert body["embedding"] == [0.1, 0.2, 0.3]
         assert token not in p._embed_one.call_args.args[0]
-
-    def test_the_hash_of_what_combine_wrote_is_that_of_the_text_that_is_stored(self):
-        token = "ghp_" + "A1b2" * 9
-        p = _make_pipeline()
-        seed, partner, verdicts = _pair()
-        model = _Model(verdicts, [_write(["M1", "M2"], f"{BOTH} Its token is {token}.")], [_holds(2)])
-
-        _run(p, [seed], {"f2": [partner]}, model)
-
-        [body] = _created(p)
-        assert token not in body["content"]
-        assert body["combined_hash"] == compute_content_hash(body["content"]), "redacting is not an edit"
-
-
-class TestACombinedFactsOwnFieldsAreNotRedacted:
-    def test_the_secret_guard_leaves_what_combining_recorded_alone(self):
-        shaped_like_a_token = "ghp_" + "A1b2" * 9  # in a field that holds a date or a hash, never prose
-        doc = {
-            "id": "fact_1",
-            "content": BOTH,
-            "combined_since": shaped_like_a_token,
-            "combined_hash": shaped_like_a_token,
-        }
-
-        assert sanitize_record(doc) == []
-        assert (doc["combined_since"], doc["combined_hash"]) == (shaped_like_a_token, shaped_like_a_token)
 
 
 class TestWhichFactsCombine:
@@ -907,10 +864,18 @@ class TestWriteResult:
 
         assert p._write_combined(None) == CombineWrite("lost")
 
+    def test_a_written_combined_fact_reports_its_id_with_the_members_retired_into_it(self):
+        p = _make_pipeline()
+        seed, partner, _ = _pair()
+        p._docs.update({seed["id"]: seed, partner["id"]: partner})
+
+        write = p._write_combined(CombineDraft("combined", (partner, seed), BOTH))
+
+        [record] = _created(p)
+        assert write == CombineWrite("written", ("f1", "f2"), record["id"])
+
     def test_reconcile_reports_the_combine_counts(self, caplog):
         p = _make_pipeline()
-        p._reconcile_contradictions = MagicMock(return_value={"kept": 0, "merged": 0, "contradicted": 0})
-        p._active_memories_for_reconcile = MagicMock(return_value=[])
         seed, partner, verdicts = _pair()
         p._docs.update({seed["id"]: seed, partner["id"]: partner})
         p._container.query_items.side_effect = lambda query, parameters, **kwargs: iter(
@@ -924,32 +889,3 @@ class TestWriteResult:
         [record] = [r for r in caplog.records if r.getMessage() == "reconcile.outcome"]
         assert (result["combined"], result["synthesized"], result["combine_groups"]) == (2, 1, 1)
         assert (record.combined, record.synthesized, record.combine_groups, record.combine_failed) == (2, 1, 1, 0)
-
-
-class TestTheContradictionPoolDatesACombinedFactByItsOldestMember:
-    @staticmethod
-    def _created_shown(facts: list[dict]) -> list[str]:
-        """The ``Created:`` the contradiction prompt prints for each of ``facts``."""
-        p = PipelineService.__new__(PipelineService)
-        shown: list[str] = []
-
-        def run_prompty(filename: str, inputs: dict) -> str:
-            shown.extend(line.rsplit("Created: ", 1)[1] for line in inputs["facts_text"].splitlines())
-            return json.dumps({"contradicted_pairs": [], "kept_ids": []})
-
-        p._run_prompty = run_prompty
-        p._reconcile_contradictions("u1", "fact", facts)
-        return shown
-
-    def test_a_combined_fact_is_dated_by_combined_since_and_any_other_fact_by_created_at(self):
-        tags = ["sys:fact", "sys:combined"]
-        combined = _fact(
-            "c1", BOTH, created_at="2023-11-20T00:00:00+00:00", combined_since="2023-11-01T00:00:00+00:00", tags=tags
-        )
-        written_before_the_field_existed = _fact("c2", BOTH, created_at="2023-11-21T00:00:00+00:00", tags=tags)
-        ordinary = _fact("f1", PLANS, created_at="2023-11-22T00:00:00+00:00")
-        undated = _fact("f2", START, created_at=None)
-
-        shown = self._created_shown([combined, written_before_the_field_existed, ordinary, undated])
-
-        assert shown == ["2023-11-01T00:00:00+00:00", "2023-11-21T00:00:00+00:00", "2023-11-22T00:00:00+00:00", "N/A"]

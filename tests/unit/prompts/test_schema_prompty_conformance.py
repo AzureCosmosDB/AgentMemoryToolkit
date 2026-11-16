@@ -145,7 +145,7 @@ def test_prompty_describes_schema_shape(filename: str, schema_entry: tuple[str, 
 def test_prompty_nested_required_fields_present(filename: str, schema_entry: tuple[str, dict]) -> None:
     """Each prompty's JSON example must include all required keys at every nesting level.
 
-    Catches drift inside nested objects (e.g. ``duplicate_groups[].required``)
+    Catches drift inside nested objects (e.g. ``candidates[].required``)
     that the top-level shape test cannot see. Walks the first JSON block whose
     top-level keys satisfy the schema; if none does, the top-level test owns
     the failure and we skip here.

@@ -8,9 +8,9 @@ import pytest
 
 from azure.cosmos.agent_memory.services._pipeline_helpers import PromptyLoader
 
-# Prompts whose output is never stored as memory text: dedup and dedup_verify only classify memories that are
-# already stored.
-_NON_WRITING_PROMPTS = frozenset({"dedup.prompty", "dedup_verify.prompty"})
+# Prompts whose output is never stored as memory text: dedup_verify only classifies memories that are already
+# stored.
+_NON_WRITING_PROMPTS = frozenset({"dedup_verify.prompty"})
 
 
 def test_memory_writing_prompts_forbid_literal_secrets() -> None:

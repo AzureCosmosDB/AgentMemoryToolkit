@@ -5,11 +5,10 @@ change feed passes a count), then an optional ``ReconcileMemories`` activity,
 then a best-effort ``SynthesizeProceduralOrchestrator`` sub-call.
 Reconciliation is gated by the change-feed trigger (which tracks the
 per-user/thread turn counter) and signaled to the orchestrator via the
-``reconcile`` flag on its input payload. It runs the duplicate pass (fold and
-combine) and then the contradiction pass within a time budget
+``reconcile`` flag on its input payload. It folds duplicate facts, combines facts
+about one thing and links conflicting facts within a time budget
 (``ACTIVITY_TIME_BUDGET_SECONDS``): once it has passed no new model call
-starts and the contradiction pass is skipped, and the next run continues from
-the dedup cursor. Procedural synthesis (its own activity, with the same time
+starts, and the next run continues from the dedup cursor. Procedural synthesis (its own activity, with the same time
 budget) fires only after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO``
 is enabled, so operators have a kill-switch for the extra LLM call. It learns
 from the behavioral facts and episode lessons written since the user's
@@ -168,9 +167,9 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
 def em_ReconcileMemories(payload: dict) -> dict:
     # Reconcile is one activity: its model decisions and supersession writes are larger
     # and more coupled than the extract/persist flow handled here.
-    # The deadline keeps it inside the function timeout: once it passes, the dedup pass
-    # stops starting model calls and keeps what it finished, the contradiction pass is
-    # skipped, and the next run continues from the dedup cursor.
+    # The deadline keeps it inside the function timeout: once it passes, the pass stops
+    # starting model calls and keeps what it finished, and the next run continues from the
+    # dedup cursor.
     # The episodic call is a no-op that returns zero counts.
     user_id = payload["user_id"]
     pipeline = get_pipeline()

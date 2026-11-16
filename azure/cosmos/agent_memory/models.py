@@ -183,10 +183,10 @@ class MemoryRecordBase(BaseModel):
     confidence: Optional[float] = None
     content_hash: Optional[str] = None
     superseded_by: Optional[str] = None
-    # Why a record was retired: ``contradict`` (a conflicting fact replaced it), ``duplicate`` (folded into a
-    # fact that states the same claim), ``combined`` (its details went into a combined fact) or ``procedure``
-    # (a directive or correction retired into the procedure that now holds it). ``update`` is accepted but
-    # nothing writes it.
+    # Why a record was retired: ``duplicate`` (folded into a fact that states the same claim), ``combined`` (its
+    # details went into a combined fact) or ``procedure`` (a directive or correction retired into the procedure
+    # that now holds it). ``contradict`` and ``update`` are no longer written (facts that conflict stay active and
+    # are linked instead) but stay valid, so that records written earlier still load.
     supersede_reason: Optional[Literal["duplicate", "contradict", "update", "combined", "procedure"]] = None
     superseded_at: Optional[str] = None
     supersedes_ids: list[str] = Field(default_factory=list)
@@ -388,8 +388,6 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
         "assertion",
         "subject",
         "attribute",
-        "combined_since",
-        "combined_hash",
     }
     drop_when_empty_list: set[str] = {"entities", "merged_from"}
     drop_when_zero = {"use_count"}
@@ -516,11 +514,6 @@ class FactRecord(MemoryRecordBase):
     fact about the same subject would replace), the names it mentions (``entities``) and the
     turns it came from (``source_turn_ids``). Facts from earlier prompts have no assertion,
     subject, attribute or entities.
-
-    A combined fact (tagged ``sys:combined``) also records ``combined_since``, the ``created_at`` of
-    its oldest member (its own ``created_at`` is its newest member's), and ``combined_hash``, the
-    content hash of the text combining wrote. The contradiction pass dates the fact by
-    ``combined_since``, and tells an edit of its text from the text as written by ``combined_hash``.
     """
 
     memory_type: Literal[MemoryType.fact] = Field(  # type: ignore[assignment]
@@ -538,8 +531,6 @@ class FactRecord(MemoryRecordBase):
     attribute: Optional[str] = None
     entities: list[str] = Field(default_factory=list)
     merged_from: list[str] = Field(default_factory=list)
-    combined_since: Optional[str] = None
-    combined_hash: Optional[str] = None
 
     _ID_PREFIX: ClassVar[Optional[str]] = "fact_"
 

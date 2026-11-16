@@ -45,8 +45,10 @@ def test_search_and_history_results_carry_merged_from():
     assert "c.merged_from" in MEMORY_PROJECTION
 
 
-@pytest.mark.parametrize("reason", ["duplicate", "contradict", "update", "combined", "procedure"])
-def test_every_supersede_reason_the_pipeline_writes_is_accepted(reason):
+@pytest.mark.parametrize("reason", ["duplicate", "combined", "procedure", "contradict", "update"])
+def test_every_supersede_reason_is_accepted_including_those_earlier_versions_wrote(reason):
+    # The pipeline writes the first three; "contradict" and "update" are no longer written, but records
+    # retired for them must still load.
     record = FactRecord.model_validate(_fact_doc(superseded_by="fact_2", supersede_reason=reason))
 
     assert record.supersede_reason == reason

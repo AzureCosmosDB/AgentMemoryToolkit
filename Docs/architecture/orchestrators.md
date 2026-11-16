@@ -7,7 +7,7 @@ ExtractMemoriesOrchestrator
   em_Extract  (load recent turns + LLM + parse; read-only context lookups, no writes)
   em_Persist  (embeddings + deterministic create_item; 409 = already persisted)
   em_AdvanceExtractWatermark (when the change feed passes a count; runs only after a successful persist)
-  em_ReconcileMemories (optional; single activity for GA; time-budgeted dedup, combine and contradiction passes)
+  em_ReconcileMemories (optional; single activity for GA; time-budgeted: folds duplicates, combines facts and links conflicts)
   SynthesizeProceduralOrchestrator (best-effort sub-orchestration after reconcile when PROCEDURAL_SYNTHESIS_AUTO is on)
 
 ExtractEpisodesOrchestrator
@@ -33,12 +33,13 @@ Fact IDs are deterministic from user, thread, and normalized content, and episod
 
 ## Reconcile activity
 
-`em_ReconcileMemories` calls `PipelineService.reconcile_memories` for `fact` and for `episodic` (a no-op) with `n = DEDUP_POOL_SIZE` and one deadline, `time.monotonic() + ACTIVITY_TIME_BUDGET_SECONDS` (default 240 s, minimum 30). Keep the budget below the app's `functionTimeout`. Each call runs two passes in order:
+`em_ReconcileMemories` calls `PipelineService.reconcile_memories` for `fact` and for `episodic` (a no-op) with `n = DEDUP_POOL_SIZE` and one deadline, `time.monotonic() + ACTIVITY_TIME_BUDGET_SECONDS` (default 240 s, minimum 30). Keep the budget below the app's `functionTimeout`. A call for facts runs one pass (`consolidate_memories`):
 
-1. **Dedup pass** (`consolidate_memories`). It takes up to `n` active facts written after the user's dedup cursor, oldest first, and compares each with its nearest active neighbours in one `dedup_verify` call. A fact is folded into another (`supersede_reason="duplicate"`) only when nothing it states would be lost. Facts about one specific thing that each hold details the others lack also become one new fact (tagged `sys:combined`) and their sources are retired as `combined`. The cursor is the `dedup_cursor_<user_id>_fact` document under the thread id `__dedup__`.
-2. **Contradiction pass.** It re-queries the `n` most recent active facts, after the folds (so a fact combined in this run is in the pool), and retires the loser of each contradiction (`contradict`). Agent-sourced facts (`sys:agent-fact`) are left out of it: a later user statement does not supersede what the agent did or recommended. The prompt lets the more recent `Created` win, and a combined fact (`sys:combined`) shows its oldest member's date (`combined_since`), so it beats only a fact older than every one of its members. One that loses first has the records retired into it (as `combined`, or folded into it as `duplicate`) written back as active, each under an ETag check, and is then retired, so a later pass can retire the sources the winner contradicts; if an app edited its text it is retired alone. A fact that changed meanwhile, or a write that fails, leaves the pair for a later pass.
+1. **Checks.** It takes up to `n` active facts written after the user's dedup cursor, oldest first, and compares each with its nearest active neighbours in one `dedup_verify` call. The cursor is the `dedup_cursor_<user_id>_fact` document under the thread id `__dedup__`.
+2. **Folds and combines.** A fact is folded into another (`supersede_reason="duplicate"`) only when nothing it states would be lost. Facts about one specific thing that each hold details the others lack also become one new fact (tagged `sys:combined`) and their sources are retired as `combined`.
+3. **Conflict links.** A pair judged `update` or `inconsistent` retires nothing: both facts stay active and the pass upserts one `conflict_link` document for the pair under the thread id `__conflicts__` (the two fact ids and the kind, no text; its id derives from the pair, so a retry rewrites it). A conflict with a fact the same pass folded or combined is linked to the fact that took its place, and a link that cannot be written is logged and skipped: it neither fails the activity nor holds the cursor back.
 
-Once the deadline has passed no new model call starts. The dedup pass applies the folds it found and moves its cursor past the facts it finished, and the contradiction pass is skipped. When combining, checking stops halfway to the deadline so the groups have time to be written, and the cursor stops before the first fact of a group that was not tried, so the next run checks it again. A retryable model error also ends the dedup pass early, with the same cursor handling.
+Once the deadline has passed no new model call starts. The pass applies the folds it found, links the conflicts it found and moves its cursor past the facts it finished. When combining, checking stops halfway to the deadline so the groups have time to be written, and the cursor stops before the first fact of a group that was not tried, so the next run checks it again. A retryable model error also ends the pass early, with the same cursor handling.
 
 Folds and combines are not transactional; each is ordered so a crash leaves a state the next run finishes. A fold writes the survivor first (it lists the retired facts in `merged_from`) and then retires each loser. A combined fact is created first and its sources are retired after. The cursor moves only after the writes it covers.
 

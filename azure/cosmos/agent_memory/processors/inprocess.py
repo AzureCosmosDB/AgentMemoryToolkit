@@ -137,8 +137,8 @@ class InProcessProcessor:
     def process_reconcile(self, *, user_id: str) -> int:
         """Run reconciliation standalone. Returns the count of facts consolidated or retired.
 
-        That is the dedup pass's merged and combined facts plus the facts the
-        contradiction pass retired. Pool size is read from ``DEDUP_POOL_SIZE``
+        That is the facts folded into another as duplicates plus the facts combined into a new one; a
+        conflict retires nothing, so it adds nothing. Pool size is read from ``DEDUP_POOL_SIZE``
         (env-tunable, default 50, capped at 500) so the auto-trigger and the
         standalone path agree.
         """
@@ -150,7 +150,7 @@ class InProcessProcessor:
         """Reconcile facts, then episodic memories; sum the consolidated counts.
 
         SDK in-process processing makes the same two ``reconcile_memories`` calls as the Durable
-        backend. Facts get the duplicate, combine and contradiction passes; the pipeline treats an
+        backend. Facts are folded and combined, and their conflicts linked; the pipeline treats an
         episodic reconcile as a no-op, so it adds nothing to the count.
         """
         total = 0
@@ -161,20 +161,17 @@ class InProcessProcessor:
 
     @staticmethod
     def _extract_reconcile_count(reconciled: Any) -> int:
-        """Sum ``merged + contradicted + combined`` from a ``reconcile_memories`` result.
+        """Sum ``merged + combined`` from a ``reconcile_memories`` result.
 
-        ``PipelineService.reconcile_memories`` returns a dict with
-        ``{"kept", "merged", "contradicted"}`` plus the dedup pass's counts;
-        ``merged`` (duplicates), ``contradicted`` and ``combined`` (facts
-        retired into a combined fact) all represent facts that were
-        consolidated or retired, so they contribute to the dedup-count metric.
+        ``PipelineService.reconcile_memories`` returns a dict of the pass's counts;
+        ``merged`` (duplicates) and ``combined`` (facts retired into a combined
+        fact) represent facts that were consolidated or retired, so they
+        contribute to the dedup-count metric. ``conflicts`` retires nothing,
+        so it does not.
         """
         if not isinstance(reconciled, dict):
             return 0
-        return sum(
-            reconciled[key] if isinstance(reconciled.get(key), int) else 0
-            for key in ("merged", "contradicted", "combined")
-        )
+        return sum(reconciled[key] if isinstance(reconciled.get(key), int) else 0 for key in ("merged", "combined"))
 
     def generate_user_summary(
         self,

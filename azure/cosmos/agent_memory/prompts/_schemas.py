@@ -26,32 +26,6 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# dedup.prompty - reconcile a pool of active facts
-# ---------------------------------------------------------------------------
-DEDUP_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "contradicted_pairs": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "winner_id": {"type": "string"},
-                    "loser_id": {"type": "string"},
-                    "reason": {"type": "string"},
-                },
-                "required": ["winner_id", "loser_id", "reason"],
-                "additionalProperties": False,
-            },
-        },
-        "kept_ids": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["contradicted_pairs", "kept_ids"],
-    "additionalProperties": False,
-}
-
-
-# ---------------------------------------------------------------------------
 # dedup_verify.prompty - one memory's relation to each of its nearest neighbours
 #
 # One entry per candidate label: the relation, and the details each side states
@@ -431,7 +405,6 @@ PLAIN_JSON_PROMPTS: frozenset[str] = frozenset({"combine_memories.prompty"})
 # Registry - maps prompty filename → (schema_name, schema_dict)
 # ---------------------------------------------------------------------------
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
-    "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),
     "dedup_verify.prompty": ("DedupVerifyOutput", DEDUP_VERIFY_SCHEMA),
     "extract_episode.prompty": ("ExtractEpisodesOutput", EXTRACT_EPISODE_SCHEMA),
     "extract_procedure.prompty": ("ExtractProceduresOutput", EXTRACT_PROCEDURE_SCHEMA),

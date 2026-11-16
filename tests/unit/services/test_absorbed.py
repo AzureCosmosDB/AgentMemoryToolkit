@@ -117,14 +117,15 @@ def _reasons_the_pipeline_retires_with(module) -> set[str]:
 @pytest.mark.parametrize("module", [sync_pipeline, aio_pipeline], ids=["sync", "async"])
 def test_the_cascade_follows_exactly_the_retirements_that_leave_a_copy_behind(module):
     """A record retired as a duplicate, a combined member or a taught fact holds what its survivor holds, so deleting
-    the survivor deletes it; a contradicted or updated record is an earlier version and stays."""
+    the survivor deletes it; a record an earlier version retired as contradicted or updated is an earlier version and
+    stays."""
     written = _reasons_the_pipeline_retires_with(module)
     # What ``supersede_reason`` accepts: the vocabulary the pipelines, the models and the cascade share.
     accepted = set(get_args(get_args(MemoryRecordBase.model_fields["supersede_reason"].annotation)[0]))
 
-    assert written == {"duplicate", "contradict", "combined", "procedure"}
+    assert written == {"duplicate", "combined", "procedure"}
     assert written <= accepted and set(ABSORBED_REASONS) <= accepted
-    assert set(ABSORBED_REASONS) == written - {"contradict"}
+    assert set(ABSORBED_REASONS) == written
     assert COMBINE_REASON in ABSORBED_REASONS
     assert accepted - set(ABSORBED_REASONS) == {"contradict", "update"}
 

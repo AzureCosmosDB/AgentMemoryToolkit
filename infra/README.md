@@ -132,7 +132,7 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 |---|---|---|---|
 | `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. `0` disables it. |
 | `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact extraction every N turns within a `(user_id, thread_id)`. Reconcile and procedure learning run on multiples of it (see `DEDUP_EVERY_N`). `0` disables all three. |
-| `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run reconcile (fold duplicate facts, combine facts about one specific thing, resolve contradictions) every Nth fact-extraction, so it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns. Procedure learning is chained after it (unless `PROCEDURAL_SYNTHESIS_AUTO` is `false`). `0` disables both. |
+| `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run reconcile (fold duplicate facts, combine facts about one specific thing, link conflicting facts) every Nth fact-extraction, so it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns. Procedure learning is chained after it (unless `PROCEDURAL_SYNTHESIS_AUTO` is `false`). `0` disables both. |
 | `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
 | `EPISODE_EVAL_EVERY_N` | `episodeEvalEveryN` | `4` | Check a thread's open episode for a boundary every N turns within a `(user_id, thread_id)`. `0` disables episodic memory. |
 | `EPISODE_IDLE_GAP_SECONDS` | `episodeIdleGapSeconds` | `1800` | A gap longer than this between two consecutive turns closes the open episode. |
@@ -140,7 +140,7 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | `EPISODE_MAX_TURNS` | `episodeMaxTurns` | `40` | An open episode is closed once it reaches this many turns. |
 | `EPISODE_MIN_TURNS` | `episodeMinTurns` | `2` | Fewest turns before an idle gap or topic drift may close an episode. |
 | `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Newest items a summary run reads: turns for a thread summary, new memories per thread for a user summary. Extraction is not capped by it; it reads every turn since its last successful run. At least 1; a lower value falls back to `20`. |
-| `DEDUP_POOL_SIZE` | `dedupPoolSize` | `50` | The `n` of the automatic reconcile: the most new facts its duplicate pass checks per run (each one with close neighbours costs a model call; facts beyond `n` wait for the next run) and the size of its contradiction pool. `1`-`500`. |
+| `DEDUP_POOL_SIZE` | `dedupPoolSize` | `50` | The `n` of the automatic reconcile: the most new facts its duplicate pass checks per run (each one with close neighbours costs a model call; facts beyond `n` wait for the next run). `1`-`500`. |
 | `ACTIVITY_TIME_BUDGET_SECONDS` | `activityTimeBudgetSeconds` | `240` | Seconds a reconcile or procedure-learning activity keeps starting model calls. It then saves what it finished and the next run continues from its cursor. At least `30`; keep it below the function app timeout (30 minutes by default on Flex Consumption). |
 | `MEMORY_PROCESSOR_OWNER` | `memoryProcessorOwner` | `durable` | Backend that owns processing. `durable` = this function-app fleet owns it; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing instead. |
 

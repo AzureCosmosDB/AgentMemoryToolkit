@@ -1,8 +1,9 @@
-"""``reconcile_memories`` runs the dedup pass first, then the contradiction pass on a re-read pool.
+"""``reconcile_memories`` is the dedup pass and its outcome log, and nothing else.
 
-The dedup pass (``consolidate_memories``) retires duplicates; the contradiction pass then asks the
-dedup prompt about the facts that remain. These tests run both for real against a fake container
-and check their order, what each sees, the merged result and the deadline.
+The pass (``consolidate_memories``) folds duplicates, combines facts and links conflicts; ``reconcile_memories``
+adds the ``reconcile.outcome`` log. It reads the user's facts no second time and asks the model nothing more. These
+tests run the pass for real against a fake container and check what it retires, its result, the deadline and the
+log; ``test_conflict_links.py`` covers the conflicts.
 """
 
 from __future__ import annotations
@@ -20,6 +21,19 @@ from azure.cosmos.agent_memory.services._dedup import dedup_result
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 NEAR = [1.0, 0.0, 0.0]
+NO_DEDUP = dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
+RESULT_KEYS = {
+    "kept",
+    "merged",
+    "conflicts",
+    "checked",
+    "compared",
+    "vetoed",
+    "combined",
+    "synthesized",
+    "combine_groups",
+    "combine_failed",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +62,8 @@ def _fact(fid: str, content: str, *, vector=None, ts: int = 1, created_at: str =
 
 
 class _Store:
-    """A memories container holding facts; retiring one hides it from later queries."""
+    """A memories container holding facts; retiring one hides it from later queries. It answers the dedup pass's two
+    queries (the facts after the cursor, a fact's neighbours) and fails on any other."""
 
     def __init__(self, facts: list[dict]):
         self.facts = facts
@@ -65,7 +80,7 @@ class _Store:
             return iter([doc for doc in self.active() if doc["id"] != seed_id and "embedding" in doc])
         if "ORDER BY c._ts ASC" in query:
             return iter(self.active())
-        return iter(sorted(self.active(), key=lambda doc: doc["created_at"], reverse=True))
+        raise AssertionError(f"the pass ran a query the dedup pass does not: {query!r}")
 
     def mark_superseded(self, doc, superseder_id, *, reason):
         self.retired[doc["id"]] = (superseder_id, reason)
@@ -111,50 +126,45 @@ def _store() -> _Store:
     )
 
 
-CONTRADICTION = {"contradicted_pairs": [{"winner_id": "f4", "loser_id": "f3", "reason": "newer"}], "kept_ids": []}
-
-
-class TestDedupThenContradictions:
-    def test_duplicates_are_folded_first_and_the_contradiction_pass_reads_what_is_left(self):
+class TestReconcileIsTheDedupPass:
+    def test_duplicates_are_folded_and_nothing_else_is_retired(self):
         store = _store()
-        p = _make_pipeline(store, [_dedup_reply(), CONTRADICTION])
+        p = _make_pipeline(store, [_dedup_reply()])
 
         result = p.reconcile_memories("u1")
 
-        assert [call.args[0] for call in p._run_prompty.call_args_list] == ["dedup_verify.prompty", "dedup.prompty"]
-        pool = p._run_prompty.call_args.kwargs["inputs"]["facts_text"]
-        assert "ID: f1" not in pool and all(f"ID: {fid} |" in pool for fid in ("f2", "f3", "f4"))
-        assert store.retired == {"f1": ("f2", "duplicate"), "f3": ("f4", "contradict")}
-        assert (result["merged"], result["contradicted"], result["kept"]) == (1, 1, 2)
+        assert [call.args[0] for call in p._run_prompty.call_args_list] == ["dedup_verify.prompty"]
+        assert store.retired == {"f1": ("f2", "duplicate")}
+        assert (result["merged"], result["conflicts"], result["kept"]) == (1, 0, 3)
         assert (result["checked"], result["compared"], result["vetoed"]) == (4, 1, 0)
 
-    def test_the_dedup_pass_writes_its_cursor_before_the_contradiction_pool_is_read(self):
+    def test_the_dedup_cursor_is_written_and_the_facts_are_not_read_again(self):
         store = _store()
-        p = _make_pipeline(store, [_dedup_reply(), CONTRADICTION])
+        p = _make_pipeline(store, [_dedup_reply()])
 
         p.reconcile_memories("u1")
 
         body = p._container.create_item.call_args.kwargs["body"]
         assert (body["id"], body["thread_id"], body["last_ts"]) == ("dedup_cursor_u1_fact", "__dedup__", 4)
-        assert "ORDER BY c.created_at DESC" in store.queries[-1]
+        assert not [query for query in store.queries if "ORDER BY c.created_at DESC" in query]
 
-    def test_a_pass_with_nothing_to_fold_still_resolves_contradictions(self):
+    def test_a_pass_with_nothing_to_fold_retires_nothing(self):
         store = _store()
-        p = _make_pipeline(store, [_dedup_reply("related"), CONTRADICTION])
+        p = _make_pipeline(store, [_dedup_reply("related")])
 
         result = p.reconcile_memories("u1")
 
-        assert store.retired == {"f3": ("f4", "contradict")}
-        assert (result["merged"], result["contradicted"], result["kept"]) == (0, 1, 3)
+        assert store.retired == {}
+        assert (result["merged"], result["conflicts"], result["kept"]) == (0, 0, 4)
 
-    def test_the_result_keeps_its_keys_and_adds_the_dedup_counts(self):
+    def test_the_result_has_the_passs_keys_and_no_contradicted_count(self):
         store = _store()
-        p = _make_pipeline(store, [_dedup_reply(), CONTRADICTION])
+        p = _make_pipeline(store, [_dedup_reply()])
 
         result = p.reconcile_memories("u1")
 
-        assert set(result) == set(dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0))
-        assert {"kept", "merged", "contradicted"} <= set(result)
+        assert set(result) == RESULT_KEYS == set(NO_DEDUP)
+        assert "contradicted" not in result
 
     @pytest.mark.parametrize("memory_type", ["episodic", "procedural"])
     def test_other_memory_types_are_no_ops_with_the_full_result_shape(self, memory_type):
@@ -164,6 +174,7 @@ class TestDedupThenContradictions:
         result = p.reconcile_memories("u1", memory_type=memory_type)
 
         assert result == dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
+        assert result["conflicts"] == 0 and set(result) == RESULT_KEYS
         p.consolidate_memories.assert_not_called()
         p._container.query_items.assert_not_called()
 
@@ -172,8 +183,6 @@ class TestDedupThenContradictions:
         p.consolidate_memories = MagicMock(
             return_value=dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
         )
-        p._reconcile_contradictions = MagicMock(return_value={"kept": 0, "merged": 0, "contradicted": 0})
-        p._active_memories_for_reconcile = MagicMock(return_value=[])
 
         p.reconcile_memories("u1", n=9, deadline=float("inf"))
 
@@ -182,7 +191,7 @@ class TestDedupThenContradictions:
 
 
 class TestReconcileDeadline:
-    def test_a_deadline_passed_during_the_dedup_pass_skips_the_contradiction_pass(self, monkeypatch, caplog):
+    def test_a_deadline_passed_during_the_pass_ends_it_after_the_fold_it_found(self, monkeypatch, caplog):
         store = _store()
         clock = {"now": 0.0}
         monkeypatch.setattr(pipeline_module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
@@ -200,24 +209,24 @@ class TestReconcileDeadline:
 
         assert [call.args[0] for call in p._run_prompty.call_args_list] == ["dedup_verify.prompty"]
         assert store.retired == {"f1": ("f2", "duplicate")}
-        assert (result["merged"], result["contradicted"]) == (1, 0)
-        assert result["kept"] == result["checked"] - 1
+        assert (result["merged"], result["checked"], result["kept"]) == (1, 1, 0)
+        assert p._container.create_item.call_args.kwargs["body"]["last_ts"] == 1, "the cursor stops after f1"
         outcome = [r for r in caplog.records if r.getMessage() == "reconcile.outcome"]
-        assert len(outcome) == 1 and outcome[0].candidates_considered == 0
+        assert len(outcome) == 1 and outcome[0].candidates_considered == 1
 
-    def test_without_a_deadline_both_passes_always_run(self):
+    def test_without_a_deadline_the_pass_checks_every_fact(self):
         store = _store()
-        p = _make_pipeline(store, [_dedup_reply(), CONTRADICTION])
+        p = _make_pipeline(store, [_dedup_reply()])
 
         result = p.reconcile_memories("u1", deadline=None)
 
-        assert (result["merged"], result["contradicted"]) == (1, 1)
+        assert (result["merged"], result["checked"]) == (1, 4)
 
 
 class TestReconcileOutcomeTelemetryIncludesDedupCounts:
     def test_the_outcome_record_carries_the_dedup_counts(self, caplog):
         store = _store()
-        p = _make_pipeline(store, [_dedup_reply(), CONTRADICTION])
+        p = _make_pipeline(store, [_dedup_reply()])
 
         with caplog.at_level(logging.INFO, logger="azure.cosmos.agent_memory.pipeline"):
             result = p.reconcile_memories("u1")
@@ -225,7 +234,8 @@ class TestReconcileOutcomeTelemetryIncludesDedupCounts:
         [record] = [r for r in caplog.records if r.getMessage() == "reconcile.outcome"]
         assert record.facts_checked == result["checked"] == 4
         assert record.pairs_compared == result["compared"] == 1
-        for key in ("kept", "merged", "contradicted", "vetoed", "combined", "synthesized"):
+        for key in ("kept", "merged", "conflicts", "vetoed", "combined", "synthesized"):
             assert getattr(record, key) == result[key]
+        assert not hasattr(record, "contradicted")
         assert (record.combine_groups, record.combine_failed) == (0, 0)
-        assert record.candidates_considered == 3
+        assert record.candidates_considered == 4

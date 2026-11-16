@@ -52,16 +52,14 @@ DEFAULT_EPISODE_MAX_TURNS = 40
 # ceiling and is not floored.
 DEFAULT_EPISODE_MIN_TURNS = 2
 DEFAULT_USER_SUMMARY_EVERY_N = 20
-# Reconcile (the duplicate, combine and contradiction passes) runs on its own cadence -
-# every Nth extract (NOT every Nth turn) - because each pass makes model calls that would
-# dominate per-push cost when FACT_EXTRACTION_EVERY_N=1. Default 5 = one reconcile per 5
-# extracts. Set to 1 to reconcile on every extract; set to 0 to disable it, and the
-# procedural synthesis that follows it.
+# Reconcile (folding duplicates, combining facts and linking conflicts) runs on its own cadence -
+# every Nth extract (NOT every Nth turn) - because its model calls would dominate per-push cost
+# when FACT_EXTRACTION_EVERY_N=1. Default 5 = one reconcile per 5 extracts. Set to 1 to reconcile
+# on every extract; set to 0 to disable it, and the procedural synthesis that follows it.
 DEFAULT_DEDUP_EVERY_N = 5
-# How many facts one reconcile pass looks at: the ``n`` of ``PipelineService.reconcile_memories``.
-# The duplicate pass checks up to this many facts written since its last pass, each against its
-# nearest active neighbours only; the contradiction pass reads up to this many of the user's newest
-# active facts. The pipeline rejects an ``n`` above 500, which bounds prompt size and LLM cost.
+# How many facts one reconcile pass checks: the ``n`` of ``PipelineService.reconcile_memories``.
+# It checks up to this many facts written since its last pass, each against its nearest active
+# neighbours only. The pipeline rejects an ``n`` above 500, which bounds LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
 # ---------------------------------------------------------------------------
 # INTERNAL extraction, dedup and combine tuning - NOT customer-configurable.
@@ -253,7 +251,7 @@ def get_dedup_every_n() -> int:
 
 
 def get_dedup_pool_size() -> int:
-    """How many facts one reconcile pass looks at: the ``n`` of
+    """How many facts one reconcile pass checks: the ``n`` of
     :py:meth:`PipelineService.reconcile_memories`. The pipeline rejects an ``n``
     above 500, so a larger value is clamped to 500 with a WARN here, and 0 falls
     back to the default."""

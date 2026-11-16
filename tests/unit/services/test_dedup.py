@@ -377,7 +377,7 @@ class TestSurvivorProvenance:
 
         assert patch["merged_from"] == ["a", "b", "old"]
 
-    def test_a_user_fact_that_absorbs_an_agent_paraphrase_stays_open_to_contradiction(self):
+    def test_a_user_fact_that_absorbs_an_agent_paraphrase_stays_a_user_fact_open_to_a_conflict_link(self):
         survivor = _doc("s", "User runs daily")
         loser = _doc("a", "Assistant noted the user runs", tags=["sys:fact", "sys:agent-fact"])
 
@@ -409,13 +409,13 @@ class TestSurvivorProvenance:
 
 
 class TestResultAndArguments:
-    def test_a_passes_counts_report_what_it_kept_and_retired(self):
-        result = dedup_result(checked=4, retired_seeds=1, merged=2, compared=3, vetoed=1)
+    def test_a_passes_counts_report_what_it_kept_retired_and_linked(self):
+        result = dedup_result(checked=4, retired_seeds=1, merged=2, compared=3, vetoed=1, conflicts=2)
 
         assert result == {
             "kept": 3,
             "merged": 2,
-            "contradicted": 0,
+            "conflicts": 2,
             "checked": 4,
             "compared": 3,
             "vetoed": 1,

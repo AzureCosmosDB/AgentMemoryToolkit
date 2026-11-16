@@ -1117,8 +1117,8 @@ class AsyncMemoryStore:
     ) -> list[dict[str, Any]]:
         """Return a memory's superseded predecessors, most-recently-superseded first.
 
-        AMT supersedes rather than deletes: when a fact is contradicted by a newer one, folded into
-        a duplicate or combined fact, or retired into a procedure, the prior document is retained
+        AMT supersedes rather than deletes: when a fact is folded into a duplicate or combined fact,
+        or retired into a procedure, the prior document is retained
         with ``superseded_by`` pointing at its replacement (see :meth:`mark_superseded`). This walks
         that chain backwards from *memory_id* so callers can reason about how a
         fact evolved - knowledge updates, preference reversals, relocations -

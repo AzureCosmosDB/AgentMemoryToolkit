@@ -28,12 +28,12 @@ import pytest
 from azure.cosmos.agent_memory import CosmosMemoryClient
 from tests.conftest import INTEGRATION_ENABLED
 
-# What ``reconcile`` returns: the contradiction pass's ``kept`` and ``contradicted``, the duplicates folded
-# (``merged``), and the duplicate pass's counts, including the facts combined into one.
+# What ``reconcile`` returns: the facts checked that stay active (``kept``), the duplicates folded (``merged``),
+# the conflicting pairs linked (``conflicts``), and the pass's other counts, including the facts combined into one.
 RECONCILE_KEYS = {
     "kept",
     "merged",
-    "contradicted",
+    "conflicts",
     "checked",
     "compared",
     "vetoed",
@@ -436,8 +436,8 @@ class TestReconciliation:
             )
             assert isinstance(stats, dict)
             assert RECONCILE_KEYS <= set(stats), stats
-            assert stats["merged"] + stats["combined"] + stats["contradicted"] >= 1, (
-                f"Expected at least one near-duplicate to be merged, combined or contradicted, got {stats}"
+            assert stats["merged"] + stats["combined"] >= 1, (
+                f"Expected at least one near-duplicate to be merged or combined, got {stats}"
             )
 
             active = [
@@ -449,14 +449,16 @@ class TestReconciliation:
         finally:
             _cleanup(agent_memory, unique_user_id)
 
-    def test_reconcile_resolves_contradiction(self, agent_memory, unique_user_id, unique_thread_id):
+    def test_reconcile_links_conflicting_facts_and_retires_neither(
+        self, agent_memory, unique_user_id, unique_thread_id
+    ):
         try:
-            contradictory_facts = [
-                "User is strictly vegetarian and never eats meat.",
-                "User loves a good ribeye steak.",
-                "User often orders the bone-in pork chop at steakhouses.",
+            # Two values for one attribute: close enough in meaning for the pass to compare them.
+            conflicting_facts = [
+                "The user's deadline for the Orion report is March 1.",
+                "The user's deadline for the Orion report is March 15.",
             ]
-            for content in contradictory_facts:
+            for content in conflicting_facts:
                 agent_memory.upsert_memory(
                     user_id=unique_user_id,
                     role="user",
@@ -466,32 +468,31 @@ class TestReconciliation:
                     salience=0.7,
                 )
 
-            before = agent_memory.get_memories(
-                user_id=unique_user_id,
-                memory_types=["fact"],
-            )
-            assert len(before) == len(contradictory_facts)
-
             stats = agent_memory.reconcile(user_id=unique_user_id)
             assert isinstance(stats, dict)
-            assert stats.get("contradicted", 0) >= 1, f"Expected at least one contradiction to be resolved, got {stats}"
+            assert "contradicted" not in stats
+            assert stats.get("conflicts", 0) >= 1, f"Expected the two facts to be linked as a conflict, got {stats}"
 
             all_facts = agent_memory.get_memories(
                 user_id=unique_user_id,
                 memory_types=["fact"],
                 include_superseded=True,
             )
-            contradicted = [m for m in all_facts if m.get("supersede_reason") == "contradict"]
-            assert len(contradicted) >= 1, "Expected at least one record marked supersede_reason=contradiction"
-            sample = contradicted[0]
-            assert isinstance(sample.get("superseded_at"), str) and len(sample["superseded_at"]) > 0
-            assert isinstance(sample.get("superseded_by"), str) and len(sample["superseded_by"]) > 0
-
+            assert [m for m in all_facts if m.get("supersede_reason") == "contradict"] == []
             active = [m for m in all_facts if not m.get("superseded_by")]
-            assert len(active) < len(before), (
-                f"Active fact count should shrink after contradiction resolution; "
-                f"before={len(before)} active={len(active)}"
+            assert len(active) == len(conflicting_facts), "A conflict retires neither fact"
+
+            links = list(
+                agent_memory._memories_container_client.query_items(
+                    query="SELECT c.first, c.later, c.kind FROM c WHERE c.type = 'conflict_link'",
+                    partition_key=[unique_user_id, "__conflicts__"],
+                )
             )
+            assert links, "Expected a link document in the user's __conflicts__ partition"
+            assert {fact_id for link in links for fact_id in (link["first"], link["later"])} <= {
+                m["id"] for m in active
+            }
+            assert all(link["kind"] in {"update", "inconsistent"} for link in links)
         finally:
             _cleanup(agent_memory, unique_user_id)
 
@@ -556,8 +557,8 @@ class TestReconciliation:
 
             stats = agent_memory.reconcile(user_id=unique_user_id)
             assert isinstance(stats, dict)
-            assert stats.get("merged", 0) + stats.get("combined", 0) + stats.get("contradicted", 0) >= 1, (
-                f"Expected at least one merge, combine or contradiction across paraphrases, got {stats}"
+            assert stats.get("merged", 0) + stats.get("combined", 0) >= 1, (
+                f"Expected at least one merge or combine across paraphrases, got {stats}"
             )
 
             all_facts = agent_memory.get_memories(
@@ -569,7 +570,7 @@ class TestReconciliation:
             assert len(losers) >= 1, "Expected at least one superseded record"
 
             sample_loser = losers[0]
-            assert sample_loser["supersede_reason"] in {"duplicate", "combined", "contradict"}
+            assert sample_loser["supersede_reason"] in {"duplicate", "combined"}
             assert isinstance(sample_loser["superseded_at"], str) and len(sample_loser["superseded_at"]) > 0
             assert isinstance(sample_loser["superseded_by"], str) and len(sample_loser["superseded_by"]) > 0
 

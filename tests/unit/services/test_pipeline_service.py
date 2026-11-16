@@ -234,8 +234,8 @@ def test_extract_memories_happy_path_writes_fact_only() -> None:
 
 
 def test_extract_memories_creates_new_fact_without_superseding() -> None:
-    # Extract no longer detects updates/contradictions - it just adds new facts.
-    # Contradiction resolution happens later in reconcile, not at extract time.
+    # Extract does not detect updates or conflicts - it just adds new facts.
+    # Reconcile links facts that conflict later, not at extract time.
     old = _fact("old_fact", "The user prefers light mode.")
     store = FakeStore([old])
     turns_store = FakeStore([_turn("Actually, I prefer dark mode now.")])
@@ -261,65 +261,45 @@ def test_extract_memories_creates_new_fact_without_superseding() -> None:
     assert "superseded_by" not in old_doc
 
 
-def test_reconcile_memories_returns_contradiction_counts() -> None:
+def test_reconcile_memories_links_facts_that_conflict_and_retires_neither() -> None:
     store = FakeStore(
         [
             _fact("f1", "User likes coffee", ts=1),
             _fact("f2", "User prefers coffee", ts=2),
-            _fact("f3", "User is vegetarian", ts=3),
-            _fact("f4", "User eats steak", ts=4),
+            {**_fact("f3", "User is vegetarian", ts=3), "embedding": [1.0, 0.0, 0.0]},
+            {**_fact("f4", "User eats steak", ts=4), "embedding": [0.9, 0.3, 0.0]},
         ]
     )
     llm = FakeLLMService(
         [
             {
-                # duplicate_groups are ignored (paraphrases fold in the dedup pass);
-                # only contradicted_pairs are applied.
-                "duplicate_groups": [
-                    {"source_ids": ["f1", "f2"], "merged_content": "The user prefers coffee.", "confidence": 0.9}
-                ],
-                "contradicted_pairs": [{"winner_id": "f3", "loser_id": "f4", "reason": "newer evidence"}],
-                "kept_ids": [],
+                "candidates": [
+                    {
+                        "label": "C1",
+                        "relation": "inconsistent",
+                        "seed_details_missing_from_candidate": [],
+                        "candidate_details_missing_from_seed": [],
+                    }
+                ]
             }
         ]
     )
 
     result = _pipeline(store, llm).reconcile_memories("u1", n=4)
 
-    # f1/f2 are NOT merged (no embeddings, so the dedup pass has no neighbours to compare);
-    # only f4 loses a contradiction. Survivors: f1, f2, f3.
-    assert (result["kept"], result["merged"], result["contradicted"]) == (3, 0, 1)
-
-
-def test_reconcile_memories_tombstones_losers_with_reasons() -> None:
-    store = FakeStore(
-        [
-            _fact("f1", "User likes coffee", ts=1),
-            _fact("f2", "User prefers coffee", ts=2),
-            _fact("f3", "User is vegetarian", ts=3),
-            _fact("f4", "User eats steak", ts=4),
-        ]
+    # f1/f2 have no embeddings, so the dedup pass has no neighbours to compare them with; f3 and f4 are compared
+    # once, and found to conflict: both stay active and one link names them.
+    assert (result["kept"], result["merged"], result["conflicts"], result["checked"], result["compared"]) == (
+        4,
+        0,
+        1,
+        4,
+        1,
     )
-    llm = FakeLLMService(
-        [
-            {
-                "duplicate_groups": [{"source_ids": ["f1", "f2"], "merged_content": "The user prefers coffee."}],
-                "contradicted_pairs": [{"winner_id": "f3", "loser_id": "f4", "reason": "explicit correction"}],
-                "kept_ids": [],
-            }
-        ]
-    )
-
-    _pipeline(store, llm).reconcile_memories("u1", n=4)
-
-    by_id = {doc["id"]: doc for doc in store.docs}
-    # Paraphrases f1/f2 are left untouched: duplicate_groups are ignored and, without embeddings,
-    # the dedup pass has no neighbours to fold them into.
-    assert by_id["f1"].get("supersede_reason") is None
-    assert by_id["f2"].get("supersede_reason") is None
-    # Only the contradiction loser is tombstoned.
-    assert by_id["f4"]["supersede_reason"] == "contradict"
-    assert by_id["f4"]["superseded_by"] == "f3"
+    assert len(llm.chat_calls) == 1 and store.supersede_calls == []
+    assert not [doc for doc in store.docs if doc.get("superseded_by")]
+    [link] = [doc for doc in store.docs if doc.get("type") == "conflict_link"]
+    assert ({link["first"], link["later"]}, link["kind"]) == ({"f3", "f4"}, "inconsistent")
 
 
 def test_thread_summary_persists_to_summaries_container() -> None:

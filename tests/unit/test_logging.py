@@ -68,7 +68,7 @@ class TestJsonFormatter:
                 operation="reconcile_memories",
                 latency_ms=42.5,
                 ru_charge=1.23,
-                prompt_id="dedup.prompty",
+                prompt_id="dedup_verify.prompty",
                 prompt_version="v1",
             )
         )
@@ -77,7 +77,7 @@ class TestJsonFormatter:
         assert payload["operation"] == "reconcile_memories"
         assert payload["latency_ms"] == 42.5
         assert payload["ru_charge"] == 1.23
-        assert payload["prompt_id"] == "dedup.prompty"
+        assert payload["prompt_id"] == "dedup_verify.prompty"
         assert payload["prompt_version"] == "v1"
 
     def test_optional_keys_omitted_when_none(self):

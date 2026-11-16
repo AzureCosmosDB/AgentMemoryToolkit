@@ -22,7 +22,6 @@ from typing import Any, Iterable, Literal, Mapping, Optional
 
 from azure.cosmos.exceptions import (
     CosmosAccessConditionFailedError,
-    CosmosHttpResponseError,
     CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
@@ -51,10 +50,8 @@ from azure.cosmos.agent_memory.models import (
     construct_internal,
 )
 from azure.cosmos.agent_memory.prompts._schemas import response_format_for
-from azure.cosmos.agent_memory.services._absorbed import combined_members_query, restored_member
 from azure.cosmos.agent_memory.services._combine import (
     COMBINE_PROMPT,
-    COMBINED_TAG,
     CombineCounts,
     CombineDraft,
     CombineOutcome,
@@ -62,13 +59,12 @@ from azure.cosmos.agent_memory.services._combine import (
     arun_combine_group,
     combined_record,
     comparable_candidates,
-    contradiction_created_at,
-    edited_since_combined,
     fold_verdicts,
     in_seed_order,
     plan_combine_groups,
     settled_seeds,
 )
+from azure.cosmos.agent_memory.services._conflicts import conflict_link_body, conflict_pairs
 from azure.cosmos.agent_memory.services._dedup import (
     DEDUP_CURSOR_THREAD_ID,
     DEDUP_CURSOR_TYPE,
@@ -121,16 +117,12 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     ground_fact_sources,
     is_retryable_llm_error,
     is_valid_time_pair,
-    json_text,
     newest_window,
     parse_llm_json,
     segment_time_bounds,
     transcript_labels,
     turn_gap_seconds,
     user_turn_ids,
-)
-from azure.cosmos.agent_memory.services._pipeline_helpers import (
-    is_real_number as _is_real_number,
 )
 from azure.cosmos.agent_memory.services._procedures import (
     PROCEDURE_CURSOR_ID,
@@ -483,7 +475,7 @@ class AsyncPipelineService:
         old_doc: dict[str, Any],
         superseder_id: str,
         *,
-        reason: Literal["duplicate", "contradict", "update", "combined", "procedure"],
+        reason: Literal["duplicate", "combined", "procedure"],
     ) -> bool:
         """Atomically set ``superseded_by`` on ``old_doc`` via the async memory store."""
         return await self._store.mark_superseded(old_doc, superseder_id, reason=reason)
@@ -2034,51 +2026,15 @@ class AsyncPipelineService:
                 "pairs_compared": result["compared"],
                 "kept": result["kept"],
                 "merged": result["merged"],
-                "contradicted": result["contradicted"],
+                "conflicts": result["conflicts"],
                 "vetoed": result["vetoed"],
                 "combined": result["combined"],
                 "synthesized": result["synthesized"],
                 "combine_groups": result["combine_groups"],
                 "combine_failed": result["combine_failed"],
                 "duration_ms": duration_ms,
-                "prompt_id": "dedup.prompty",
-                "prompt_version": "v1",
+                **self._prompt_lineage(DEDUP_PROMPT),
             },
-        )
-
-    async def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
-        capped_n = top_literal(n, name="reconcile_memories.n")
-        # ---- Load up to N most recent active memories ----
-        # ORDER BY c.created_at DESC keeps the TOP cap deterministic across
-        # physical partitions and matches the dedup prompt's tiebreaker
-        # ("more recent created_at first"). Cosmos's _ts is the last-write
-        # timestamp, which would diverge from created_at after any UPDATE.
-        #
-        # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
-        # agent did/recommended (historical events), not mutable user state, so
-        # they must never be contradiction-superseded by a later user statement.
-        # Combined facts (sys:combined) stay in: this is read after the dedup pass
-        # of the same run, so a fact combined there can retire an older one, and a
-        # combined fact a newer fact contradicts is retired (its members first made
-        # active again) instead of staying active beside the outdated claim. They
-        # are ordered by created_at, which is their newest member's date, so a
-        # fresh combined fact is inside the window; the prompt shows combined_since
-        # (the oldest member's date) as their Created.
-        query = (
-            f"SELECT TOP {capped_n} * FROM c "
-            "WHERE c.user_id = @user_id "
-            "AND c.type = @memory_type "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
-            "ORDER BY c.created_at DESC"
-        )
-        return await self._query_items(
-            self._memories_container,
-            query=query,
-            parameters=[
-                {"name": "@user_id", "value": user_id},
-                {"name": "@memory_type", "value": memory_type},
-            ],
         )
 
     async def _load_memories_by_ids(
@@ -2107,38 +2063,26 @@ class AsyncPipelineService:
     async def reconcile_memories(
         self, user_id: str, n: int = 50, *, memory_type: str = "fact", deadline: Optional[float] = None
     ) -> dict[str, int]:
-        """Fold duplicate facts, then resolve contradictions among a user's most-recent active memories.
+        """Fold duplicate facts, combine facts about one thing and link facts that conflict.
 
         Async mirror of :meth:`~azure.cosmos.agent_memory.services.pipeline.PipelineService.reconcile_memories`.
-        Two passes run in order:
+        One pass, :meth:`consolidate_memories`: it checks up to ``n`` of the facts written since the last
+        pass against their nearest neighbours and retires a fact into another that states everything it
+        states (``supersede_reason="duplicate"``); it also combines facts about one specific thing into a
+        new fact and retires them into it (``supersede_reason="combined"``). A pair the same check calls
+        ``update`` (the same attribute with a different value at a later time) or ``inconsistent`` (the two
+        cannot both be true) is a conflict: both facts stay active and one link document names the pair (see
+        :mod:`azure.cosmos.agent_memory.services._conflicts`), which ``search_cosmos`` shows as
+        ``conflicts_with``. Nothing is retired for a conflict, and a pair with an assistant-written
+        fact is not linked.
 
-        1. :meth:`consolidate_memories` checks the facts written since the last pass against their
-           nearest neighbours and retires a fact into another that states everything it states
-           (``supersede_reason="duplicate"``); it also combines facts about one specific thing into a
-           new fact and retires them into it (``supersede_reason="combined"``).
-        2. Up to ``n`` of the most recent active (non-superseded) ``memory_type`` records are then
-           read again, except agent-sourced (``sys:agent-fact``) facts, and ``dedup.prompty`` identifies
-           ``contradicted_pairs`` - opposing claims about the same subject (e.g. "deadline March 1" vs
-           "March 15"). Each loser is soft-deleted with ``supersede_reason="contradict"`` and
-           ``superseded_by`` set to the winner. The pool is read after the first pass, so it holds the
-           combined facts that pass wrote. The prompt lets the more recent ``Created`` win, and a combined
-           fact shows its oldest member's date (``combined_since``), so it beats only a fact older than
-           every one of its members. One that loses is retired only after its members (the facts retired
-           into it as combined, or folded into it as duplicates since) are made active again, so a later
-           pass compares each of them with the winner, while they are among the ``n`` most recent facts,
-           and retires each one it contradicts. A combined fact whose text was edited is retired alone.
+        Episodic and procedural types are no-ops. ``deadline`` (a ``time.monotonic()`` value) ends the pass
+        early: it applies the folds it found and moves its cursor past the facts it finished.
 
-        Episodic and procedural types are no-ops because they have no contradiction semantics.
-        ``deadline`` (a ``time.monotonic()`` value) ends the passes early: the dedup pass applies the
-        folds it found and moves its cursor past the facts it finished, and the contradiction pass is
-        skipped once it has passed.
-
-        Returns ``{"kept", "merged", "contradicted"}`` - ``kept`` is the facts the contradiction pass
-        left active (when that pass is skipped, the checked facts the dedup pass left active),
-        ``merged`` counts the facts retired as duplicates - plus the dedup pass's ``checked``,
-        ``compared``, ``vetoed``, ``combined`` (facts retired into a combined fact), ``synthesized``
-        (combined facts written), ``combine_groups`` and ``combine_failed`` counts. Members made
-        active again are not counted.
+        Returns the pass's counts: ``kept`` (the facts checked that stay active), ``merged`` (facts retired
+        as duplicates), ``conflicts`` (pairs linked), ``checked``, ``compared``, ``vetoed``, ``combined``
+        (facts retired into a combined fact), ``synthesized`` (combined facts written), ``combine_groups``
+        and ``combine_failed``.
         """
         validate_consolidation_args(user_id, n, memory_type)
         if memory_type in {"episodic", "procedural"}:
@@ -2150,18 +2094,10 @@ class AsyncPipelineService:
         logger.info("reconcile_memories started user_id=%s n=%d memory_type=%s", user_id, n, memory_type)
 
         result = await self.consolidate_memories(user_id, n, memory_type=memory_type, deadline=deadline)
-        facts: list[dict[str, Any]] = []
-        if deadline is None or time.monotonic() < deadline:
-            # Folds retired facts, so the contradiction pool is read after them.
-            facts = await self._active_memories_for_reconcile(user_id, memory_type, n)
-            contradictions = await self._reconcile_contradictions(user_id, memory_type, facts)
-            result = {**result, "kept": contradictions["kept"], "contradicted": contradictions["contradicted"]}
-        else:
-            logger.info("reconcile_memories skipped its contradiction pass at its deadline user_id=%s", user_id)
         self._emit_reconcile_outcome(
             started_at=started_at,
             user_id=user_id,
-            candidates=len(facts),
+            candidates=result["checked"],
             result=result,
         )
         return result
@@ -2169,7 +2105,7 @@ class AsyncPipelineService:
     async def consolidate_memories(
         self, user_id: str, n: int = 50, *, memory_type: str = "fact", deadline: Optional[float] = None
     ) -> dict[str, int]:
-        """Fold duplicate facts written since the user's last dedup pass.
+        """Fold duplicate facts written since the user's last dedup pass, and link those that conflict.
 
         Async mirror of
         :meth:`~azure.cosmos.agent_memory.services.pipeline.PipelineService.consolidate_memories`.
@@ -2177,8 +2113,8 @@ class AsyncPipelineService:
         their nearest active neighbours (see :mod:`azure.cosmos.agent_memory.services._dedup`). A fact
         is retired into another (``supersede_reason="duplicate"``) only when the two state the same
         claim or the other contains it and nothing it states would be lost; the survivor keeps its
-        content verbatim and gains the retired fact's tags and ``merged_from``. Contradictions are
-        left to :meth:`reconcile_memories`' contradiction pass, and a fact that has absorbed others is
+        content verbatim and gains the retired fact's tags and ``merged_from``. A pair the check calls a
+        conflict (``update`` or ``inconsistent``) retires nothing, and a fact that has absorbed others is
         never retired, so merges never chain.
 
         It also combines facts about one specific thing that each hold details the others lack (see
@@ -2186,6 +2122,11 @@ class AsyncPipelineService:
         compared with neighbours it could be combined with down to ``COMBINE_SIMILARITY_FLOOR``
         (folds still need ``DEDUP_SIMILARITY_FLOOR``), and the groups are written after the folds, a
         few at once, from the facts the folds left alone.
+
+        Each pair the check called a conflict is then linked, before the cursor moves (see
+        :mod:`azure.cosmos.agent_memory.services._conflicts`): a fact this pass retired into another, as a
+        duplicate or into a combined fact, is linked as the fact that took its place. A link that cannot
+        be written is logged and skipped; it never fails the pass or holds the cursor back.
 
         A retryable model error, or ``deadline`` (a ``time.monotonic()`` value) passing, ends the pass
         early: the folds found so far are applied and the cursor stops after the last fact checked.
@@ -2252,11 +2193,14 @@ class AsyncPipelineService:
 
         plan = plan_folds(fold_verdicts(checked) if combining else checked)
         retired: set[str] = set()
+        absorbed: dict[str, str] = {}  # each fact this pass retired into another, and the fact that took its place
         for survivor_id, losers in plan.retired.items():
             survivor = plan.survivors[survivor_id]
-            retired.update(
-                await self._commit_fold(survivor_patch(survivor, losers), losers, survivor_etag=survivor.get("_etag"))
+            committed = await self._commit_fold(
+                survivor_patch(survivor, losers), losers, survivor_etag=survivor.get("_etag")
             )
+            retired.update(committed)
+            absorbed.update(dict.fromkeys(committed, survivor_id))
         combine = CombineCounts()
         settled = done
         if combining:
@@ -2264,6 +2208,8 @@ class AsyncPipelineService:
             groups = in_seed_order(plan_combine_groups(checked, set(plan.survivors) | plan.retired_ids()), done)
             combine, untried = await self._run_combine_groups(user_id, groups, deadline)
             settled = settled_seeds(done, untried)
+        absorbed.update(combine.absorbed)
+        conflicts = await self._link_conflicts(user_id, checked, absorbed)
         await self._advance_dedup_cursor(user_id, memory_type, cursor, settled)
 
         gone = retired | combine.retired_ids
@@ -2273,6 +2219,7 @@ class AsyncPipelineService:
             merged=len(retired),
             compared=compared,
             vetoed=plan.vetoed,
+            conflicts=conflicts,
             combined=len(combine.retired_ids),
             synthesized=combine.written,
             combine_groups=combine.groups,
@@ -2333,6 +2280,30 @@ class AsyncPipelineService:
         except CosmosResourceNotFoundError:
             return None
         return doc if isinstance(doc, dict) and doc.get("type") == DEDUP_CURSOR_TYPE else None
+
+    async def _link_conflicts(
+        self,
+        user_id: str,
+        checked: list[tuple[dict[str, Any], list[Verdict]]],
+        absorbed: dict[str, str],
+    ) -> int:
+        """Write a link for each pair of facts the pass's verdicts call a conflict, and return how many were written.
+
+        Both facts stay active. ``absorbed`` maps each fact the pass retired into another to the fact that took its
+        place, which is linked instead. A link is one small document in the user's memories container, written with a
+        direct call like the dedup cursor; its ID derives from the pair, so judging a pair again writes the same
+        document. A link that cannot be written is logged and skipped: it never fails the pass or holds the cursor back.
+        """
+        written = 0
+        for pair in conflict_pairs(checked, absorbed=absorbed):
+            try:
+                await self._upsert_item(self._memories_container, body=conflict_link_body(user_id, pair))
+                written += 1
+            except Exception as exc:  # noqa: BLE001 - a link is best effort
+                logger.warning(
+                    "consolidate_memories: could not link a conflict user_id=%s: %s", user_id, describe_exception(exc)
+                )
+        return written
 
     async def _advance_dedup_cursor(
         self,
@@ -2449,7 +2420,7 @@ class AsyncPipelineService:
                     counts.groups += 1
                     if write.status == "written":
                         counts.written += 1
-                        counts.retired_ids.update(write.retired)
+                        counts.absorbed.update(dict.fromkeys(write.retired, write.combined_id))
                     else:
                         counts.failed += 1
         finally:
@@ -2486,8 +2457,6 @@ class AsyncPipelineService:
             return CombineWrite("lost")
         # Redact before embedding: the write guard drops the vector of a record whose text it rewrites.
         self._redact_for_embedding(record)
-        # Redacting may have rewritten the text, and the text as stored is the one an edit is told apart from.
-        record["combined_hash"] = compute_content_hash(record["content"])
         try:
             record["embedding"] = await self._embed_one(record["content"])
         except Exception as exc:
@@ -2507,7 +2476,7 @@ class AsyncPipelineService:
             )
             return CombineWrite("lost")
         retired = await self._commit_combine(record, members)
-        return CombineWrite("lost") if retired is None else CombineWrite("written", tuple(retired))
+        return CombineWrite("lost") if retired is None else CombineWrite("written", tuple(retired), record["id"])
 
     async def _members_unchanged(self, members: list[dict[str, Any]]) -> bool:
         """Whether every member is still there as this pass read it: not deleted, edited or retired since.
@@ -2551,162 +2520,6 @@ class AsyncPipelineService:
                 return None
             logger.info("consolidate_memories: combined fact %s already exists", record["id"])
         return [doc["id"] for doc in members if await self._mark_superseded(doc, record["id"], reason="combined")]
-
-    async def _reconcile_contradictions(
-        self, user_id: str, memory_type: str, facts: list[dict[str, Any]]
-    ) -> dict[str, int]:
-        """Resolve contradictions within an explicit pool of same-type memories.
-
-        Runs ``dedup.prompty`` over the pool and applies its
-        ``contradicted_pairs`` - the loser of each pair is soft-deleted with
-        ``superseded_by`` set to the winner. Paraphrases are not merged here;
-        the dedup prompt/schema does not emit duplicate groups because the
-        dedup pass that runs first (:meth:`consolidate_memories`) folds them,
-        so this pass only retires losers: it mints no documents and is
-        convergent. The prompt lets the more recent ``Created`` win, and a
-        combined fact shows its oldest member's date (``combined_since``, see
-        :func:`~azure.cosmos.agent_memory.services._combine.contradiction_created_at`),
-        so it wins only against a fact older than every one of its members. A
-        loser that is a combined fact first has its members made active again
-        (:meth:`_restore_combined_members`) unless its text was edited, when it
-        is retired alone; if restoring fails, the pair is left for a later
-        pass. Returns ``{"kept", "merged": 0, "contradicted"}``; the members
-        made active again are counted nowhere.
-        """
-        if len(facts) <= 1:
-            return {"kept": len(facts), "merged": 0, "contradicted": 0}
-
-        lines: list[str] = []
-        for i, cf in enumerate(facts, 1):
-            content_quoted = json_text(cf.get("content", ""))
-            conf_raw = cf.get("confidence")
-            sal_raw = cf.get("salience")
-            conf_str = conf_raw if _is_real_number(conf_raw) else "N/A"
-            sal_str = sal_raw if _is_real_number(sal_raw) else "N/A"
-            created_str = contradiction_created_at(cf) or "N/A"
-            lines.append(
-                f"{i}. ID: {cf['id']} | Content: {content_quoted} | "
-                f"Confidence: {conf_str} | Salience: {sal_str} | Created: {created_str}"
-            )
-        facts_text = "\n".join(lines)
-
-        response_text = await self._run_prompty("dedup.prompty", inputs={"facts_text": facts_text})
-        parsed = self._parse_llm_json(response_text)
-        contradicted_pairs = parsed.get("contradicted_pairs", []) or []
-
-        facts_by_id: dict[str, dict[str, Any]] = {f["id"]: f for f in facts}
-        contradicted = 0
-        consumed_loser_ids: set[str] = set()
-        for pair in contradicted_pairs:
-            winner_id = pair.get("winner_id")
-            loser_id = pair.get("loser_id")
-            if not winner_id or not loser_id or winner_id == loser_id:
-                continue
-            if winner_id not in facts_by_id:
-                logger.warning(
-                    "reconcile_memories: hallucinated winner_id=%s not in pool; skipping pair %s",
-                    describe_shape(winner_id),
-                    describe_shape(pair),
-                )
-                continue
-            # Guard chained contradictions: never point a loser at a winner that
-            # was itself already superseded earlier this pass (A>B then B>C would
-            # tombstone C in favor of a now-dead B), and never re-supersede a loser.
-            if winner_id in consumed_loser_ids or loser_id in consumed_loser_ids:
-                logger.info(
-                    "reconcile_memories: skipping chained/duplicate contradiction pair %s "
-                    "(winner or loser already superseded this pass)",
-                    describe_shape(pair),
-                )
-                continue
-            loser_doc = facts_by_id.get(loser_id)
-            if loser_doc is None:
-                continue
-            # A combined fact's members are hidden behind it. They go back first, so that a failure between the
-            # two writes leaves them beside the fact rather than hidden behind a retired one.
-            if COMBINED_TAG in (loser_doc.get("tags") or []) and not await self._restore_combined_members(
-                user_id, loser_doc
-            ):
-                continue
-            if await self._mark_superseded(loser_doc, winner_id, reason="contradict"):
-                contradicted += 1
-                consumed_loser_ids.add(loser_id)
-
-        kept = len([fid for fid in facts_by_id if fid not in consumed_loser_ids])
-        result = {"kept": kept, "merged": 0, "contradicted": contradicted}
-        logger.info(
-            "reconcile_memories contradiction pass user_id=%s memory_type=%s result=%s",
-            user_id,
-            memory_type,
-            result,
-        )
-        return result
-
-    async def _restore_combined_members(self, user_id: str, combined: dict[str, Any]) -> bool:
-        """Make the members of the combined fact ``combined`` active again, ahead of retiring it.
-
-        The fact is read again first: one that changed, or was retired or deleted, since the pool was read is left
-        for a later pass, which judges it afresh. A fact whose text an app edited since combining wrote it
-        (:func:`~azure.cosmos.agent_memory.services._combine.edited_since_combined`) gets nothing restored: its
-        members hold the text from before the edit, which writing them back would undo, so it is retired alone.
-        Otherwise the members are the records retired into it as combined or folded into it as duplicates, read
-        across the user's partitions. Each is written back without its supersession fields, only if it is unchanged
-        since this read: one that was edited, deleted or retired another way meanwhile is left as it is.
-
-        Returns ``False`` when the fact changed, or the members could not be read or one could not be written for
-        another reason: the fact stays active and its pair is left for a later pass (members already written stay
-        active beside it, and that pass finds them again, folded into the fact as duplicates). Returns ``True``
-        when the fact may be retired, whatever was restored.
-        """
-        from azure.core import MatchConditions
-
-        query, parameters = combined_members_query(user_id, combined["id"])
-        restored = skipped = 0
-        try:
-            try:
-                current = await self._read_item(
-                    self._memories_container,
-                    item=combined["id"],
-                    partition_key=[combined["user_id"], combined["thread_id"]],
-                )
-            except CosmosResourceNotFoundError:
-                current = {}
-            if not current or current.get("superseded_by") or current.get("_etag") != combined.get("_etag"):
-                logger.info(
-                    "reconcile_memories left a combined fact: it changed since the pool was read user_id=%s", user_id
-                )
-                return False
-            if edited_since_combined(current):
-                logger.info(
-                    "reconcile_memories restored no members of a combined fact: its text was edited since it was "
-                    "written user_id=%s",
-                    user_id,
-                )
-                return True
-            members = await self._query_items(self._memories_container, query=query, parameters=parameters)
-            for member in members:
-                kwargs: dict[str, Any] = {"item": member["id"], "body": restored_member(member)}
-                if member.get("_etag"):
-                    kwargs.update(etag=member["_etag"], match_condition=MatchConditions.IfNotModified)
-                try:
-                    await self._replace_item(self._memories_container, **kwargs)
-                    restored += 1
-                except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError):
-                    skipped += 1
-        except CosmosHttpResponseError as exc:
-            logger.warning(
-                "reconcile_memories kept a combined fact: restoring its members stopped after %d: %s",
-                restored,
-                describe_exception(exc),
-            )
-            return False
-        logger.info(
-            "reconcile_memories restored %d members of a combined fact, %d changed since they were read user_id=%s",
-            restored,
-            skipped,
-            user_id,
-        )
-        return True
 
     async def build_procedural_context(self, user_id: str, task: Optional[str] = None) -> str:
         """The standing-instructions block for a session start, or ``""`` when there is none.

@@ -11,7 +11,7 @@ def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary_u_t", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 2, "episodic": 1, "procedural": 0}
-    pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 1, "kept": 5}
+    pipeline.reconcile_memories.return_value = {"merged": 2, "conflicts": 1, "kept": 5}
 
     proc = InProcessProcessor(pipeline=pipeline)
     result = proc.process_thread(user_id="u1", thread_id="t1", turns=[])
@@ -32,7 +32,7 @@ def test_process_thread_calls_summarize_extract_reconcile_in_order():
 
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary_u_t", "type": "thread_summary"}
-    assert result.reconciled_count == 6
+    assert result.reconciled_count == 4  # the facts folded as duplicates; a conflict retires nothing
     assert result.elapsed_ms >= 0
 
 
@@ -48,12 +48,12 @@ def test_process_thread_handles_non_dict_summary():
     assert result.reconciled_count == 0
 
 
-def test_the_reconcile_count_includes_facts_retired_into_a_combined_fact():
+def test_the_reconcile_count_is_the_facts_retired_as_duplicates_or_into_a_combined_fact():
     pipeline = MagicMock()
-    pipeline.reconcile_memories.return_value = {"merged": 1, "contradicted": 2, "combined": 3, "kept": 4}
+    pipeline.reconcile_memories.return_value = {"merged": 1, "conflicts": 2, "combined": 3, "kept": 4}
 
-    # Facts and episodic memories are reconciled in turn: 1 + 2 + 3 each time.
-    assert InProcessProcessor(pipeline=pipeline).process_reconcile(user_id="u1") == 12
+    # Facts and episodic memories are reconciled in turn: 1 + 3 each time. The 2 conflicts linked retired nothing.
+    assert InProcessProcessor(pipeline=pipeline).process_reconcile(user_id="u1") == 8
 
 
 def test_generate_user_summary_passes_thread_ids():

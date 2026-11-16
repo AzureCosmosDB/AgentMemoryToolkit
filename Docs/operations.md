@@ -12,6 +12,7 @@ Runtime knobs for an Agent-Memory-Toolkit deployment. Most ops levers live in `.
 | user_summary | never | container default (memories_summaries, -1) |
 | fact | never | container default (memories, -1); supersession handles aging |
 | procedural | never | container default (memories, -1); supersession handles aging |
+| conflict_link | never | container default (memories, -1); ids and a kind, no text; ignored once either fact is retired or deleted |
 | counter | 90 d | container default (counter container; every document in it) |
 
 The counter container's TTL is set when the container is created, by `create_memory_store()` or the Bicep template. It is the container's default, so it applies to every document in it, not only thread counters: user counters and the extraction watermark kept on a thread counter go with them, each 90 days after its last update. A container that already exists keeps its current setting, because `create_container_if_not_exists` does not change it. When a counter expires, its thread or user starts counting again from zero.
@@ -36,7 +37,7 @@ These settings are read from the environment: `.env` for the SDK, App Settings f
 
 | Setting | Default | Read by | Effect |
 |---|---:|---|---|
-| `DEDUP_POOL_SIZE` | `50` (max `500`) | SDK, Function App | The `n` of the automatic reconcile: the most facts the dedup pass checks per run, and the size of the contradiction pool. |
+| `DEDUP_POOL_SIZE` | `50` (max `500`) | SDK, Function App | The `n` of the automatic reconcile: the most new facts one run checks; the rest wait for the next run. |
 | `ACTIVITY_TIME_BUDGET_SECONDS` | `240` (min `30`) | Function App | Seconds a reconcile or procedure activity keeps starting model calls. Keep it below the app's `functionTimeout`. The activity then saves what it finished and the next run continues from its cursor. |
 | `PROCEDURAL_SYNTHESIS_AUTO` | `true` | SDK, Function App | Learn procedures after each reconcile. `false` turns it off. |
 | `AMT_EXTRACT_MEMORIES_PROMPT` | `extract_memories-v3.prompty` | SDK, Function App | Fact-extraction prompt. `extract_memories-v2.prompty` and `extract_memories.prompty` select the earlier prompts; an unknown value uses the default. |
@@ -44,7 +45,7 @@ These settings are read from the environment: `.env` for the SDK, App Settings f
 
 Boolean settings (`PROCEDURAL_SYNTHESIS_AUTO`, `ENABLE_TURN_EMBEDDINGS`) take `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, `t`/`f` or `y`/`n`, in any case. The SDK and the Function App share one parser, and an invalid value falls back to the default with a warning.
 
-Cost: the dedup pass makes one `dedup_verify` call per new fact that has close neighbours, and each combined group adds a writer call and a verification call, with one retry. Procedure learning reads at most 50 facts and 50 episodes per run, at 10 sources per model call.
+Cost: reconcile makes one `dedup_verify` call per new fact that has close neighbours, and each combined group adds a writer call and a verification call, with one retry; linking conflicts adds no model call. Procedure learning reads at most 50 facts and 50 episodes per run, at 10 sources per model call.
 
-The similarity thresholds are fixed in code, not env settings: a fact is folded only into one of its 5 nearest active facts at cosine similarity of at least 0.85; combining looks down to 0.65, in groups of at most 4 facts, into one fact of at most 800 characters.
+The similarity thresholds are fixed in code, not env settings: a fact is folded only into one of its 5 nearest active facts at cosine similarity of at least 0.85; combining looks down to 0.65, in groups of at most 4 facts, into one fact of at most 800 characters. Conflict links are always on and have no setting.
 

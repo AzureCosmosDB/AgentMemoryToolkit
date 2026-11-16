@@ -14,7 +14,7 @@ async def test_process_thread_calls_summarize_extract_reconcile_in_order():
     pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
-    pipeline.reconcile_memories.return_value = {"merged": 2, "contradicted": 0, "kept": 3}
+    pipeline.reconcile_memories.return_value = {"merged": 2, "conflicts": 1, "kept": 3}
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     result = await proc.process_thread(user_id="u", thread_id="t", turns=[])
@@ -28,7 +28,7 @@ async def test_process_thread_calls_summarize_extract_reconcile_in_order():
     ]
     assert isinstance(result, ProcessThreadResult)
     assert result.thread_summary == {"id": "summary", "type": "thread_summary"}
-    assert result.reconciled_count == 4
+    assert result.reconciled_count == 4  # the facts folded as duplicates; a conflict retires nothing
 
 
 @pytest.mark.asyncio
@@ -51,12 +51,12 @@ async def test_close_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_the_reconcile_count_includes_facts_retired_into_a_combined_fact():
+async def test_the_reconcile_count_is_the_facts_retired_as_duplicates_or_into_a_combined_fact():
     pipeline = AsyncMock()
-    pipeline.reconcile_memories.return_value = {"merged": 1, "contradicted": 2, "combined": 3, "kept": 4}
+    pipeline.reconcile_memories.return_value = {"merged": 1, "conflicts": 2, "combined": 3, "kept": 4}
 
-    # Facts and episodic memories are reconciled in turn: 1 + 2 + 3 each time.
-    assert await AsyncInProcessProcessor(pipeline=pipeline).process_reconcile(user_id="u") == 12
+    # Facts and episodic memories are reconciled in turn: 1 + 3 each time. The 2 conflicts linked retired nothing.
+    assert await AsyncInProcessProcessor(pipeline=pipeline).process_reconcile(user_id="u") == 8
 
 
 @pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
     env-tunable pool size from ``get_dedup_pool_size``."""
     monkeypatch.setenv("DEDUP_POOL_SIZE", "37")
     pipeline = AsyncMock()
-    pipeline.reconcile_memories.return_value = {"merged": 4, "contradicted": 1, "kept": 9}
+    pipeline.reconcile_memories.return_value = {"merged": 4, "conflicts": 1, "kept": 9}
 
     proc = AsyncInProcessProcessor(pipeline=pipeline)
     count = await proc.process_reconcile(user_id="u")
@@ -82,7 +82,7 @@ async def test_process_reconcile_invokes_pipeline_with_env_pool_size(monkeypatch
         "n": 37,
         "memory_type": "episodic",
     }
-    assert count == 10  # (merged+contradicted) x2 types
+    assert count == 8  # merged x2 types; a conflict retires nothing
 
 
 @pytest.mark.asyncio

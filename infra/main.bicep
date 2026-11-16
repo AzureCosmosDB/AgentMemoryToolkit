@@ -72,7 +72,7 @@ param threadSummaryEveryN int = 10
 @description('Run fact extraction every N turns within a (user_id, thread_id); reconcile and procedure learning run on multiples of it (see dedupEveryN). Default 2 = every 2 turns (the SDK default). 0 = disabled, which disables all three. Bump for cost-sensitive production deployments.')
 param factExtractionEveryN int = 2
 
-@description('Once per N fact extractions, run reconcile (fold duplicates, combine facts, resolve contradictions), then procedure learning unless PROCEDURAL_SYNTHESIS_AUTO is false. Effective cadence = factExtractionEveryN * dedupEveryN turns. 0 = disabled.')
+@description('Once per N fact extractions, run reconcile (fold duplicates, combine facts, link conflicting facts), then procedure learning unless PROCEDURAL_SYNTHESIS_AUTO is false. Effective cadence = factExtractionEveryN * dedupEveryN turns. 0 = disabled.')
 param dedupEveryN int = 5
 
 @description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
@@ -96,7 +96,7 @@ param episodeMinTurns int = 2
 @description('Newest items a summary run reads (turns for a thread summary, new memories per thread for a user summary). Extraction is not capped by it. At least 1; a lower value falls back to 20.')
 param maxBatchSize int = 20
 
-@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run (each one with close neighbours costs a model call; facts beyond n wait for the next run) and the size of its contradiction pool. 1-500.')
+@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run (each one with close neighbours costs a model call; facts beyond n wait for the next run). 1-500.')
 @minValue(1)
 @maxValue(500)
 param dedupPoolSize int = 50

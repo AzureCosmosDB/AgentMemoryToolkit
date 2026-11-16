@@ -14,10 +14,11 @@ nearest neighbours:
    the other contains it, the model lists nothing it would lose, and
    :func:`specifics_preserved` agrees. The survivor keeps its content verbatim.
 
-Contradictions are never retired here: ``reconcile_memories`` resolves them in its own
-pass after this one. A fact that has absorbed others is never retired, and a user's
-statement is never retired into an assistant's. :mod:`azure.cosmos.agent_memory.services._combine`
-also combines facts about one specific thing in the same pass.
+Facts that conflict (``update`` or ``inconsistent``) are never retired here: the pass links each
+such pair instead and both facts stay active (:mod:`azure.cosmos.agent_memory.services._conflicts`).
+A fact that has absorbed others is never retired, and a user's statement is never retired into an
+assistant's. :mod:`azure.cosmos.agent_memory.services._combine` also combines facts about one
+specific thing in the same pass.
 
 The module also holds what the other passes share with this one: the active-document filter, the
 ``_ts`` cursor positions and the query window after one, agent-source detection, the numbers, names
@@ -71,7 +72,7 @@ def validate_consolidation_args(user_id: str, n: int, memory_type: str) -> None:
     if not isinstance(n, int) or isinstance(n, bool) or n < 1:
         raise ValidationError(f"n must be a positive integer, got {n!r}")
     if n > 500:
-        raise ValidationError(f"n must be <= 500 to bound prompt size and LLM cost, got {n}")
+        raise ValidationError(f"n must be <= 500 to bound LLM cost, got {n}")
     if memory_type not in {"fact", "episodic", "procedural"}:
         raise ValidationError(f"memory_type must be one of fact, episodic, procedural; got {memory_type!r}")
 
@@ -462,7 +463,7 @@ def survivor_patch(survivor: dict[str, Any], losers: list[dict[str, Any]]) -> di
     docs = [survivor, *losers]
     tags = {tag for doc in docs for tag in (doc.get("tags") or [])}
     if not is_agent_sourced(survivor):
-        # A user fact that absorbs an agent paraphrase must stay open to contradiction.
+        # A user fact that absorbs an agent paraphrase stays a user fact: a conflict with it can still be linked.
         tags.discard(AGENT_FACT_TAG)
     # The model refuses a record with more tags than its cap: a survivor keeps its own and takes what fits.
     own = sorted(tags & set(survivor.get("tags") or []))
@@ -488,19 +489,21 @@ def dedup_result(
     merged: int,
     compared: int,
     vetoed: int,
+    conflicts: int = 0,
     combined: int = 0,
     synthesized: int = 0,
     combine_groups: int = 0,
     combine_failed: int = 0,
 ) -> dict[str, int]:
-    """A pass's counts. ``kept`` is the facts checked that stay active; ``contradicted`` stays 0, because
-    this pass never retires contradictions. ``synthesized`` counts the combined facts written and
-    ``combined`` the facts they retired; ``combine_groups`` the groups tried and ``combine_failed``
-    those declined or left as they were (see :mod:`azure.cosmos.agent_memory.services._combine`)."""
+    """A pass's counts. ``kept`` is the facts checked that stay active; ``conflicts`` the pairs of conflicting
+    facts whose link was written (the pass links conflicts and never retires them). ``synthesized`` counts the
+    combined facts written and ``combined`` the facts they retired; ``combine_groups`` the groups tried and
+    ``combine_failed`` those declined or left as they were (see
+    :mod:`azure.cosmos.agent_memory.services._combine`)."""
     return {
         "kept": checked - retired_seeds,
         "merged": merged,
-        "contradicted": 0,
+        "conflicts": conflicts,
         "checked": checked,
         "compared": compared,
         "vetoed": vetoed,

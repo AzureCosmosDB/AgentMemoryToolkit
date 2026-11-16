@@ -194,6 +194,8 @@ results = await mem.search_cosmos(
 )
 ```
 
+With a `user_id`, a fact that conflicts with another fact also carries `conflicts_with` (see [Section 10](#10-keeping-the-fact-pool-clean)).
+
 ### Search slots: preferences and procedures
 
 A ranked search fills `top_k` with the closest facts, which can crowd out a standing preference or a relevant procedure. Reserve a place for each **inside** `top_k`:
@@ -433,7 +435,7 @@ for rule in rules:
 
 ## 10. Keeping the Fact Pool Clean
 
-Extraction only adds facts, so a long-running user accumulates restatements, overlapping details and, sometimes, contradictions. `reconcile` cleans up behind it in two passes: a duplicate pass retires a fact only when another states everything it states (and combines facts about one specific thing that each hold details the others lack), then a contradiction pass retires the loser of each pair of opposing claims. The duplicate pass never retires a contradiction, and the contradiction pass reads its pool after the duplicate pass has finished.
+Extraction only adds facts, so a long-running user accumulates restatements, overlapping details and, sometimes, facts that conflict. `reconcile` cleans up behind it in one pass: it retires a fact only when another states everything it states, combines facts about one specific thing that each hold details the others lack, and links facts that conflict. It never retires a fact because it conflicts with another, since only the user knows which one is right.
 
 ### When to call
 
@@ -445,20 +447,34 @@ Extraction only adds facts, so a long-running user accumulates restatements, ove
 
 ```python
 result = await mem.reconcile("user-1")  # n defaults to DEDUP_POOL_SIZE (50, at most 500)
-print(result["merged"], result["combined"], result["contradicted"])
+print(result["merged"], result["combined"], result["conflicts"])
 ```
 
-`merged` is the number of duplicates retired, `combined` the facts retired into combined facts (`synthesized` combined facts were written), and `contradicted` the contradiction losers; `checked`, `compared`, `vetoed`, `combine_groups` and `combine_failed` describe the duplicate pass. A pass checks at most `n` new facts, oldest first, and remembers where it stopped, so after a large import call `reconcile` again until `checked` is below `n`.
+`merged` is the number of duplicates retired, `combined` the facts retired into combined facts (`synthesized` combined facts were written), and `conflicts` the conflicting pairs linked; `kept`, `checked`, `compared`, `vetoed`, `combine_groups` and `combine_failed` describe the checks. A pass checks at most `n` new facts, oldest first, and remembers where it stopped, so after a large import call `reconcile` again until `checked` is below `n`.
+
+### Conflicting facts
+
+When a new fact gives a different value of the same attribute at a later time (`update`), or cannot be true together with a stored fact (`inconsistent`), both facts stay active and `reconcile` links them. `search_cosmos` with a `user_id` returns each fact that conflicts with others with `conflicts_with` (up to 2 of the newest active facts, each `{"id", "content", "created_at", "kind"}`), so your agent can show both sides and ask the user which is right:
+
+```python
+facts = await mem.search_cosmos(search_terms="where does the user live", user_id="user-1", top_k=5)
+for fact in facts:
+    for other in fact.get("conflicts_with", []):
+        print(f"{fact['content']!r} conflicts with {other['content']!r} ({other['kind']})")
+```
+
+An app that settles a conflict can delete the fact that is wrong with `delete_memory`; a link to a fact that is no longer active is ignored. Only pairs the duplicate check judged are linked (a new fact against its nearest active facts), so a conflict between facts that are far apart in meaning is not found. Facts the assistant wrote (`sys:agent-fact`) are never linked, and a conflict stops showing once a later pass folds or combines either fact.
 
 ### What changes in your data
 
-- Retired facts stay in the container with a `supersede_reason` (`duplicate`, `combined`, `contradict`); search hides them, `include_superseded=True` shows them, and `get_memory_history(memory_id, user_id)` walks a fact's chain.
+- Retired facts stay in the container with a `supersede_reason` (`duplicate` or `combined`); search hides them, `include_superseded=True` shows them, and `get_memory_history(memory_id, user_id)` walks a fact's chain. Older records may carry `contradict`, which nothing writes now.
 - A surviving duplicate keeps its wording and gains `merged_from`; a combined fact is tagged `sys:combined` and lists its sources in `merged_from`.
-- A user's statement is never retired into an agent-sourced fact, and agent-sourced facts are not part of the contradiction pass. A combined fact (`sys:combined`) is part of it, dated by its oldest member: when a newer fact contradicts it, the facts it combined are made active again first, so a later pass can retire the ones that conflict (a combined fact whose text an app edited is retired alone).
+- A conflict changes neither fact. It adds one small `conflict_link` document (the two fact ids and the kind, no text) that `get_memories` does not return.
+- A user's statement is never retired into an agent-sourced fact.
 
 ### Cost and control
 
-A pass makes one duplicate check per new fact that has close neighbours, a few calls per combine group, and one contradiction call. Raise `DEDUP_EVERY_N` to run reconcile less often, or lower `DEDUP_POOL_SIZE` to check fewer facts per pass. In the Function App, `ACTIVITY_TIME_BUDGET_SECONDS` stops a pass from starting model calls near the function timeout and the next pass continues from its cursor.
+A pass makes one duplicate check per new fact that has close neighbours and a few calls per combine group; linking conflicts adds no model call. Raise `DEDUP_EVERY_N` to run reconcile less often, or lower `DEDUP_POOL_SIZE` to check fewer facts per pass. In the Function App, `ACTIVITY_TIME_BUDGET_SECONDS` stops a pass from starting model calls near the function timeout and the next pass continues from its cursor. A search with a `user_id` adds one query for the links, and one more for the conflicting facts when there are any.
 
 ---
 
@@ -481,7 +497,7 @@ Credentials without a fixed format, such as `password: hunter2`, cannot be recog
 await mem.delete_memory(memory_id="<fact id>", user_id="user-1", thread_id=THREAD_ID, memory_type="fact")
 ```
 
-- Deleting a fact or procedure first deletes the records retired into it (`duplicate`, `combined` and `procedure`) and anything retired into those, each under its own `thread_id`, so what the user deleted is gone from history too. Records replaced by a contradiction or an update stay, because they are earlier versions rather than copies.
+- Deleting a fact or procedure first deletes the records retired into it (`duplicate`, `combined` and `procedure`) and anything retired into those, each under its own `thread_id`, so what the user deleted is gone from history too. Records retired for any other reason (older records may carry `contradict` or `update`) stay, because they are earlier versions rather than copies.
 - To remove a piece of information, delete the fact that is active now. If it was folded into another fact, search returns the survivor; deleting a retired record removes only that record.
 - The cascade is sequential and best-effort: if deleting a folded record fails, the memory is kept and a retry resumes where it stopped.
 - `delete_thread` removes a thread's turns and summary only; the facts, episodes and procedures distilled from it are user-scoped and stay.
@@ -497,13 +513,13 @@ await mem.delete_memory(memory_id="<fact id>", user_id="user-1", thread_id=THREA
 | Update a memory | `update_cosmos` | Correct or annotate an existing record |
 | Delete a memory | `delete_memory` | Remove incorrect or sensitive data; a fact or procedure takes the records retired into it along |
 | Get a thread | `get_thread` | Load recent conversation context |
-| Semantic search | `search_cosmos` | Find relevant facts for a prompt; add episodes, summaries or turns with `include_*` |
+| Semantic search | `search_cosmos` | Find relevant facts for a prompt; add episodes, summaries or turns with `include_*`; conflicting facts carry `conflicts_with` |
 | Search with slots | `search_cosmos(preference_slot=True, procedure_slot=True)` | Always include a matching preference and procedure within `top_k` |
 | Summarize a thread | `generate_thread_summary` | End of conversation, periodically, or automatic via change feed |
 | Extract facts | `extract_memories` | After key exchanges, end of conversation, or automatic via change feed |
 | Learn procedures | `synthesize_procedural` | After reconcile (automatic by default), or on demand with the in-process backend |
 | Standing instructions | `build_procedural_context` | Start of a session; pass `task=` to add the nearest situational rule |
 | Look up procedures | `retrieve_procedures` | Find procedures for a task; `status=None` also lists candidates |
-| Clean up facts | `reconcile` | Fold duplicates, combine facts, resolve contradictions: automatic, or after a bulk import |
+| Clean up facts | `reconcile` | Fold duplicates, combine facts, link conflicts: automatic, or after a bulk import |
 | Summarize a user | `generate_user_summary` | Cross-session profiling, after thread summaries, or automatic via change feed |
 | Get user summary | `get_user_summary` | Start of a new session |

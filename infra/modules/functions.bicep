@@ -100,7 +100,7 @@ param episodeMinTurns int
 @description('Newest items a summary run reads (turns for a thread summary, new memories per thread for a user summary). Extraction is not capped by it. At least 1; a lower value falls back to 20.')
 param maxBatchSize int
 
-@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run and the size of its contradiction pool.')
+@description('The n of the automatic reconcile: the most new facts its duplicate pass checks per run.')
 param dedupPoolSize int
 
 @description('Seconds a reconcile or procedure-learning activity keeps starting model calls. Must stay below the function app timeout.')

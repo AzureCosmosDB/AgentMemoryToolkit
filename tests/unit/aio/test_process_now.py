@@ -36,7 +36,7 @@ async def test_process_now_with_inprocess_invokes_full_pipeline():
     pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
-    pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+    pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "conflicts": 0}
     pipeline.synthesize_procedural.return_value = {"id": "proc1", "type": "procedural"}
     pipeline.generate_user_summary.return_value = {"id": "us1", "type": "user_summary"}
     pipeline._store = client._get_store()

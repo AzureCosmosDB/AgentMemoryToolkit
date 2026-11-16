@@ -62,7 +62,7 @@ def test_all_shipped_prompts_declare_version() -> None:
     expected = {
         "extract_memories.prompty": "v4",
         "extract_episode.prompty": "v1",
-        "dedup.prompty": "v1",
+        "dedup_verify.prompty": "v1",
         "summarize.prompty": "v1",
         "summarize_update.prompty": "v1",
         "user_summary.prompty": "v1",

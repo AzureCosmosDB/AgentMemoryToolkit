@@ -10,7 +10,7 @@ from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 from . import _slots
 from ._base import _BaseMemoryClient
 from ._base.base_client import is_transient_tail_step_error
-from ._container_routing import container_key_for_type
+from ._container_routing import ContainerKey, container_key_for_type
 from ._utils import (
     _build_container_kwargs,
     _container_policies,
@@ -28,6 +28,7 @@ from .chat import ChatClient
 from .embeddings import EmbeddingsClient
 from .exceptions import CosmosOperationError, MemoryNotFoundError, ValidationError
 from .processors import InProcessProcessor, MemoryProcessor
+from .services._conflicts import with_conflicts
 from .services._pipeline_helpers import _normalize_cadence_thresholds, _normalize_metadata_keys
 from .services.pipeline import PipelineService
 from .store import MemoryStore
@@ -824,6 +825,12 @@ class CosmosMemoryClient(_BaseMemoryClient):
         no ranked result; the preference slot needs facts in the search, and a search for procedures
         alone ranks them, so ``procedure_slot`` has no effect there. Search shows only
         active procedures that are not past ``valid_until``.
+
+        With ``user_id``, a fact that ``reconcile`` linked to facts it conflicts with comes back with
+        ``conflicts_with``: up to two active partners, newest first, each
+        ``{"id", "content", "created_at", "kind"}`` (``kind`` is ``update`` or ``inconsistent``). Neither
+        fact is retired for the conflict, so show both and ask the user which is right. The lookup costs
+        one more query (two when a fact has links); if it fails the results come back without it.
         """
         store = self._get_store()
         # Facts + episodes share one ranked query and one top_k budget: episodic
@@ -932,7 +939,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 )
                 turns = []
             _extend(turns)
-        return results
+
+        def query_memories(sql: str, parameters: Any, **kwargs: Any) -> Any:
+            return store.query(sql, parameters, container_key=ContainerKey.MEMORIES, **kwargs)
+
+        return with_conflicts(results, query_memories)
 
     def _slot_candidates(self, store: Any, search_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         """Candidates for a result slot; a failed slot search leaves the slot to the ranked results."""
@@ -1021,8 +1032,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
         preference, decision, or attribute changed over time - is preserved. This
         walks the ``superseded_by`` chain backwards from *memory_id* and returns
         every version it replaced (transitively), each carrying its
-        ``superseded_at`` / ``supersede_reason`` audit fields (``contradict``,
-        ``duplicate``, ``combined`` or ``procedure``). Useful for
+        ``superseded_at`` / ``supersede_reason`` audit fields (``duplicate``, ``combined`` or
+        ``procedure``; records from earlier betas can also carry ``contradict`` or ``update``). Useful for
         answering "what changed?" / "what was it before?" questions that a
         current-value-only view cannot.
         """
@@ -1332,15 +1343,19 @@ class CosmosMemoryClient(_BaseMemoryClient):
         return self._get_pipeline().generate_user_summary(user_id, thread_ids, recent_k)
 
     def reconcile(self, user_id: str, n: Optional[int] = None) -> dict[str, int]:
-        """Reconcile a user's facts: fold duplicates, then resolve contradictions.
+        """Reconcile a user's facts: fold duplicates, combine facts about one thing, link conflicts.
 
-        ``n`` (1 to 500) defaults to ``DEDUP_POOL_SIZE`` and caps both the facts the dedup pass checks
-        and the contradiction pool. The dedup pass compares each fact written since the last pass with
-        its nearest active neighbours and retires one into another as a duplicate only when the two
-        state the same claim, or one contains the other, and nothing it states would be lost. It also
-        combines facts about one specific thing into one new fact.
+        ``n`` (1 to 500) defaults to ``DEDUP_POOL_SIZE`` and caps the facts one pass checks. The pass
+        compares each fact written since the last pass with its nearest active neighbours and retires
+        one into another as a duplicate only when the two state the same claim, or one contains the
+        other, and nothing it states would be lost. It also combines facts about one specific thing
+        into one new fact.
 
-        Returns ``{"kept", "merged", "contradicted"}`` plus the dedup pass's ``checked``, ``compared``,
+        A pair the check judges an update of, or inconsistent with, each other is a conflict. Nothing is
+        retired for it: both facts stay active and are linked, and ``search_cosmos(user_id=...)`` returns
+        each with ``conflicts_with``.
+
+        Returns ``{"kept", "merged", "conflicts"}`` plus the pass's ``checked``, ``compared``,
         ``vetoed``, ``combined``, ``synthesized``, ``combine_groups`` and ``combine_failed`` counts.
         """
         from .thresholds import get_dedup_pool_size

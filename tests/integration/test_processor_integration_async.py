@@ -57,7 +57,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
                 "updated_count": 0,
             }
         )
-        pipeline.reconcile_memories = AsyncMock(return_value={"kept": 0, "merged": 0, "contradicted": 0})
+        pipeline.reconcile_memories = AsyncMock(return_value={"kept": 0, "merged": 0, "conflicts": 0})
         pipeline.synthesize_procedural = AsyncMock(return_value=SYNTHESIZED)
         pipeline.generate_user_summary = AsyncMock(return_value={"id": "us-1", "type": "user_summary"})
 

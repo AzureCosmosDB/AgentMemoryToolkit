@@ -6,7 +6,6 @@ the JSON formatter), and checks the string is absent while the diagnostic that r
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +14,7 @@ import pytest
 
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.logging import JsonFormatter
+from azure.cosmos.agent_memory.services._dedup import Verdict
 from azure.cosmos.agent_memory.services._pipeline_helpers import parse_llm_json
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 from tests.unit.aio.services.test_episode_boundary_async import _service as _async_boundary_service
@@ -263,50 +263,41 @@ def test_trailing_model_output_is_counted_not_logged(logs: pytest.LogCaptureFixt
 # --- reconcile ------------------------------------------------------------------------------------------------
 
 
-def _fact(fact_id: str) -> dict[str, Any]:
-    return {"id": fact_id, "user_id": "u1", "thread_id": "t1", "type": "fact", "content": f"fact {fact_id}"}
+def _conflict() -> list[tuple[dict[str, Any], list[Verdict]]]:
+    """The verdicts of a pass that found two facts in conflict, whose text must stay out of the log."""
+    older = {
+        "id": "f1",
+        "user_id": "u1",
+        "thread_id": "t1",
+        "type": "fact",
+        "content": MEMORY,
+        "created_at": "2026-01-01",
+    }
+    newer = {**older, "id": "f2", "content": MODEL, "created_at": "2026-02-01"}
+    verdict = Verdict(candidate=older, similarity=0.9, relation="update", seed_missing=(), candidate_missing=())
+    return [(newer, [verdict])]
 
 
-def _contradictions_answer() -> str:
-    return json.dumps(
-        {
-            "duplicate_groups": [],
-            "contradicted_pairs": [
-                {"winner_id": MODEL, "loser_id": "f1", "reason": MEMORY},
-                {"winner_id": "f2", "loser_id": "f1", "reason": MEMORY},
-                {"winner_id": "f3", "loser_id": "f1", "reason": MEMORY},
-            ],
-            "kept_ids": ["f1", "f2", "f3"],
-        }
-    )
+_LINK_DIAGNOSTIC = "consolidate_memories: could not link a conflict user_id=u1: RuntimeError(status=503) at "
 
 
-_RECONCILE_DIAGNOSTICS = (
-    f"reconcile_memories: hallucinated winner_id=string(chars={len(MODEL)}) not in pool; skipping pair object(keys=3)",
-    "reconcile_memories: skipping chained/duplicate contradiction pair object(keys=3) "
-    "(winner or loser already superseded this pass)",
-)
-
-
-def test_contradiction_pairs_the_model_got_wrong_are_logged_by_shape(logs: pytest.LogCaptureFixture) -> None:
+def test_a_conflict_link_that_cannot_be_written_is_logged_by_error_type_not_its_text(
+    logs: pytest.LogCaptureFixture,
+) -> None:
     service = PipelineService.__new__(PipelineService)
-    service._run_prompty = MagicMock(return_value=_contradictions_answer())
-    service._mark_superseded = MagicMock(return_value=True)
+    service._memories_container = MagicMock()
+    service._memories_container.upsert_item.side_effect = _failure(QUERY, 503)
 
-    result = service._reconcile_contradictions("u1", "fact", [_fact("f1"), _fact("f2"), _fact("f3")])
-
-    assert result["contradicted"] == 1
-    _expect(logs, *_RECONCILE_DIAGNOSTICS)
+    assert service._link_conflicts("u1", _conflict(), {}) == 0
+    _expect(logs, _LINK_DIAGNOSTIC)
 
 
-async def test_async_contradiction_pairs_the_model_got_wrong_are_logged_by_shape(
+async def test_async_conflict_link_that_cannot_be_written_is_logged_by_error_type_not_its_text(
     logs: pytest.LogCaptureFixture,
 ) -> None:
     service = AsyncPipelineService.__new__(AsyncPipelineService)
-    service._run_prompty = AsyncMock(return_value=_contradictions_answer())
-    service._mark_superseded = AsyncMock(return_value=True)
+    service._memories_container = MagicMock()
+    service._memories_container.upsert_item = AsyncMock(side_effect=_failure(QUERY, 503))
 
-    result = await service._reconcile_contradictions("u1", "fact", [_fact("f1"), _fact("f2"), _fact("f3")])
-
-    assert result["contradicted"] == 1
-    _expect(logs, *_RECONCILE_DIAGNOSTICS)
+    assert await service._link_conflicts("u1", _conflict(), {}) == 0
+    _expect(logs, _LINK_DIAGNOSTIC)

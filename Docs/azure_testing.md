@@ -279,6 +279,7 @@ Bring the environment up in this order:
 10. write more turns and verify `fact` memories appear (an `episodic` memory appears only once an episode closes: more than `EPISODE_IDLE_GAP_SECONDS` (default 1800) between two turns, or `EPISODE_MAX_TURNS` (default 40) turns in one episode; a `procedural` memory appears only when the conversation teaches a preference or an instruction and reconcile has run, and it stays a `candidate` until the evidence for its kind has arrived)
 11. verify a per-user `user_summary` memory appears once `USER_SUMMARY_EVERY_N` turns have accumulated for that user
 12. test deduplication by writing two near-duplicate facts (for example the paraphrases in `Samples/Scenarios/scenario_memory_reconciliation.py`), then call `reconcile(user_id)` or wait for the `DEDUP_EVERY_N` cadence, and confirm one is retired into the other (`superseded_by` set, `supersede_reason="duplicate"`) while the survivor keeps its text and lists the retired fact in `merged_from`; facts about one specific thing that hold different details may instead become one new fact tagged `sys:combined`
+13. test conflict links by writing two facts that give different values of one attribute (for example the project deadlines in the same sample), then call `reconcile(user_id)` and confirm both stay active, `conflicts` counts the pair, and `search_cosmos(..., user_id=...)` returns `conflicts_with` on both
 
 This keeps failures isolated and easier to diagnose.
 

@@ -14,6 +14,7 @@ Use this guide when local memory works but Cosmos DB, embeddings, Durable Functi
 | Cosmos operations fail before connecting | Call `create_memory_store()` or `connect_cosmos()` before cloud operations. |
 | Search returns no vector results | Confirm embeddings are generated and `AI_FOUNDRY_EMBEDDING_DIMENSIONS` matches the container vector policy. |
 | A fact, procedure or preference is missing from search results | It may be retired (`superseded_by` is set; pass `include_superseded=True`) or, for a procedure, still a `candidate` or past `valid_until`. See section 4. |
+| Conflicting facts show no `conflicts_with` | Search with `user_id` after a reconcile pass has run; only pairs that pass compared are linked. See section 4. |
 | A stored memory contains `[REDACTED-SECRET]` | The write guard replaced a credential it recognized and tagged the record `sys:secret`; the credential itself is not written to Cosmos DB. See [Secrets](design_patterns.md#11-secrets-and-deleting-memories). |
 | Durable Functions processing fails | Start the Functions host and check `function_app/local.settings.json`, the change feed trigger, and the orchestrator logs. |
 | A Durable activity fails with only `<code> (<ExcType>)` | The error message is withheld on purpose; read the `Activity ... failed` line in the Function App log. See section 5. |
@@ -125,8 +126,14 @@ Keyword searches read across partitions. The Python SDK skips query planning for
 
 Search hides some records on purpose:
 
-- A retired fact (`superseded_by` is set) is hidden unless you pass `include_superseded=True`. `supersede_reason` says why: `duplicate`, `combined`, `contradict`, `update` or `procedure`. The survivor of a duplicate or a combine lists the retired facts in `merged_from`.
+- A retired fact (`superseded_by` is set) is hidden unless you pass `include_superseded=True`. `supersede_reason` says why: `duplicate`, `combined` or `procedure` (older records may carry `contradict` or `update`). The survivor of a duplicate or a combine lists the retired facts in `merged_from`.
 - `search_cosmos` shows a procedure only while it is `active` and not past `valid_until`. A `candidate` stays hidden until its evidence arrives; `get_procedural_memories` and `retrieve_procedures(..., status=None)` show candidates.
+
+If `conflicts_with` is missing from facts you expect to conflict:
+
+- It needs `user_id`, and `reconcile` (or the automatic cadence) must have run since the newer fact was written. A pass links only pairs its duplicate check judged: a new fact against its nearest active facts.
+- Facts the assistant wrote (`sys:agent-fact`) are never linked, and a conflict stops showing once either fact is deleted or a later pass folds or combines it. Conflicting facts are not retired, so both stay in `get_memories`.
+- A failed lookup returns the results without the field and logs a warning.
 
 If `preference_slot` or `procedure_slot` adds nothing:
 

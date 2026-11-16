@@ -8,12 +8,15 @@ conflicts with (``conflicts_with``), so the agent sees both sides and can ask th
 
 A link is one small document in the user's memories container, in the user's ``__conflicts__`` partition. It holds the
 IDs of the two facts and the kind, and no text. Its ID derives from the pair, so judging a pair again rewrites the same
-document. Reading ignores a link whose other fact is no longer active, so nothing needs cleaning up when a fact is
-folded, combined or deleted. Facts written by the assistant (``sys:agent-fact``) are never linked: they record what the
-agent said or recommended, not what the user holds true.
+document. Facts written by the assistant (``sys:agent-fact``) are never linked: they record what the agent said or
+recommended, not what the user holds true.
 
-When a pass retires one of the facts of a pair into another (a fold or a combine), the link goes to the fact that took
-its place, so a conflict survives its fact being combined.
+A link names the two facts as they were when it was written, and a later pass can retire either into another fact (a
+fold or a combine). The conflict follows the fact. When the pass that retires one of a pair is the pass that links it,
+the link is written to the fact that took its place. When a later pass retires it, reading follows ``superseded_by``
+from the retired fact to the fact that replaced it, and a fact that absorbed others (``merged_from``) shows the
+conflicts of what it absorbed. A conflict is dropped once either side is deleted, or when both sides end up in one
+fact, so nothing needs cleaning up.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
 from azure.cosmos.agent_memory.logging import describe_exception, get_logger
-from azure.cosmos.agent_memory.services._dedup import ACTIVE_FILTER, CONFLICT_RELATIONS, Verdict, is_agent_sourced
+from azure.cosmos.agent_memory.services._dedup import CONFLICT_RELATIONS, Verdict, is_agent_sourced
 from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP
 
 logger = get_logger(__name__)
@@ -33,6 +36,10 @@ CONFLICT_LINK_TYPE = "conflict_link"
 CONFLICT_LINK_THREAD_ID = "__conflicts__"
 # The most conflicting facts shown with one fact: the newest ones.
 MAX_CONFLICT_PARTNERS = 2
+# How many times a retired fact is followed to the fact that replaced it.
+MAX_REDIRECT_HOPS = 3
+# The most fact IDs one search looks links up for, per user: the results' own IDs first, then the facts they absorbed.
+MAX_LOOKUP_IDS = 200
 
 
 @dataclass(frozen=True)
@@ -68,7 +75,7 @@ def conflict_pairs(
     absorbed = absorbed or {}
 
     def active(fact_id: str) -> str:
-        for _ in range(3):
+        for _ in range(MAX_REDIRECT_HOPS):
             if fact_id not in absorbed:
                 break
             fact_id = absorbed[fact_id]
@@ -124,12 +131,12 @@ def links_query(user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[s
     return query, parameters
 
 
-def partners_query(user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[str, Any]]]:
-    """The active facts among ``fact_ids``, with what a result shows of a conflicting fact (run across the user's
-    partitions)."""
+def facts_query(user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[str, Any]]]:
+    """The facts among ``fact_ids``, active or not, with what a result shows of a conflicting fact and where a retired
+    one went (``superseded_by``); run it across the user's partitions."""
     query = (
-        "SELECT c.id, c.content, c.created_at FROM c WHERE c.user_id = @user_id AND c.type = 'fact' "
-        f"AND {ACTIVE_FILTER} AND ARRAY_CONTAINS(@ids, c.id)"
+        "SELECT c.id, c.content, c.created_at, c.superseded_by FROM c "
+        "WHERE c.user_id = @user_id AND c.type = 'fact' AND ARRAY_CONTAINS(@ids, c.id)"
     )
     parameters = [{"name": "@user_id", "value": user_id}, {"name": "@ids", "value": list(fact_ids)}]
     return query, parameters
@@ -140,45 +147,129 @@ def link_endpoints(links: Iterable[Mapping[str, Any]]) -> list[str]:
     return sorted({fact_id for link in links for fact_id in (link.get("first"), link.get("later")) if fact_id})
 
 
+class EndpointResolver:
+    """The active fact that stands for each fact a link names.
+
+    A link names facts as they were when it was written, and a later pass can retire one into another fact. The
+    resolver follows ``superseded_by`` from a retired fact to the fact that replaced it, up to ``MAX_REDIRECT_HOPS``
+    steps. It reads in rounds: take :meth:`next_ids`, read those facts, :meth:`add` the rows, and repeat until
+    ``next_ids`` is empty. A fact that is gone, a chain that ends in one, and a chain that is too long or loops all
+    stand for nothing.
+    """
+
+    def __init__(self, fact_ids: Iterable[str]) -> None:
+        self._roots = list(dict.fromkeys(fact_ids))
+        self._rows: dict[str, Mapping[str, Any]] = {}
+        self._asked: set[str] = set()
+
+    def _follow(self, root: str) -> tuple[Optional[Mapping[str, Any]], Optional[str]]:
+        """The active fact ``root`` stands for, or else the ID where the chain stops because that fact is unread."""
+        fact_id = root
+        for _ in range(MAX_REDIRECT_HOPS + 1):
+            row = self._rows.get(fact_id)
+            if row is None:
+                return None, fact_id
+            replaced_by = row.get("superseded_by")
+            if not replaced_by:
+                return row, None
+            fact_id = replaced_by
+        return None, None
+
+    def next_ids(self) -> list[str]:
+        """The fact IDs to read next. Each is handed out once, whether or not the fact turns out to exist."""
+        wanted: list[str] = []
+        for root in self._roots:
+            _, unread = self._follow(root)
+            if unread is not None and unread not in self._asked and unread not in wanted:
+                wanted.append(unread)
+        self._asked.update(wanted)
+        return wanted
+
+    def add(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        for row in rows:
+            if row.get("id"):
+                self._rows[row["id"]] = row
+
+    def resolved(self) -> dict[str, Mapping[str, Any]]:
+        """Each fact ID that stands for an active fact, with that fact."""
+        found: dict[str, Mapping[str, Any]] = {}
+        for root in self._roots:
+            row, _ = self._follow(root)
+            if row is not None:
+                found[root] = row
+        return found
+
+
+def _absorbed_ids(doc: Mapping[str, Any]) -> list[str]:
+    """The facts ``doc`` absorbed (``merged_from``): duplicates folded into it, or the members of a combined fact."""
+    merged = doc.get("merged_from")
+    if not isinstance(merged, (list, tuple)):
+        return []
+    return [fact_id for fact_id in merged if isinstance(fact_id, str) and fact_id]
+
+
 def attach_conflicts(
     docs: Sequence[dict[str, Any]],
     links: Iterable[Mapping[str, Any]],
-    partners: Mapping[str, Mapping[str, Any]],
+    active: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """``docs`` with, on each fact that has any, ``conflicts_with``: at most ``MAX_CONFLICT_PARTNERS`` active facts it
     conflicts with, newest first, each as ``{"id", "content", "created_at", "kind"}``.
 
-    ``partners`` holds the active facts by ID; a link to a fact that is not there (retired or deleted) is ignored.
+    ``active`` maps each fact ID a link names to the active fact that stands for it: the fact itself, or the fact it
+    was retired into. A fact stands for itself and for the facts it absorbed, so it shows their conflicts too. A link
+    whose far side stands for no active fact (it was deleted) is ignored, and so is one whose two sides stand for the
+    same fact.
     """
-    linked: dict[str, list[tuple[str, Any]]] = {}
+    stands_for: dict[str, list[str]] = {}
+    for doc in docs:
+        if doc.get("type") == "fact" and doc.get("id"):
+            for fact_id in (doc["id"], *_absorbed_ids(doc)):
+                stands_for.setdefault(fact_id, []).append(doc["id"])
+    entries: dict[str, dict[str, dict[str, Any]]] = {}
     for link in links:
         first, later, kind = link.get("first"), link.get("later"), link.get("kind")
-        if first and later and first != later:
-            linked.setdefault(first, []).append((later, kind))
-            linked.setdefault(later, []).append((first, kind))
+        if not first or not later or first == later:
+            continue
+        for here, there in ((first, later), (later, first)):
+            partner = active.get(there)
+            if partner is None:
+                continue
+            for doc_id in stands_for.get(here, ()):
+                if partner["id"] != doc_id:
+                    entries.setdefault(doc_id, {}).setdefault(
+                        partner["id"],
+                        {
+                            "id": partner["id"],
+                            "content": partner.get("content"),
+                            "created_at": partner.get("created_at"),
+                            "kind": kind,
+                        },
+                    )
     out: list[dict[str, Any]] = []
     for doc in docs:
-        entries: dict[str, dict[str, Any]] = {}
-        for partner_id, kind in linked.get(doc.get("id"), ()):
-            partner = partners.get(partner_id)
-            if partner is not None and partner_id not in entries:
-                entries[partner_id] = {
-                    "id": partner_id,
-                    "content": partner.get("content"),
-                    "created_at": partner.get("created_at"),
-                    "kind": kind,
-                }
-        shown = sorted(entries.values(), key=lambda e: (str(e["created_at"] or ""), e["id"]), reverse=True)
+        found = entries.get(doc.get("id")) if doc.get("type") == "fact" else None
+        shown = (
+            sorted(found.values(), key=lambda e: (str(e["created_at"] or ""), e["id"]), reverse=True) if found else []
+        )
         out.append({**doc, "conflicts_with": shown[:MAX_CONFLICT_PARTNERS]} if shown else doc)
     return out
 
 
-def _fact_ids_by_user(docs: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
-    ids_by_user: dict[str, list[str]] = {}
-    for doc in docs:
-        if doc.get("type") == "fact" and doc.get("id") and doc.get("user_id"):
-            ids_by_user.setdefault(str(doc["user_id"]), []).append(str(doc["id"]))
-    return ids_by_user
+def _lookup_ids_by_user(docs: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
+    """The fact IDs to look links up for, per user: each fact result's own ID, then (up to ``MAX_LOOKUP_IDS``) the facts
+    it absorbed."""
+    facts = [doc for doc in docs if doc.get("type") == "fact" and doc.get("id") and doc.get("user_id")]
+    ids_by_user: dict[str, dict[str, None]] = {}
+    for doc in facts:
+        ids_by_user.setdefault(str(doc["user_id"]), {})[str(doc["id"])] = None
+    for doc in facts:
+        ids = ids_by_user[str(doc["user_id"])]
+        for fact_id in _absorbed_ids(doc):
+            if len(ids) >= MAX_LOOKUP_IDS:
+                break
+            ids.setdefault(fact_id, None)
+    return {user_id: list(ids) for user_id, ids in ids_by_user.items()}
 
 
 def with_conflicts(
@@ -187,24 +278,28 @@ def with_conflicts(
     """``docs`` (search results) with the conflicts of each fact attached (``conflicts_with``).
 
     ``query(sql, parameters, *, partition_key=None, cross_partition=False)`` runs a query on the memories container and
-    returns its rows. A search with no conflicts costs one query per user; with links, a second reads their partners.
+    returns its rows. A search with no conflicts costs one query per user; with links, one more reads the facts they
+    name, and one more for each step a linked fact has since been retired through.
     Conflicts are context: a failed lookup is logged and ``docs`` come back as they were.
     """
-    ids_by_user = _fact_ids_by_user(docs)
+    ids_by_user = _lookup_ids_by_user(docs)
     if not ids_by_user:
         return list(docs)
     try:
         links: list[Mapping[str, Any]] = []
-        partners: dict[str, Mapping[str, Any]] = {}
+        active: dict[str, Mapping[str, Any]] = {}
         for user_id, fact_ids in ids_by_user.items():
             sql, parameters = links_query(user_id, fact_ids)
             found = list(query(sql, parameters, partition_key=[user_id, CONFLICT_LINK_THREAD_ID]))
             if not found:
                 continue
             links.extend(found)
-            sql, parameters = partners_query(user_id, link_endpoints(found))
-            partners.update({row["id"]: row for row in query(sql, parameters, cross_partition=True)})
-        return attach_conflicts(docs, links, partners)
+            resolver = EndpointResolver(link_endpoints(found))
+            while wanted := resolver.next_ids():
+                sql, parameters = facts_query(user_id, wanted)
+                resolver.add(query(sql, parameters, cross_partition=True))
+            active.update(resolver.resolved())
+        return attach_conflicts(docs, links, active)
     except Exception as exc:  # noqa: BLE001 - conflicts must never break a search
         logger.warning(
             "search: conflicts_with lookup failed (%s); returning results without it", describe_exception(exc)
@@ -216,21 +311,24 @@ async def awith_conflicts(
     docs: Sequence[dict[str, Any]], query: Callable[..., Awaitable[Iterable[Mapping[str, Any]]]]
 ) -> list[dict[str, Any]]:
     """:func:`with_conflicts` for an async ``query``."""
-    ids_by_user = _fact_ids_by_user(docs)
+    ids_by_user = _lookup_ids_by_user(docs)
     if not ids_by_user:
         return list(docs)
     try:
         links: list[Mapping[str, Any]] = []
-        partners: dict[str, Mapping[str, Any]] = {}
+        active: dict[str, Mapping[str, Any]] = {}
         for user_id, fact_ids in ids_by_user.items():
             sql, parameters = links_query(user_id, fact_ids)
             found = list(await query(sql, parameters, partition_key=[user_id, CONFLICT_LINK_THREAD_ID]))
             if not found:
                 continue
             links.extend(found)
-            sql, parameters = partners_query(user_id, link_endpoints(found))
-            partners.update({row["id"]: row for row in await query(sql, parameters, cross_partition=True)})
-        return attach_conflicts(docs, links, partners)
+            resolver = EndpointResolver(link_endpoints(found))
+            while wanted := resolver.next_ids():
+                sql, parameters = facts_query(user_id, wanted)
+                resolver.add(await query(sql, parameters, cross_partition=True))
+            active.update(resolver.resolved())
+        return attach_conflicts(docs, links, active)
     except Exception as exc:  # noqa: BLE001 - conflicts must never break a search
         logger.warning(
             "search: conflicts_with lookup failed (%s); returning results without it", describe_exception(exc)

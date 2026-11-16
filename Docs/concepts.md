@@ -182,7 +182,7 @@ Slots need `user_id` and are skipped when `memory_id` is set or when they would 
 
 ### Conflicts in search results
 
-`search_cosmos(..., user_id=...)` returns each fact that conflicts with other facts with `conflicts_with`: up to 2 of the newest active facts it conflicts with, each as `{"id", "content", "created_at", "kind"}`. `kind` is `update` (the same attribute with a different value at a later time) or `inconsistent` (the two cannot both be true). A fact without a conflict has no such key. Both facts stay active and searchable, so the agent can show both sides and ask the user which is right. Reconcile writes the links (see [Linking conflicts](#linking-conflicts)). The lookup adds one query per search, for the links, and one more when there are any, for the conflicting facts; if it fails, the results come back without `conflicts_with`.
+`search_cosmos(..., user_id=...)` returns each fact that conflicts with other facts with `conflicts_with`: up to 2 of the newest active facts it conflicts with, each as `{"id", "content", "created_at", "kind"}`. `kind` is `update` (the same attribute with a different value at a later time) or `inconsistent` (the two cannot both be true). A fact without a conflict has no such key. Both facts stay active and searchable, so the agent can show both sides and ask the user which is right. Reconcile writes the links (see [Linking conflicts](#linking-conflicts)). The lookup adds one query per search, for the links, and one or two more when there are any, for the conflicting facts; if it fails, the results come back without `conflicts_with`.
 
 ### Keyword search and partition scope
 
@@ -268,9 +268,9 @@ A combined fact is never combined again or folded into another fact. Combining a
 Two of the labels in step 3 name a conflict: `update` (the same attribute with a different value at a later time) and `inconsistent` (the two cannot both be true). Retiring either side on one model call misleads answers whenever the call is wrong, and nothing in the pass can tell which side the user holds true, so reconcile retires neither. Both facts stay active, and the pass links the pair, with no model call beyond the check it already made:
 
 - A link is a small document in the user's `memories` container (`type="conflict_link"`, thread id `__conflicts__`) that holds the two fact ids and the kind, and no text. Its id derives from the pair, so judging a pair again rewrites the same document. `get_memories()` does not return links.
-- If the same pass folds or combines one fact of a pair into another, the link goes to the fact that took its place. A link that cannot be written is logged and skipped; it never fails the pass.
+- If the same pass folds or combines one fact of a pair into another, the link goes to the fact that took its place. If a later pass does, a search follows the retired fact to the fact that replaced it (`superseded_by`), and a fact shows the conflicts of the facts folded or combined into it (`merged_from`). A link that cannot be written is logged and skipped; it never fails the pass.
 - Facts written by the assistant (`sys:agent-fact`) are never linked: they record what the agent said or recommended, not what the user holds true.
-- Only pairs the pass compares are linked: a new fact against its nearest active facts (the candidates above, and the combining neighbours below). A conflict stops showing once either fact is deleted or a later pass folds or combines it, because a link to a fact that is no longer active is ignored.
+- Only pairs the pass compares are linked: a new fact against its nearest active facts (the candidates above, and the combining neighbours below). A conflict stops showing once either fact is deleted, or when both facts end up in one fact.
 
 `search_cosmos(..., user_id=...)` shows the links (see [Conflicts in search results](#conflicts-in-search-results)).
 

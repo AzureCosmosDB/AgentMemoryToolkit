@@ -873,8 +873,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         With ``user_id``, a fact that ``reconcile`` linked to facts it conflicts with comes back with
         ``conflicts_with``: up to two active partners, newest first, each
         ``{"id", "content", "created_at", "kind"}`` (``kind`` is ``update`` or ``inconsistent``). Neither
-        fact is retired for the conflict, so show both and ask the user which is right. The lookup costs
-        one more query (two when a fact has links); if it fails the results come back without it.
+        fact is retired for the conflict, so show both and ask the user which is right. A conflict follows a
+        fact that a later pass folded or combined to the fact that took its place. The lookup costs one more
+        query (two when a fact has links, three when a linked fact was since folded or combined); if it fails
+        the results come back without it.
         """
         store = self._get_store()
         # Facts + episodes share one ranked query and one top_k budget: episodic

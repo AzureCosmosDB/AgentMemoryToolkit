@@ -463,7 +463,7 @@ for fact in facts:
         print(f"{fact['content']!r} conflicts with {other['content']!r} ({other['kind']})")
 ```
 
-An app that settles a conflict can delete the fact that is wrong with `delete_memory`; a link to a fact that is no longer active is ignored. Only pairs the duplicate check judged are linked (a new fact against its nearest active facts), so a conflict between facts that are far apart in meaning is not found. Facts the assistant wrote (`sys:agent-fact`) are never linked, and a conflict stops showing once a later pass folds or combines either fact.
+An app that settles a conflict can delete the fact that is wrong with `delete_memory`; a link to a deleted fact is ignored. Only pairs the duplicate check judged are linked (a new fact against its nearest active facts), so a conflict between facts that are far apart in meaning is not found. Facts the assistant wrote (`sys:agent-fact`) are never linked, and a conflict follows a fact that a later pass folds or combines to the fact that took its place.
 
 ### What changes in your data
 

@@ -132,7 +132,7 @@ Search hides some records on purpose:
 If `conflicts_with` is missing from facts you expect to conflict:
 
 - It needs `user_id`, and `reconcile` (or the automatic cadence) must have run since the newer fact was written. A pass links only pairs its duplicate check judged: a new fact against its nearest active facts.
-- Facts the assistant wrote (`sys:agent-fact`) are never linked, and a conflict stops showing once either fact is deleted or a later pass folds or combines it. Conflicting facts are not retired, so both stay in `get_memories`.
+- Facts the assistant wrote (`sys:agent-fact`) are never linked, and a conflict stops showing once either fact is deleted (a fact that a later pass folds or combines is followed to the fact that took its place). Conflicting facts are not retired, so both stay in `get_memories`.
 - A failed lookup returns the results without the field and logs a warning.
 
 If `preference_slot` or `procedure_slot` adds nothing:

@@ -1,7 +1,7 @@
 """``search_cosmos`` returns each fact with the facts it conflicts with (``conflicts_with``).
 
 These run the real client and store over a fake memories container that answers the ranked search, the link query and
-the partner query, so they cover the whole path a search takes.
+the fact query, so they cover the whole path a search takes.
 """
 
 from __future__ import annotations
@@ -38,20 +38,21 @@ LINKS = [{"first": "f-old", "later": "f-new", "kind": "update"}]
 
 
 class FakeMemories:
-    """Answers the three queries a search makes and records them."""
+    """Answers the three queries a search makes (links and facts by the IDs asked for) and records them."""
 
-    def __init__(self, *, ranked: list[dict[str, Any]], links: list[dict[str, Any]], partners: list[dict[str, Any]]):
-        self.ranked, self.links, self.partners = ranked, links, partners
+    def __init__(self, *, ranked: list[dict[str, Any]], links: list[dict[str, Any]], facts: list[dict[str, Any]]):
+        self.ranked, self.links, self.facts = ranked, links, facts
         self.calls: list[dict[str, Any]] = []
         self.id = "memories"
 
     def _answer(self, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         self.calls.append(kwargs)
         query = kwargs["query"]
+        asked = {p["name"]: p["value"] for p in kwargs.get("parameters") or []}.get("@ids", [])
         if "c.type = @type" in query:
-            return list(self.links)
+            return [link for link in self.links if {link["first"], link["later"]} & set(asked)]
         if "ARRAY_CONTAINS(@ids, c.id)" in query:
-            return list(self.partners)
+            return [stored for stored in self.facts if stored["id"] in asked]
         return list(self.ranked)
 
     def query_items(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -89,7 +90,8 @@ def _async_client(container: AsyncFakeMemories) -> Any:
     return mem
 
 
-def _partners() -> list[dict[str, Any]]:
+def _facts() -> list[dict[str, Any]]:
+    """The two facts as the fact query reads them."""
     return [{"id": d["id"], "content": d["content"], "created_at": d["created_at"]} for d in (RANKED, OLDER)]
 
 
@@ -107,7 +109,7 @@ def _assert_shown_with_its_conflict(results: list[dict[str, Any]]) -> None:
 
 
 def test_a_fact_is_returned_with_the_fact_it_conflicts_with() -> None:
-    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, partners=_partners())
+    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
 
     results = _sync_client(container).search_cosmos(search_terms="deadline", user_id=USER, top_k=3)
 
@@ -117,7 +119,7 @@ def test_a_fact_is_returned_with_the_fact_it_conflicts_with() -> None:
 
 
 def test_a_fact_with_no_links_is_returned_as_it_is() -> None:
-    container = FakeMemories(ranked=[dict(RANKED)], links=[], partners=_partners())
+    container = FakeMemories(ranked=[dict(RANKED)], links=[], facts=_facts())
 
     [shown] = _sync_client(container).search_cosmos(search_terms="deadline", user_id=USER, top_k=3)
 
@@ -126,7 +128,7 @@ def test_a_fact_with_no_links_is_returned_as_it_is() -> None:
 
 
 def test_a_search_without_a_user_looks_up_no_conflicts() -> None:
-    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, partners=_partners())
+    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
 
     [shown] = _sync_client(container).search_cosmos(search_terms="deadline", top_k=3)
 
@@ -135,7 +137,7 @@ def test_a_search_without_a_user_looks_up_no_conflicts() -> None:
 
 
 def test_a_failing_conflict_lookup_does_not_break_the_search() -> None:
-    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, partners=_partners())
+    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
     original = container._answer
 
     def answer(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -150,9 +152,54 @@ def test_a_failing_conflict_lookup_does_not_break_the_search() -> None:
     assert shown["id"] == "f-new" and "conflicts_with" not in shown
 
 
+# "Departs June 1" was linked to "now departs June 3"; a later pass combined the June 3 fact with "seat 12A".
+FLIGHT = fact("f-flight", "The user's flight departs June 1.", "2026-05-01T00:00:00Z")
+COMBINED = {
+    **fact("f-combined", "The user's flight now departs June 3, seat 12A.", "2026-05-03T00:00:00Z"),
+    "tags": ["sys:fact", "sys:combined"],
+    "merged_from": ["f-moved", "f-seat"],
+}
+FLIGHT_LINKS = [{"first": "f-flight", "later": "f-moved", "kind": "update"}]
+FLIGHT_FACTS = [
+    {"id": "f-flight", "content": FLIGHT["content"], "created_at": FLIGHT["created_at"]},
+    {
+        "id": "f-moved",
+        "content": "The user's flight now departs June 3.",
+        "created_at": "2026-05-02T00:00:00Z",
+        "superseded_by": "f-combined",
+    },
+    {"id": "f-combined", "content": COMBINED["content"], "created_at": COMBINED["created_at"]},
+]
+FLIGHT_ENTRY = {"id": "f-flight", "content": FLIGHT["content"], "created_at": FLIGHT["created_at"], "kind": "update"}
+COMBINED_ENTRY = {
+    "id": "f-combined",
+    "content": COMBINED["content"],
+    "created_at": COMBINED["created_at"],
+    "kind": "update",
+}
+
+
+def test_a_conflict_follows_a_fact_that_a_later_pass_combined() -> None:
+    container = FakeMemories(ranked=[dict(FLIGHT), dict(COMBINED)], links=FLIGHT_LINKS, facts=FLIGHT_FACTS)
+
+    results = _sync_client(container).search_cosmos(search_terms="flight", user_id=USER, top_k=3)
+
+    by_id = {doc["id"]: doc for doc in results}
+    assert by_id["f-flight"]["conflicts_with"] == [COMBINED_ENTRY]
+    assert by_id["f-combined"]["conflicts_with"] == [FLIGHT_ENTRY]
+
+
+def test_the_combined_fact_alone_shows_the_conflict_of_the_facts_it_absorbed() -> None:
+    container = FakeMemories(ranked=[dict(COMBINED)], links=FLIGHT_LINKS, facts=FLIGHT_FACTS)
+
+    [shown] = _sync_client(container).search_cosmos(search_terms="flight", user_id=USER, top_k=3)
+
+    assert shown["conflicts_with"] == [FLIGHT_ENTRY]
+
+
 @pytest.mark.asyncio
 async def test_async_a_fact_is_returned_with_the_fact_it_conflicts_with() -> None:
-    container = AsyncFakeMemories(ranked=[dict(RANKED)], links=LINKS, partners=_partners())
+    container = AsyncFakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
 
     results = await _async_client(container).search_cosmos(search_terms="deadline", user_id=USER, top_k=3)
 
@@ -162,8 +209,19 @@ async def test_async_a_fact_is_returned_with_the_fact_it_conflicts_with() -> Non
 
 
 @pytest.mark.asyncio
+async def test_async_a_conflict_follows_a_fact_that_a_later_pass_combined() -> None:
+    container = AsyncFakeMemories(ranked=[dict(FLIGHT), dict(COMBINED)], links=FLIGHT_LINKS, facts=FLIGHT_FACTS)
+
+    results = await _async_client(container).search_cosmos(search_terms="flight", user_id=USER, top_k=3)
+
+    by_id = {doc["id"]: doc for doc in results}
+    assert by_id["f-flight"]["conflicts_with"] == [COMBINED_ENTRY]
+    assert by_id["f-combined"]["conflicts_with"] == [FLIGHT_ENTRY]
+
+
+@pytest.mark.asyncio
 async def test_async_a_failing_conflict_lookup_does_not_break_the_search() -> None:
-    container = AsyncFakeMemories(ranked=[dict(RANKED)], links=LINKS, partners=_partners())
+    container = AsyncFakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
     original = container._answer
 
     def answer(kwargs: dict[str, Any]) -> list[dict[str, Any]]:

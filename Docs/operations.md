@@ -12,7 +12,7 @@ Runtime knobs for an Agent-Memory-Toolkit deployment. Most ops levers live in `.
 | user_summary | never | container default (memories_summaries, -1) |
 | fact | never | container default (memories, -1); supersession handles aging |
 | procedural | never | container default (memories, -1); supersession handles aging |
-| conflict_link | never | container default (memories, -1); ids and a kind, no text; ignored once either fact is retired or deleted |
+| conflict_link | never | container default (memories, -1); ids and a kind, no text; a retired fact is followed to the fact that replaced it, and the link is ignored once either fact is deleted |
 | counter | 90 d | container default (counter container; every document in it) |
 
 The counter container's TTL is set when the container is created, by `create_memory_store()` or the Bicep template. It is the container's default, so it applies to every document in it, not only thread counters: user counters and the extraction watermark kept on a thread counter go with them, each 90 days after its last update. A container that already exists keeps its current setting, because `create_container_if_not_exists` does not change it. When a counter expires, its thread or user starts counting again from zero.

@@ -17,16 +17,22 @@ from azure.cosmos.agent_memory.aio.auto_trigger import maybe_trigger_steps
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor
 
+TENANT = "acme"
+
 
 class _AsyncFakeCounterContainer:
     """Async in-memory counter container exercising the REAL increment /
-    watermark-read / watermark-advance helpers end-to-end (no constant mocks)."""
+    watermark-read / watermark-advance helpers end-to-end (no constant mocks).
+    It records the partition each read and patch asks for."""
 
     def __init__(self) -> None:
         self.store: dict[str, dict] = {}
+        self.partitions_read: list[list[str]] = []
+        self.partitions_patched: list[list[str]] = []
         self._etag = 0
 
     async def read_item(self, *, item, partition_key):
+        self.partitions_read.append(partition_key)
         if item not in self.store:
             raise CosmosResourceNotFoundError(message="404")
         return dict(self.store[item])
@@ -46,6 +52,7 @@ class _AsyncFakeCounterContainer:
         return dict(body)
 
     async def patch_item(self, *, item, partition_key, patch_operations):
+        self.partitions_patched.append(partition_key)
         doc = self.store.setdefault(item, {"id": item})
         for op in patch_operations:
             doc[op["path"].lstrip("/")] = op["value"]
@@ -110,6 +117,7 @@ class TestAsyncExtractRecentK:
         await maybe_trigger_steps(
             processor,
             counter_container,
+            TENANT,
             {("u1", "t1"): 1},
             thresholds={
                 "FACT_EXTRACTION_EVERY_N": 0,
@@ -136,10 +144,10 @@ class TestAsyncExtractRecentK:
             "MEMORY_PROCESSOR_OWNER": "inprocess",
         }
 
-        await maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 2}, thresholds=thresholds)
+        await maybe_trigger_steps(processor, counter_container, TENANT, {("u1", "t1"): 2}, thresholds=thresholds)
         processor.process_extract_episodes.assert_not_awaited()
 
-        await maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 1}, thresholds=thresholds)
+        await maybe_trigger_steps(processor, counter_container, TENANT, {("u1", "t1"): 1}, thresholds=thresholds)
 
         processor.process_extract_episodes.assert_awaited_once_with(user_id="u1", thread_id="t1")
 
@@ -157,6 +165,7 @@ class TestAsyncExtractRecentK:
             await maybe_trigger_steps(
                 processor,
                 counter_container,
+                TENANT,
                 {("u1", "t1"): 1},
                 thresholds={
                     "FACT_EXTRACTION_EVERY_N": 0,
@@ -383,3 +392,83 @@ class TestCadenceThresholdsNormalization:
     def test_non_mapping_rejected(self):
         with pytest.raises(TypeError):
             AsyncCosmosMemoryClient(use_default_credential=False, cadence_thresholds=[("DEDUP_EVERY_N", 5)])
+
+
+_THREAD_AND_USER_STEPS = {
+    "FACT_EXTRACTION_EVERY_N": 1,
+    "THREAD_SUMMARY_EVERY_N": 0,
+    "EPISODE_EVAL_EVERY_N": 0,
+    "USER_SUMMARY_EVERY_N": 1,
+    "DEDUP_EVERY_N": 0,
+    "MEMORY_PROCESSOR_OWNER": "inprocess",
+}
+
+
+class TestCountersFollowTheTenant:
+    """Every counter the auto-trigger reads, writes or stamps is in the client's tenant, in the owner's partition."""
+
+    @pytest.mark.asyncio
+    async def test_thread_and_user_counters_live_in_the_tenant_and_owner_partition(self):
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = AsyncMock(return_value={})
+        processor.process_user_summary = AsyncMock()
+        counters = _AsyncFakeCounterContainer()
+
+        await maybe_trigger_steps(processor, counters, TENANT, {("u1", "t1"): 1}, thresholds=_THREAD_AND_USER_STEPS)
+
+        assert {(doc["tenant_id"], doc["user_id"], doc["thread_id"]) for doc in counters.store.values()} == {
+            (TENANT, "u1", "t1"),
+            (TENANT, "u1", "__counters__"),
+        }
+        assert counters.partitions_read == [[TENANT, "u1"], [TENANT, "u1"]]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_step_is_stamped_in_the_tenant_and_owner_partition(self):
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = AsyncMock(side_effect=RuntimeError("boom"))
+        processor.process_user_summary = AsyncMock(side_effect=RuntimeError("boom"))
+        counters = _AsyncFakeCounterContainer()
+
+        await maybe_trigger_steps(processor, counters, TENANT, {("u1", "t1"): 1}, thresholds=_THREAD_AND_USER_STEPS)
+
+        assert counters.partitions_patched == [[TENANT, "u1"], [TENANT, "u1"]]
+        assert counters.store["thread:u1:t1"]["last_failure_reason"].startswith("process_extract_memories: ")
+        assert counters.store["user:u1"]["last_failure_reason"].startswith("process_user_summary: ")
+
+    @pytest.mark.asyncio
+    async def test_a_client_counts_the_turns_it_pushes_in_its_own_tenant(self, monkeypatch):
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = AsyncMock(return_value={})
+        client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor, tenant_id=TENANT)
+        client._memories_container_client = MagicMock()
+        client._memories_container_client.upsert_item = AsyncMock(side_effect=lambda body: body)
+        client._turns_container_client = client._memories_container_client
+        client._summaries_container_client = client._memories_container_client
+        counters = client._counter_container_client = _AsyncFakeCounterContainer()
+
+        client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+        await client.push_to_cosmos()
+        await asyncio.gather(*list(client._background_tasks), return_exceptions=True)
+
+        [counter] = counters.store.values()
+        assert (counter["tenant_id"], counter["user_id"], counter["thread_id"]) == (TENANT, "u1", "t1")
+        assert counters.partitions_read == [[TENANT, "u1"]]
+
+    @pytest.mark.asyncio
+    async def test_a_client_hands_its_tenant_to_the_trigger(self):
+        client = AsyncCosmosMemoryClient(use_default_credential=False, tenant_id=TENANT)
+        processor, counters = MagicMock(), MagicMock()
+        client._get_processor = MagicMock(return_value=processor)
+        client._get_counter_container = MagicMock(return_value=counters)
+
+        with patch(
+            "azure.cosmos.agent_memory.aio.cosmos_memory_client.maybe_trigger_steps",
+            new=AsyncMock(),
+        ) as trigger:
+            await client._maybe_auto_trigger({("u1", "t1"): 1})
+
+        assert trigger.await_args.args == (processor, counters, TENANT, {("u1", "t1"): 1})

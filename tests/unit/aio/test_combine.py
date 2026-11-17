@@ -23,6 +23,7 @@ from azure.cosmos.agent_memory.services._combine import COMBINE_PROMPT, CombineD
 
 NEAR = [1.0, 0.0, 0.0]
 BAND = [0.75, math.sqrt(1 - 0.75**2), 0.0]  # cosine 0.75: below the dedup floor, above the combine floor
+TENANT = "acme"
 
 PLANS = "The user is planning a Christmas Eve dinner for 15 guests"
 START = "The user wants the Christmas Eve dinner to start at 6:30 PM"
@@ -32,6 +33,7 @@ BOTH = "For the user's Christmas Eve dinner, the user is planning for 15 guests 
 def _fact(fid: str, content: str, *, vector=NEAR, ts: int = 1, created_at: str = "2024-01-01T00:00:00+00:00", **extra):
     doc = {
         "id": fid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "role": "system",
@@ -99,6 +101,7 @@ class _Model:
 
 def _make_pipeline() -> AsyncPipelineService:
     p = AsyncPipelineService.__new__(AsyncPipelineService)
+    p._tenant_id = TENANT
     p._embeddings = MagicMock()
     p._embed_one = AsyncMock(return_value=[0.1, 0.2, 0.3])
     p._commit_fold = AsyncMock(side_effect=lambda survivor, losers, **kwargs: [doc["id"] for doc in losers])
@@ -174,6 +177,8 @@ class TestAsyncCombine:
         [record] = _created(p)
         assert (record["content"], record["merged_from"]) == (BOTH, ["f1", "f2"])
         assert "sys:combined" in record["tags"] and record["embedding"] == [0.1, 0.2, 0.3]
+        assert record["tenant_id"] == TENANT
+        assert {tuple(c.kwargs["partition_key"]) for c in p._container.read_item.call_args_list} == {(TENANT, "u1")}
         assert (record["prompt_id"], record["prompt_version"]) == ("combine_memories.prompty", "v1")
         assert _retired(p) == [("f1", record["id"], "combined"), ("f2", record["id"], "combined")]
         assert (result["combined"], result["synthesized"], result["kept"], result["combine_groups"]) == (2, 1, 0, 1)
@@ -370,6 +375,7 @@ class TestAsyncCommitCombine:
     @staticmethod
     def _build() -> AsyncPipelineService:
         p = AsyncPipelineService.__new__(AsyncPipelineService)
+        p._tenant_id = TENANT
         p._container = MagicMock()
         p._container.create_item = AsyncMock()
         p._memories_container = p._container
@@ -400,6 +406,8 @@ class TestAsyncCommitCombine:
         record, members = self._inputs()
 
         assert await p._commit_combine(record, members) == ["f1", "f2"]
+
+        p._container.read_item.assert_awaited_once_with(item=record["id"], partition_key=[TENANT, "u1"])
 
     @pytest.mark.parametrize(
         "existing",

@@ -28,6 +28,14 @@ from pydantic import ValidationError as PydanticValidationError
 from azure.cosmos.agent_memory import thresholds as threshold_config
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._curation import mark_secret, sanitize_record, sanitize_text
+from azure.cosmos.agent_memory._partitioning import (
+    DEFAULT_TENANT_ID,
+    OWNER_FILTER,
+    owner_parameters,
+    partition_key_for,
+    resolve_tenant_id,
+    stamp_scope,
+)
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
@@ -65,7 +73,6 @@ from azure.cosmos.agent_memory.services._combine import (
 )
 from azure.cosmos.agent_memory.services._conflicts import conflict_link_body, conflict_pairs
 from azure.cosmos.agent_memory.services._dedup import (
-    DEDUP_CURSOR_THREAD_ID,
     DEDUP_CURSOR_TYPE,
     DEDUP_PROMPT,
     Verdict,
@@ -277,7 +284,11 @@ class _StoreContainerAdapter:
 
 
 class PipelineService:
-    """LLM orchestration service over the injected containers, memory store and model clients."""
+    """LLM orchestration service over the injected containers, memory store and model clients.
+
+    The service is bound to one tenant (``tenant_id``): every record it reads or writes is in the partition
+    ``[tenant_id, user_id]`` of its owner, and every query it sends filters on the tenant.
+    """
 
     def __init__(
         self,
@@ -288,7 +299,9 @@ class PipelineService:
         *,
         containers: dict[ContainerKey, Any],
         transcript_metadata_keys: Optional[Iterable[str]] = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> None:
+        self._tenant_id = resolve_tenant_id(tenant_id)
         self._store = store
         self._containers = containers
         self._memories_container = containers[ContainerKey.MEMORIES]
@@ -366,64 +379,12 @@ class PipelineService:
             include_timestamp=include_timestamp,
         )
 
-    def _query_active_memories(
-        self,
-        user_id: str,
-        memory_type: str,
-        *,
-        limit: int | None = None,
-        tagged_only: bool = False,
-    ) -> list[dict[str, Any]]:
-        top_clause = f"TOP {top_literal(limit, name='_query_active_memories.limit')} " if limit else ""
-        tag_clause = "AND ARRAY_CONTAINS(c.tags, @tag) " if tagged_only else ""
-        query = (
-            f"SELECT {top_clause}* FROM c WHERE c.user_id = @user_id "
-            "AND c.type = @memory_type "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            f"{tag_clause}"
-            "ORDER BY c.created_at DESC"
-        )
-        parameters = [
-            {"name": "@user_id", "value": user_id},
-            {"name": "@memory_type", "value": memory_type},
-        ]
-        if tagged_only:
-            parameters.append({"name": "@tag", "value": "sys:dup-candidate"})
-        return list(
-            self._memories_container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
-        )
-
-    def _load_memories_by_ids(self, user_id: str, memory_type: str, ids: Iterable[str]) -> list[dict[str, Any]]:
-        ids = [mid for mid in dict.fromkeys(ids) if mid]
-        if not ids:
-            return []
-        placeholders = ", ".join(f"@id{i}" for i in range(len(ids)))
-        parameters = [
-            {"name": "@user_id", "value": user_id},
-            {"name": "@memory_type", "value": memory_type},
-        ]
-        parameters.extend({"name": f"@id{i}", "value": mid} for i, mid in enumerate(ids))
-        query = (
-            "SELECT * FROM c WHERE c.user_id = @user_id "
-            "AND c.type = @memory_type "
-            f"AND c.id IN ({placeholders}) "
-            f"AND {_ACTIVE_DOC_FILTER}"
-        )
-        return list(
-            self._memories_container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True,
-            )
-        )
-
     def _sanitized_body(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Copy ``doc`` with literal credentials redacted, ready for a direct container write."""
-        body = dict(doc)
+        """Copy ``doc`` with literal credentials redacted and the tenant stamped, ready for a direct container write.
+
+        A document that names another tenant is refused: the service writes only into its own.
+        """
+        body = stamp_scope(doc, self._tenant_id)
         redacted = sanitize_record(body)
         if redacted:
             logger.warning("redacted literal secrets before write id=%s patterns=%s", body.get("id"), redacted)
@@ -553,19 +514,19 @@ class PipelineService:
 
         if turns is None:
             query = (
-                "SELECT * FROM c WHERE c.user_id = @user_id "
+                f"SELECT * FROM c WHERE {OWNER_FILTER} "
                 "AND c.thread_id = @thread_id AND c.type = 'turn' "
                 "AND (NOT IS_DEFINED(c.extracted_at) OR IS_NULL(c.extracted_at))"
             )
             parameters: list[dict[str, Any]] = [
-                {"name": "@user_id", "value": user_id},
+                *owner_parameters(self._tenant_id, user_id),
                 {"name": "@thread_id", "value": thread_id},
             ]
             items = list(
                 self._turns_container.query_items(
                     query=query,
                     parameters=parameters,
-                    partition_key=[user_id, thread_id],
+                    partition_key=partition_key_for(self._tenant_id, user_id),
                 )
             )
         else:
@@ -694,6 +655,7 @@ class PipelineService:
             source_turn_ids = ground_fact_sources(fact, turn_ids=batch_turn_ids, labels=batch_labels)
             doc: dict[str, Any] = {
                 "id": det_id,
+                "tenant_id": self._tenant_id,
                 "user_id": user_id,
                 "thread_id": thread_id,
                 "role": "system",
@@ -785,11 +747,10 @@ class PipelineService:
             return [], NONE
         window_ts = window_write_second(items, window_start)
         prior: list[dict[str, Any]] = []
+        partition_key = partition_key_for(self._tenant_id, user_id)
         try:
-            query, parameters = previous_turns_query(user_id, thread_id, window_start, window_ts)
-            rows = self._turns_container.query_items(
-                query=query, parameters=parameters, partition_key=[user_id, thread_id]
-            )
+            query, parameters = previous_turns_query(self._tenant_id, user_id, thread_id, window_start, window_ts)
+            rows = self._turns_container.query_items(query=query, parameters=parameters, partition_key=partition_key)
             prior = prior_turns(rows, items)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -801,7 +762,7 @@ class PipelineService:
         summary = NONE
         try:
             summary_doc = self._summaries_container.read_item(
-                item=f"summary_{user_id}_{thread_id}", partition_key=[user_id, thread_id]
+                item=f"summary_{user_id}_{thread_id}", partition_key=partition_key
             )
             summary = summary_text(summary_doc, window_start, window_ts)
         except CosmosResourceNotFoundError:
@@ -822,11 +783,11 @@ class PipelineService:
             return NONE
         try:
             query, parameters = known_facts_query(
-                user_id, self._embed_one(text), latest_created_at(batch), _ACTIVE_DOC_FILTER
+                self._tenant_id, user_id, self._embed_one(text), latest_created_at(batch), _ACTIVE_DOC_FILTER
             )
             rows = list(
                 self._memories_container.query_items(
-                    query=query, parameters=parameters, enable_cross_partition_query=True
+                    query=query, parameters=parameters, partition_key=partition_key_for(self._tenant_id, user_id)
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -975,6 +936,7 @@ class PipelineService:
                     EpisodicRecord,
                     {
                         "id": self._deterministic_episode_id(segment_key, index),
+                        "tenant_id": self._tenant_id,
                         "user_id": user_id,
                         "thread_id": thread_id,
                         "role": "system",
@@ -1033,7 +995,7 @@ class PipelineService:
         try:
             doc = self._memories_container.read_item(
                 item=self._episode_cursor_id(user_id, thread_id),
-                partition_key=[user_id, thread_id],
+                partition_key=partition_key_for(self._tenant_id, user_id),
             )
         except CosmosResourceNotFoundError:
             return "", ""
@@ -1057,7 +1019,7 @@ class PipelineService:
         if not last_at:
             return
         cursor_id = self._episode_cursor_id(user_id, thread_id)
-        partition_key = [user_id, thread_id]
+        partition_key = partition_key_for(self._tenant_id, user_id)
         for _ in range(3):
             etag: Optional[str] = None
             try:
@@ -1075,6 +1037,7 @@ class PipelineService:
             body = {
                 "id": cursor_id,
                 "type": "episode_cursor",
+                "tenant_id": self._tenant_id,
                 "user_id": user_id,
                 "thread_id": thread_id,
                 "last_episode_at": last_at,
@@ -1107,7 +1070,7 @@ class PipelineService:
         """
         last_at, last_id = self._read_episode_cursor(user_id, thread_id)
         query = (
-            "SELECT * FROM c WHERE c.user_id = @user_id "
+            f"SELECT * FROM c WHERE {OWNER_FILTER} "
             "AND c.thread_id = @thread_id AND c.type = 'turn' "
             "AND (c.created_at > @last_at "
             "OR (c.created_at = @last_at AND c.id > @last_id))"
@@ -1115,14 +1078,14 @@ class PipelineService:
         parameters: list[dict[str, Any]] = [
             {"name": "@last_at", "value": last_at},
             {"name": "@last_id", "value": last_id},
-            {"name": "@user_id", "value": user_id},
+            *owner_parameters(self._tenant_id, user_id),
             {"name": "@thread_id", "value": thread_id},
         ]
         items = list(
             self._turns_container.query_items(
                 query=query,
                 parameters=parameters,
-                partition_key=[user_id, thread_id],
+                partition_key=partition_key_for(self._tenant_id, user_id),
             )
         )
         items.sort(key=created_at_sort_key)
@@ -1285,8 +1248,8 @@ class PipelineService:
             raise ValidationError("extracted must be a dict")
 
         result = self._empty_extract_counts()
-        fact_docs = [dict(doc) for doc in extracted.get("facts", [])]
-        episodic_docs = [dict(doc) for doc in extracted.get("episodic", [])]
+        fact_docs = [stamp_scope(doc, self._tenant_id) for doc in extracted.get("facts", [])]
+        episodic_docs = [stamp_scope(doc, self._tenant_id) for doc in extracted.get("episodic", [])]
         update_ops = [dict(op) for op in extracted.get("updates", [])]
         docs_to_create = fact_docs + episodic_docs
 
@@ -1361,7 +1324,7 @@ class PipelineService:
             try:
                 self._turns_container.patch_item(
                     item=turn_id,
-                    partition_key=[turn.get("user_id"), turn.get("thread_id")],
+                    partition_key=partition_key_for(self._tenant_id, turn.get("user_id")),
                     patch_operations=[{"op": "set", "path": "/extracted_at", "value": now_iso}],
                 )
                 marked += 1
@@ -1458,10 +1421,10 @@ class PipelineService:
 
         logger.info("synthesize_procedural extraction started user_id=%s", user_id)
 
-        scope = ProcedureScope(user_id)
+        scope = ProcedureScope(self._tenant_id, user_id)
         cursor = self._read_procedure_cursor(scope)
-        facts_read = self._query_user_memories(*behavioral_facts_query(scope, cursor))
-        episodes_read = self._query_user_memories(*lesson_episodes_query(scope, cursor))
+        facts_read = self._query_procedures(scope, *behavioral_facts_query(scope, cursor))
+        episodes_read = self._query_procedures(scope, *lesson_episodes_query(scope, cursor))
         batches = source_batches(facts_read, episodes_read)
         if not any(sources for sources, _, _ in batches):
             self._advance_procedure_cursor(scope, cursor, facts_read, episodes_read)
@@ -1621,7 +1584,9 @@ class PipelineService:
     def _create_procedure(
         self, user_id: str, answer: ProcedureAnswer, now: str
     ) -> tuple[str, Optional[dict[str, Any]]]:
-        created = with_support(new_procedure(answer, user_id=user_id, now=now), answer.sources, answer.evidence)
+        created = with_support(
+            new_procedure(answer, tenant_id=self._tenant_id, user_id=user_id, now=now), answer.sources, answer.evidence
+        )
         if created is None:
             return "skipped", None
         created.update(self._prompt_lineage("extract_procedure.prompty"))
@@ -1691,16 +1656,10 @@ class PipelineService:
             return None
         return doc if doc.get("type") == "procedural" and not doc.get("superseded_by") else None
 
-    def _query_user_memories(self, query: str, parameters: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Run ``query`` over all of the user's memories, which span their threads' partitions."""
-        return list(
-            self._memories_container.query_items(query=query, parameters=parameters, enable_cross_partition_query=True)
-        )
-
     def _query_procedures(
         self, scope: ProcedureScope, query: str, parameters: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Run ``query`` over the user's procedures, which all share one partition."""
+        """Run ``query`` in the owner's partition, where their memories, procedures and procedure cursor all live."""
         return list(
             self._memories_container.query_items(query=query, parameters=parameters, partition_key=scope.partition_key)
         )
@@ -1784,15 +1743,16 @@ class PipelineService:
         logger.info("generate_thread_summary_durable started user_id=%s thread_id=%s", user_id, thread_id)
 
         summary_id = f"summary_{user_id}_{thread_id}"
+        partition_key = partition_key_for(self._tenant_id, user_id)
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._summaries_container.read_item(item=summary_id, partition_key=[user_id, thread_id])
+            existing_summary = self._summaries_container.read_item(item=summary_id, partition_key=partition_key)
         except CosmosResourceNotFoundError:
             pass
 
-        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
+        query = f"SELECT * FROM c WHERE {OWNER_FILTER} AND c.thread_id = @thread_id AND c.type = 'turn'"
         parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
+            *owner_parameters(self._tenant_id, user_id),
             {"name": "@thread_id", "value": thread_id},
         ]
         if existing_summary:
@@ -1804,7 +1764,7 @@ class PipelineService:
             self._turns_container.query_items(
                 query=query,
                 parameters=parameters,
-                partition_key=[user_id, thread_id],
+                partition_key=partition_key,
             )
         )
 
@@ -1842,6 +1802,7 @@ class PipelineService:
         doc_timestamp = self._stable_source_timestamp(items)
         summary_doc: dict[str, Any] = {
             "id": summary_id,
+            "tenant_id": self._tenant_id,
             "user_id": user_id,
             "thread_id": thread_id,
             "role": "system",
@@ -1875,7 +1836,7 @@ class PipelineService:
         if not isinstance(summary_doc, dict):
             raise ValidationError("summary_doc must be a dict")
 
-        doc = dict(summary_doc)
+        doc = stamp_scope(summary_doc, self._tenant_id)
         doc["id"] = doc.get("id") or f"summary_{user_id}_{thread_id}"
         doc["user_id"] = user_id
         doc["thread_id"] = thread_id
@@ -1921,17 +1882,15 @@ class PipelineService:
         )
 
         user_summary_id = f"user_summary_{user_id}"
+        partition_key = partition_key_for(self._tenant_id, user_id)
         existing_summary: Optional[dict[str, Any]] = None
         try:
-            existing_summary = self._summaries_container.read_item(
-                item=user_summary_id,
-                partition_key=[user_id, "__user_summary__"],
-            )
+            existing_summary = self._summaries_container.read_item(item=user_summary_id, partition_key=partition_key)
         except CosmosResourceNotFoundError:
             pass
 
-        query_predicate = "c.user_id = @user_id"
-        parameters: list[dict[str, Any]] = [{"name": "@user_id", "value": user_id}]
+        query_predicate = OWNER_FILTER
+        parameters: list[dict[str, Any]] = owner_parameters(self._tenant_id, user_id)
         if existing_summary:
             since = existing_summary["updated_at"]
             query_predicate += " AND c.created_at > @since"
@@ -1944,14 +1903,14 @@ class PipelineService:
             self._memories_container.query_items(
                 query=memories_query,
                 parameters=parameters,
-                enable_cross_partition_query=True,
+                partition_key=partition_key,
             )
         )
         items.extend(
             self._summaries_container.query_items(
                 query=summaries_query,
                 parameters=parameters,
-                enable_cross_partition_query=True,
+                partition_key=partition_key,
             )
         )
 
@@ -2001,6 +1960,7 @@ class PipelineService:
         doc_timestamp = self._stable_source_timestamp(items)
         summary_doc: dict[str, Any] = {
             "id": user_summary_id,
+            "tenant_id": self._tenant_id,
             "user_id": user_id,
             "thread_id": "__user_summary__",
             "role": "system",
@@ -2033,7 +1993,7 @@ class PipelineService:
         if not isinstance(user_summary_doc, dict):
             raise ValidationError("user_summary_doc must be a dict")
 
-        doc = dict(user_summary_doc)
+        doc = stamp_scope(user_summary_doc, self._tenant_id)
         doc["id"] = doc.get("id") or f"user_summary_{user_id}"
         doc["user_id"] = user_id
         doc["thread_id"] = "__user_summary__"
@@ -2180,10 +2140,12 @@ class PipelineService:
         logger.info("consolidate_memories started user_id=%s n=%d memory_type=%s", user_id, n, memory_type)
         cursor = self._read_dedup_cursor(user_id, memory_type)
         query, parameters = unchecked_memories_query(
-            user_id, memory_type, cursor, top_literal(n, name="consolidate_memories.n")
+            self._tenant_id, user_id, memory_type, cursor, top_literal(n, name="consolidate_memories.n")
         )
         seeds = list(
-            self._memories_container.query_items(query=query, parameters=parameters, enable_cross_partition_query=True)
+            self._memories_container.query_items(
+                query=query, parameters=parameters, partition_key=partition_key_for(self._tenant_id, user_id)
+            )
         )
 
         checked: list[tuple[dict[str, Any], list[Verdict]]] = []
@@ -2265,9 +2227,11 @@ class PipelineService:
         ``COMBINE_SIMILARITY_FLOOR`` it could be combined with; none without an embedding."""
         if not isinstance(seed.get("embedding"), list) or not seed["embedding"]:
             return []
-        query, parameters = neighbor_query(user_id, memory_type, seed)
+        query, parameters = neighbor_query(self._tenant_id, user_id, memory_type, seed)
         neighbors = list(
-            self._memories_container.query_items(query=query, parameters=parameters, enable_cross_partition_query=True)
+            self._memories_container.query_items(
+                query=query, parameters=parameters, partition_key=partition_key_for(self._tenant_id, user_id)
+            )
         )
         return comparable_candidates(seed, neighbors) if combine else close_candidates(seed, neighbors)
 
@@ -2303,7 +2267,7 @@ class PipelineService:
     def _read_dedup_cursor(self, user_id: str, memory_type: str) -> Optional[dict[str, Any]]:
         try:
             doc = self._memories_container.read_item(
-                item=dedup_cursor_id(user_id, memory_type), partition_key=[user_id, DEDUP_CURSOR_THREAD_ID]
+                item=dedup_cursor_id(user_id, memory_type), partition_key=partition_key_for(self._tenant_id, user_id)
             )
         except CosmosResourceNotFoundError:
             return None
@@ -2325,7 +2289,7 @@ class PipelineService:
         written = 0
         for pair in conflict_pairs(checked, absorbed=absorbed):
             try:
-                self._memories_container.upsert_item(body=conflict_link_body(user_id, pair))
+                self._memories_container.upsert_item(body=conflict_link_body(self._tenant_id, user_id, pair))
                 written += 1
             except Exception as exc:  # noqa: BLE001 - a link is best effort
                 logger.warning(
@@ -2348,7 +2312,7 @@ class PipelineService:
         position = next_dedup_cursor(existing, checked)
         if position is None:
             return
-        body = dedup_cursor_body(existing, user_id, memory_type, position)
+        body = dedup_cursor_body(self._tenant_id, existing, user_id, memory_type, position)
         try:
             if existing is None:
                 self._memories_container.create_item(body=body)
@@ -2505,7 +2469,7 @@ class PipelineService:
         for doc in members:
             try:
                 current = self._memories_container.read_item(
-                    item=doc["id"], partition_key=[doc["user_id"], doc["thread_id"]]
+                    item=doc["id"], partition_key=partition_key_for(self._tenant_id, doc["user_id"])
                 )
             except CosmosResourceNotFoundError:
                 return False
@@ -2527,7 +2491,7 @@ class PipelineService:
         except CosmosResourceExistsError:
             try:
                 existing = self._memories_container.read_item(
-                    item=record["id"], partition_key=[record["user_id"], record["thread_id"]]
+                    item=record["id"], partition_key=partition_key_for(self._tenant_id, record["user_id"])
                 )
             except CosmosResourceNotFoundError:
                 return None
@@ -2552,7 +2516,7 @@ class PipelineService:
         """
         if not user_id:
             raise ValidationError("user_id is required")
-        scope = ProcedureScope(user_id)
+        scope = ProcedureScope(self._tenant_id, user_id)
         today = utc_today()
         standing, left_out = standing_rules(self._query_procedures(scope, *standing_rules_query(scope, today)), today)
         if left_out:

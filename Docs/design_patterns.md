@@ -63,10 +63,10 @@ await mem.push_to_cosmos()
 
 ```python
 # Update content of an existing memory
-await mem.update_cosmos(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID, memory_type="fact", content="Corrected message text")
+await mem.update_cosmos(memory_id="<id>", user_id="user-1", memory_type="fact", content="Corrected message text")
 
-# Delete a memory (requires the partition keys and the memory_type)
-await mem.delete_memory(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID, memory_type="fact")
+# Delete a memory (needs the owner's user_id and the memory_type, not the thread)
+await mem.delete_memory(memory_id="<id>", user_id="user-1", memory_type="fact")
 ```
 
 Deleting a fact or procedure also deletes the records that were retired into it (duplicates, the sources of a combined fact, and directives or corrections held by a procedure), so deleted information does not survive in history. See [Section 11](#11-secrets-and-deleting-memories).
@@ -338,7 +338,7 @@ await mem.upsert_memory(
 
 ### Pattern: per-agent threads, cross-agent retrieval
 
-Each agent writes to its own `thread_id`. Other agents discover relevant context through `search_cosmos` across all threads for the user. At the end, `generate_user_summary` produces a unified profile from all agent threads.
+Each agent writes to its own `thread_id`. Other agents discover relevant context through `search_cosmos` across all threads for the user. At the end, `generate_user_summary` produces a unified profile from all agent threads. An agent can also own memories of its own (see [An agent as owner](#an-agent-as-owner)).
 
 ```python
 # After all agents finish
@@ -359,15 +359,17 @@ When a new turn is written to the `memories_turns` container, the change feed tr
 2. Checks whether the counter has crossed a configured threshold.
 3. Starts the appropriate Durable Functions orchestration if the threshold is crossed.
 
+The trigger reads `tenant_id` from each changed turn and processes it in that tenant, so one Function App serves every tenant that shares the database, with no tenant setting. A turn without a valid `tenant_id` is skipped with a warning.
+
 ### Configuration
 
 Set these application settings (in `local.settings.json` locally or Function App settings in Azure):
 
 | Setting | Scope | Effect |
 |---------|-------|--------|
-| `THREAD_SUMMARY_EVERY_N=5` | Per `(user_id, thread_id)` | Summarize the thread every 5 turns |
-| `FACT_EXTRACTION_EVERY_N=3` | Per `(user_id, thread_id)` | Extract facts every 3 turns |
-| `USER_SUMMARY_EVERY_N=10` | Per `user_id` | Update user profile every 10 turns across all threads |
+| `THREAD_SUMMARY_EVERY_N=5` | Per `(tenant_id, user_id, thread_id)` | Summarize the thread every 5 turns |
+| `FACT_EXTRACTION_EVERY_N=3` | Per `(tenant_id, user_id, thread_id)` | Extract facts every 3 turns |
+| `USER_SUMMARY_EVERY_N=10` | Per `(tenant_id, user_id)` | Update user profile every 10 turns across all threads |
 
 Set any value to `0` to disable that processing type. The defaults are `10`, `2` and `20` (see [Threshold settings](concepts.md#threshold-settings)). Reconcile (`DEDUP_EVERY_N`) and procedure learning (`PROCEDURAL_SYNTHESIS_AUTO`) follow extraction automatically; see [Section 9](#9-procedures-and-standing-instructions) and [Section 10](#10-keeping-the-fact-pool-clean). The Function App also needs `MEMORY_PROCESSOR_OWNER=durable` (the Bicep template and `local.settings.json.template` set it); without it the trigger skips every batch.
 
@@ -494,13 +496,50 @@ Credentials without a fixed format, such as `password: hunter2`, cannot be recog
 ### Deleting
 
 ```python
-await mem.delete_memory(memory_id="<fact id>", user_id="user-1", thread_id=THREAD_ID, memory_type="fact")
+await mem.delete_memory(memory_id="<fact id>", user_id="user-1", memory_type="fact")
 ```
 
-- Deleting a fact or procedure first deletes the records retired into it (`duplicate`, `combined` and `procedure`) and anything retired into those, each under its own `thread_id`, so what the user deleted is gone from history too. Records retired for any other reason (older records may carry `contradict` or `update`) stay, because they are earlier versions rather than copies.
+- Deleting a fact or procedure first deletes the records retired into it (`duplicate`, `combined` and `procedure`) and anything retired into those, so what the user deleted is gone from history too. Records retired for any other reason (older records may carry `contradict` or `update`) stay, because they are earlier versions rather than copies.
 - To remove a piece of information, delete the fact that is active now. If it was folded into another fact, search returns the survivor; deleting a retired record removes only that record.
 - The cascade is sequential and best-effort: if deleting a folded record fails, the memory is kept and a retry resumes where it stopped.
 - `delete_thread` removes a thread's turns and summary only; the facts, episodes and procedures distilled from it are user-scoped and stay.
+
+---
+
+## 12. Tenants and Owners
+
+Every record is keyed by `[tenant_id, user_id]` (see [Tenants and Owners](concepts.md#tenants-and-owners)): `tenant_id` says whose memories these are, and `user_id` owns them, as a user or as an agent.
+
+### One client per tenant
+
+A client is bound to one tenant when you create it, and every read and write stays inside it. An app that serves several customers or environments from the same containers creates one client for each:
+
+```python
+acme = AsyncCosmosMemoryClient(..., tenant_id="acme")
+globex = AsyncCosmosMemoryClient(..., tenant_id="globex")
+
+await acme.upsert_memory(user_id="user-1", thread_id="t-1", role="user", content="I prefer dark mode.")
+await globex.get_thread(thread_id="t-1", user_id="user-1")  # [] - "user-1" at Globex is a different owner
+```
+
+The tenant is never a per-call argument and has no setting, so a call cannot reach into another tenant. The Function App follows the `tenant_id` stored on each turn.
+
+### An agent as owner
+
+`user_id` names whoever owns a memory, and that can be an agent. Use a distinct string such as `agent:support-bot` so it never collides with a user's id:
+
+```python
+AGENT = "agent:support-bot"
+
+# What the agent itself has learned, apart from any user's memories
+await mem.upsert_memory(
+    user_id=AGENT, thread_id="ops", role="system", memory_type="fact",
+    content="Refunds over $500 need a manager's approval.",
+)
+facts = await mem.search_cosmos("refund limits", user_id=AGENT, memory_types=["fact"], top_k=3)
+```
+
+Everything an owner knows sits in one partition, and Cosmos DB limits a logical partition to 20 GB of data and 10,000 RU/s. Keep each user's memories under that user's id and put only what belongs to the agent itself under the agent's, so that no single owner, such as an agent shared by many users, outgrows those limits.
 
 ---
 
@@ -523,3 +562,4 @@ await mem.delete_memory(memory_id="<fact id>", user_id="user-1", thread_id=THREA
 | Clean up facts | `reconcile` | Fold duplicates, combine facts, link conflicts: automatic, or after a bulk import |
 | Summarize a user | `generate_user_summary` | Cross-session profiling, after thread summaries, or automatic via change feed |
 | Get user summary | `get_user_summary` | Start of a new session |
+| Keep tenants apart | `tenant_id` (client argument) | One client per app, customer or environment that shares the containers |

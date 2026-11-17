@@ -38,7 +38,7 @@ class FakeMemories:
 
     def _save(self, body: dict[str, Any]) -> dict[str, Any]:
         saved = {**copy.deepcopy(body), "_etag": f"etag-{next(self._etags)}"}
-        self._docs[saved["id"], (saved["user_id"], saved["thread_id"])] = saved
+        self._docs[saved["id"], (saved["tenant_id"], saved["user_id"])] = saved
         return copy.deepcopy(saved)
 
     async def read_item(self, item: str, partition_key: list[str], **_kwargs: Any) -> dict[str, Any]:
@@ -52,7 +52,7 @@ class FakeMemories:
     async def replace_item(
         self, item: str, body: dict[str, Any], *, match_condition: Any = None, etag: Any = None, **_kwargs: Any
     ) -> dict[str, Any]:
-        current = await self.read_item(item, [body["user_id"], body["thread_id"]])
+        current = await self.read_item(item, [body["tenant_id"], body["user_id"]])
         if match_condition == MatchConditions.IfNotModified and etag != current["_etag"]:
             raise CosmosAccessConditionFailedError(status_code=412, message="Precondition failed")
         return self._save(body)
@@ -75,6 +75,7 @@ class FlakyEmbedder:
 def _fact(content: str, embedding: list[float]) -> dict[str, Any]:
     return {
         "id": "fact_1",
+        "tenant_id": "default",
         "user_id": "u1",
         "thread_id": "t1",
         "type": "fact",
@@ -103,16 +104,16 @@ async def test_a_failed_re_embed_keeps_the_record_in_vector_search_and_a_later_e
     store = _store(memories, embedder)
 
     embedder.available = False
-    await store.update("fact_1", user_id="u1", thread_id="t1", memory_type="fact", content="I like green tea")
+    await store.update("fact_1", user_id="u1", memory_type="fact", content="I like green tea")
 
-    stored = await memories.read_item("fact_1", ["u1", "t1"])
+    stored = await memories.read_item("fact_1", ["default", "u1"])
     assert stored["content"] == "I like green tea"
     assert stored["embedding"] == [10.0, 1.0], "the previous vector stays, so the record is still found"
 
     embedder.available = True
-    await store.update("fact_1", user_id="u1", thread_id="t1", memory_type="fact", content="I like oolong tea")
+    await store.update("fact_1", user_id="u1", memory_type="fact", content="I like oolong tea")
 
-    stored = await memories.read_item("fact_1", ["u1", "t1"])
+    stored = await memories.read_item("fact_1", ["default", "u1"])
     assert stored["embedding"] == [float(len("I like oolong tea")), 1.0]
     assert embedder.texts == ["I like green tea", "I like oolong tea"]
 
@@ -140,7 +141,7 @@ async def test_an_async_etag_conflict_retry_drops_a_re_read_vector_built_from_a_
     )
     store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=_failing_embedder())
 
-    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", metadata={"note": "rotated"})
+    await store.update("m1", user_id="u1", memory_type="fact", metadata={"note": "rotated"})
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert memories.replace_item.await_count == 2

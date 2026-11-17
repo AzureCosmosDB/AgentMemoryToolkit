@@ -109,7 +109,7 @@ In `function_app/local.settings.json`, add these to enable automatic processing:
 
 The Function App skips every change feed batch unless `MEMORY_PROCESSOR_OWNER` is `durable`. Set `MEMORY_PROCESSOR_OWNER=durable` in the SDK's `.env` as well, so the SDK does not also process the same turns in-process.
 
-Set any threshold to `"0"` to disable that processing type. `USER_SUMMARY_WAIT_SECONDS` (default `120`) and `USER_SUMMARY_WAIT_INTERVAL_SECONDS` (default `10`) set how long a user-summary run waits, polling at that interval, for extraction to save a new user's first memories before it skips that cycle. See `function_app/local.settings.json.template` for the full template.
+Set any threshold to `"0"` to disable that processing type. There is no tenant setting: the Function App processes each turn in the tenant stored on it, which is the `tenant_id` of the client that wrote it (`"default"` unless set). `USER_SUMMARY_WAIT_SECONDS` (default `120`) and `USER_SUMMARY_WAIT_INTERVAL_SECONDS` (default `10`) set how long a user-summary run waits, polling at that interval, for extraction to save a new user's first memories before it skips that cycle. See `function_app/local.settings.json.template` for the full template.
 
 ---
 
@@ -235,7 +235,7 @@ for r in results:
 await memory.close()
 ```
 
-`create_memory_store()` creates the database and the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. It configures the hierarchical partition key (`user_id`, `thread_id`) for the first four and `/id` for `leases`, gives a newly created `memories_turns` container a 30-day default TTL and a newly created `counter` container a 90-day one, and applies either serverless or autoscale throughput based on `cosmos_throughput_mode` (set from `COSMOS_DB_THROUGHPUT_MODE` above).
+`create_memory_store()` creates the database and the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. It configures the hierarchical partition key (`/tenant_id`, `/user_id`) for the first four and `/id` for `leases`, gives a newly created `memories_turns` container a 30-day default TTL and a newly created `counter` container a 90-day one, and applies either serverless or autoscale throughput based on `cosmos_throughput_mode` (set from `COSMOS_DB_THROUGHPUT_MODE` above). An existing container keeps its key, so recreate the containers that an earlier version created with `[/user_id, /thread_id]`, and `leases` with them so the change feed starts clean on the recreated turns container.
 
 ---
 
@@ -335,7 +335,7 @@ If you have configured the change feed settings above, you can test automatic pr
 
 1. Set a low threshold for testing, e.g. `THREAD_SUMMARY_EVERY_N=3` (restart the host after changing it).
 2. Write turns to Cosmos with the SDK until the threshold is crossed.
-3. Watch the Functions host logs - you should see the orchestrator being started automatically, for example `change-feed: starting ThreadSummaryOrchestrator instance=thread_summary:user-001:<thread-id>:3`.
+3. Watch the Functions host logs - you should see the orchestrator being started automatically, for example `change-feed: starting ThreadSummaryOrchestrator instance=thread_summary:<digest>:3`.
 
 ```python
 import uuid

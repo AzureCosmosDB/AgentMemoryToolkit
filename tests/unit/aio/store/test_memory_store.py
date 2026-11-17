@@ -162,9 +162,9 @@ async def test_update_replaces_matching_doc():
     memories.replace_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
+    await store.update("m1", user_id="u1", memory_type="fact", content="updated")
 
-    memories.read_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.read_item.assert_awaited_once_with(item="m1", partition_key=["default", "u1"])
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["content"] == "updated"
     assert body["type"] == "fact"
@@ -178,8 +178,10 @@ async def test_update_raises_when_missing():
     memories.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="404"))
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    with pytest.raises(MemoryNotFoundError):
-        await store.update("missing", user_id="u1", thread_id="t1", memory_type="fact")
+    with pytest.raises(MemoryNotFoundError) as excinfo:
+        await store.update("missing", user_id="u1", memory_type="fact")
+
+    assert (excinfo.value.memory_id, excinfo.value.user_id) == ("missing", "u1")
 
 
 async def test_update_raises_on_type_mismatch():
@@ -189,7 +191,7 @@ async def test_update_raises_on_type_mismatch():
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryTypeMismatchError):
-        await store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
+        await store.update("m1", user_id="u1", memory_type="episodic", content="x")
 
     memories.replace_item.assert_not_awaited()
 
@@ -200,9 +202,9 @@ async def test_delete_calls_delete_item_directly():
     memories.delete_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    await store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+    await store.delete("m1", user_id="u1", memory_type="fact")
 
-    memories.delete_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.delete_item.assert_awaited_once_with(item="m1", partition_key=["default", "u1"])
 
 
 async def test_delete_raises_when_missing():
@@ -214,7 +216,7 @@ async def test_delete_raises_when_missing():
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryNotFoundError):
-        await store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+        await store.delete("m1", user_id="u1", memory_type="fact")
 
     memories.delete_item.assert_not_awaited()
 
@@ -226,7 +228,7 @@ async def test_delete_raises_on_type_mismatch():
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryTypeMismatchError):
-        await store.delete("m1", user_id="u1", thread_id="t1", memory_type="episodic")
+        await store.delete("m1", user_id="u1", memory_type="episodic")
 
     memories.delete_item.assert_not_awaited()
 
@@ -237,11 +239,12 @@ async def test_read_and_tag_mutation_use_point_reads():
     memories.replace_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    assert (await store.read_item("m1", ["u1", "t1"], container_key=ContainerKey.MEMORIES))["id"] == "m1"
-    await store.add_tags("m1", "u1", "t1", "fact", ["New"])
-    await store.remove_tags("m1", "u1", "t1", "fact", ["old"])
+    assert (await store.read_item("m1", ["default", "u1"], container_key=ContainerKey.MEMORIES))["id"] == "m1"
+    await store.add_tags("m1", "u1", "fact", ["New"])
+    await store.remove_tags("m1", "u1", "fact", ["old"])
 
-    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["u1", "t1"]}
+    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["default", "u1"]}
+    assert [call.kwargs["partition_key"] for call in memories.read_item.call_args_list] == [["default", "u1"]] * 3
     assert memories.replace_item.await_count == 2
 
 
@@ -250,7 +253,7 @@ async def test_tag_mutation_rejects_non_memories_types():
 
     for bad in ("turn", "thread_summary", "user_summary", "unknown"):
         with pytest.raises(ValueError, match="memory_type for tag mutation"):
-            await store.add_tags("m1", "u1", "t1", bad, ["x"])
+            await store.add_tags("m1", "u1", bad, ["x"])
 
 
 async def test_single_doc_and_simple_query_helpers():
@@ -386,7 +389,7 @@ async def test_get_memories_rejects_non_memories_types():
             await store.get_memories(memory_types=bad)
 
 
-async def test_get_thread_summary_queries_summaries_with_partition_key():
+async def test_get_thread_summary_queries_summaries_with_the_owners_partition_key():
     summaries = MagicMock()
     summaries.query_items.return_value = AsyncIterator([_doc(type="thread_summary", id="s1")])
     store = AsyncMemoryStore(containers=_containers(summaries=summaries))
@@ -395,7 +398,7 @@ async def test_get_thread_summary_queries_summaries_with_partition_key():
 
     assert [doc["id"] for doc in results] == ["s1"]
     call_kwargs = summaries.query_items.call_args.kwargs
-    assert call_kwargs["partition_key"] == ["u1", "t1"]
+    assert call_kwargs["partition_key"] == ["default", "u1"]
     assert "c.type = @type" in call_kwargs["query"]
     assert "TOP @recent_k" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
@@ -457,7 +460,7 @@ async def test_get_memories_no_memory_types_with_thread_id_emits_or_clause():
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0, @user_scoped_type_1))" in call_kwargs["query"]
 
 
-async def test_search_with_episodic_and_thread_id_omits_partition_key():
+async def test_search_with_episodic_and_thread_id_stays_in_the_owners_partition():
     memories = MagicMock()
     memories.query_items.return_value = AsyncIterator([])
     embeddings = MagicMock()
@@ -465,17 +468,16 @@ async def test_search_with_episodic_and_thread_id_omits_partition_key():
     store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
 
     await store.search(
-        search_terms="hotels",
+        search_terms="hello",
         user_id="u1",
         thread_id="t1",
         memory_types=["episodic"],
     )
 
     call_kwargs = memories.query_items.call_args.kwargs
-    # When user-scoped types are in scope, async search must NOT confine
-    # the query to [u1, t1] (where no episodic ever lives). Async SDK
-    # treats absent partition_key as cross-partition by default.
-    assert "partition_key" not in call_kwargs
+    # The thread filter never forces a fan-out: every record of the owner is in one partition, and the OR clause keeps
+    # the user-wide types reachable.
+    assert call_kwargs["partition_key"] == ["default", "u1"]
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
 
 
@@ -572,7 +574,7 @@ async def test_search_turns_queries_turns_container():
     assert "VectorDistance(c.embedding, @embedding)" in sql
 
 
-async def test_vector_only_search_turns_scopes_to_single_partition_with_thread_id():
+async def test_vector_only_search_turns_reads_the_owners_partition_whatever_the_thread():
     turns = MagicMock()
     turns.query_items.return_value = AsyncIterator([])
     embeddings = MagicMock()
@@ -586,7 +588,8 @@ async def test_vector_only_search_turns_scopes_to_single_partition_with_thread_i
     await store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
 
     kwargs = turns.query_items.call_args.kwargs
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "u1"]
+    assert "c.thread_id = @thread_id" in kwargs["query"]
 
 
 async def test_keyword_search_turns_with_thread_id_filters_instead_of_using_partition_key():
@@ -605,22 +608,6 @@ async def test_keyword_search_turns_with_thread_id_filters_instead_of_using_part
     assert "partition_key" not in kwargs
     assert "c.user_id = @user_id" in kwargs["query"]
     assert "c.thread_id = @thread_id" in kwargs["query"]
-
-
-async def test_search_turns_fans_out_across_partitions_without_thread_id():
-    turns = MagicMock()
-    turns.query_items.return_value = AsyncIterator([])
-    embeddings = MagicMock()
-    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
-    store = AsyncMemoryStore(
-        containers=_containers(turns=turns),
-        embeddings_client=embeddings,
-    )
-
-    await store.search_turns(search_terms="hello", user_id="u1")
-
-    kwargs = turns.query_items.call_args.kwargs
-    assert "partition_key" not in kwargs
 
 
 async def test_search_turns_requires_user_id():

@@ -9,6 +9,7 @@ from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemory
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 
 EPISODIC_OPT_IN_WARNING = "Episodic memories requested via memory_types are only returned when include_episodes=True"
+TENANT = "acme"
 
 
 class AsyncIterator:
@@ -26,7 +27,7 @@ class AsyncIterator:
 
 
 def _connected_client() -> tuple[AsyncCosmosMemoryClient, MagicMock]:
-    client = AsyncCosmosMemoryClient(use_default_credential=False)
+    client = AsyncCosmosMemoryClient(use_default_credential=False, tenant_id=TENANT)
     memories = MagicMock()
     turns = MagicMock()
     summaries = MagicMock()
@@ -64,12 +65,12 @@ async def test_async_get_episodes_user_wide_newest_first():
     assert [doc["id"] for doc in results] == ["ep-new", "ep-old"]
     call_kwargs = memories.query_items.call_args.kwargs
     assert "SELECT TOP @recent_k * FROM c" in call_kwargs["query"]
-    assert "c.user_id = @user_id" in call_kwargs["query"]
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call_kwargs["query"]
     assert "c.type = @type" in call_kwargs["query"]
     assert "ORDER BY c.created_at DESC" in call_kwargs["query"]
-    assert "partition_key" not in call_kwargs
+    assert call_kwargs["partition_key"] == [TENANT, "u1"]
     params = _params_by_name(call_kwargs)
-    assert params["@user_id"] == "u1"
+    assert (params["@tenant_id"], params["@user_id"]) == (TENANT, "u1")
     assert params["@type"] == "episodic"
     assert params["@recent_k"] == 2
 
@@ -168,7 +169,7 @@ async def test_async_search_cosmos_include_episodes_combined_query_hits_real_sto
     memories.query_items = MagicMock(return_value=AsyncIterator([]))
     embeddings = MagicMock()
     embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
-    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings, tenant_id=TENANT)
 
     mem, _ = _connected_client()
     mem._get_store = MagicMock(return_value=store)
@@ -188,7 +189,9 @@ async def test_async_search_cosmos_include_episodes_combined_query_hits_real_sto
     # caller's filters applied uniformly.
     assert memories.query_items.call_count == 1
     call_kwargs = memories.query_items.call_args.kwargs
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
+    assert (params["@tenant_id"], params["@user_id"]) == (TENANT, "u1")
     type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
     assert type_values == {"fact", "episodic"}
     assert params["@min_salience"] == 0.5
@@ -200,7 +203,7 @@ async def test_async_search_episodic_temporal_filters_do_not_rank_by_time():
     memories.query_items.return_value = AsyncIterator([])
     embeddings = MagicMock()
     embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
-    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings, tenant_id=TENANT)
     created_after = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     await store.search_episodic(

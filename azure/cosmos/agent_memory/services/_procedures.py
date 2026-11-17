@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters, partition_key_for
 from azure.cosmos.agent_memory.models import FACT_ASSERTIONS, USER_ONLY_ASSERTIONS, ProcedureEvidence, ProcedureKind
 from azure.cosmos.agent_memory.services._dedup import (
     ACTIVE_FILTER,
@@ -85,26 +86,27 @@ def is_transient_write_failure(exc: BaseException) -> bool:
 
 @dataclass(frozen=True)
 class ProcedureScope:
-    """One user's procedure data: what selects their memories, and where their procedures live."""
+    """One owner's procedure data: what selects their memories, and where their procedures live."""
 
+    tenant_id: str
     user_id: str
 
     @property
     def predicate(self) -> str:
-        return "c.user_id = @uid"
+        return OWNER_FILTER
 
     @property
     def parameters(self) -> list[dict[str, Any]]:
-        return [{"name": "@uid", "value": self.user_id}]
+        return owner_parameters(self.tenant_id, self.user_id)
 
     @property
     def partition_key(self) -> list[str]:
-        """Where procedures and the procedure cursor are stored (a point read or write)."""
-        return [self.user_id, PROCEDURAL_THREAD_ID]
+        """The owner's partition: their memories, procedures and the procedure cursor are all stored in it."""
+        return partition_key_for(self.tenant_id, self.user_id)
 
     @property
     def fields(self) -> dict[str, str]:
-        return {"user_id": self.user_id, "thread_id": PROCEDURAL_THREAD_ID}
+        return {"tenant_id": self.tenant_id, "user_id": self.user_id, "thread_id": PROCEDURAL_THREAD_ID}
 
 
 # ---------------------------------------------------------------- shared helpers
@@ -557,10 +559,11 @@ def _content_fields(item: Mapping[str, Any], name: str) -> dict[str, Any]:
     return fields
 
 
-def new_procedure(answer: ProcedureAnswer, *, user_id: str, now: str) -> dict[str, Any]:
+def new_procedure(answer: ProcedureAnswer, *, tenant_id: str, user_id: str, now: str) -> dict[str, Any]:
     """A new candidate procedure from an ``add`` answer, with no support yet."""
     return {
         "id": procedure_id(user_id, answer.kind, answer.name),
+        "tenant_id": tenant_id,
         "user_id": user_id,
         "thread_id": PROCEDURAL_THREAD_ID,
         "type": "procedural",

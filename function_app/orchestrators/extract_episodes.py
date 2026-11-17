@@ -30,6 +30,7 @@ bp = df.Blueprint()
 @bp.orchestration_trigger(context_name="context")
 def ExtractEpisodesOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
 
@@ -38,7 +39,7 @@ def ExtractEpisodesOrchestrator(context: df.DurableOrchestrationContext):
     result = yield context.call_activity_with_retry(
         "ee_ExtractEpisodes",
         retry,
-        {"user_id": user_id, "thread_id": thread_id},
+        {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id},
     )
 
     return result
@@ -52,13 +53,15 @@ def ExtractEpisodesOrchestrator(context: df.DurableOrchestrationContext):
 @bp.activity_trigger(input_name="payload")
 @redact_errors
 def ee_ExtractEpisodes(payload: dict) -> dict:
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(tenant_id)
     result = pipeline.extract_episodes(user_id=user_id, thread_id=thread_id, flush=False) or {}
     slim = {"episodes": int(result.get("episodes", 0))}
     logger.info(
-        "ExtractEpisodes user=%s thread=%s episodes=%s",
+        "ExtractEpisodes tenant=%s user=%s thread=%s episodes=%s",
+        tenant_id,
         user_id,
         thread_id,
         slim["episodes"],

@@ -30,10 +30,12 @@ _NO_MEMORIES_YET_STATUS = "no_memories_yet"
 @bp.orchestration_trigger(context_name="context")
 def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_ids = payload.get("thread_ids") or None
     retry = default_retry_options()
     extract_payload = {
+        "tenant_id": tenant_id,
         "user_id": user_id,
         "limit": config.get_max_batch_size(),
         "thread_ids": thread_ids,
@@ -52,9 +54,10 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     while isinstance(user_summary, dict) and user_summary.get("status") == _NO_MEMORIES_YET_STATUS:
         if context.current_utc_datetime >= deadline:
             logger.warning(
-                "UserSummary no memories persisted within %ss for user=%s; skipping this "
+                "UserSummary no memories persisted within %ss for tenant=%s user=%s; skipping this "
                 "cadence (a later user-summary threshold will retry)",
                 wait_budget,
+                tenant_id,
                 user_id,
             )
             return {"persisted": False, "user_summary_id": None, "skipped": _NO_MEMORIES_YET_STATUS}
@@ -64,7 +67,7 @@ def UserSummaryOrchestrator(context: df.DurableOrchestrationContext):
     persisted = yield context.call_activity_with_retry(
         "us_PersistUserSummary",
         retry,
-        {"user_id": user_id, "user_summary": user_summary},
+        {"tenant_id": tenant_id, "user_id": user_id, "user_summary": user_summary},
     )
 
     return {
@@ -86,17 +89,18 @@ def us_Extract(payload: dict) -> dict:
     the user has no persisted memories yet, so the orchestrator can wait for
     extraction to land rather than exhausting its activity retries.
     """
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     try:
-        summary = get_pipeline().generate_user_summary_durable(
+        summary = get_pipeline(tenant_id).generate_user_summary_durable(
             user_id=user_id,
             recent_k=payload.get("limit"),
             thread_ids=payload.get("thread_ids") or None,
         )
     except NoSourceMemoriesError:
-        logger.info("UserSummary no source memories yet user=%s; will wait and retry", user_id)
+        logger.info("UserSummary no source memories yet tenant=%s user=%s; will wait and retry", tenant_id, user_id)
         return {"status": _NO_MEMORIES_YET_STATUS}
-    logger.info("UserSummary extracted user=%s", user_id)
+    logger.info("UserSummary extracted tenant=%s user=%s", tenant_id, user_id)
     return summary
 
 
@@ -104,10 +108,11 @@ def us_Extract(payload: dict) -> dict:
 @redact_errors
 def us_PersistUserSummary(payload: dict) -> dict:
     """Compute the embedding and persist the user summary."""
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
-    summary = get_pipeline().persist_user_summary(
+    summary = get_pipeline(tenant_id).persist_user_summary(
         user_id=user_id,
         user_summary_doc=payload["user_summary"],
     )
-    logger.info("UserSummary persisted user=%s id=%s", user_id, summary.get("id"))
+    logger.info("UserSummary persisted tenant=%s user=%s id=%s", tenant_id, user_id, summary.get("id"))
     return summary

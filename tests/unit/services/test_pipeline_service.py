@@ -8,6 +8,8 @@ import pytest
 from azure.cosmos.exceptions import CosmosResourceExistsError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID
+from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
@@ -48,10 +50,15 @@ class FakeLLMService:
 
 
 class FakeStore:
+    """A container. Every query and point read is recorded (``queries``, ``reads``) with the partition it named; a
+    query that names the tenant only answers with that tenant's records."""
+
     def __init__(self, docs: list[dict[str, Any]] | None = None):
         self.docs = [dict(doc) for doc in (docs or [])]
         self.upserts: list[dict[str, Any]] = []
         self.supersede_calls: list[tuple[str, str, str]] = []
+        self.queries: list[tuple[str, dict[str, Any], Any]] = []
+        self.reads: list[tuple[str, Any]] = []
 
     def query(
         self,
@@ -60,12 +67,14 @@ class FakeStore:
         partition_key: Any = None,
         cross_partition: bool = False,
     ) -> list[dict[str, Any]]:
-        del partition_key, cross_partition
+        del cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
+        self.queries.append((sql, params, partition_key))
         docs = [dict(doc) for doc in self.docs]
-        uid = params.get("@user_id", params.get("@uid"))
-        if uid is not None:
-            docs = [doc for doc in docs if doc.get("user_id") == uid]
+        if "@tenant_id" in params:
+            docs = [doc for doc in docs if doc.get("tenant_id", params["@tenant_id"]) == params["@tenant_id"]]
+        if "@user_id" in params:
+            docs = [doc for doc in docs if doc.get("user_id") == params["@user_id"]]
         if "@thread_id" in params:
             docs = [doc for doc in docs if doc.get("thread_id") == params["@thread_id"]]
         if "@type" in params:
@@ -107,9 +116,9 @@ class FakeStore:
         return docs
 
     def read_item(self, item_id: str, partition_key: Any) -> dict[str, Any]:
-        del partition_key
+        self.reads.append((item_id, partition_key))
         for doc in self.docs:
-            if doc.get("id") == item_id:
+            if doc.get("id") == item_id and doc.get("tenant_id", partition_key[0]) == partition_key[0]:
                 return dict(doc)
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
@@ -162,12 +171,14 @@ def _pipeline(
     *,
     turns_store: FakeStore | None = None,
     summaries_store: FakeStore | None = None,
+    tenant_id: str = DEFAULT_TENANT_ID,
 ) -> PipelineService:
     return PipelineService(
         memories_store,
         llm.chat_client,
         llm.embeddings_client,
         containers=_containers_for_store(memories_store, turns_store=turns_store, summaries_store=summaries_store),
+        tenant_id=tenant_id,
     )
 
 
@@ -313,7 +324,7 @@ def test_thread_summary_persists_to_summaries_container() -> None:
         ContainerKey.SUMMARIES: summaries_container,
     }
     embeddings = FakeLLMService([]).embeddings_client
-    service = PipelineService(FakeStore(), object(), embeddings, containers=containers)
+    service = PipelineService(FakeStore(), object(), embeddings, containers=containers, tenant_id="acme")
     summary_doc = {
         "id": "summary_u1_t1",
         "user_id": "u1",
@@ -334,9 +345,14 @@ def test_thread_summary_persists_to_summaries_container() -> None:
 
     assert stored["type"] == "thread_summary"
     summaries_container.upsert_item.assert_called_once()
-    assert summaries_container.upsert_item.call_args.kwargs["body"]["id"] == "summary_u1_t1"
+    written = summaries_container.upsert_item.call_args.kwargs["body"]
+    assert (written["id"], written["tenant_id"]) == ("summary_u1_t1", "acme")
     memories_container.method_calls == []
     turns_container.method_calls == []
+
+    with pytest.raises(ValidationError, match="different tenant"):
+        service.persist_thread_summary("u1", "t1", {**summary_doc, "tenant_id": "other"})
+    summaries_container.upsert_item.assert_called_once()
 
 
 def test_generate_thread_and_user_summary_basic_shape() -> None:
@@ -365,7 +381,77 @@ def test_generate_thread_and_user_summary_basic_shape() -> None:
     assert llm.embed_one_calls == ["Thread discussed retries.", "The project needs retries."]
 
 
+def test_summaries_are_read_and_written_in_the_owners_partition_of_the_tenant() -> None:
+    owner = [{"tenant_id": "acme"}, {"tenant_id": "other"}]
+    turns_store = FakeStore(
+        [
+            {**_turn("We decided to add retries."), **owner[0]},
+            {**_turn("Another tenant's plan."), **owner[1]},
+        ]
+    )
+    memories = FakeStore([{**_fact("f1", "The project needs retries."), **owner[0]}])
+    memories.docs.append({**_fact("f2", "Another tenant's fact."), **owner[1]})
+    summaries_store = FakeStore([{"id": "summary_u1_t1", "type": "thread_summary", "tenant_id": "other"}])
+    llm = FakeLLMService(
+        [
+            {"overview": "Thread discussed retries.", "topics": ["retries"]},
+            {"key_facts": ["The project needs retries."], "open_questions": []},
+        ]
+    )
+    service = _pipeline(memories, llm, turns_store=turns_store, summaries_store=summaries_store, tenant_id="acme")
+
+    thread_summary = service.generate_thread_summary("u1", "t1")
+    user_summary = service.generate_user_summary("u1")
+
+    assert "Another tenant" not in str(llm.chat_calls)
+    assert (thread_summary["tenant_id"], user_summary["tenant_id"]) == ("acme", "acme")
+    for store in (turns_store, memories, summaries_store):
+        assert store.queries
+        for sql, params, partition_key in store.queries:
+            assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+            assert (params["@tenant_id"], params["@user_id"]) == ("acme", "u1")
+            assert partition_key == ["acme", "u1"]
+    assert summaries_store.reads == [("summary_u1_t1", ["acme", "u1"]), ("user_summary_u1", ["acme", "u1"])]
+    assert [doc["id"] for doc in summaries_store.upserts] == ["summary_u1_t1", "user_summary_u1"]
+    assert {doc["tenant_id"] for doc in summaries_store.upserts} == {"acme"}
+
+
+def test_the_threads_of_one_owner_have_summaries_with_different_ids() -> None:
+    turns_store = FakeStore([_turn("In thread one."), {**_turn("In thread two."), "id": "turn2", "thread_id": "t2"}])
+    summaries_store = FakeStore()
+    llm = FakeLLMService([{"overview": "One."}, {"overview": "Two."}])
+    service = _pipeline(FakeStore(), llm, turns_store=turns_store, summaries_store=summaries_store)
+
+    first = service.generate_thread_summary("u1", "t1")
+    second = service.generate_thread_summary("u1", "t2")
+
+    assert (first["id"], second["id"]) == ("summary_u1_t1", "summary_u1_t2")
+    assert {doc["id"] for doc in summaries_store.docs} == {"summary_u1_t1", "summary_u1_t2"}
+
+
 def test_build_procedural_context_requires_user_id() -> None:
     with pytest.raises(Exception, match="user_id is required"):
         fake = FakeLLMService([])
         _pipeline(FakeStore(), fake).build_procedural_context("")
+
+
+def test_a_pipeline_without_a_tenant_works_in_the_default_one() -> None:
+    llm = FakeLLMService([])
+    memories = FakeStore()
+    service = PipelineService(
+        memories,
+        llm.chat_client,
+        llm.embeddings_client,
+        containers=_containers_for_store(memories),
+    )
+
+    service.build_procedural_context("u1")
+
+    (_, params, partition_key), *_ = memories.queries
+    assert (params["@tenant_id"], partition_key) == (DEFAULT_TENANT_ID, [DEFAULT_TENANT_ID, "u1"])
+
+
+@pytest.mark.parametrize("tenant_id", ["", "  ", "a/b", "a?b", "a#b", "a\\b", "a" * 257, 7])
+def test_a_pipeline_refuses_a_tenant_id_that_is_not_valid(tenant_id) -> None:
+    with pytest.raises(ValidationError, match="tenant_id"):
+        _pipeline(FakeStore(), FakeLLMService([]), tenant_id=tenant_id)

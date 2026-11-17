@@ -62,16 +62,34 @@ class _AsyncEmbeddings(_SyncEmbeddings):
         return [1.0]
 
 
+def _in_partition(doc: dict[str, Any], partition_key: Any) -> bool:
+    """Whether ``doc`` sits in the partition ``[tenant_id, user_id]``. A record that names no tenant, or no user, is
+    taken to sit in whichever partition is asked for."""
+    if not isinstance(partition_key, (list, tuple)) or len(partition_key) != 2:
+        return True
+    tenant_id, user_id = partition_key
+    return doc.get("tenant_id", tenant_id) == tenant_id and doc.get("user_id", user_id) == user_id
+
+
 class _Store:
+    """A container as the pipeline sees it. A query that names the tenant (``@tenant_id``) or a partition
+    (``[tenant_id, user_id]``) only answers with the records that sit there, and every query and point read is
+    recorded in ``queries`` and ``reads``."""
+
     def __init__(self, docs: list[dict[str, Any]]):
         self.docs = [dict(doc) for doc in docs]
         self.search_calls: list[dict[str, Any]] = []
         self.search_results: list[dict[str, Any]] = []
+        self.queries: list[tuple[str, dict[str, Any], Any]] = []
+        self.reads: list[tuple[str, Any]] = []
 
     def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
-        del partition_key, cross_partition
+        del cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
-        docs = [dict(doc) for doc in self.docs]
+        self.queries.append((sql, params, partition_key))
+        docs = [dict(doc) for doc in self.docs if _in_partition(doc, partition_key)]
+        if "@tenant_id" in params:
+            docs = [doc for doc in docs if doc.get("tenant_id", params["@tenant_id"]) == params["@tenant_id"]]
         if "@user_id" in params:
             docs = [doc for doc in docs if doc.get("user_id") == params["@user_id"]]
         if "@thread_id" in params:
@@ -132,9 +150,9 @@ class _Store:
         return body
 
     def read_item(self, item_id: str, partition_key: Any):
-        del partition_key
+        self.reads.append((item_id, partition_key))
         for doc in self.docs:
-            if doc.get("id") == item_id:
+            if doc.get("id") == item_id and _in_partition(doc, partition_key):
                 return dict(doc)
         raise CosmosResourceNotFoundError(message=item_id)
 
@@ -843,3 +861,23 @@ def test_extract_memories_durable_clamps_out_of_range_fact_scores() -> None:
     assert len(output["facts"]) == 1
     assert output["facts"][0]["confidence"] == 1.0
     assert output["facts"][0]["salience"] == 0.0
+
+
+def test_extracted_facts_carry_the_tenant_and_the_same_fact_in_two_threads_has_two_ids() -> None:
+    memories_store = _Store([])
+    turns_store = _Store([_turn(1), {**_turn(1), "thread_id": "t2"}])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([_response(), _response()]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+        tenant_id="acme",
+    )
+
+    [first] = service.extract_memories_durable("u1", "t1")["facts"]
+    [second] = service.extract_memories_durable("u1", "t2")["facts"]
+
+    assert (first["tenant_id"], first["user_id"], first["thread_id"]) == ("acme", "u1", "t1")
+    assert (second["tenant_id"], second["thread_id"]) == ("acme", "t2")
+    assert first["content_hash"] == second["content_hash"]
+    assert first["id"] != second["id"], "an owner's threads share one partition, so the thread is part of the id"

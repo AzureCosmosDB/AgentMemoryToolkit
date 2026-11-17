@@ -8,13 +8,15 @@ This folder provisions everything the Agent Memory Toolkit needs in a single Azu
 
 - **Cosmos DB for NoSQL** - serverless account (vector and full-text search enabled) with the `ai_memory` database and this container topology:
 
-  | Container | Purpose |
-  | --- | --- |
-  | `memories` | Facts, episodics, and procedural memories; vector + FTS index |
-  | `memories_turns` | Turns; vector + FTS index, 30-day default TTL (`MEMORIES_TURNS_DEFAULT_TTL`, in seconds), change-feed binding target |
-  | `memories_summaries` | Thread + user summaries; vector + FTS index (`search_summaries`), composite index for point reads |
-  | `leases` | Change-feed checkpoints |
-  | `counter` | Atomic counters; 90-day default TTL |
+  | Container | Partition key | Purpose |
+  | --- | --- | --- |
+  | `memories` | `/tenant_id`, `/user_id` | Facts, episodics, and procedural memories; vector + FTS index |
+  | `memories_turns` | `/tenant_id`, `/user_id` | Turns; vector + FTS index, 30-day default TTL (`MEMORIES_TURNS_DEFAULT_TTL`, in seconds), change-feed binding target |
+  | `memories_summaries` | `/tenant_id`, `/user_id` | Thread + user summaries; vector + FTS index (`search_summaries`), composite index for point reads |
+  | `leases` | `/id` | Change-feed checkpoints |
+  | `counter` | `/tenant_id`, `/user_id` | Atomic counters; 90-day default TTL |
+
+  Everything one owner (a user or an agent) knows in one tenant is in one logical partition; `thread_id` is a plain field. A container's partition key cannot be changed, so a deployment created with the earlier `[user_id, thread_id]` key has to recreate its containers: delete `memories`, `memories_turns`, `memories_summaries`, `counter` and `leases` (their data is lost) and run `azd up`. A container left with the earlier key is refused by `create_memory_store()`, by `validate_topology()` and by the Function App on its first change-feed batch, so the mistake shows up at startup rather than as empty reads.
 - **AI Foundry** (`Microsoft.CognitiveServices/accounts` with `kind: AIServices`) - with `gpt-4o-mini` and `text-embedding-3-large` deployments
 - **User-assigned managed identity (UAMI)** - used by the Function app
 - **RBAC role assignments** - Cosmos DB Built-in Data Reader + Contributor, Cognitive Services OpenAI User, Storage Blob/Queue/Table data roles, granted to the UAMI and (except the Storage Queue/Table roles) the deploying user (full table in [Identity & RBAC](#identity--rbac))
@@ -126,15 +128,15 @@ To cut chat usage instead, see the cost knobs under [Counter-based trigger confi
 
 ## Counter-based trigger configuration (Function app only)
 
-The Function app uses a counter document per `(user_id, thread_id)` to decide when to fire each orchestrator. Every knob is a Bicep parameter bound to an `azd env` variable - `azd up` re-renders them on every deploy, so changing a value is a one-line `azd env set ...` followed by `azd up`.
+The Function app uses a counter document per `(tenant_id, user_id, thread_id)` to decide when to fire each orchestrator, and reads `tenant_id` from each changed turn, so one Function app serves every tenant (there is no tenant setting). Every knob is a Bicep parameter bound to an `azd env` variable - `azd up` re-renders them on every deploy, so changing a value is a one-line `azd env set ...` followed by `azd up`.
 
 | `azd env` variable | Bicep param | Default | Effect |
 |---|---|---|---|
-| `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. `0` disables it. |
-| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact extraction every N turns within a `(user_id, thread_id)`. Reconcile and procedure learning run on multiples of it (see `DEDUP_EVERY_N`). `0` disables all three. |
+| `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(tenant_id, user_id, thread_id)`. `0` disables it. |
+| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact extraction every N turns within a `(tenant_id, user_id, thread_id)`. Reconcile and procedure learning run on multiples of it (see `DEDUP_EVERY_N`). `0` disables all three. |
 | `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run reconcile (fold duplicate facts, combine facts about one specific thing, link conflicting facts) every Nth fact-extraction, so it fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns. Procedure learning is chained after it (unless `PROCEDURAL_SYNTHESIS_AUTO` is `false`). `0` disables both. |
-| `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
-| `EPISODE_EVAL_EVERY_N` | `episodeEvalEveryN` | `4` | Check a thread's open episode for a boundary every N turns within a `(user_id, thread_id)`. `0` disables episodic memory. |
+| `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `(tenant_id, user_id)` across all threads. `0` disables it. |
+| `EPISODE_EVAL_EVERY_N` | `episodeEvalEveryN` | `4` | Check a thread's open episode for a boundary every N turns within a `(tenant_id, user_id, thread_id)`. `0` disables episodic memory. |
 | `EPISODE_IDLE_GAP_SECONDS` | `episodeIdleGapSeconds` | `1800` | A gap longer than this between two consecutive turns closes the open episode. |
 | `EPISODE_TOPIC_DRIFT` | `episodeTopicDrift` | `0` | Cosine distance from the open episode's centroid past which a new turn closes it. `0` turns drift detection off, leaving the idle gap and the size cap. |
 | `EPISODE_MAX_TURNS` | `episodeMaxTurns` | `40` | An open episode is closed once it reaches this many turns. |

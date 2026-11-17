@@ -18,13 +18,15 @@ from unittest.mock import MagicMock
 from azure.cosmos.agent_memory._utils import _build_memory_query_builder
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 
+TENANT = "acme"
+
 # ---------------------------------------------------------------------------
 # Helpers - a small replica of the patterns used in test_cosmos_memory_client.
 # ---------------------------------------------------------------------------
 
 
 def _connected_client() -> tuple[CosmosMemoryClient, MagicMock]:
-    client = CosmosMemoryClient(use_default_credential=False)
+    client = CosmosMemoryClient(use_default_credential=False, tenant_id=TENANT)
     container = MagicMock()
     container.query_items.return_value = []
     client._memories_container_client = container
@@ -47,6 +49,7 @@ def _captured_params(container: MagicMock) -> list[dict]:
 
 def test_memory_types_list_emits_in_clause():
     qb = _build_memory_query_builder(
+        tenant_id=TENANT,
         user_id="u1",
         memory_types=["fact", "procedural", "episodic"],
     )
@@ -58,32 +61,33 @@ def test_memory_types_list_emits_in_clause():
 
 
 def test_memory_types_single_element_list_still_uses_in_clause():
-    qb = _build_memory_query_builder(user_id="u1", memory_types=["fact"])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", memory_types=["fact"])
     where = qb.build_where()
     assert "c.type IN (@memory_type_0)" in where
 
 
 def test_memory_types_empty_list_skipped():
-    qb = _build_memory_query_builder(user_id="u1", memory_types=[])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", memory_types=[])
     where = qb.build_where()
     assert "c.type" not in where
 
 
 def test_memory_types_none_skipped():
-    qb = _build_memory_query_builder(user_id="u1", memory_types=None)
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", memory_types=None)
     where = qb.build_where()
     assert "c.type" not in where
 
 
 def test_memory_types_list_combines_with_other_filters():
     qb = _build_memory_query_builder(
+        tenant_id=TENANT,
         user_id="u1",
         thread_id="t1",
         memory_types=["fact", "episodic"],
         min_confidence=0.5,
     )
     where = qb.build_where()
-    assert "c.user_id = @user_id" in where
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in where
     # Episodic is user-scoped, so the thread_id filter becomes an OR clause
     # instead of the plain equality form.
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in where
@@ -97,21 +101,21 @@ def test_memory_types_list_combines_with_other_filters():
 
 
 def test_thread_id_unchanged_when_only_non_user_scoped_types_requested():
-    qb = _build_memory_query_builder(user_id="u1", thread_id="t1", memory_types=["fact"])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", thread_id="t1", memory_types=["fact"])
     where = qb.build_where()
     assert "c.thread_id = @thread_id" in where
     assert "@user_scoped_type_" not in where
 
 
 def test_thread_id_unchanged_when_only_turn_requested():
-    qb = _build_memory_query_builder(user_id="u1", thread_id="t1", memory_types=["turn"])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", thread_id="t1", memory_types=["turn"])
     where = qb.build_where()
     assert "c.thread_id = @thread_id" in where
     assert "@user_scoped_type_" not in where
 
 
 def test_thread_id_or_clause_when_episodic_requested():
-    qb = _build_memory_query_builder(user_id="u1", thread_id="t1", memory_types=["episodic"])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", thread_id="t1", memory_types=["episodic"])
     where = qb.build_where()
     params = qb.get_parameters()
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in where
@@ -120,7 +124,7 @@ def test_thread_id_or_clause_when_episodic_requested():
 
 
 def test_thread_id_or_clause_when_procedural_requested():
-    qb = _build_memory_query_builder(user_id="u1", thread_id="t1", memory_types=["procedural"])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", thread_id="t1", memory_types=["procedural"])
     where = qb.build_where()
     params = qb.get_parameters()
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in where
@@ -130,6 +134,7 @@ def test_thread_id_or_clause_when_procedural_requested():
 
 def test_thread_id_or_clause_includes_both_when_both_in_scope():
     qb = _build_memory_query_builder(
+        tenant_id=TENANT,
         user_id="u1",
         thread_id="t1",
         memory_types=["episodic", "procedural"],
@@ -143,7 +148,7 @@ def test_thread_id_or_clause_includes_both_when_both_in_scope():
 
 def test_thread_id_or_clause_when_no_memory_types_filter():
     # No memory_types means "all types", so user-scoped types are implicitly in scope.
-    qb = _build_memory_query_builder(user_id="u1", thread_id="t1")
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", thread_id="t1")
     where = qb.build_where()
     params = qb.get_parameters()
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0, @user_scoped_type_1))" in where
@@ -152,13 +157,13 @@ def test_thread_id_or_clause_when_no_memory_types_filter():
 
 
 def test_thread_id_or_clause_when_empty_memory_types_filter():
-    qb = _build_memory_query_builder(user_id="u1", thread_id="t1", memory_types=[])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", thread_id="t1", memory_types=[])
     where = qb.build_where()
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0, @user_scoped_type_1))" in where
 
 
 def test_no_thread_id_no_or_clause():
-    qb = _build_memory_query_builder(user_id="u1", memory_types=["episodic"])
+    qb = _build_memory_query_builder(tenant_id=TENANT, user_id="u1", memory_types=["episodic"])
     where = qb.build_where()
     assert "c.thread_id" not in where
     assert "@user_scoped_type_" not in where

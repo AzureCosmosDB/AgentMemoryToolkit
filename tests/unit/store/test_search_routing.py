@@ -2,8 +2,9 @@
 
 A ``FullTextScore`` (keyword or hybrid) query is ranked only when it runs across partitions. The Python SDK runs one
 sent with a partition key without planning it, and it came back in one fixed order for every question
-(azure-sdk-for-python#42241), so a thread holding more memories than ``top_k`` returned the same memories whatever
-was asked. Vector-only searches rank correctly either way and keep the key.
+(azure-sdk-for-python#42241), so an owner holding more memories than ``top_k`` returned the same memories whatever
+was asked. Vector-only searches rank correctly either way and keep the key ``[tenant_id, user_id]``; a thread filter
+never changes that, because every record of the owner is in one partition.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import pytest
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.store import MemoryStore
+from azure.cosmos.agent_memory.store._search_helpers import query_scope
 
 KEYWORDS = "Hotels in Lisbon"
 NO_KEYWORDS = "hello"
@@ -45,6 +47,13 @@ def _params(call: dict) -> list[tuple[str, object]]:
     return [(param["name"], param["value"]) for param in call["parameters"]]
 
 
+def test_a_search_reads_the_owners_partition_unless_it_has_keywords():
+    assert query_scope("acme", "u1") == (["acme", "u1"], False)
+    assert query_scope("acme", "u1", keyword_count=0) == (["acme", "u1"], False)
+    assert query_scope("acme", "u1", keyword_count=2) == (None, True)
+    assert query_scope("acme", None) == (None, True)
+
+
 @pytest.mark.parametrize(("method", "container_key", "options"), THREAD_SEARCHES)
 def test_a_keyword_search_of_a_thread_runs_cross_partition_inside_it(method, container_key, options):
     store, containers = _store()
@@ -54,9 +63,10 @@ def test_a_keyword_search_of_a_thread_runs_cross_partition_inside_it(method, con
     (call,) = _calls(containers[container_key])
     assert "partition_key" not in call
     assert call["enable_cross_partition_query"] is True
-    assert "c.user_id = @user_id" in call["query"]
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call["query"]
     assert "c.thread_id = @thread_id" in call["query"]
     params = _params(call)
+    assert ("@tenant_id", "default") in params
     assert ("@user_id", "u1") in params
     assert ("@thread_id", "t1") in params
     assert (
@@ -70,16 +80,29 @@ def test_a_keyword_search_of_a_thread_runs_cross_partition_inside_it(method, con
 
 
 @pytest.mark.parametrize(("method", "container_key", "options"), THREAD_SEARCHES)
-def test_a_vector_only_search_of_a_thread_keeps_the_partition_key(method, container_key, options):
+def test_a_vector_only_search_of_a_thread_keeps_the_owners_partition_key(method, container_key, options):
     store, containers = _store()
 
     getattr(store, method)(user_id="u1", thread_id="t1", search_terms=NO_KEYWORDS, **options)
 
     (call,) = _calls(containers[container_key])
-    assert call["partition_key"] == ["u1", "t1"]
+    assert call["partition_key"] == ["default", "u1"]
     assert "enable_cross_partition_query" not in call
+    assert "c.thread_id = @thread_id" in call["query"]
     assert "FullTextScore" not in call["query"]
     assert "full_text_score_scope" not in call
+
+
+@pytest.mark.parametrize(("method", "container_key", "options"), USER_SEARCHES)
+def test_a_vector_only_search_of_the_users_threads_keeps_the_owners_partition_key(method, container_key, options):
+    store, containers = _store()
+
+    getattr(store, method)(user_id="u1", search_terms=NO_KEYWORDS, **options)
+
+    (call,) = _calls(containers[container_key])
+    assert call["partition_key"] == ["default", "u1"]
+    assert "enable_cross_partition_query" not in call
+    assert "c.thread_id = @thread_id" not in call["query"]
 
 
 @pytest.mark.parametrize(("method", "container_key", "options"), USER_SEARCHES)
@@ -91,7 +114,7 @@ def test_a_keyword_search_of_the_users_threads_ranks_with_local_statistics(metho
     (call,) = _calls(containers[container_key])
     assert "partition_key" not in call
     assert call["enable_cross_partition_query"] is True
-    assert "c.user_id = @user_id" in call["query"]
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call["query"]
     assert "c.thread_id = @thread_id" not in call["query"]
     assert call["full_text_score_scope"] == "Local"
 
@@ -130,7 +153,7 @@ def test_a_full_text_query_sent_with_a_partition_key_is_rejected(call):
             f"SELECT TOP 1 c.id FROM c ORDER BY RANK {call}",
             [],
             container_key=ContainerKey.MEMORIES,
-            partition_key=["u1", "t1"],
+            partition_key=["default", "u1"],
         )
     containers[ContainerKey.MEMORIES].query_items.assert_not_called()
 
@@ -142,17 +165,20 @@ def test_a_query_that_only_names_a_field_like_the_function_keeps_its_partition_k
         "SELECT TOP 1 c.id FROM c WHERE c.fulltextscore = 1",
         [],
         container_key=ContainerKey.MEMORIES,
-        partition_key=["u1", "t1"],
+        partition_key=["default", "u1"],
     )
 
     (call,) = _calls(containers[ContainerKey.MEMORIES])
-    assert call["partition_key"] == ["u1", "t1"]
+    assert call["partition_key"] == ["default", "u1"]
 
 
 def test_a_callers_own_full_text_query_keeps_the_default_statistics():
     store, containers = _store()
-    sql = "SELECT TOP 1 c.id FROM c WHERE c.user_id = @u ORDER BY RANK FullTextScore(c.content, 'hotels')"
-    parameters = [{"name": "@u", "value": "u1"}]
+    sql = (
+        "SELECT TOP 1 c.id FROM c WHERE c.tenant_id = @t AND c.user_id = @u "
+        "ORDER BY RANK FullTextScore(c.content, 'hotels')"
+    )
+    parameters = [{"name": "@t", "value": "default"}, {"name": "@u", "value": "u1"}]
 
     store.query(sql, parameters, container_key=ContainerKey.MEMORIES, cross_partition=True)
     store.query(

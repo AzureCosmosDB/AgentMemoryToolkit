@@ -19,6 +19,7 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.services._dedup import dedup_result
 
 NEAR = [1.0, 0.0, 0.0]
+TENANT = "acme"
 ASYNC_LOGGER_NAME = "azure.cosmos.agent_memory.pipeline.aio"
 RESULT_KEYS = {
     "kept",
@@ -42,6 +43,7 @@ def _dedup_only(monkeypatch):
 def _fact(fid: str, content: str, *, vector=None, ts: int = 1, created_at: str = "2024-01-01T00:00:00+00:00") -> dict:
     doc = {
         "id": fid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "fact",
@@ -94,6 +96,7 @@ def _store() -> _Store:
 
 def _make_pipeline(store: _Store, replies: list[dict]) -> AsyncPipelineService:
     p = AsyncPipelineService.__new__(AsyncPipelineService)
+    p._tenant_id = TENANT
     p._container = MagicMock()
     p._container.query_items = AsyncMock(side_effect=store.query_items)
     p._container.read_item = AsyncMock(side_effect=CosmosResourceNotFoundError(message="no dedup cursor yet"))
@@ -147,7 +150,12 @@ class TestReconcileIsTheDedupPass:
         await p.reconcile_memories("u1")
 
         body = p._container.create_item.call_args.kwargs["body"]
-        assert (body["id"], body["thread_id"], body["last_ts"]) == ("dedup_cursor_u1_fact", "__dedup__", 4)
+        assert (body["id"], body["tenant_id"], body["thread_id"], body["last_ts"]) == (
+            "dedup_cursor_u1_fact",
+            TENANT,
+            "__dedup__",
+            4,
+        )
         assert not [query for query in store.queries if "ORDER BY c.created_at DESC" in query]
 
     async def test_a_pass_with_nothing_to_fold_retires_nothing(self):

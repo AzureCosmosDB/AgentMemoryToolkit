@@ -509,6 +509,7 @@ def _validate_connection(
 
 def _build_memory_query_builder(
     *,
+    tenant_id: str,
     memory_id: Optional[str] = None,
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
@@ -518,12 +519,11 @@ def _build_memory_query_builder(
 ) -> _QueryBuilder:
     """Return a :class:`_QueryBuilder` pre-loaded with the standard filters.
 
-    ``memory_types`` is a list of types (e.g. ``["fact", "procedural",
-    "episodic"]``); when ``None`` or empty no type filter is applied.
+    The query is confined to ``tenant_id``, and to the owner's records when ``user_id`` is given. ``memory_types`` is
+    a list of types (e.g. ``["fact", "procedural", "episodic"]``); when ``None`` or empty no type filter is applied.
     """
-    qb = _QueryBuilder()
+    qb = _QueryBuilder.for_tenant(tenant_id, user_id)
     qb.add_filter("c.id", "@memory_id", memory_id)
-    qb.add_filter("c.user_id", "@user_id", user_id)
     in_scope_user_types = _resolve_user_scoped_types_in_query(memory_types)
     if thread_id is not None and in_scope_user_types:
         qb.add_thread_id_or_user_scoped(thread_id, "@thread_id", sorted(in_scope_user_types))

@@ -139,7 +139,7 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 | **Reconcile**             | Fold duplicate facts, combine facts about one thing, link conflicting facts            | `reconcile(...)`                                         |
 | **Process now**           | Run the full pipeline (summary → facts → reconcile → procedures → user profile)        | `process_now(...)`                                       |
 
-AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarchical `(user_id, thread_id)` keys:
+AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by the hierarchical key `[tenant_id, user_id]`:
 
 | Container            | Holds                                      | Notes                                                                 |
 |----------------------|--------------------------------------------|-----------------------------------------------------------------------|
@@ -147,7 +147,9 @@ AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by hierarch
 | `memories`           | `fact`, `episodic`, `procedural` documents | vector + full-text retrieval path                                     |
 | `memories_summaries` | thread and user summaries                  | latest-summary point reads; vector + full-text for `search_summaries` |
 
-`create_memory_store()` also creates a `counter` container (the turn counters behind the auto-trigger) and a `leases` container (change feed checkpoints).
+`tenant_id` says whose memories these are (an app, a customer, an environment); a client is bound to one tenant through its `tenant_id` argument, `"default"` unless you set it. `user_id` is the owner of a memory, a user or an agent. `thread_id` is a plain field, so everything one owner knows sits in one partition. See [Tenants and Owners](Docs/concepts.md#tenants-and-owners).
+
+`create_memory_store()` also creates a `counter` container (the turn counters behind the auto-trigger, with the same key) and a `leases` container (change feed checkpoints, keyed `/id`).
 
 ### Memory Type Taxonomy
 
@@ -351,8 +353,8 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 
 ## Documentation
 
-- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, threads, roles, embeddings, search slots, conflicting facts, processing pipeline, secret redaction, reconciliation, change feed processing
-- **[Docs/design_patterns.md](Docs/design_patterns.md)** - Integration patterns for chat apps and multi-agent systems, including procedures, reconciliation and secrets
+- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, tenants and owners (the partition key), threads, roles, embeddings, search slots, conflicting facts, processing pipeline, secret redaction, reconciliation, change feed processing
+- **[Docs/design_patterns.md](Docs/design_patterns.md)** - Integration patterns for chat apps and multi-agent systems, including procedures, reconciliation, secrets, tenants and agent-owned memory
 - **[Docs/public_api.md](Docs/public_api.md)** - Client methods and options, fact and procedure fields, secret redaction
 - **[Docs/operations.md](Docs/operations.md)** - TTLs and runtime settings (thresholds, reconcile, procedures, extraction prompt)
 - **[Docs/local_testing.md](Docs/local_testing.md)** - Prerequisites, environment setup, running locally, debugging
@@ -381,6 +383,7 @@ tests/                  Unit + integration tests (pytest)
 
 ## Migration notes
 
+- **Memories are keyed `[tenant_id, user_id]`, with no migration.** `memories`, `memories_turns`, `memories_summaries` and `counter` were keyed `[user_id, thread_id]`. A partition key cannot change in place, so recreate those containers and `leases`, so the change feed starts clean on the recreated turns container (`create_memory_store()` creates them with the new key, and for `azd` deployments see [`infra/README.md`](infra/README.md)). Existing data is not migrated, and `create_memory_store()` refuses a container that still has the earlier key rather than let it take writes and read back empty. A `user_id` must now be a non-empty string of at most 256 UTF-8 bytes without `/`, `\`, `?`, `#` or control characters. `thread_id` is no longer an argument of `update_cosmos()`, `delete_memory()`, `delete_turn()`, `add_tags()`, `remove_tags()` and `get_memory_history()`, and `MemoryNotFoundError` no longer carries it. Clients take an optional `tenant_id` (default `"default"`). See [CHANGELOG.md](CHANGELOG.md).
 - **`azure.cosmos.agent_memory.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
 - **New `processor=` kwarg.** Defaults to `InProcessProcessor()` - existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.

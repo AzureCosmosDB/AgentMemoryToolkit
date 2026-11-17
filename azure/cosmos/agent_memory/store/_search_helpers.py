@@ -12,11 +12,12 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from azure.cosmos.agent_memory._partitioning import partition_key_for
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
 MEMORY_PROJECTION = (
-    "c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
+    "c.id, c.tenant_id, c.user_id, c.thread_id, c.role, c.type, c.content, "
     "c.metadata, c.created_at, c.tags, c.salience, c.confidence, "
     "c.name, c.summary, c.procedure_kind, c.applies, c.status, c.valid_until, c.activation_conditions, c.steps, "
     "c.title, c.started_at, c.ended_at, c.participants, c.events, "
@@ -115,17 +116,20 @@ def uses_full_text_score(query: str) -> bool:
     return _FULL_TEXT_SCORE_CALL.search(query) is not None
 
 
-def query_scope(user_id: Optional[str], thread_id: Optional[str], keyword_count: int = 0) -> tuple[Any, bool]:
+def query_scope(tenant_id: str, user_id: Optional[str], keyword_count: int = 0) -> tuple[Optional[list[str]], bool]:
     """Return ``(partition_key, needs_cross_partition)`` for a read.
+
+    A read that names the owner stays in the owner's partition ``[tenant_id, user_id]``, whatever thread it asks about.
+    A read that does not name the owner spans the owners of the tenant, so it runs cross-partition.
 
     A search with keywords (``keyword_count`` > 0) ranks with ``FullTextScore``. The Python SDK runs a query sent with a
     partition key without planning it, and Cosmos DB then ignores the ranking: every question gets the same fixed order
-    (Azure/azure-sdk-for-python#42241). Such a search therefore runs cross-partition: the ``c.user_id`` and
-    ``c.thread_id`` filters in its ``WHERE`` clause confine it to the records the key would have read. A vector-only
+    (Azure/azure-sdk-for-python#42241). Such a search therefore runs cross-partition: the ``c.tenant_id`` and
+    ``c.user_id`` filters in its ``WHERE`` clause confine it to the records the key would have read. A vector-only
     search ranks correctly either way and keeps the key.
     """
-    if user_id is not None and thread_id is not None and not keyword_count:
-        return [user_id, thread_id], False
+    if user_id is not None and not keyword_count:
+        return partition_key_for(tenant_id, user_id), False
     return None, True
 
 

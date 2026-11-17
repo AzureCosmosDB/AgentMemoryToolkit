@@ -26,6 +26,7 @@ import uuid
 import pytest
 
 from azure.cosmos.agent_memory import CosmosMemoryClient
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters, partition_key_for
 from tests.conftest import INTEGRATION_ENABLED
 
 # What ``reconcile`` returns: the facts checked that stay active (``kept``), the duplicates folded (``merged``),
@@ -68,6 +69,7 @@ def agent_memory(
     embedding_deployment_name,
     embedding_dimensions,
     chat_deployment_name,
+    integration_tenant_id,
 ):
     """A live CosmosMemoryClient shared by every test in this module."""
     if not cosmos_endpoint or not ai_foundry_endpoint:
@@ -83,6 +85,7 @@ def agent_memory(
         embedding_deployment_name=embedding_deployment_name,
         embedding_dimensions=embedding_dimensions,
         chat_deployment_name=chat_deployment_name,
+        tenant_id=integration_tenant_id,
     )
 
 
@@ -106,35 +109,23 @@ def _cleanup(mem: CosmosMemoryClient, user_id: str) -> None:
     """Best-effort delete of every memory belonging to *user_id* across all
     split containers (turns, memories, summaries) so consecutive runs on the
     same user_id do not accumulate residue."""
-
-    def _delete(container, doc: dict) -> None:
-        try:
-            container.delete_item(
-                item=doc["id"],
-                partition_key=[user_id, doc.get("thread_id", "")],
-            )
-        except Exception:
-            pass
-
-    sql = "SELECT c.id, c.thread_id FROM c WHERE c.user_id = @uid"
-    params = [{"name": "@uid", "value": user_id}]
+    partition_key = partition_key_for(mem.tenant_id, user_id)
+    sql = f"SELECT c.id FROM c WHERE {OWNER_FILTER}"
+    params = owner_parameters(mem.tenant_id, user_id)
     for container in (
         mem._turns_container_client,
         mem._memories_container_client,
         mem._summaries_container_client,
     ):
         try:
-            docs = list(
-                container.query_items(
-                    query=sql,
-                    parameters=params,
-                    enable_cross_partition_query=True,
-                )
-            )
+            docs = list(container.query_items(query=sql, parameters=params, partition_key=partition_key))
         except Exception:
             continue
         for doc in docs:
-            _delete(container, doc)
+            try:
+                container.delete_item(item=doc["id"], partition_key=partition_key)
+            except Exception:
+                pass
 
 
 def _seed_fact_with_embedding(
@@ -153,8 +144,8 @@ def _seed_fact_with_embedding(
     neighbour to match. Retry until an embedded copy exists (indexing is fast -
     the doc is vector-searchable within ~2s), and skip honestly if the embedding
     service is genuinely unavailable rather than reporting a false failure."""
-    check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
-    params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
+    check = f"SELECT c.id FROM c WHERE {OWNER_FILTER} AND c.content = @content AND IS_DEFINED(c.embedding)"
+    params = [*owner_parameters(mem.tenant_id, user_id), {"name": "@content", "value": content}]
     for _ in range(retries):
         mem.upsert_memory(
             user_id=user_id,
@@ -166,7 +157,7 @@ def _seed_fact_with_embedding(
         )
         embedded = list(
             mem._memories_container_client.query_items(
-                query=check, parameters=params, enable_cross_partition_query=True
+                query=check, parameters=params, partition_key=partition_key_for(mem.tenant_id, user_id)
             )
         )
         if embedded:
@@ -375,14 +366,12 @@ class TestTaggingAndSalience:
             agent_memory.add_tags(
                 memory_id=mid,
                 user_id=unique_user_id,
-                thread_id=unique_thread_id,
                 memory_type="fact",
                 tags=["ui"],
             )
             agent_memory.remove_tags(
                 memory_id=mid,
                 user_id=unique_user_id,
-                thread_id=unique_thread_id,
                 memory_type="fact",
                 tags=["ide"],
             )
@@ -484,11 +473,12 @@ class TestReconciliation:
 
             links = list(
                 agent_memory._memories_container_client.query_items(
-                    query="SELECT c.first, c.later, c.kind FROM c WHERE c.type = 'conflict_link'",
-                    partition_key=[unique_user_id, "__conflicts__"],
+                    query=f"SELECT c.first, c.later, c.kind FROM c WHERE {OWNER_FILTER} AND c.type = 'conflict_link'",
+                    parameters=owner_parameters(agent_memory.tenant_id, unique_user_id),
+                    partition_key=partition_key_for(agent_memory.tenant_id, unique_user_id),
                 )
             )
-            assert links, "Expected a link document in the user's __conflicts__ partition"
+            assert links, "Expected a link document in the owner's partition"
             assert {fact_id for link in links for fact_id in (link["first"], link["later"])} <= {
                 m["id"] for m in active
             }

@@ -29,6 +29,7 @@ from pydantic import (
     model_validator,
 )
 
+from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID
 from azure.cosmos.agent_memory.logging import get_logger
 
 logger = get_logger(__name__)
@@ -167,6 +168,7 @@ class MemoryRecordBase(BaseModel):
     )
 
     id: str = Field(default_factory=_uuid4_str)
+    tenant_id: str = DEFAULT_TENANT_ID
     user_id: str
     thread_id: str = Field(default_factory=_uuid4_str)
     role: Optional[MemoryRole] = None

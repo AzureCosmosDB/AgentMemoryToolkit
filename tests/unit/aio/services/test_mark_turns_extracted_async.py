@@ -62,9 +62,13 @@ class _AsyncContainerBackedStore(_AsyncStore):
         self._containers = {ContainerKey.TURNS: container}
 
 
+TENANT = "acme"
+
+
 def _turn_doc(**overrides: Any) -> dict[str, Any]:
     doc = {
         "id": "turn-1",
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "turn",
@@ -88,6 +92,7 @@ def _service(turns_container: Any) -> AsyncPipelineService:
             ContainerKey.MEMORIES: _AsyncStoreContainerAdapter(memories_store, ContainerKey.MEMORIES),
             ContainerKey.SUMMARIES: _AsyncStoreContainerAdapter(summaries_store, ContainerKey.SUMMARIES),
         },
+        tenant_id=TENANT,
     )
 
 
@@ -102,7 +107,7 @@ async def test_mark_turns_extracted_patches_extracted_at() -> None:
     assert turns_container.patch_calls == [
         {
             "item": "turn-1",
-            "partition_key": ["u1", "t1"],
+            "partition_key": [TENANT, "u1"],
             "patch_operations": [
                 {"op": "set", "path": "/extracted_at", "value": turns_container.docs[0]["extracted_at"]}
             ],

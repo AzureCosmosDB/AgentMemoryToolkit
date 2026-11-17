@@ -25,6 +25,7 @@ import time
 import azure.durable_functions as df
 from shared import config
 from shared.error_redaction import redact_errors
+from shared.instance_ids import orchestration_instance_id
 from shared.pipeline_factory import get_pipeline
 
 from azure.cosmos.agent_memory.logging import describe_exception
@@ -39,13 +40,14 @@ bp = df.Blueprint()
 @bp.orchestration_trigger(context_name="context")
 def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     should_reconcile = bool(payload.get("reconcile", False))
     recent_k = payload.get("recent_k")
     retry = default_retry_options()
 
-    extract_payload = {"user_id": user_id, "thread_id": thread_id}
+    extract_payload = {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id}
     if recent_k is not None:
         extract_payload["recent_k"] = recent_k
     extracted = yield context.call_activity_with_retry(
@@ -56,7 +58,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     persisted = yield context.call_activity_with_retry(
         "em_Persist",
         retry,
-        {"user_id": user_id, "extracted": extracted},
+        {"tenant_id": tenant_id, "user_id": user_id, "extracted": extracted},
     )
 
     count = payload.get("count")
@@ -64,7 +66,7 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         yield context.call_activity_with_retry(
             "em_AdvanceExtractWatermark",
             retry,
-            {"user_id": user_id, "thread_id": thread_id, "count": count},
+            {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "count": count},
         )
 
     reconciled = None
@@ -73,22 +75,27 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         reconciled = yield context.call_activity_with_retry(
             "em_ReconcileMemories",
             retry,
-            {"user_id": user_id},
+            {"tenant_id": tenant_id, "user_id": user_id},
         )
         if config.get_procedural_synthesis_auto():
             count = payload.get("count")
-            instance_id = f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
+            instance_id = (
+                orchestration_instance_id("procedural", tenant_id, user_id, thread_id, count=count)
+                if count is not None
+                else None
+            )
             try:
                 procedural = yield context.call_sub_orchestrator_with_retry(
                     "SynthesizeProceduralOrchestrator",
                     retry,
-                    {"user_id": user_id, "force": False},
+                    {"tenant_id": tenant_id, "user_id": user_id, "force": False},
                     instance_id=instance_id,
                 )
             except Exception as exc:
                 if not context.is_replaying:
                     logger.warning(
-                        "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
+                        "SynthesizeProceduralOrchestrator failed tenant=%s user=%s thread=%s: %s",
+                        tenant_id,
                         user_id,
                         thread_id,
                         describe_exception(exc),
@@ -106,18 +113,20 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
 @redact_errors
 def em_Extract(payload: dict) -> dict:
     """Load recent turns and run LLM extraction without embeddings or writes."""
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     recent_k = payload.get("recent_k")
     if recent_k is None:
         recent_k = config.get_max_batch_size()
-    extracted = get_pipeline().extract_memories_durable(
+    extracted = get_pipeline(tenant_id).extract_memories_durable(
         user_id=user_id,
         thread_id=thread_id,
         recent_k=recent_k,
     )
     logger.info(
-        "ExtractMemories extracted user=%s thread=%s facts=%d episodic=%d updates=%d",
+        "ExtractMemories extracted tenant=%s user=%s thread=%s facts=%d episodic=%d updates=%d",
+        tenant_id,
         user_id,
         thread_id,
         len(extracted.get("facts", [])),
@@ -131,12 +140,13 @@ def em_Extract(payload: dict) -> dict:
 @redact_errors
 def em_Persist(payload: dict) -> dict:
     """Persist extracted docs with embeddings and deterministic create semantics."""
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
-    counts = get_pipeline().persist_extracted_memories(
+    counts = get_pipeline(tenant_id).persist_extracted_memories(
         user_id=user_id,
         extracted=payload["extracted"],
     )
-    logger.info("ExtractMemories persisted user=%s counts=%s", user_id, counts)
+    logger.info("ExtractMemories persisted tenant=%s user=%s counts=%s", tenant_id, user_id, counts)
     return counts or {}
 
 
@@ -154,11 +164,12 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
     from shared.cosmos_clients import get_counter_container_async
     from shared.counters import advance_extract_watermark, thread_counter_id
 
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     count = payload["count"]
     container = await get_counter_container_async()
-    await advance_extract_watermark(container, thread_counter_id(user_id, thread_id), user_id, thread_id, count)
+    await advance_extract_watermark(container, tenant_id, thread_counter_id(user_id, thread_id), user_id, count)
     return True
 
 
@@ -171,8 +182,9 @@ def em_ReconcileMemories(payload: dict) -> dict:
     # starting model calls and keeps what it finished, and the next run continues from the
     # dedup cursor.
     # The episodic call is a no-op that returns zero counts.
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(tenant_id)
     from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size
 
     n = get_dedup_pool_size()

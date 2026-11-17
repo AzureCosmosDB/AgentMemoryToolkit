@@ -231,7 +231,6 @@ def main() -> None:
                     mem.delete_memory(
                         memory_id=memory_id,
                         user_id=user_id,
-                        thread_id=record.get("thread_id", thread_id),
                         memory_type=record["type"],
                     )
                     deleted += 1

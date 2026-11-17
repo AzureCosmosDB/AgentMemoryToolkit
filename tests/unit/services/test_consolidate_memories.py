@@ -35,6 +35,7 @@ from azure.cosmos.agent_memory.services.pipeline import PipelineService
 NEAR = [1.0, 0.0, 0.0]
 NEAR_ENOUGH = [0.9, 0.3, 0.0]  # cosine 0.95 with NEAR
 TOO_FAR = [0.8, 0.6, 0.0]  # cosine 0.80 with NEAR: below the 0.85 floor
+TENANT = "acme"
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +45,7 @@ def _dedup_only(monkeypatch):
 
 def _make_pipeline() -> PipelineService:
     p = PipelineService.__new__(PipelineService)
+    p._tenant_id = TENANT
     p._embeddings = MagicMock()
     p._commit_fold = MagicMock(side_effect=lambda survivor, losers, **kwargs: [doc["id"] for doc in losers])
     p._container = MagicMock()
@@ -67,6 +69,7 @@ def _fact(
 ) -> dict:
     doc = {
         "id": fid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "fact",
@@ -172,7 +175,7 @@ class TestWhatAPassChecks:
         p._run_prompty.assert_not_called()
         body = p._container.create_item.call_args.kwargs["body"]
         assert (body["id"], body["type"]) == ("dedup_cursor_u1_fact", "dedup_cursor")
-        assert (body["user_id"], body["thread_id"]) == ("u1", "__dedup__")
+        assert (body["tenant_id"], body["user_id"], body["thread_id"]) == (TENANT, "u1", "__dedup__")
         assert (body["last_ts"], body["ids_at_last_ts"]) == (3, ["f1"])
 
     def test_a_fact_without_an_embedding_is_checked_without_a_neighbour_query(self):
@@ -199,24 +202,27 @@ class TestWhatAPassChecks:
         sql, params, kwargs = queries[0]
         assert "TOP 7" in sql and "ORDER BY c._ts ASC" in sql
         assert "IS_NULL(c.superseded_by)" in sql and "c.superseded_by = null" not in sql
-        assert (params["@user_id"], params["@after_ts"], params["@after_ids"]) == ("u1", 5, ["f0"])
-        assert (params["@memory_type"], kwargs["enable_cross_partition_query"]) == ("fact", True)
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"]) == (TENANT, "u1")
+        assert (params["@after_ts"], params["@after_ids"]) == (5, ["f0"])
+        assert (params["@memory_type"], kwargs) == ("fact", {"partition_key": [TENANT, "u1"]})
         replaced = p._container.replace_item.call_args.kwargs
         assert (replaced["item"], replaced["etag"]) == ("dedup_cursor_u1_fact", "c1")
         assert replaced["match_condition"] == MatchConditions.IfNotModified
         assert (replaced["body"]["last_ts"], replaced["body"]["ids_at_last_ts"]) == (6, ["f1"])
+        assert replaced["body"]["tenant_id"] == TENANT
 
-    def test_the_cursor_document_is_read_from_the_users_dedup_partition(self):
+    def test_the_cursor_document_is_read_from_the_owners_partition(self):
         p = _make_pipeline()
 
         _run(p, [])
 
         assert p._container.read_item.call_args.kwargs == {
             "item": "dedup_cursor_u1_fact",
-            "partition_key": ["u1", "__dedup__"],
+            "partition_key": [TENANT, "u1"],
         }
 
-    def test_neighbours_are_the_nearest_active_facts_of_the_same_user(self):
+    def test_neighbours_are_the_nearest_active_facts_of_the_same_owner(self):
         p = _make_pipeline()
 
         _, queries = _run(p, [_fact("f1", "User likes coffee")])
@@ -224,8 +230,9 @@ class TestWhatAPassChecks:
         sql, params, kwargs = queries[1]
         assert "ORDER BY VectorDistance(c.embedding, @embedding)" in sql
         assert "IS_NULL(c.superseded_by)" in sql
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
         assert (params["@seed_id"], params["@memory_type"], params["@embedding"]) == ("f1", "fact", NEAR)
-        assert (params["@user_id"], kwargs["enable_cross_partition_query"]) == ("u1", True)
+        assert (params["@tenant_id"], params["@user_id"], kwargs) == (TENANT, "u1", {"partition_key": [TENANT, "u1"]})
 
     def test_only_neighbours_at_or_above_the_similarity_floor_reach_the_model(self):
         p = _make_pipeline()
@@ -530,6 +537,7 @@ class TestCommitFold:
     @staticmethod
     def _build(superseded: bool | list[bool] = True) -> PipelineService:
         p = PipelineService.__new__(PipelineService)
+        p._tenant_id = TENANT
         p._container = MagicMock()
         p._memories_container = p._container
         p._mark_superseded = MagicMock(side_effect=superseded if isinstance(superseded, list) else None)
@@ -555,6 +563,7 @@ class TestCommitFold:
         replaced = p._container.replace_item.call_args.kwargs
         assert (replaced["etag"], replaced["match_condition"]) == ("etag-s", MatchConditions.IfNotModified)
         assert replaced["body"]["merged_from"] == ["a", "b"]
+        assert replaced["body"]["tenant_id"] == TENANT
         assert [(c.args[1], c.kwargs["reason"]) for c in p._mark_superseded.call_args_list] == [
             ("s", "duplicate"),
             ("s", "duplicate"),

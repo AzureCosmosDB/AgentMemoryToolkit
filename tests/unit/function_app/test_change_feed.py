@@ -3,18 +3,26 @@
 Mocks the durable client's ``start_new`` and the counter container so the
 trigger's pure-logic entry point :func:`process_changefeed_batch` can be
 exercised without Azure Functions or Cosmos DB.
+
+Every turn names its tenant (``acme`` unless a test says otherwise): counters, instance ids and orchestrator
+inputs are per ``(tenant_id, user_id[, thread_id])``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import triggers.change_feed as change_feed_module
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
+from shared.instance_ids import orchestration_instance_id
 from triggers.change_feed import process_changefeed_batch
+
+TENANT = "acme"
 
 
 @pytest.fixture(autouse=True)
@@ -34,8 +42,8 @@ def _default_owner_durable(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _turn(user_id: str = "u1", thread_id: str = "t1", lsn: int | None = None) -> dict:
-    doc: dict = {"type": "turn", "user_id": user_id, "thread_id": thread_id}
+def _turn(user_id: str = "u1", thread_id: str = "t1", lsn: int | None = None, tenant_id: str = TENANT) -> dict:
+    doc: dict = {"type": "turn", "tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id}
     if lsn is not None:
         doc["_lsn"] = lsn
     return doc
@@ -48,33 +56,42 @@ def _make_starter() -> MagicMock:
 
 
 def _make_counter_container_starting_at(start_count: int = 0) -> MagicMock:
-    """Return a counter container whose ``read_item`` answers from an in-mem
-    dict and whose ``create_item``/``upsert_item`` mutate that same dict.
+    """Return a counter container that keeps its documents per logical partition.
 
-    Lets the test mimic a real Cosmos counter without needing the SDK.
+    ``read_item`` answers from an in-memory dict keyed by ``(tenant_id, user_id, id)``, that is, by the partition key
+    ``[tenant_id, user_id]`` plus the document id, and ``create_item``/``upsert_item`` mutate that same dict, taking
+    the partition from the document. A read in another partition than the write finds nothing, as in Cosmos.
     """
-    state: dict[str, dict] = {}
+    state: dict[tuple[str, str, str], dict] = {}
     if start_count:
         # Seeded entries can be supplied by the test if needed; default empty.
         pass
 
     container = MagicMock()
 
+    def slot(partition_key, item):
+        tenant_id, user_id = partition_key
+        return (tenant_id, user_id, item)
+
     async def read_item(*, item, partition_key):
-        if item not in state:
+        key = slot(partition_key, item)
+        if key not in state:
             raise CosmosResourceNotFoundError(message="404")
-        return dict(state[item])
+        return dict(state[key])
 
     async def create_item(*, body):
-        state[body["id"]] = dict(body)
+        state[slot([body["tenant_id"], body["user_id"]], body["id"])] = dict(body)
         return body
 
     async def upsert_item(*, body, **_kwargs):
-        state[body["id"]] = dict(body)
+        state[slot([body["tenant_id"], body["user_id"]], body["id"])] = dict(body)
         return body
 
     async def patch_item(*, item, partition_key, patch_operations, filter_predicate=None):
-        doc = state.setdefault(item, {"id": item})
+        key = slot(partition_key, item)
+        if key not in state:
+            raise CosmosResourceNotFoundError(message="404")
+        doc = state[key]
         if filter_predicate is not None:
             # Honor the monotonic watermark guard: apply only when the new
             # last_extract_count exceeds the stored one (else Cosmos returns 412).
@@ -97,18 +114,37 @@ def _make_counter_container_starting_at(start_count: int = 0) -> MagicMock:
     return container
 
 
-def _make_topology_db(missing_name: str | None = None):
+def _counter(container: MagicMock, counter_id: str, *, tenant_id: str = TENANT, user_id: str = "u1") -> dict:
+    """The counter document ``counter_id`` of ``user_id`` in ``tenant_id``."""
+    return container._state[(tenant_id, user_id, counter_id)]
+
+
+def _thread_instance_id(
+    kind: str, count: int, *, tenant_id: str = TENANT, user_id: str = "u1", thread_id: str = "t1"
+) -> str:
+    """The instance id of a thread-scoped orchestration: a hash of the tenant, user and thread, and the count."""
+    return orchestration_instance_id(kind, tenant_id, user_id, thread_id, count=count)
+
+
+def _user_instance_id(count: int, *, tenant_id: str = TENANT, user_id: str = "u1") -> str:
+    """The instance id of a user summary: a hash of the tenant and user, and the count."""
+    return orchestration_instance_id("user_summary", tenant_id, user_id, count=count)
+
+
+def _make_topology_db(missing_name: str | None = None, earlier_key_name: str | None = None):
     containers: dict[str, MagicMock] = {}
     for name in (
         change_feed_module.config.TURNS_CONTAINER,
         change_feed_module.config.MEMORIES_CONTAINER,
         change_feed_module.config.SUMMARIES_CONTAINER,
+        change_feed_module.config.COUNTERS_CONTAINER,
     ):
         container = MagicMock()
         if name == missing_name:
             container.read = AsyncMock(side_effect=CosmosResourceNotFoundError(message="missing"))
         else:
-            container.read = AsyncMock()
+            paths = ["/user_id", "/thread_id"] if name == earlier_key_name else ["/tenant_id", "/user_id"]
+            container.read = AsyncMock(return_value={"id": name, "partitionKey": {"paths": paths, "kind": "MultiHash"}})
         containers[name] = container
 
     db = MagicMock()
@@ -129,7 +165,7 @@ def test_ensure_topology_succeeds_when_all_containers_exist():
         asyncio.run(change_feed_module._ensure_topology())
 
     assert change_feed_module._topology_validated is True
-    assert db.get_container_client.call_count == 3
+    assert db.get_container_client.call_count == 4
     for container in containers.values():
         container.read.assert_awaited_once()
 
@@ -148,6 +184,28 @@ def test_ensure_topology_raises_on_missing_container():
     assert change_feed_module._topology_validated is False
 
 
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        change_feed_module.config.TURNS_CONTAINER,
+        change_feed_module.config.MEMORIES_CONTAINER,
+        change_feed_module.config.SUMMARIES_CONTAINER,
+        change_feed_module.config.COUNTERS_CONTAINER,
+    ],
+)
+def test_ensure_topology_raises_on_a_container_with_the_earlier_key(earlier):
+    change_feed_module._topology_validated = False
+    db, _containers = _make_topology_db(earlier_key_name=earlier)
+
+    with patch("shared.cosmos_clients.get_cosmos_database_async", new=AsyncMock(return_value=db)):
+        with pytest.raises(RuntimeError, match=rf"Topology error: container '{earlier}' has partition key") as error:
+            asyncio.run(change_feed_module._ensure_topology())
+
+    assert "['/user_id', '/thread_id']" in str(error.value)
+    assert "recreate" in str(error.value)
+    assert change_feed_module._topology_validated is False
+
+
 def test_ensure_topology_is_idempotent():
     change_feed_module._topology_validated = False
     db, containers = _make_topology_db()
@@ -161,7 +219,7 @@ def test_ensure_topology_is_idempotent():
         asyncio.run(run_twice())
 
     assert get_db.await_count == 1
-    assert sum(container.read.await_count for container in containers.values()) == 3
+    assert sum(container.read.await_count for container in containers.values()) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +307,9 @@ def test_non_turn_documents_are_filtered_out():
     container = _make_counter_container_starting_at()
 
     docs = [
-        {"type": "thread_summary", "user_id": "u1", "thread_id": "t1"},
-        {"type": "fact", "user_id": "u1", "thread_id": "t1"},
-        {"type": "user_summary", "user_id": "u1", "thread_id": "__user_summary__"},
+        {"type": "thread_summary", "tenant_id": TENANT, "user_id": "u1", "thread_id": "t1"},
+        {"type": "fact", "tenant_id": TENANT, "user_id": "u1", "thread_id": "t1"},
+        {"type": "user_summary", "tenant_id": TENANT, "user_id": "u1", "thread_id": "__user_summary__"},
     ]
 
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
@@ -285,7 +343,7 @@ def test_sub_threshold_batch_does_not_start_orchestrator():
     assert starter.start_new.await_count == 0
     # We DID still increment the counter.
     assert container.create_item.await_count == 1
-    assert container._state["thread:u1:t1"]["count"] == 3
+    assert _counter(container, "thread:u1:t1")["count"] == 3
 
 
 @patch.dict(
@@ -301,12 +359,86 @@ def test_turn_doc_missing_ids_is_skipped():
     starter = _make_starter()
     container = _make_counter_container_starting_at()
     docs = [
-        {"type": "turn", "user_id": "u1"},  # missing thread_id
-        {"type": "turn", "thread_id": "t1"},  # missing user_id
+        {"type": "turn", "tenant_id": TENANT, "user_id": "u1"},  # missing thread_id
+        {"type": "turn", "tenant_id": TENANT, "thread_id": "t1"},  # missing user_id
     ]
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
     assert starter.start_new.await_count == 0
     assert container.read_item.await_count == 0
+
+
+_NO_TENANT = object()
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+@pytest.mark.parametrize(
+    "tenant_id",
+    [
+        pytest.param(_NO_TENANT, id="missing"),
+        pytest.param(None, id="null"),
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="blank"),
+        pytest.param(7, id="not-a-string"),
+        pytest.param("acme/eu", id="slash"),
+        pytest.param("acme#eu", id="hash"),
+        pytest.param("x" * 300, id="too-long"),
+    ],
+)
+def test_a_turn_without_a_valid_tenant_is_skipped_with_a_warning_that_quotes_nothing(tenant_id, caplog):
+    """The tenant is never guessed: a turn that names none, or an unusable one, is counted nowhere (not under the
+    default tenant either) and the valid turns of the same batch still are."""
+    caplog.set_level(logging.WARNING)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    unusable = {"type": "turn", "user_id": "u2", "thread_id": "t2", "content": "private text"}
+    if tenant_id is not _NO_TENANT:
+        unusable["tenant_id"] = tenant_id
+
+    asyncio.run(process_changefeed_batch([unusable, unusable, _turn(), _turn()], starter, counter_container=container))
+
+    assert list(container._state) == [(TENANT, "u1", "thread:u1:t1")]
+    assert [(c.args[0], c.kwargs["instance_id"]) for c in starter.start_new.await_args_list] == [
+        ("ThreadSummaryOrchestrator", _thread_instance_id("thread_summary", 2))
+    ]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["change-feed: turn doc missing a valid tenant_id, user_id or thread_id, skipping"] * 2
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+@pytest.mark.parametrize("owner", ["", "   ", 7, "a/b", "a#b", "o" * 300], ids=repr)
+def test_a_turn_with_an_unsupported_owner_is_skipped_like_one_without_a_tenant(owner, caplog):
+    """An owner the SDK would refuse is never counted; the valid turns of the same batch still are."""
+    caplog.set_level(logging.WARNING)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    unusable = {"type": "turn", "tenant_id": TENANT, "user_id": owner, "thread_id": "t2", "content": "private text"}
+
+    asyncio.run(process_changefeed_batch([unusable, _turn(), _turn()], starter, counter_container=container))
+
+    assert list(container._state) == [(TENANT, "u1", "thread:u1:t1")]
+    assert [(c.args[0], c.kwargs["instance_id"]) for c in starter.start_new.await_args_list] == [
+        ("ThreadSummaryOrchestrator", _thread_instance_id("thread_summary", 2))
+    ]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["change-feed: turn doc missing a valid tenant_id, user_id or thread_id, skipping"]
 
 
 # ---------------------------------------------------------------------------
@@ -339,9 +471,9 @@ def test_thread_threshold_crossing_starts_summary_and_extract():
     )
 
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
-    assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
-    assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
-    assert ("ExtractEpisodesOrchestrator", "episode:u1:t1:4") in started
+    assert ("ThreadSummaryOrchestrator", _thread_instance_id("thread_summary", 4)) in started
+    assert ("ExtractMemoriesOrchestrator", _thread_instance_id("extract", 4)) in started
+    assert ("ExtractEpisodesOrchestrator", _thread_instance_id("episode", 4)) in started
     # User threshold 20 not crossed by 4 turns.
     assert not any(name == "UserSummaryOrchestrator" for name, _ in started)
 
@@ -371,8 +503,8 @@ def test_episode_threshold_crossing_starts_extract_episodes():
     episode_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractEpisodesOrchestrator"]
     assert len(episode_calls) == 1
     call = episode_calls[0]
-    assert call.kwargs["instance_id"] == "episode:u1:t1:4"
-    assert call.kwargs["client_input"] == {"user_id": "u1", "thread_id": "t1", "count": 4}
+    assert call.kwargs["instance_id"] == _thread_instance_id("episode", 4)
+    assert call.kwargs["client_input"] == {"tenant_id": TENANT, "user_id": "u1", "thread_id": "t1", "count": 4}
 
 
 @patch.dict(
@@ -399,14 +531,14 @@ def test_user_threshold_crossing_starts_user_summary():
 
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
     # Exactly one user-summary, deterministic instance id at count=20.
-    assert ("UserSummaryOrchestrator", "user_summary:u1:20") in started
+    assert ("UserSummaryOrchestrator", _user_instance_id(20)) in started
     user_summary_starts = [n for n, _ in started if n == "UserSummaryOrchestrator"]
     assert len(user_summary_starts) == 1
 
-    # Payload must include the contributing thread_ids so the orchestrator
-    # can scope the user-summary query (avoids a full cross-partition scan).
+    # Payload carries the contributing thread_ids.
     us_call = next(c for c in starter.start_new.await_args_list if c.args[0] == "UserSummaryOrchestrator")
     payload = us_call.kwargs["client_input"]
+    assert payload["tenant_id"] == TENANT
     assert payload["user_id"] == "u1"
     assert sorted(payload["thread_ids"]) == ["t0", "t1", "t2", "t3"]
 
@@ -470,6 +602,7 @@ def test_disabled_episode_does_not_start_extract_episodes():
     {
         "THREAD_SUMMARY_EVERY_N": "4",
         "FACT_EXTRACTION_EVERY_N": "4",
+        "EPISODE_EVAL_EVERY_N": "4",
         "USER_SUMMARY_EVERY_N": "20",
     },
     clear=False,
@@ -492,11 +625,12 @@ def test_per_thread_grouping_is_correct():
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
 
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
-    # t1 crossed → summary + extract started for t1 only.
-    assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
-    assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
-    # t2 below threshold - no orchestrators for t2.
-    assert not any("t2" in iid for _, iid in started)
+    # t1 crossed → summary, extract and episode started for t1 only; t2 is below every threshold.
+    assert started == {
+        ("ThreadSummaryOrchestrator", _thread_instance_id("thread_summary", 4)),
+        ("ExtractMemoriesOrchestrator", _thread_instance_id("extract", 4)),
+        ("ExtractEpisodesOrchestrator", _thread_instance_id("episode", 4)),
+    }
 
 
 @patch.dict(
@@ -522,9 +656,224 @@ def test_orchestrator_payload_includes_count_and_ids():
 
     for call in starter.start_new.await_args_list:
         payload = call.kwargs["client_input"]
+        assert payload["tenant_id"] == TENANT
         assert payload["user_id"] == "u1"
         assert payload["thread_id"] == "t1"
         assert payload["count"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Tenants: every scope is per (tenant_id, user_id[, thread_id])
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "4",
+        "FACT_EXTRACTION_EVERY_N": "4",
+        "EPISODE_EVAL_EVERY_N": "4",
+        "USER_SUMMARY_EVERY_N": "4",
+    },
+    clear=False,
+)
+def test_every_orchestration_is_started_with_a_hashed_instance_id_and_the_tenant_in_its_input():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(
+        process_changefeed_batch([_turn(tenant_id="globex") for _ in range(4)], starter, counter_container=container)
+    )
+
+    calls = starter.start_new.await_args_list
+    started = {c.args[0]: (c.kwargs["instance_id"], c.kwargs["client_input"]) for c in calls}
+    instance_ids = {name: instance_id for name, (instance_id, _) in started.items()}
+    assert instance_ids == {
+        "ThreadSummaryOrchestrator": _thread_instance_id("thread_summary", 4, tenant_id="globex"),
+        "ExtractMemoriesOrchestrator": _thread_instance_id("extract", 4, tenant_id="globex"),
+        "ExtractEpisodesOrchestrator": _thread_instance_id("episode", 4, tenant_id="globex"),
+        "UserSummaryOrchestrator": _user_instance_id(4, tenant_id="globex"),
+    }
+    # An id names the kind and the count and hashes the rest: no tenant, user or thread in it.
+    assert all(re.fullmatch(r"[a-z_]+:[0-9a-f]{32}:4", instance_id) for instance_id in instance_ids.values())
+    assert all(client_input["tenant_id"] == "globex" for _, client_input in started.values())
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "4",
+        "FACT_EXTRACTION_EVERY_N": "4",
+        "EPISODE_EVAL_EVERY_N": "4",
+        "USER_SUMMARY_EVERY_N": "4",
+    },
+    clear=False,
+)
+def test_owners_with_very_long_ids_still_get_instance_ids_within_the_durable_limit():
+    """Durable Functions takes at most 100 characters; ids of 200 characters each used to overflow it."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(user_id="u" * 200, thread_id="h" * 200, tenant_id="t" * 200) for _ in range(4)]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    instance_ids = [c.kwargs["instance_id"] for c in starter.start_new.await_args_list]
+    assert len(instance_ids) == 4
+    assert all(re.fullmatch(r"[a-z_]+:[0-9a-f]{32}:4", instance_id) for instance_id in instance_ids)
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_the_log_of_a_start_names_the_owner_because_the_instance_id_does_not(caplog):
+    caplog.set_level(logging.INFO)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(process_changefeed_batch([_turn(), _turn()], starter, counter_container=container))
+
+    instance_id = _thread_instance_id("thread_summary", 2)
+    assert [r.getMessage() for r in caplog.records if r.getMessage().startswith("change-feed: starting")] == [
+        f"change-feed: starting ThreadSummaryOrchestrator instance={instance_id} tenant=acme user=u1 thread=t1"
+    ]
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "4",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "4",
+    },
+    clear=False,
+)
+def test_the_same_user_and_thread_in_two_tenants_are_counted_separately():
+    """Two turns per tenant never add up to the four that start an orchestration."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(tenant_id="acme"), _turn(tenant_id="globex"), _turn(tenant_id="acme"), _turn(tenant_id="globex")]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    assert starter.start_new.await_count == 0
+    for tenant_id in ("acme", "globex"):
+        assert _counter(container, "thread:u1:t1", tenant_id=tenant_id)["count"] == 2
+        assert _counter(container, "user:u1", tenant_id=tenant_id)["count"] == 2
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "4",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_each_tenant_that_crosses_a_threshold_starts_its_own_orchestration():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(tenant_id="acme") for _ in range(4)] + [_turn(tenant_id="globex") for _ in range(4)]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    started = {c.kwargs["instance_id"]: c.kwargs["client_input"] for c in starter.start_new.await_args_list}
+    assert started == {
+        _thread_instance_id("thread_summary", 4, tenant_id="acme"): {
+            "tenant_id": "acme",
+            "user_id": "u1",
+            "thread_id": "t1",
+            "count": 4,
+        },
+        _thread_instance_id("thread_summary", 4, tenant_id="globex"): {
+            "tenant_id": "globex",
+            "user_id": "u1",
+            "thread_id": "t1",
+            "count": 4,
+        },
+    }
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "2",
+    },
+    clear=False,
+)
+def test_user_summary_thread_ids_are_collected_per_tenant():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [
+        _turn(tenant_id="acme", thread_id="t1"),
+        _turn(tenant_id="globex", thread_id="t9"),
+        _turn(tenant_id="acme", thread_id="t2"),
+        _turn(tenant_id="globex", thread_id="t9"),
+    ]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    started = {c.kwargs["instance_id"]: c.kwargs["client_input"] for c in starter.start_new.await_args_list}
+    assert started == {
+        _user_instance_id(2, tenant_id="acme"): {
+            "tenant_id": "acme",
+            "user_id": "u1",
+            "count": 2,
+            "thread_ids": ["t1", "t2"],
+        },
+        _user_instance_id(2, tenant_id="globex"): {
+            "tenant_id": "globex",
+            "user_id": "u1",
+            "count": 2,
+            "thread_ids": ["t9"],
+        },
+    }
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "100",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "100",
+    },
+    clear=False,
+)
+def test_counters_live_in_the_owner_partition_and_carry_the_tenant():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(
+        process_changefeed_batch([_turn(thread_id="t1"), _turn(thread_id="t2")], starter, counter_container=container)
+    )
+
+    assert {tuple(call.kwargs["partition_key"]) for call in container.read_item.await_args_list} == {(TENANT, "u1")}
+    thread_counter = _counter(container, "thread:u1:t1")
+    user_counter = _counter(container, "user:u1")
+    assert (thread_counter["tenant_id"], thread_counter["user_id"], thread_counter["thread_id"]) == (TENANT, "u1", "t1")
+    assert (user_counter["tenant_id"], user_counter["user_id"], user_counter["thread_id"]) == (
+        TENANT,
+        "u1",
+        "__counters__",
+    )
+    assert set(container._state) == {
+        (TENANT, "u1", "thread:u1:t1"),
+        (TENANT, "u1", "thread:u1:t2"),
+        (TENANT, "u1", "user:u1"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +900,7 @@ def test_lsn_replay_does_not_double_increment():
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
 
     # Layer 1 (LSN replay dedup): the counter must NOT double-increment.
-    assert container._state["thread:u1:t1"]["count"] == 4
+    assert _counter(container, "thread:u1:t1")["count"] == 4
 
     # Layer 2 (deterministic instance ID): on replay the counter helper still
     # reports the same ``(old, new)`` it returned the first time, so the
@@ -560,7 +909,37 @@ def test_lsn_replay_does_not_double_increment():
     # ``start_new`` server-side. We assert the determinism here.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 2  # same id sent twice - durable dedups
-    assert all(c.kwargs["instance_id"] == "thread_summary:u1:t1:4" for c in summary_starts)
+    assert all(c.kwargs["instance_id"] == _thread_instance_id("thread_summary", 4) for c in summary_starts)
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "100",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "100",
+    },
+    clear=False,
+)
+def test_lsns_are_tracked_per_tenant_and_a_replay_counts_nothing_twice():
+    """One batch can mix tenants; each tenant's counters record only the LSNs of its own turns."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [
+        _turn(tenant_id="acme", lsn=10),
+        _turn(tenant_id="globex", lsn=50),
+        _turn(tenant_id="acme", lsn=11),
+    ]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    for counter_id in ("thread:u1:t1", "user:u1"):
+        acme = _counter(container, counter_id, tenant_id="acme")
+        globex = _counter(container, counter_id, tenant_id="globex")
+        assert (acme["count"], acme["last_batch_lsn"]) == (2, 11)
+        assert (globex["count"], globex["last_batch_lsn"]) == (1, 50)
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +1001,7 @@ def test_runs_normally_when_owner_durable():
     asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
 
     # Counter was written.
-    assert container._state["thread:u1:t1"]["count"] == 2
+    assert _counter(container, "thread:u1:t1")["count"] == 2
     # Threshold (2) crossed - orchestrator started.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
     assert len(summary_starts) == 1
@@ -704,7 +1083,7 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     # advancing the watermark to the processed count (4) after batch 1.
     from shared.counters import advance_extract_watermark, thread_counter_id
 
-    asyncio.run(advance_extract_watermark(container, thread_counter_id("u1", "t1"), "u1", "t1", 4))
+    asyncio.run(advance_extract_watermark(container, TENANT, thread_counter_id("u1", "t1"), "u1", 4))
 
     # Next batch: counter 4 -> 5. Reconcile threshold crossed, so the same
     # extract dispatch carries reconcile=True, and recent_k = 5 - watermark(4) = 1.
@@ -714,6 +1093,7 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     assert len(extract_calls) == 1
     payload = _extract_payload(extract_calls[0])
     assert payload.get("reconcile") is True
+    assert payload.get("tenant_id") == TENANT
     assert payload.get("user_id") == "u1"
     assert payload.get("recent_k") == 1
 
@@ -721,21 +1101,54 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
 def test_advance_extract_watermark_is_monotonic():
     """A later, out-of-order run must not regress the extract watermark below a
     higher value a concurrent run already wrote (that would re-extract turns)."""
-    from shared.counters import advance_extract_watermark, thread_counter_id
+    from shared.counters import advance_extract_watermark, increment_counter_by, thread_counter_id
 
     container = _make_counter_container_starting_at()
     cid = thread_counter_id("u1", "t1")
+    asyncio.run(increment_counter_by(container, TENANT, cid, "u1", "t1", 12))
 
-    asyncio.run(advance_extract_watermark(container, cid, "u1", "t1", 8))
-    assert container._state[cid]["last_extract_count"] == 8
+    asyncio.run(advance_extract_watermark(container, TENANT, cid, "u1", 8))
+    assert _counter(container, cid)["last_extract_count"] == 8
 
     # An out-of-order run with a lower count is a no-op (Cosmos 412, swallowed).
-    asyncio.run(advance_extract_watermark(container, cid, "u1", "t1", 4))
-    assert container._state[cid]["last_extract_count"] == 8
+    asyncio.run(advance_extract_watermark(container, TENANT, cid, "u1", 4))
+    assert _counter(container, cid)["last_extract_count"] == 8
 
     # A higher count still advances.
-    asyncio.run(advance_extract_watermark(container, cid, "u1", "t1", 12))
-    assert container._state[cid]["last_extract_count"] == 12
+    asyncio.run(advance_extract_watermark(container, TENANT, cid, "u1", 12))
+    assert _counter(container, cid)["last_extract_count"] == 12
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "1",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+        "DEDUP_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_the_extract_watermark_is_read_from_the_tenant_of_the_turns():
+    from shared.counters import advance_extract_watermark, thread_counter_id
+
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    first = [_turn(tenant_id=tenant_id) for tenant_id in ("acme", "globex") for _ in range(4)]
+    asyncio.run(process_changefeed_batch(first, starter, counter_container=container))
+    # Only acme's extraction has gone through its 4 turns.
+    asyncio.run(advance_extract_watermark(container, "acme", thread_counter_id("u1", "t1"), "u1", 4))
+
+    starter.start_new.reset_mock()
+    asyncio.run(
+        process_changefeed_batch(
+            [_turn(tenant_id="acme"), _turn(tenant_id="globex")], starter, counter_container=container
+        )
+    )
+
+    payloads = [_extract_payload(c) for c in starter.start_new.await_args_list]
+    assert {payload["tenant_id"]: payload["recent_k"] for payload in payloads} == {"acme": 1, "globex": 5}
 
 
 @patch.dict(

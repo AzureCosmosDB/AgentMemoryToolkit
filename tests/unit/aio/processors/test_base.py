@@ -32,3 +32,17 @@ def test_async_inprocess_requires_pipeline_or_components():
 
     with pytest.raises(ValueError):
         AsyncInProcessProcessor()
+
+
+def test_async_inprocess_built_from_components_belongs_to_the_tenant_it_is_given():
+    proc = AsyncInProcessProcessor(
+        cosmos_container=MagicMock(),
+        turns_container=MagicMock(),
+        summaries_container=MagicMock(),
+        chat_client=MagicMock(),
+        embeddings_client=MagicMock(),
+        tenant_id="acme",
+    )
+
+    assert proc._pipeline._store.tenant_id == "acme"
+    assert proc._pipeline._tenant_id == "acme"

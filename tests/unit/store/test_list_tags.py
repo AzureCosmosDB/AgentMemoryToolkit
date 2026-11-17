@@ -43,10 +43,15 @@ def test_list_tags_flattens_dedupes_sorts_and_hides_sys_tags():
     summaries.query_items.assert_not_called()
     kwargs = memories.query_items.call_args.kwargs
     assert kwargs["query"] == (
-        "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
-        " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+        "SELECT VALUE c.tags FROM c WHERE c.tenant_id = @tenant_id AND c.user_id = @user_id"
+        " AND ARRAY_LENGTH(c.tags) > 0 AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
     )
-    assert kwargs["enable_cross_partition_query"] is True
+    assert kwargs["parameters"] == [
+        {"name": "@tenant_id", "value": "default"},
+        {"name": "@user_id", "value": "u1"},
+    ]
+    assert kwargs["partition_key"] == ["default", "u1"]
+    assert "enable_cross_partition_query" not in kwargs
 
 
 def test_list_tags_prefix_and_include_sys():
@@ -62,7 +67,7 @@ def test_list_tags_prefix_and_include_sys():
     summaries.query_items.assert_not_called()
 
 
-def test_list_tags_thread_id_scopes_to_partition():
+def test_list_tags_thread_id_filters_within_the_owners_partition():
     turns = MagicMock()
     memories = MagicMock()
     summaries = MagicMock()
@@ -73,7 +78,7 @@ def test_list_tags_thread_id_scopes_to_partition():
 
     kwargs = memories.query_items.call_args.kwargs
     assert "AND c.thread_id = @thread_id" in kwargs["query"]
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "u1"]
     assert "enable_cross_partition_query" not in kwargs
     turns.query_items.assert_not_called()
     summaries.query_items.assert_not_called()
@@ -95,11 +100,11 @@ async def test_async_list_tags_flattens_dedupes_sorts_and_hides_sys_tags():
     summaries.query_items.assert_not_called()
     kwargs = memories.query_items.call_args.kwargs
     assert kwargs["query"] == (
-        "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
-        " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
+        "SELECT VALUE c.tags FROM c WHERE c.tenant_id = @tenant_id AND c.user_id = @user_id"
+        " AND ARRAY_LENGTH(c.tags) > 0 AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
     )
+    assert kwargs["partition_key"] == ["default", "u1"]
     assert "enable_cross_partition_query" not in kwargs
-    assert "partition_key" not in kwargs
 
 
 async def test_async_list_tags_prefix_and_include_sys():
@@ -117,7 +122,7 @@ async def test_async_list_tags_prefix_and_include_sys():
     summaries.query_items.assert_not_called()
 
 
-async def test_async_list_tags_thread_id_scopes_to_partition():
+async def test_async_list_tags_thread_id_filters_within_the_owners_partition():
     turns = MagicMock()
     memories = MagicMock()
     summaries = MagicMock()
@@ -128,7 +133,7 @@ async def test_async_list_tags_thread_id_scopes_to_partition():
 
     kwargs = memories.query_items.call_args.kwargs
     assert "AND c.thread_id = @thread_id" in kwargs["query"]
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "u1"]
     assert "enable_cross_partition_query" not in kwargs
     turns.query_items.assert_not_called()
     summaries.query_items.assert_not_called()

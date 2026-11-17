@@ -26,11 +26,12 @@ def _containers(*, memories=None):
     }
 
 
-def _fact(fact_id, *, superseded_by=None, superseded_at=None, reason=None, content=""):
+def _fact(fact_id, *, superseded_by=None, superseded_at=None, reason=None, content="", thread_id="t1"):
     return {
         "id": fact_id,
+        "tenant_id": "default",
         "user_id": "u1",
-        "thread_id": "t1",
+        "thread_id": thread_id,
         "type": "fact",
         "content": content or fact_id,
         "metadata": {"category": "biographical"},
@@ -68,7 +69,7 @@ def test_single_level_history_returns_direct_predecessor():
     ]
     store = MemoryStore(containers=_containers(memories=memories))
 
-    history = store.get_memory_history("current", user_id="u1", thread_id="t1")
+    history = store.get_memory_history("current", user_id="u1")
 
     assert [d["id"] for d in history] == ["v1"]
     assert history[0]["supersede_reason"] == "update"
@@ -83,7 +84,7 @@ def test_multi_level_chain_walks_transitively_newest_first():
     ]
     store = MemoryStore(containers=_containers(memories=memories))
 
-    history = store.get_memory_history("current", user_id="u1", thread_id="t1")
+    history = store.get_memory_history("current", user_id="u1")
 
     # Ordered most-recently-superseded first.
     assert [d["id"] for d in history] == ["v2", "v1"]
@@ -94,7 +95,7 @@ def test_no_history_returns_empty_list():
     memories.query_items.return_value = []
     store = MemoryStore(containers=_containers(memories=memories))
 
-    assert store.get_memory_history("current", user_id="u1", thread_id="t1") == []
+    assert store.get_memory_history("current", user_id="u1") == []
 
 
 def test_cycle_is_bounded_and_deduplicated():
@@ -107,35 +108,28 @@ def test_cycle_is_bounded_and_deduplicated():
     ]
     store = MemoryStore(containers=_containers(memories=memories))
 
-    history = store.get_memory_history("current", user_id="u1", thread_id="t1", max_depth=50)
+    history = store.get_memory_history("current", user_id="u1", max_depth=50)
 
     assert [d["id"] for d in history] == ["v1"]
 
 
-def test_thread_scoped_query_uses_single_partition():
+def test_the_chain_is_walked_in_the_owners_partition_whatever_the_thread_of_each_version():
     memories = MagicMock()
-    memories.query_items.return_value = []
+    memories.query_items.side_effect = [
+        [_fact("v2", superseded_at="2025-03-01T00:00:00+00:00", thread_id="t2")],
+        [_fact("v1", superseded_at="2025-02-01T00:00:00+00:00", thread_id="t3")],
+        [],
+    ]
     store = MemoryStore(containers=_containers(memories=memories))
 
-    store.get_memory_history("current", user_id="u1", thread_id="t1")
+    history = store.get_memory_history("current", user_id="u1")
 
-    kwargs = memories.query_items.call_args.kwargs
-    assert kwargs["partition_key"] == ["u1", "t1"]
-    assert "enable_cross_partition_query" not in kwargs
-    assert "c.thread_id = @thread_id" in kwargs["query"]
-
-
-def test_history_without_thread_id_fans_out_cross_partition():
-    memories = MagicMock()
-    memories.query_items.return_value = []
-    store = MemoryStore(containers=_containers(memories=memories))
-
-    store.get_memory_history("current", user_id="u1")
-
-    kwargs = memories.query_items.call_args.kwargs
-    assert kwargs.get("enable_cross_partition_query") is True
-    assert "c.thread_id = @thread_id" not in kwargs["query"]
-    assert "c.superseded_by IN (@sid0)" in kwargs["query"]
+    assert [d["thread_id"] for d in history] == ["t2", "t3"]
+    for call in memories.query_items.call_args_list:
+        assert call.kwargs["partition_key"] == ["default", "u1"]
+        assert "enable_cross_partition_query" not in call.kwargs
+        assert "c.thread_id" not in call.kwargs["query"].split(" WHERE ", 1)[1]
+        assert "c.superseded_by IN (@sid0)" in call.kwargs["query"]
 
 
 def test_missing_memory_id_raises():

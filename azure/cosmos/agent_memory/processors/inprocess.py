@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+from .._partitioning import DEFAULT_TENANT_ID
 from .base import ProcessThreadResult, UserSummaryResult
 
 
@@ -13,7 +14,8 @@ class InProcessProcessor:
 
     This is the default backend. Wraps an existing
     :class:`azure.cosmos.agent_memory.services.pipeline.PipelineService` instance,
-    or constructs one from the supplied container / LLM / embeddings clients.
+    or constructs one from the supplied container / LLM / embeddings clients,
+    bound to ``tenant_id`` (``"default"`` when not given).
     """
 
     def __init__(
@@ -25,6 +27,7 @@ class InProcessProcessor:
         summaries_container: Any = None,
         chat_client: Any = None,
         embeddings_client: Any = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> None:
         if pipeline is None:
             if (
@@ -51,8 +54,11 @@ class InProcessProcessor:
             store = MemoryStore(
                 containers=containers,
                 embeddings_client=embeddings_client,
+                tenant_id=tenant_id,
             )
-            pipeline = PipelineService(store, chat_client, embeddings_client, containers=containers)
+            pipeline = PipelineService(
+                store, chat_client, embeddings_client, containers=containers, tenant_id=tenant_id
+            )
 
         self._pipeline = pipeline
 

@@ -303,3 +303,51 @@ def test_build_episode_docs_drops_whitespace_only_summary() -> None:
     docs = service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
 
     assert docs == []
+
+
+def test_extract_episodes_reads_and_writes_only_inside_its_tenant(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    ours = [{**_turn(1), "tenant_id": "acme"}, {**_turn(2), "tenant_id": "acme"}]
+    theirs = {**_turn(3), "tenant_id": "other", "content": "Another tenant's private plan."}
+    memories, turns, chat = _TrackingStore([]), _Store([*ours, theirs]), _SyncChat([{"episodes": [_episode()]}])
+    service = PipelineService(
+        memories,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories, turns_store=turns),
+        tenant_id="acme",
+    )
+
+    assert service.extract_episodes("u1", "t1", flush=True) == {"episodes": 1}
+
+    assert "private plan" not in str(chat.messages)
+    assert turns.queries, "the open segment was read"
+    for sql, params, partition_key in turns.queries:
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id AND c.thread_id = @thread_id" in sql
+        assert (params["@tenant_id"], params["@user_id"], params["@thread_id"]) == ("acme", "u1", "t1")
+        assert partition_key == ["acme", "u1"]
+    assert memories.reads and all(partition_key == ["acme", "u1"] for _, partition_key in memories.reads)
+    assert {doc["type"] for doc in memories.docs} == {"episodic", "episode_cursor"}
+    assert {doc["tenant_id"] for doc in memories.docs} == {"acme"}, "the episode and the watermark carry the tenant"
+    [cursor] = [doc for doc in memories.docs if doc["type"] == "episode_cursor"]
+    assert (cursor["id"], cursor["user_id"], cursor["thread_id"]) == ("episode_cursor_u1_t1", "u1", "t1")
+
+
+def test_the_same_turns_in_two_threads_make_episodes_and_watermarks_with_different_ids(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    memories = _IdUniqueStore([])
+    turns = _Store([_turn(1), _turn(2), {**_turn(1), "thread_id": "t2"}, {**_turn(2), "thread_id": "t2"}])
+    service = PipelineService(
+        memories,
+        _SyncChat([{"episodes": [_episode()]}, {"episodes": [_episode()]}]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories, turns_store=turns),
+    )
+
+    assert service.extract_episodes("u1", "t1", flush=True) == {"episodes": 1}
+    assert service.extract_episodes("u1", "t2", flush=True) == {"episodes": 1}
+
+    episodes = [doc for doc in memories.docs if doc["type"] == "episodic"]
+    cursors = [doc for doc in memories.docs if doc["type"] == "episode_cursor"]
+    assert {doc["thread_id"] for doc in episodes} == {"t1", "t2"} and len({doc["id"] for doc in episodes}) == 2
+    assert {doc["id"] for doc in cursors} == {"episode_cursor_u1_t1", "episode_cursor_u1_t2"}

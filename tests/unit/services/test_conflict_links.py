@@ -2,13 +2,14 @@
 
 The duplicate check labels how each new fact relates to its nearest neighbours; ``update`` (the same attribute with a
 different value at a later time) and ``inconsistent`` (the two cannot both be true) name a conflict. A pass that finds
-one keeps both facts active and writes one small link document for the pair, in the user's ``__conflicts__``
-partition, from the verdicts it already has: no model call is added.
+one keeps both facts active and writes one small link document for the pair, in the owner's partition (marked with
+the thread id ``__conflicts__``), from the verdicts it already has: no model call is added.
 
 ``reconcile_memories`` and ``consolidate_memories`` run for real here, with the real memory store and prompt
 templates, against a fake memories container that answers the passes' queries the way Cosmos DB does (it applies every
 filter, the ``ORDER BY`` and the ``TOP``, keeps one ETag per record, rejects a conditional write whose ETag is stale,
-and finds a record only under its own partition) and a scripted chat model that reads each rendered prompt. A
+refuses a query that does not name one owner's partition, and finds a record only under its own ``[tenant_id,
+user_id]`` partition) and a scripted chat model that reads each rendered prompt. A
 predicate the fake does not understand, or a prompt the test did not plan for, fails the test.
 
 Covers:
@@ -50,6 +51,7 @@ from azure.cosmos.agent_memory.services.pipeline import PipelineService
 from azure.cosmos.agent_memory.store import MemoryStore
 
 USER = "u1"
+TENANT = "acme"
 CURSOR_ID = "dedup_cursor_u1_fact"
 
 RESULT_KEYS = {
@@ -143,12 +145,17 @@ def _ordered(rows: list[dict[str, Any]], order: str | None, params: dict[str, An
 
 
 class Account:
-    """The memories container as Cosmos DB serves the passes: one partition per ``[user_id, thread_id]``."""
+    """The memories container as Cosmos DB serves the passes: one partition per ``[tenant_id, user_id]``, which holds
+    the records of every thread of that owner. A query must name the partition it reads."""
 
     def __init__(self, docs: Iterable[dict[str, Any]] = ()) -> None:
         self._docs: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._writes = itertools.count(1000)
         self.queries: list[str] = []
+        # What each query asked: its text, its parameters and the partition it named.
+        self.requests: list[tuple[str, dict[str, Any], Any]] = []
+        # The partition of each point read.
+        self.reads: list[Any] = []
         # The errors the next writes of link documents raise, one each.
         self.link_write_errors: list[Exception] = []
         for doc in docs:
@@ -160,17 +167,28 @@ class Account:
         stored = {key: value for key, value in doc.items() if not key.startswith("_")}
         number = next(self._writes)
         stored["_etag"], stored["_ts"] = f'"{number}"', number
-        self._docs[(stored["user_id"], stored["thread_id"], stored["id"])] = stored
+        self._docs[(stored["tenant_id"], stored["user_id"], stored["id"])] = stored
         return copy.deepcopy(stored)
 
-    def get(self, record_id: str) -> dict[str, Any] | None:
-        return next((copy.deepcopy(doc) for doc in self._docs.values() if doc["id"] == record_id), None)
+    def get(self, record_id: str, tenant_id: str = TENANT) -> dict[str, Any] | None:
+        return next(
+            (
+                copy.deepcopy(doc)
+                for doc in self._docs.values()
+                if doc["id"] == record_id and doc["tenant_id"] == tenant_id
+            ),
+            None,
+        )
 
     def delete(self, record_id: str) -> None:
         self._docs = {key: doc for key, doc in self._docs.items() if doc["id"] != record_id}
 
     def active_ids(self) -> set[str]:
-        return {doc["id"] for doc in self._docs.values() if doc["type"] == "fact" and doc.get("superseded_by") is None}
+        return {
+            doc["id"]
+            for doc in self._docs.values()
+            if doc["tenant_id"] == TENANT and doc["type"] == "fact" and doc.get("superseded_by") is None
+        }
 
     def retirements(self) -> dict[str, tuple[str, str]]:
         """Each retired fact's ID with who it was retired into and why."""
@@ -196,16 +214,16 @@ class Account:
         partition_key: Any = None,
         enable_cross_partition_query: bool = False,
     ) -> Iterator[dict[str, Any]]:
-        if partition_key is None and not enable_cross_partition_query:
-            raise CosmosHttpResponseError(status_code=400, message="Cross partition query is required but disabled.")
+        if partition_key is None or enable_cross_partition_query:
+            raise AssertionError("every query of the passes reads the partition of one owner")
         self.queries.append(query)
         match = _SELECT.fullmatch(query)
         assert match, f"the fake container cannot parse {query!r}"
         params = {parameter["name"]: parameter["value"] for parameter in parameters or []}
+        self.requests.append((query, params, list(partition_key)))
         predicates = _conjuncts(match["where"])
         rows = [doc for doc in self._docs.values() if all(_holds(doc, predicate, params) for predicate in predicates)]
-        if partition_key is not None:
-            rows = [doc for doc in rows if [doc["user_id"], doc["thread_id"]] == list(partition_key)]
+        rows = [doc for doc in rows if [doc["tenant_id"], doc["user_id"]] == list(partition_key)]
         rows = _ordered(rows, match["order"], params)[: int(match["top"] or len(rows))]
         if match["cols"] == "*":
             return iter(copy.deepcopy(rows))
@@ -213,13 +231,14 @@ class Account:
         return iter([{column: doc.get(column) for column in columns} for doc in rows])
 
     def read_item(self, item: str, partition_key: Any) -> dict[str, Any]:
+        self.reads.append(list(partition_key))
         doc = self._docs.get((partition_key[0], partition_key[1], item))
         if doc is None:
             raise CosmosResourceNotFoundError(status_code=404, message="Entity with the specified id does not exist.")
         return copy.deepcopy(doc)
 
     def create_item(self, body: dict[str, Any]) -> dict[str, Any]:
-        if (body["user_id"], body["thread_id"], body["id"]) in self._docs:
+        if (body["tenant_id"], body["user_id"], body["id"]) in self._docs:
             raise CosmosResourceExistsError(status_code=409, message="Entity with the specified id already exists.")
         return self.put(body)
 
@@ -232,7 +251,7 @@ class Account:
         self, item: str, body: dict[str, Any], *, etag: str | None = None, match_condition: Any = None, **_: Any
     ) -> dict[str, Any]:
         assert (etag is None) == (match_condition is None), "a conditional write names the ETag and how to match it"
-        current = self._docs.get((body["user_id"], body["thread_id"], item))
+        current = self._docs.get((body["tenant_id"], body["user_id"], item))
         if current is None:
             raise CosmosResourceNotFoundError(status_code=404, message="Entity with the specified id does not exist.")
         if match_condition == MatchConditions.IfNotModified and etag != current["_etag"]:
@@ -346,10 +365,12 @@ def fact(
     *,
     thread_id: str = "t1",
     agent: bool = False,
+    tenant_id: str = TENANT,
     **extra: Any,
 ) -> dict[str, Any]:
     return {
         "id": fid,
+        "tenant_id": tenant_id,
         "user_id": USER,
         "thread_id": thread_id,
         "type": "fact",
@@ -370,11 +391,11 @@ def service_over(account: Any, chat: Any) -> PipelineService:
     """The real pipeline and memory store over ``account``, with ``chat`` as the model."""
     embeddings = Embeddings(VECTORS)
     containers = {ContainerKey.MEMORIES: account, ContainerKey.TURNS: MagicMock(), ContainerKey.SUMMARIES: MagicMock()}
-    store = MemoryStore(containers=containers, embeddings_client=embeddings)
-    return PipelineService(store, chat, embeddings, containers=containers)
+    store = MemoryStore(containers=containers, embeddings_client=embeddings, tenant_id=TENANT)
+    return PipelineService(store, chat, embeddings, containers=containers, tenant_id=TENANT)
 
 
-# The two facts of a conflict: in different threads, so in different partitions.
+# The two facts of a conflict: said in different threads, which does not matter, they are the owner's.
 def conflicting_facts(older: str, newer: str) -> list[dict[str, Any]]:
     return [
         fact("f1", older, V_A, "2026-03-01T10:00:00Z", thread_id="t1"),
@@ -421,6 +442,7 @@ class TestAConflictIsLinkedNotRetired:
         assert link_fields(link) == {
             "id": link["id"],
             "type": "conflict_link",
+            "tenant_id": TENANT,
             "user_id": USER,
             "thread_id": "__conflicts__",
             "first": "f1",
@@ -428,9 +450,7 @@ class TestAConflictIsLinkedNotRetired:
             "kind": kind,
         }
         assert link["id"].startswith("conflict_") and link["created_at"]
-        assert account.read_item(link["id"], [USER, "__conflicts__"])["id"] == link["id"], (
-            "it is in the user's partition"
-        )
+        assert account.read_item(link["id"], [TENANT, USER])["id"] == link["id"], "it is in the owner's partition"
         assert not {"content", "text"} & set(link), "a link names the facts and holds none of their text"
         assert (result["conflicts"], result["checked"], result["compared"], result["kept"]) == (1, 2, 1, 2)
         assert (result["merged"], result["combined"], result["synthesized"]) == (0, 0, 0)
@@ -639,3 +659,57 @@ class TestTheNoOpTypesReportNoConflicts:
         assert result["conflicts"] == 0 and sum(result.values()) == 0
         assert account.queries == [] and account.links() == [] and chat.calls == []
         assert account.get("f1") == before
+
+
+# ---------------------------------------------------------------------------
+# A pass stays inside its tenant
+# ---------------------------------------------------------------------------
+class TestAPassStaysInsideItsTenant:
+    def test_every_query_and_point_read_names_the_tenant_and_the_owners_partition(self):
+        account, _, service = a_conflict("update")
+
+        service.reconcile_memories(USER)
+
+        assert len(account.requests) >= 2, "the seeds and the neighbours were read"
+        for sql, params, partition in account.requests:
+            assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+            assert (params["@tenant_id"], params["@user_id"], partition) == (TENANT, USER, [TENANT, USER])
+        assert account.reads and all(key == [TENANT, USER] for key in account.reads), "the cursor is read there too"
+
+    def test_everything_a_pass_writes_carries_the_tenant(self):
+        account, _, service = a_conflict("update")
+
+        service.reconcile_memories(USER)
+
+        assert account.links() and account.get(CURSOR_ID)
+        assert {doc["tenant_id"] for doc in account._docs.values()} == {TENANT}, "the link and the cursor included"
+
+    def test_a_combined_fact_carries_the_tenant_and_is_written_with_it(self):
+        account, chat = Account([fact("old", OLD_FLIGHT, V_OLD, "2026-03-01T10:00:00Z", thread_id="t0")]), flight_chat()
+        service = service_over(account, chat)
+        account.put(fact("g", GATE, V_A, "2026-05-01T10:00:00Z", thread_id="t1"))
+        account.put(fact("l", LEAVES, V_LEAVES, "2026-05-01T10:05:00Z", thread_id="t2"))
+
+        service.reconcile_memories(USER)
+
+        assert account.combined()["tenant_id"] == TENANT
+        assert {doc["tenant_id"] for doc in account._docs.values()} == {TENANT}
+        assert all(key == [TENANT, USER] for key in account.reads), "the members were read back there"
+
+    def test_a_fact_of_the_same_user_in_another_tenant_is_neither_checked_nor_linked_nor_retired(self):
+        older, newer = CONFLICTS["update"]
+        # The same user id in another tenant has already said what the newer fact says: a duplicate out of reach.
+        theirs = fact("f3", newer, V_B, "2026-04-02T10:00:00Z", tenant_id="other")
+        account = Account([*conflicting_facts(older, newer), theirs])
+        before = account.get("f3", "other")
+        service = service_over(account, Chat(between({(older, newer): "update", (newer, newer): "same_claim"})))
+
+        result = service.reconcile_memories(USER)
+
+        assert (result["checked"], result["compared"], result["conflicts"], result["merged"]) == (2, 1, 1, 0)
+        assert account.retirements() == {}
+        assert account.get("f3", "other") == before, "it was not rewritten"
+        [link] = account.links()
+        assert (link["tenant_id"], link["first"], link["later"]) == (TENANT, "f1", "f2")
+        assert account.get(CURSOR_ID, "other") is None, "the other tenant has no cursor of ours"
+        assert account.get(CURSOR_ID)["tenant_id"] == TENANT

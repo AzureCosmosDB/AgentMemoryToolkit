@@ -80,6 +80,10 @@ resource database 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-11-15
 }
 
 // --- Containers -----------------------------------------------------------
+//
+// memories, turns, summaries and counter share one hierarchical partition key, /tenant_id then /user_id (the SDK's
+// create_memory_store() uses the same): all of one owner's records in a tenant, whether the owner is a user or an
+// agent, live in one logical partition, and thread_id is a plain field. A container's key cannot be changed later.
 
 resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
   parent: database
@@ -92,8 +96,8 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
         kind: 'MultiHash'
         version: 2
         paths: [
+          '/tenant_id'
           '/user_id'
-          '/thread_id'
         ]
       }
       indexingPolicy: {
@@ -161,8 +165,8 @@ resource memoriesTurnsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
         kind: 'MultiHash'
         version: 2
         paths: [
+          '/tenant_id'
           '/user_id'
-          '/thread_id'
         ]
       }
       indexingPolicy: {
@@ -233,8 +237,8 @@ resource memoriesSummariesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDa
         kind: 'MultiHash'
         version: 2
         paths: [
+          '/tenant_id'
           '/user_id'
-          '/thread_id'
         ]
       }
       indexingPolicy: {
@@ -258,6 +262,10 @@ resource memoriesSummariesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDa
         ]
         compositeIndexes: [
           [
+            {
+              path: '/tenant_id'
+              order: 'ascending'
+            }
             {
               path: '/user_id'
               order: 'ascending'
@@ -335,8 +343,8 @@ resource counterContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/co
         kind: 'MultiHash'
         version: 2
         paths: [
+          '/tenant_id'
           '/user_id'
-          '/thread_id'
         ]
       }
       // 90 days: every counter document expires this long after its last update

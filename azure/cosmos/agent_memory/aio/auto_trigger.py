@@ -46,6 +46,7 @@ def _should_trigger(processor: Any, thresholds: Any) -> bool:
 async def maybe_trigger_steps(
     processor: Any,
     counter_container: Any,
+    tenant_id: str,
     turn_counts: dict[tuple[str, str], int],
     *,
     thresholds: Any = default_thresholds,
@@ -68,6 +69,7 @@ async def maybe_trigger_steps(
     user_batch_counts = await _trigger_thread_steps(
         processor,
         counter_container,
+        tenant_id,
         turn_counts,
         n_facts=n_facts,
         n_summary=n_summary,
@@ -75,12 +77,13 @@ async def maybe_trigger_steps(
         n_dedup_turns=n_dedup_turns,
         thresholds=thresholds,
     )
-    await _trigger_user_steps(processor, counter_container, user_batch_counts, n_user=n_user)
+    await _trigger_user_steps(processor, counter_container, tenant_id, user_batch_counts, n_user=n_user)
 
 
 async def _trigger_thread_steps(
     processor: AsyncInProcessProcessor,
     counter_container: Any,
+    tenant_id: str,
     turn_counts: dict[tuple[str, str], int],
     *,
     n_facts: int,
@@ -98,6 +101,7 @@ async def _trigger_thread_steps(
         try:
             old_count, new_count = await _counters.increment_counter_async(
                 counter_container,
+                tenant_id,
                 counter_id,
                 user_id,
                 thread_id,
@@ -110,6 +114,7 @@ async def _trigger_thread_steps(
         await _fire_thread_steps(
             processor,
             counter_container,
+            tenant_id,
             counter_id,
             user_id,
             thread_id,
@@ -126,6 +131,7 @@ async def _trigger_thread_steps(
 async def _fire_thread_steps(
     processor: AsyncInProcessProcessor,
     counter_container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
     thread_id: str,
@@ -154,7 +160,7 @@ async def _fire_thread_steps(
                 "Async auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, error
             )
             await _counters.stamp_failure_async(
-                counter_container, counter_id, user_id, thread_id, f"process_extract_memories: {error}"
+                counter_container, tenant_id, counter_id, user_id, f"process_extract_memories: {error}"
             )
     calls = (
         (
@@ -190,12 +196,13 @@ async def _fire_thread_steps(
         except Exception as exc:
             error = describe_exception(exc)
             logger.warning("Async auto-trigger %s failed for %s/%s: %s", label, user_id, thread_id, error)
-            await _counters.stamp_failure_async(counter_container, counter_id, user_id, thread_id, f"{label}: {error}")
+            await _counters.stamp_failure_async(counter_container, tenant_id, counter_id, user_id, f"{label}: {error}")
 
 
 async def _trigger_user_steps(
     processor: AsyncInProcessProcessor,
     counter_container: Any,
+    tenant_id: str,
     user_batch_counts: dict[str, int],
     *,
     n_user: int,
@@ -207,6 +214,7 @@ async def _trigger_user_steps(
         try:
             old_count, new_count = await _counters.increment_counter_async(
                 counter_container,
+                tenant_id,
                 counter_id,
                 user_id,
                 _counters.USER_COUNTER_THREAD_ID,
@@ -225,9 +233,9 @@ async def _trigger_user_steps(
             logger.warning("Async auto-trigger process_user_summary failed for %s: %s", user_id, error)
             await _counters.stamp_failure_async(
                 counter_container,
+                tenant_id,
                 counter_id,
                 user_id,
-                _counters.USER_COUNTER_THREAD_ID,
                 f"process_user_summary: {error}",
             )
 

@@ -136,9 +136,9 @@ def test_the_scan_flags_an_exception_taken_from_a_task() -> None:
 @pytest.mark.parametrize(
     "statement",
     [
-        '_counters.stamp_failure_sync(container, "id", "u1", "t1", f"step: {exc!r}")',
-        'await _counters.stamp_failure_async(container, "id", "u1", "t1", f"step: {exc}")',
-        'stamp_failure_sync(container, "id", "u1", "t1", str(exc))',
+        '_counters.stamp_failure_sync(container, "acme", "id", "u1", f"step: {exc!r}")',
+        'await _counters.stamp_failure_async(container, "acme", "id", "u1", f"step: {exc}")',
+        'stamp_failure_sync(container, "acme", "id", "u1", str(exc))',
     ],
 )
 def test_the_scan_flags_a_stored_failure_reason_that_holds_exception_text(statement: str) -> None:
@@ -146,7 +146,9 @@ def test_the_scan_flags_a_stored_failure_reason_that_holds_exception_text(statem
 
 
 def test_the_scan_allows_a_stored_failure_reason_that_describes_the_error() -> None:
-    statement = 'error = describe_exception(exc)\n    stamp_failure_sync(container, "id", "u1", "t1", f"step: {error}")'
+    statement = (
+        'error = describe_exception(exc)\n    stamp_failure_sync(container, "acme", "id", "u1", f"step: {error}")'
+    )
 
     assert _exception_text_in_logs(_in_handler(statement), "sample.py") == []
 

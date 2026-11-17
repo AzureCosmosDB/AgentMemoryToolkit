@@ -35,6 +35,7 @@ bp = df.Blueprint()
 @bp.orchestration_trigger(context_name="context")
 def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     force = bool(payload.get("force", False))
 
@@ -43,7 +44,7 @@ def SynthesizeProceduralOrchestrator(context: df.DurableOrchestrationContext):
     result = yield context.call_activity_with_retry(
         "sp_SynthesizeProcedural",
         retry,
-        {"user_id": user_id, "force": force},
+        {"tenant_id": tenant_id, "user_id": user_id, "force": force},
     )
 
     return result
@@ -60,9 +61,10 @@ def sp_SynthesizeProcedural(payload: dict) -> dict:
     # One activity: the pass moves its cursor after each batch of sources and stops
     # starting model calls at the deadline, so a long backlog spreads over later runs
     # instead of outrunning the function timeout.
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     force = bool(payload.get("force", False))
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(tenant_id)
     deadline = time.monotonic() + config.get_activity_time_budget_seconds()
     result = pipeline.synthesize_procedural(user_id=user_id, force=force, deadline=deadline) or {}
     slim = {
@@ -71,7 +73,8 @@ def sp_SynthesizeProcedural(payload: dict) -> dict:
         "facts_retired": int(result.get("facts_retired") or 0),
     }
     logger.info(
-        "SynthesizeProcedural user=%s status=%s procedures_created=%s facts_retired=%s",
+        "SynthesizeProcedural tenant=%s user=%s status=%s procedures_created=%s facts_retired=%s",
+        tenant_id,
         user_id,
         slim["status"],
         slim["procedures_created"],

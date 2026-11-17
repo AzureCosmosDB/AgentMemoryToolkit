@@ -28,6 +28,8 @@ from azure.cosmos.agent_memory.services._conflicts import (
 )
 from azure.cosmos.agent_memory.services._dedup import ACTIVE_FILTER, Verdict
 
+TENANT = "acme"
+
 
 def fact(fact_id: str, created_at: str, *, agent: bool = False) -> dict[str, Any]:
     tags = ["sys:fact", "sys:agent-fact"] if agent else ["sys:fact"]
@@ -107,11 +109,12 @@ class TestTheLinkDocument:
     def test_it_names_the_facts_and_the_kind_and_holds_no_text(self) -> None:
         now = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
 
-        body = conflict_link_body("u1", ConflictPair("a", "b", "inconsistent"), now=now)
+        body = conflict_link_body(TENANT, "u1", ConflictPair("a", "b", "inconsistent"), now=now)
 
         assert body == {
             "id": conflict_link_id("u1", ConflictPair("a", "b", "inconsistent")),
             "type": CONFLICT_LINK_TYPE,
+            "tenant_id": TENANT,
             "user_id": "u1",
             "thread_id": CONFLICT_LINK_THREAD_ID,
             "first": "a",
@@ -120,20 +123,27 @@ class TestTheLinkDocument:
             "created_at": "2026-05-01T12:00:00+00:00",
         }
 
-    def test_the_queries_are_scoped_to_the_user_and_the_fact_query_reads_retired_facts_too(self) -> None:
-        query, parameters = links_query("u1", ["a", "b"])
-        assert "c.user_id = @user_id" in query and "c.type = @type" in query
+    def test_the_queries_are_scoped_to_the_tenant_and_the_owner_and_the_fact_query_reads_retired_facts_too(
+        self,
+    ) -> None:
+        query, parameters = links_query(TENANT, "u1", ["a", "b"])
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in query and "c.type = @type" in query
         assert {p["name"]: p["value"] for p in parameters} == {
+            "@tenant_id": TENANT,
             "@user_id": "u1",
             "@type": CONFLICT_LINK_TYPE,
             "@ids": ["a", "b"],
         }
 
-        query, parameters = facts_query("u1", ["a", "b"])
-        assert "c.type = 'fact'" in query and "c.user_id = @user_id" in query
+        query, parameters = facts_query(TENANT, "u1", ["a", "b"])
+        assert "c.type = 'fact'" in query and "c.tenant_id = @tenant_id AND c.user_id = @user_id" in query
         # A retired fact is read too: where it went (superseded_by) is how a conflict follows it.
         assert "c.superseded_by" in query and ACTIVE_FILTER not in query
-        assert {p["name"]: p["value"] for p in parameters} == {"@user_id": "u1", "@ids": ["a", "b"]}
+        assert {p["name"]: p["value"] for p in parameters} == {
+            "@tenant_id": TENANT,
+            "@user_id": "u1",
+            "@ids": ["a", "b"],
+        }
 
     def test_the_endpoints_of_the_links_are_listed_once(self) -> None:
         links = [{"first": "a", "later": "b"}, {"first": "b", "later": "c"}, {"first": None, "later": "a"}]
@@ -327,7 +337,9 @@ class Recorder:
 
     def __call__(self, sql: str, parameters: list[dict[str, Any]], **kwargs: Any) -> list[dict[str, Any]]:
         values = {p["name"]: p["value"] for p in parameters}
-        self.calls.append({"sql": sql, "user": values["@user_id"], "ids": values["@ids"], **kwargs})
+        self.calls.append(
+            {"sql": sql, "tenant": values["@tenant_id"], "user": values["@user_id"], "ids": values["@ids"], **kwargs}
+        )
         if self.fail:
             raise RuntimeError("secret-looking failure text")
         asked = set(values["@ids"])
@@ -338,7 +350,7 @@ class Recorder:
     @property
     def fact_reads(self) -> list[list[str]]:
         """The IDs each read of facts asked for."""
-        return [call["ids"] for call in self.calls if call.get("cross_partition")]
+        return [call["ids"] for call in self.calls if "c.type = 'fact'" in call["sql"]]
 
 
 STORED_LINKS = [{"first": "a", "later": "b", "kind": "update"}]
@@ -359,27 +371,31 @@ class TestLookingUpTheConflictsOfSearchResults:
     def test_a_fact_is_returned_with_the_active_facts_it_conflicts_with(self) -> None:
         query = Recorder(STORED_LINKS, STORED_FACTS)
 
-        shown = with_conflicts([result("a"), result("z")], query)
+        shown = with_conflicts([result("a"), result("z")], query, TENANT)
 
         assert shown[0]["conflicts_with"] == [
             {"id": "b", "content": "text of b", "created_at": "2026-02-01T00:00:00Z", "kind": "update"}
         ]
         assert "conflicts_with" not in shown[1]
 
-    def test_the_links_are_read_from_the_users_conflict_partition_and_the_facts_across_partitions(self) -> None:
+    def test_the_links_and_the_facts_are_both_read_in_the_owners_partition(self) -> None:
         query = Recorder(STORED_LINKS, STORED_FACTS)
 
-        with_conflicts([result("a")], query)
+        with_conflicts([result("a")], query, TENANT)
 
         links_call, facts_call = query.calls
-        assert links_call["partition_key"] == ["u1", CONFLICT_LINK_THREAD_ID] and links_call["ids"] == ["a"]
-        assert facts_call["cross_partition"] is True and facts_call["ids"] == ["a", "b"]
+        assert links_call["ids"] == ["a"] and facts_call["ids"] == ["a", "b"]
+        for call in query.calls:
+            assert (call["tenant"], call["user"]) == (TENANT, "u1")
+            assert call["partition_key"] == [TENANT, "u1"]
+            assert "cross_partition" not in call
+            assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call["sql"]
 
     def test_nothing_is_queried_for_results_that_are_not_facts_or_have_no_user(self) -> None:
         query = Recorder(STORED_LINKS, STORED_FACTS)
         docs = [result("t1", kind="turn"), result("e1", kind="episodic"), {"id": "f1", "type": "fact"}]
 
-        assert with_conflicts(docs, query) == docs
+        assert with_conflicts(docs, query, TENANT) == docs
         assert query.calls == []
 
     def test_a_search_with_no_links_costs_one_query(self) -> None:
@@ -387,30 +403,32 @@ class TestLookingUpTheConflictsOfSearchResults:
 
         docs = [result("a")]
 
-        assert with_conflicts(docs, query) == docs
+        assert with_conflicts(docs, query, TENANT) == docs
         assert len(query.calls) == 1
 
     def test_a_search_with_links_to_active_facts_costs_two_queries(self) -> None:
         query = Recorder(STORED_LINKS, STORED_FACTS)
 
-        with_conflicts([result("a")], query)
+        with_conflicts([result("a")], query, TENANT)
 
         assert len(query.calls) == 2
 
-    def test_each_user_is_looked_up_on_their_own(self) -> None:
+    def test_each_user_is_looked_up_on_their_own_in_their_own_partition(self) -> None:
         query = Recorder(STORED_LINKS, STORED_FACTS)
 
-        with_conflicts([result("a", "u1"), result("b", "u2")], query)
+        with_conflicts([result("a", "u1"), result("b", "u2")], query, TENANT)
 
-        assert [(call["user"], call["ids"]) for call in query.calls if "partition_key" in call] == [
-            ("u1", ["a"]),
-            ("u2", ["b"]),
+        assert [
+            (call["user"], call["ids"], call["partition_key"]) for call in query.calls if "@type" in call["sql"]
+        ] == [
+            ("u1", ["a"], [TENANT, "u1"]),
+            ("u2", ["b"], [TENANT, "u2"]),
         ]
 
     def test_a_linked_fact_retired_since_is_followed_to_the_fact_that_took_its_place(self) -> None:
         query = Recorder([{"first": "a", "later": "m", "kind": "update"}], RETIRED_SINCE)
 
-        [shown] = with_conflicts([result("a")], query)
+        [shown] = with_conflicts([result("a")], query, TENANT)
 
         assert shown["conflicts_with"] == [
             {"id": "c", "content": "text of c", "created_at": "2026-02-01T00:00:00Z", "kind": "update"}
@@ -420,7 +438,7 @@ class TestLookingUpTheConflictsOfSearchResults:
     def test_the_fact_that_took_its_place_shows_the_conflict_of_what_it_absorbed(self) -> None:
         query = Recorder([{"first": "a", "later": "m", "kind": "inconsistent"}], RETIRED_SINCE)
 
-        [shown] = with_conflicts([result("c", merged_from=["m"])], query)
+        [shown] = with_conflicts([result("c", merged_from=["m"])], query, TENANT)
 
         assert query.calls[0]["ids"] == ["c", "m"]
         assert shown["conflicts_with"] == [
@@ -436,18 +454,20 @@ class TestLookingUpTheConflictsOfSearchResults:
         query = Recorder([{"first": "m1", "later": "m2", "kind": "update"}], facts)
         docs = [result("c", merged_from=["m1", "m2"])]
 
-        assert with_conflicts(docs, query) == docs
+        assert with_conflicts(docs, query, TENANT) == docs
 
     def test_a_linked_fact_retired_into_one_that_is_gone_shows_no_conflict(self) -> None:
         facts = [row("a", "2026-01-01T00:00:00Z"), row("m", "2026-02-01T00:00:00Z", superseded_by="gone")]
         docs = [result("a")]
 
-        assert with_conflicts(docs, Recorder([{"first": "a", "later": "m", "kind": "update"}], facts)) == docs
+        assert with_conflicts(docs, Recorder([{"first": "a", "later": "m", "kind": "update"}], facts), TENANT) == docs
 
     def test_what_a_result_absorbed_is_looked_up_after_the_results_themselves_and_only_up_to_a_limit(self) -> None:
         query = Recorder([], [])
 
-        with_conflicts([result("c", merged_from=[f"m{i}" for i in range(MAX_LOOKUP_IDS * 2)]), result("d")], query)
+        with_conflicts(
+            [result("c", merged_from=[f"m{i}" for i in range(MAX_LOOKUP_IDS * 2)]), result("d")], query, TENANT
+        )
 
         ids = query.calls[0]["ids"]
         assert ids[:2] == ["c", "d"] and len(ids) == MAX_LOOKUP_IDS
@@ -461,7 +481,7 @@ class TestLookingUpTheConflictsOfSearchResults:
         query = Recorder([{"first": "a", "later": "m", "kind": "update"}], facts)
         docs = [result("a")]
 
-        assert with_conflicts(docs, query) == docs
+        assert with_conflicts(docs, query, TENANT) == docs
         assert len(query.calls) <= 2 + MAX_REDIRECT_HOPS
 
     def test_a_failed_lookup_returns_the_results_as_they_were_and_logs_no_text(
@@ -470,7 +490,7 @@ class TestLookingUpTheConflictsOfSearchResults:
         docs = [result("a")]
 
         with caplog.at_level(logging.WARNING):
-            shown = with_conflicts(docs, Recorder([], [], fail=True))
+            shown = with_conflicts(docs, Recorder([], [], fail=True), TENANT)
 
         assert shown == docs
         assert "secret-looking failure text" not in caplog.text
@@ -483,10 +503,12 @@ class TestLookingUpTheConflictsOfSearchResults:
         async def query(sql: str, parameters: list[dict[str, Any]], **kwargs: Any) -> list[dict[str, Any]]:
             return sync(sql, parameters, **kwargs)
 
-        shown = await awith_conflicts([result("a")], query)
+        shown = await awith_conflicts([result("a")], query, TENANT)
 
         assert [entry["id"] for entry in shown[0]["conflicts_with"]] == ["b"]
-        assert sync.calls[0]["partition_key"] == ["u1", CONFLICT_LINK_THREAD_ID]
+        for call in sync.calls:
+            assert (call["tenant"], call["user"], call["partition_key"]) == (TENANT, "u1", [TENANT, "u1"])
+            assert "cross_partition" not in call
 
     @pytest.mark.asyncio
     async def test_async_a_linked_fact_retired_since_is_followed_to_the_fact_that_took_its_place(self) -> None:
@@ -495,7 +517,7 @@ class TestLookingUpTheConflictsOfSearchResults:
         async def query(sql: str, parameters: list[dict[str, Any]], **kwargs: Any) -> list[dict[str, Any]]:
             return sync(sql, parameters, **kwargs)
 
-        [shown] = await awith_conflicts([result("a")], query)
+        [shown] = await awith_conflicts([result("a")], query, TENANT)
 
         assert [entry["id"] for entry in shown["conflicts_with"]] == ["c"]
         assert sync.fact_reads == [["a", "m"], ["c"]]
@@ -507,7 +529,7 @@ class TestLookingUpTheConflictsOfSearchResults:
         async def query(sql: str, parameters: list[dict[str, Any]], **kwargs: Any) -> list[dict[str, Any]]:
             return sync(sql, parameters, **kwargs)
 
-        [shown] = await awith_conflicts([result("c", merged_from=["m"])], query)
+        [shown] = await awith_conflicts([result("c", merged_from=["m"])], query, TENANT)
 
         assert [entry["id"] for entry in shown["conflicts_with"]] == ["a"]
         assert sync.calls[0]["ids"] == ["c", "m"]
@@ -526,7 +548,7 @@ class TestLookingUpTheConflictsOfSearchResults:
 
         docs = [result("a")]
 
-        assert await awith_conflicts(docs, query) == docs
+        assert await awith_conflicts(docs, query, TENANT) == docs
         assert len(sync.calls) <= 2 + MAX_REDIRECT_HOPS
 
     @pytest.mark.asyncio
@@ -536,4 +558,4 @@ class TestLookingUpTheConflictsOfSearchResults:
 
         docs = [result("a")]
 
-        assert await awith_conflicts(docs, query) == docs
+        assert await awith_conflicts(docs, query, TENANT) == docs

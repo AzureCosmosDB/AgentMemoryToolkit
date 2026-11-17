@@ -39,6 +39,7 @@ def ttl_client(
     cosmos_key,
     cosmos_database,
     cosmos_container,
+    integration_tenant_id,
 ):
     if not cosmos_endpoint:
         pytest.skip("COSMOS_DB_ENDPOINT not set")
@@ -48,6 +49,7 @@ def ttl_client(
         cosmos_database=cosmos_database,
         cosmos_container=cosmos_container,
         cosmos_turns_container=os.environ.get("COSMOS_DB_TURNS_CONTAINER") or None,
+        tenant_id=integration_tenant_id,
     )
 
 
@@ -76,11 +78,9 @@ def _find_memory(
     return None
 
 
-def _delete_if_present(
-    client: CosmosMemoryClient, memory_id: str, user_id: str, thread_id: str, memory_type: str
-) -> None:
+def _delete_if_present(client: CosmosMemoryClient, memory_id: str, user_id: str, memory_type: str) -> None:
     try:
-        client.delete_memory(memory_id=memory_id, user_id=user_id, thread_id=thread_id, memory_type=memory_type)
+        client.delete_memory(memory_id=memory_id, user_id=user_id, memory_type=memory_type)
     except Exception:
         pass
 
@@ -115,6 +115,6 @@ def test_turn_ttl_expires_while_episodic_persists(ttl_client: CosmosMemoryClient
         assert _find_memory(ttl_client, user_id, thread_id, episodic_id, ["episodic"]) is not None
     finally:
         if turn_id:
-            _delete_if_present(ttl_client, turn_id, user_id, thread_id, "turn")
+            _delete_if_present(ttl_client, turn_id, user_id, "turn")
         if episodic_id:
-            _delete_if_present(ttl_client, episodic_id, user_id, thread_id, "episodic")
+            _delete_if_present(ttl_client, episodic_id, user_id, "episodic")

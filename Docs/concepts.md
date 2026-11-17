@@ -10,15 +10,32 @@ Every memory uses the same base shape:
 
 | Field        | Description                                                                   |
 |--------------|-------------------------------------------------------------------------------|
-| `id`         | Unique identifier                                                             |
-| `user_id`    | User the memory belongs to                                                    |
-| `thread_id`  | Conversation thread                                                           |
+| `id`         | Identifier, unique per owner across all of the owner's threads                |
+| `tenant_id`  | Tenant the memory belongs to (`"default"` unless the client sets one)         |
+| `user_id`    | Owner of the memory: a user or an agent                                       |
+| `thread_id`  | Conversation thread; a plain field, not part of the partition key             |
 | `role`       | `user`, `agent`, `tool`, or `system`                                          |
 | `type`       | `turn`, `thread_summary`, `fact`, `episodic`, `procedural`, or `user_summary` |
 | `content`    | Main text payload                                                             |
 | `embedding`  | Vector used for semantic search                                               |
 | `metadata`   | Extra context (e.g. `tool_name`, `tool_call_id`, edit reasons)                |
 | `created_at` | ISO 8601 timestamp                                                            |
+
+---
+
+## Tenants and Owners
+
+Every record lives in the logical partition `[tenant_id, user_id]`: the `memories`, `memories_turns`, `memories_summaries` and `counter` containers use the hierarchical partition key `/tenant_id`, `/user_id`.
+
+- **`tenant_id`** is a name you choose for whose memories these are: an application, a customer or an environment. A client is bound to one tenant by its `tenant_id` constructor argument (default `"default"`), stamps it on every record it writes, and reads and writes only inside it. It is never a per-call argument and has no environment variable; the Function App uses the `tenant_id` stored on each record.
+- **`user_id`** is the owner of the memory: a user or an agent. It is a plain string, so keep the ids distinct (for example `agent:support-bot`). The same `user_id` in two tenants is two owners.
+- **`thread_id`** is a plain field, not part of the key. It filters reads and names the thread for thread operations, but everything one owner knows (turns, facts, episodes, procedures, summaries, counters) sits in one partition of its container. Sentinel thread ids such as `__user_summary__` and `__procedural__` are marker values on documents, not partitions.
+
+A record id is unique per owner across all of the owner's threads. A tenant id or an owner id is a non-empty string of at most 256 UTF-8 bytes without `/`, `\`, `?`, `#` or control characters, because ids appear in Cosmos DB document ids; anything else raises `ValidationError`. A query that names the owner reads one partition (a keyword search is the exception, see [Keyword search and partition scope](#keyword-search-and-partition-scope)); a read where `user_id` is optional and left out, such as `get_memories()`, covers every owner in the client's tenant, across partitions.
+
+Cosmos DB limits a logical partition to 20 GB of data and 10,000 RU/s, so the limits apply per owner. Keep any one owner, such as an agent shared by many users, well below them.
+
+A container's partition key cannot be changed in place. `create_memory_store()` creates the containers with this key, so a deployment whose containers have the earlier `[/user_id, /thread_id]` key must recreate `memories`, `memories_turns`, `memories_summaries` and `counter`, and `leases` with them so the change feed starts clean on the recreated turns container; existing data is not migrated. `create_memory_store()` refuses an existing container keyed otherwise with an error that names the container and its key, and `validate_topology()` makes the same check after `connect_cosmos()`: a container with the earlier key takes writes but reads back empty.
 
 ---
 
@@ -107,7 +124,7 @@ A procedure `applies` either `always` (nearly every interaction: response langua
 - When reviewing code for the user: Include a suggested fix with every review comment.
 ```
 
-**How procedures are learned.** `synthesize_procedural()` runs after each reconcile (when `PROCEDURAL_SYNTHESIS_AUTO` is true) or on demand with the in-process backend. It reads the user's active preference and requirement facts, facts with salience of at least 0.8, `directive` and `correction` facts, and episodes with lessons, written since its cursor (the `procedure_cursor` document under `[user_id, "__procedural__"]`). A run reads at most 50 facts and 50 episodes and shows them to the model 10 at a time, each batch with the user's nearest existing procedures, so the model adds a procedure, revises one in place or records new evidence for one instead of writing a paraphrase. The cursor moves after each batch, so a run that stops early resumes where it stopped, and a run with nothing new makes no model call. A retryable model error, or a transient embedding or Cosmos DB error while writing a procedure, ends the run without moving the cursor past that batch, so the next run retries it. A revision that drops a number or a negation is discarded unless it records the user's correction.
+**How procedures are learned.** `synthesize_procedural()` runs after each reconcile (when `PROCEDURAL_SYNTHESIS_AUTO` is true) or on demand with the in-process backend. It reads the user's active preference and requirement facts, facts with salience of at least 0.8, `directive` and `correction` facts, and episodes with lessons, written since its cursor (the `procedure_cursor` document under the sentinel thread id `__procedural__`). A run reads at most 50 facts and 50 episodes and shows them to the model 10 at a time, each batch with the user's nearest existing procedures, so the model adds a procedure, revises one in place or records new evidence for one instead of writing a paraphrase. The cursor moves after each batch, so a run that stops early resumes where it stopped, and a run with nothing new makes no model call. A retryable model error, or a transient embedding or Cosmos DB error while writing a procedure, ends the run without moving the cursor past that batch, so the next run retries it. A revision that drops a number or a negation is discarded unless it records the user's correction.
 
 **Retiring taught facts.** When an active situational procedure cites a user's `directive` or `correction` fact, the fact is retired into the procedure (`supersede_reason="procedure"`), so the rule is stored and retrieved once. A standing rule leaves its facts searchable, because it reaches the agent through `build_procedural_context()`. Only facts extracted with an `assertion` are retired.
 
@@ -186,7 +203,7 @@ Slots need `user_id` and are skipped when `memory_id` is set or when they would 
 
 ### Keyword search and partition scope
 
-A keyword (hybrid) query ranks with `FullTextScore`, which is ignored in a query the Python SDK sends with a partition key, because it skips query planning ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)), so every question would get the same fixed order. A search that has keywords therefore runs across partitions with `c.user_id` (and `c.thread_id`, when given) in the `WHERE` clause, which confines it to the same records, and sets `full_text_score_scope="Local"` so BM25 statistics come from the partition ranges the query targets. This applies to `search_cosmos`, `search_turns`, `search_summaries`, `search_episodic_memories` and `retrieve_procedures`; expect more RUs than a single-partition read on a large container. A query whose terms are all stopwords has no keywords and ranks by vector similarity alone; with both `user_id` and `thread_id` it still reads one partition, except a `search_cosmos` that searches episodic or procedural memories, which always runs across partitions (those memories match on the user alone, whatever the `thread_id`). `MemoryStore.query()` raises `ValidationError` for a `FullTextScore` query sent with a partition key.
+A keyword (hybrid) query ranks with `FullTextScore`, which is ignored in a query the Python SDK sends with a partition key, because it skips query planning ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)), so every question would get the same fixed order. A search that has keywords therefore runs across partitions with `c.tenant_id`, `c.user_id` (and `c.thread_id`, when given) in the `WHERE` clause, which confines it to the client's tenant and the same owner, and sets `full_text_score_scope="Local"` so BM25 statistics come from the partition ranges the query targets. This applies to `search_cosmos`, `search_turns`, `search_summaries`, `search_episodic_memories` and `retrieve_procedures`; expect more RUs than a single-partition read on a large container. A query whose terms are all stopwords has no keywords and ranks by vector similarity alone; with a `user_id` it reads one partition, the owner's, whatever the `thread_id`. A search without a `user_id` covers every owner in the client's tenant and always runs across partitions. `MemoryStore.query()` raises `ValidationError` for a `FullTextScore` query sent with a partition key.
 
 ---
 
@@ -299,7 +316,7 @@ Retired facts stay in the container with their `supersede_reason` (`duplicate`, 
 
 ### Deleting a memory
 
-`delete_memory()` removes one document. For a fact or procedure it first deletes the records retired into it (`supersede_reason` of `duplicate`, `combined` or `procedure`) and, transitively, anything retired into those, because they hold the same information as the memory they were folded into: what the user deleted is gone. The records are looked up across the user's partitions and deleted deepest first, each under its own `thread_id`, before the memory itself. The delete is sequential and best-effort: if one fails, the memory is kept and a retry resumes. Records retired for another reason (older records may carry `contradict` or `update`) are earlier versions, not copies, and stay. A conflict link holds only fact ids, no text, and is ignored once either fact is gone. Deleting a retired record deletes only that record, so to remove information delete the fact that is active now (the survivor or the combined fact). `delete_thread()` deletes only a thread's turns and summary.
+`delete_memory()` removes one document. For a fact or procedure it first deletes the records retired into it (`supersede_reason` of `duplicate`, `combined` or `procedure`) and, transitively, anything retired into those, because they hold the same information as the memory they were folded into: what the user deleted is gone. The records are looked up in the owner's partition and deleted deepest first, before the memory itself. The delete is sequential and best-effort: if one fails, the memory is kept and a retry resumes. Records retired for another reason (older records may carry `contradict` or `update`) are earlier versions, not copies, and stay. A conflict link holds only fact ids, no text, and is ignored once either fact is gone. Deleting a retired record deletes only that record, so to remove information delete the fact that is active now (the survivor or the combined fact). `delete_thread()` deletes only a thread's turns and summary.
 
 ### Exact duplicates at write time
 
@@ -339,29 +356,29 @@ memories_turns container
       ▼
 on_memory_change trigger
       │
-      ├── count turns per (user_id, thread_id)
+      ├── count turns per (tenant_id, user_id, thread_id)
       │   └── crosses threshold? ──► start thread_summary / extract_memories / extract_episodes
       │
-      └── count turns per user_id
+      └── count turns per (tenant_id, user_id)
           └── crosses threshold? ──► start user_summary
 ```
 
 ### How it works
 
 1. The change feed trigger watches the `memories_turns` container for new documents.
-2. Only documents with `type == "turn"` are counted.
+2. Only documents with `type == "turn"` are counted. The trigger reads `tenant_id` from each changed turn, next to `user_id` and `thread_id`, and skips a turn without a valid `tenant_id` with a warning.
 3. Documents in the dedicated `counter` container track how many turns have been seen per scope using ETag-based optimistic concurrency.
-4. When a counter crosses a configured threshold, the corresponding Durable Functions orchestration is started automatically.
+4. When a counter crosses a configured threshold, the corresponding Durable Functions orchestration is started automatically, in the tenant of the turns it counted. The Function App needs no tenant setting.
 
 ### Threshold settings
 
-| Setting                   | Scope                                                                           | Default |
-|---------------------------|---------------------------------------------------------------------------------|---------|
-| `THREAD_SUMMARY_EVERY_N`  | Per `(user_id, thread_id)`                                                      | `10`    |
-| `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)`                                                      | `2`     |
-| `DEDUP_EVERY_N`           | Per `(user_id, thread_id)`; reconcile every `FACT_EXTRACTION_EVERY_N × N` turns | `5`     |
-| `EPISODE_EVAL_EVERY_N`    | Per `(user_id, thread_id)`; checks for an episode boundary every N turns        | `4`     |
-| `USER_SUMMARY_EVERY_N`    | Per `user_id` (across all threads)                                              | `20`    |
+| Setting                   | Scope                                                                                      | Default |
+|---------------------------|--------------------------------------------------------------------------------------------|---------|
+| `THREAD_SUMMARY_EVERY_N`  | Per `(tenant_id, user_id, thread_id)`                                                      | `10`    |
+| `FACT_EXTRACTION_EVERY_N` | Per `(tenant_id, user_id, thread_id)`                                                      | `2`     |
+| `DEDUP_EVERY_N`           | Per `(tenant_id, user_id, thread_id)`; reconcile every `FACT_EXTRACTION_EVERY_N × N` turns | `5`     |
+| `EPISODE_EVAL_EVERY_N`    | Per `(tenant_id, user_id, thread_id)`; checks for an episode boundary every N turns        | `4`     |
+| `USER_SUMMARY_EVERY_N`    | Per `(tenant_id, user_id)` (across all threads)                                            | `20`    |
 
 These defaults are shared by both backends (`function_app/shared/config.py` imports the same constants from `azure.cosmos.agent_memory.thresholds`), so the InProcess and Durable processors fire on the same turn boundaries unless overridden. Set any value to `0` to disable that processing type. For example, setting `THREAD_SUMMARY_EVERY_N=5` generates a thread summary every 5 new turns in each thread.
 
@@ -373,10 +390,10 @@ A failed activity reports only `<code> (<ExcType>)` to Durable Functions, never 
 
 | Container            | Partition Key                           | Purpose                                                                                         |
 |----------------------|-----------------------------------------|-------------------------------------------------------------------------------------------------|
-| `memories`           | `/user_id`, `/thread_id` (hierarchical) | Durable derived memories (`fact`, `episodic`, `procedural`)                                     |
-| `memories_turns`     | `/user_id`, `/thread_id` (hierarchical) | Raw conversation turns (`turn`) - append-only, TTL-pruned                                       |
-| `memories_summaries` | `/user_id`, `/thread_id` (hierarchical) | Thread + user summaries (`thread_summary`, `user_summary`)                                      |
-| `counter`            | `/user_id`, `/thread_id` (hierarchical) | Message count tracking for automatic processing; 90-day default TTL when the toolkit creates it |
+| `memories`           | `/tenant_id`, `/user_id` (hierarchical) | Durable derived memories (`fact`, `episodic`, `procedural`)                                     |
+| `memories_turns`     | `/tenant_id`, `/user_id` (hierarchical) | Raw conversation turns (`turn`) - append-only, TTL-pruned                                       |
+| `memories_summaries` | `/tenant_id`, `/user_id` (hierarchical) | Thread + user summaries (`thread_summary`, `user_summary`)                                      |
+| `counter`            | `/tenant_id`, `/user_id` (hierarchical) | Message count tracking for automatic processing; 90-day default TTL when the toolkit creates it |
 | `leases`             | `/id`                                   | Change feed checkpointing container created by `create_memory_store()`                          |
 
 The 90-day TTL is the `counter` container's default, so it applies to every document in it - thread counters, user counters and the extraction watermark kept on a thread counter - and each expires 90 days after its last update. An existing `counter` container keeps its current TTL setting: `create_container_if_not_exists` does not change it. The `memories` container also holds the cursor documents that resume reconcile (`dedup_cursor`, under `__dedup__`), procedure learning (`procedure_cursor`, under `__procedural__`) and episode extraction (`episode_cursor`, one per thread), and the conflict links (`conflict_link`, under `__conflicts__`); they are not memories and `get_memories()` does not return them.
@@ -410,4 +427,4 @@ Both modes run the same pipeline code (`PipelineService`; the Function App's act
 
 Local storage is enough for CRUD testing. Cosmos DB is required for persistence, vector search, and the processing pipeline.
 
-Cosmos DB uses a hierarchical partition key (`user_id`, `thread_id`) for efficient queries scoped to a user or thread.
+Cosmos DB uses the hierarchical partition key (`tenant_id`, `user_id`), so a read that names the owner reads one partition ([Tenants and Owners](#tenants-and-owners)).

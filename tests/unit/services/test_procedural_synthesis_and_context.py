@@ -31,15 +31,18 @@ from azure.cosmos.agent_memory.services._procedures import (
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 from azure.cosmos.agent_memory.store import MemoryStore
 
-PROCEDURAL_PARTITION = ["u1", "__procedural__"]
+TENANT = "acme"
+OWNER_PARTITION = [TENANT, "u1"]
 
 
 def procedural_rows(docs: list[dict[str, Any]], sql: str, parameters: Any) -> list[dict[str, Any]]:
     """The rows the procedure pass and the procedural context read, as Cosmos DB would return them."""
     params = {p["name"]: p["value"] for p in (parameters or [])}
     rows = [dict(doc) for doc in docs]
-    if "@uid" in params:
-        rows = [row for row in rows if row.get("user_id") == params["@uid"]]
+    if "@tenant_id" in params:
+        rows = [row for row in rows if row.get("tenant_id") == params["@tenant_id"]]
+    if "@user_id" in params:
+        rows = [row for row in rows if row.get("user_id") == params["@user_id"]]
     memory_type = params.get("@type", params.get("@memory_type"))
     if memory_type is not None:
         rows = [row for row in rows if row.get("type") == memory_type]
@@ -79,31 +82,25 @@ def _is_behavioral(row: dict[str, Any], min_salience: float) -> bool:
 
 
 class Memories:
-    """The memories container as the procedure pass sees it: a query names the partition it reads (or opts in to
-    reading them all), and a conditional write must name the version it read."""
+    """The memories container as the procedure pass sees it: a query names the owner's partition, ``[tenant_id,
+    user_id]`` (all of an owner's records share it, whatever their thread), and a conditional write must name the
+    version it read. Every query is recorded."""
 
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self.docs = [dict(doc) for doc in docs]
+        self.queries: list[tuple[str, dict[str, Any], list[Any]]] = []
         self._versions = itertools.count(1)
 
     @staticmethod
     def _partition(doc: dict[str, Any]) -> list[Any]:
-        return [doc.get("user_id"), doc.get("thread_id")]
+        return [doc.get("tenant_id"), doc.get("user_id")]
 
-    def query_items(
-        self,
-        *,
-        query: str,
-        parameters: Any = None,
-        partition_key: Any = None,
-        enable_cross_partition_query: bool = False,
-    ) -> list[dict[str, Any]]:
-        if partition_key is None and not enable_cross_partition_query:
-            raise AssertionError("a query over every partition must say so")
+    def query_items(self, *, query: str, parameters: Any = None, partition_key: Any = None) -> list[dict[str, Any]]:
+        if partition_key is None:
+            raise AssertionError("a query must name the partition of one owner")
+        self.queries.append((query, {p["name"]: p["value"] for p in parameters or []}, list(partition_key)))
         rows = procedural_rows(self.docs, query, parameters)
-        if partition_key is not None:
-            rows = [row for row in rows if self._partition(row) == list(partition_key)]
-        return rows
+        return [row for row in rows if self._partition(row) == list(partition_key)]
 
     def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
         for doc in self.docs:
@@ -121,7 +118,7 @@ class Memories:
     def replace_item(self, *, item: str, body: dict[str, Any], etag: Any = None, match_condition: Any = None) -> dict:
         del match_condition
         for index, doc in enumerate(self.docs):
-            if doc.get("id") == item:
+            if doc.get("id") == item and self._partition(doc) == self._partition(body):
                 if etag is not None and doc.get("_etag") != etag:
                     raise CosmosAccessConditionFailedError(status_code=412, message=f"{item} changed")
                 self.docs[index] = {**body, "_etag": f"etag-{next(self._versions)}"}
@@ -165,8 +162,8 @@ def _service(
     memories: Memories, responses: list[Any], vectors: dict[str, list[float]] | None = None
 ) -> tuple[PipelineService, Chat]:
     chat, embeddings, containers = Chat(responses), Embeddings(vectors), containers_for(memories)
-    store = MemoryStore(containers=containers, embeddings_client=embeddings)
-    return PipelineService(store, chat, embeddings, containers=containers), chat
+    store = MemoryStore(containers=containers, embeddings_client=embeddings, tenant_id=TENANT)
+    return PipelineService(store, chat, embeddings, containers=containers, tenant_id=TENANT), chat
 
 
 def prompt_text(chat: Any, call: int) -> str:
@@ -211,9 +208,11 @@ def fact(
     agent: bool = False,
     assertion: str | None = None,
     user_id: str = "u1",
+    tenant_id: str = TENANT,
 ) -> dict[str, Any]:
     doc = {
         "id": fid,
+        "tenant_id": tenant_id,
         "user_id": user_id,
         "thread_id": "t1",
         "type": "fact",
@@ -240,6 +239,7 @@ def directive(fid: str = "fact-raw-1", *, assertion: str = "directive", **kwargs
 def episode(eid: str = "episode-raw-1", *, ts: int = 2, day: str = "2025-01-01", status: str = "successful") -> dict:
     return {
         "id": eid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "episodic",
@@ -309,6 +309,7 @@ def procedure(name: str = "Run targeted tests", *, kind: str = "instruction", **
     """An existing procedure the pass may show, revise or reinforce."""
     return {
         "id": procedure_id("u1", kind, name),
+        "tenant_id": TENANT,
         "user_id": "u1",
         "type": "procedural",
         "thread_id": "__procedural__",
@@ -365,7 +366,12 @@ def test_a_taught_instruction_is_active_with_its_support_recorded() -> None:
     assert (created["source_fact_ids"], created["source_episodic_ids"]) == (["fact-raw-1"], [])
     assert (created["source_kind"], created["source_authority"]) == ("explicit_user_instruction", "high")
     assert created["id"] == procedure_id("u1", "instruction", "Run targeted tests")
-    assert (created["user_id"], created["thread_id"], created["role"]) == ("u1", "__procedural__", "system")
+    assert (created["tenant_id"], created["user_id"], created["thread_id"], created["role"]) == (
+        TENANT,
+        "u1",
+        "__procedural__",
+        "system",
+    )
     assert (created["embedding"], created["utility_score"], created["version"]) == ([1.0], 0.8, 1)
     assert (created["prompt_id"], created["prompt_version"]) == ("extract_procedure.prompty", "v6")
     assert created["tags"] == ["sys:auto-extracted", "sys:procedural"]
@@ -492,6 +498,23 @@ def test_an_update_revises_a_procedure_in_place() -> None:
     assert (revised["source_fact_ids"], revised["status"]) == (["fact-new", "fact-old"], "active")
     assert (revised["prompt_id"], revised["prompt_version"]) == ("extract_procedure.prompty", "v6")
     assert revised["embedding"] == [1.0]
+
+
+def test_a_procedure_with_the_same_id_in_another_tenant_is_neither_read_nor_replaced() -> None:
+    """A procedure's id derives from the user, its kind and its name, so two tenants hold the same id."""
+    mine, theirs = procedure(), {**procedure(), "tenant_id": "other", "summary": "Their rule."}
+    memories = Memories([mine, theirs, fact("fact-new", "The user wants the test command shown.", ts=5)])
+    revision = answer(action="update", updates="proc-1", summary="Run tests; show the command.")
+    service, chat = _service(memories, [{"procedures": [revision]}])
+
+    result = service.synthesize_procedural("u1")
+
+    assert result["procedures_updated"] == 1
+    assert "Their rule." not in prompt_text(chat, 0)
+    mine_now = next(doc for doc in memories.docs if doc["id"] == mine["id"] and doc["tenant_id"] == TENANT)
+    theirs_now = next(doc for doc in memories.docs if doc["id"] == mine["id"] and doc["tenant_id"] == "other")
+    assert (mine_now["version"], mine_now["summary"]) == (2, "Run tests; show the command.")
+    assert theirs_now == theirs
 
 
 @pytest.mark.parametrize(
@@ -715,17 +738,51 @@ def test_the_users_nearest_existing_procedures_are_shown_so_the_model_can_revise
     assert "(none)" not in prompt_text(chat, 0).split("## Existing procedures")[1]
 
 
-def test_procedures_and_the_cursor_live_in_the_users_procedural_partition() -> None:
+def test_procedures_and_the_cursor_live_in_the_owners_partition() -> None:
     memories = Memories([fact(), fact("fact-theirs", "Their rule.", user_id="u2")])
     service, _ = _service(memories, [{"procedures": [answer()]}])
 
     service.synthesize_procedural("u1")
 
     created = procedures_by_name(memories)["Run targeted tests"]
-    assert memories.read_item(item=created["id"], partition_key=PROCEDURAL_PARTITION)["name"] == created["name"]
-    cursor = memories.read_item(item="procedure_cursor", partition_key=PROCEDURAL_PARTITION)
-    assert (cursor["type"], cursor["user_id"], cursor["thread_id"]) == ("procedure_cursor", "u1", "__procedural__")
+    assert memories.read_item(item=created["id"], partition_key=OWNER_PARTITION)["name"] == created["name"]
+    cursor = memories.read_item(item="procedure_cursor", partition_key=OWNER_PARTITION)
+    assert (cursor["type"], cursor["tenant_id"], cursor["user_id"], cursor["thread_id"]) == (
+        "procedure_cursor",
+        TENANT,
+        "u1",
+        "__procedural__",
+    )
     assert not any(doc["user_id"] == "u2" and doc.get("type") != "fact" for doc in memories.docs)
+
+
+def test_every_query_of_the_procedure_pass_filters_on_the_tenant_and_reads_the_owners_partition() -> None:
+    memories = Memories([fact(), episode(), procedure("Existing")])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+
+    service.synthesize_procedural("u1")
+
+    assert len(memories.queries) >= 3
+    for sql, params, partition in memories.queries:
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"], partition) == (TENANT, "u1", OWNER_PARTITION)
+
+
+def test_the_procedure_pass_stays_inside_its_tenant() -> None:
+    theirs = [
+        fact("fact-theirs", "Another tenant's rule for the same user id.", tenant_id="other"),
+        {**procedure("Theirs"), "tenant_id": "other"},
+    ]
+    memories = Memories([fact(), *theirs])
+    service, chat = _service(memories, [{"procedures": [answer()]}])
+
+    service.synthesize_procedural("u1")
+
+    assert "Another tenant" not in prompt_text(chat, 0) and "Theirs" not in prompt_text(chat, 0)
+    written = [doc for doc in memories.docs if doc["id"] not in {"fact-raw-1", "fact-theirs", theirs[1]["id"]}]
+    assert {doc["type"] for doc in written} == {"procedural", "procedure_cursor"}
+    assert {doc["tenant_id"] for doc in written} == {TENANT}
+    assert [doc for doc in memories.docs if doc["tenant_id"] == "other"] == theirs
 
 
 # ---------------------------------------------------------------------------
@@ -1065,6 +1122,7 @@ def test_synthesize_procedural_requires_a_user() -> None:
 def rule(name: str, *, applies: str = "always", evidence: tuple[str, ...] = ("taught",), **extra: Any) -> dict:
     return {
         "id": f"proc-{name}",
+        "tenant_id": TENANT,
         "user_id": "u1",
         "type": "procedural",
         "thread_id": "__procedural__",
@@ -1105,6 +1163,27 @@ def test_build_procedural_context_lists_the_standing_rules_in_force() -> None:
         "- Repeated rule.",
     ]
     assert service.build_procedural_context("missing-user") == ""
+
+
+def test_build_procedural_context_reads_only_its_tenants_rules() -> None:
+    memories = Memories(
+        [rule("Mine"), rule("Reviews", applies="when", embedding=[0.0, 1.0]), {**rule("Theirs"), "tenant_id": "other"}]
+    )
+    service, _ = _service(memories, [], vectors={"review": [0.0, 1.0]})
+
+    context = service.build_procedural_context("u1", task="review")
+
+    assert context.splitlines() == [
+        STANDING_HEADER,
+        "- Mine rule.",
+        "",
+        SITUATIONAL_HEADER,
+        "- When working on Reviews: Reviews rule.",
+    ]
+    assert len(memories.queries) == 2
+    for sql, params, partition in memories.queries:
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"], partition) == (TENANT, "u1", OWNER_PARTITION)
 
 
 def test_build_procedural_context_leaves_out_rules_written_before_procedures_were_learned_from_evidence() -> None:

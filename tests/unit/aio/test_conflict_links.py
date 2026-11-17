@@ -4,8 +4,8 @@
 and one link document names the pair, a conflicting fact that is combined or folded is linked as the fact that took its
 place, and a link that cannot be written neither fails the pass nor holds the cursor back. The fake container, the
 scripted model and the scenarios are the sync tests'; here the container is behind awaitable methods as the async
-Cosmos client exposes it and, like that client, it rejects ``enable_cross_partition_query`` (a query without a
-partition reads every partition without being asked).
+Cosmos client exposes it and, like that client, it takes no ``enable_cross_partition_query``: every query names the
+partition of one owner.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from tests.unit.services.test_conflict_links import (
     RESULT_KEYS,
     RETIREMENT_FIELDS,
     SEATTLE,
+    TENANT,
     USER,
     V_A,
     V_B,
@@ -71,21 +72,14 @@ class AsyncRows:
 
 
 class AsyncAccount:
-    """``Account`` behind awaitable methods. Passing ``enable_cross_partition_query`` is a ``TypeError``, as it is for
-    the async client."""
+    """``Account`` behind awaitable methods, as the async client exposes a container (which rejects
+    ``enable_cross_partition_query``)."""
 
     def __init__(self, inner: Account) -> None:
         self.inner = inner
 
     def query_items(self, *, query: str, parameters: Any = None, partition_key: Any = None) -> AsyncRows:
-        return AsyncRows(
-            self.inner.query_items(
-                query=query,
-                parameters=parameters,
-                partition_key=partition_key,
-                enable_cross_partition_query=partition_key is None,
-            )
-        )
+        return AsyncRows(self.inner.query_items(query=query, parameters=parameters, partition_key=partition_key))
 
     async def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
         return self.inner.read_item(item, partition_key)
@@ -126,9 +120,9 @@ def service_over(account: Account, chat: Chat) -> tuple[AsyncPipelineService, As
         ContainerKey.TURNS: MagicMock(),
         ContainerKey.SUMMARIES: MagicMock(),
     }
-    store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings)
+    store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings, tenant_id=TENANT)
     scripted = AsyncChat(chat)
-    return AsyncPipelineService(store, scripted, embeddings, containers=containers), scripted
+    return AsyncPipelineService(store, scripted, embeddings, containers=containers, tenant_id=TENANT), scripted
 
 
 def a_conflict(kind: str) -> tuple[Account, AsyncChat, AsyncPipelineService]:
@@ -152,6 +146,7 @@ class TestAConflictIsLinkedNotRetired:
         assert link_fields(link) == {
             "id": link["id"],
             "type": "conflict_link",
+            "tenant_id": TENANT,
             "user_id": USER,
             "thread_id": "__conflicts__",
             "first": "f1",
@@ -159,9 +154,7 @@ class TestAConflictIsLinkedNotRetired:
             "kind": kind,
         }
         assert link["id"].startswith("conflict_") and link["created_at"]
-        assert account.read_item(link["id"], [USER, "__conflicts__"])["id"] == link["id"], (
-            "it is in the user's partition"
-        )
+        assert account.read_item(link["id"], [TENANT, USER])["id"] == link["id"], "it is in the owner's partition"
         assert not {"content", "text"} & set(link), "a link names the facts and holds none of their text"
         assert (result["conflicts"], result["checked"], result["compared"], result["kept"]) == (1, 2, 1, 2)
         assert (result["merged"], result["combined"], result["synthesized"]) == (0, 0, 0)

@@ -1,6 +1,7 @@
 """Async search routing.
 
-See tests/unit/store/test_search_routing.py for why keyword searches run cross-partition.
+See tests/unit/store/test_search_routing.py for why keyword searches run cross-partition and vector-only searches
+read the owner's partition.
 """
 
 from __future__ import annotations
@@ -63,9 +64,10 @@ async def test_a_keyword_search_of_a_thread_runs_cross_partition_inside_it(metho
 
     (call,) = _calls(containers[container_key])
     assert "partition_key" not in call, "the async SDK queries across partitions when no key is given"
-    assert "c.user_id = @user_id" in call["query"]
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call["query"]
     assert "c.thread_id = @thread_id" in call["query"]
     params = _params(call)
+    assert ("@tenant_id", "default") in params
     assert ("@user_id", "u1") in params
     assert ("@thread_id", "t1") in params
     assert (
@@ -79,15 +81,27 @@ async def test_a_keyword_search_of_a_thread_runs_cross_partition_inside_it(metho
 
 
 @pytest.mark.parametrize(("method", "container_key", "options"), THREAD_SEARCHES)
-async def test_a_vector_only_search_of_a_thread_keeps_the_partition_key(method, container_key, options):
+async def test_a_vector_only_search_of_a_thread_keeps_the_owners_partition_key(method, container_key, options):
     store, containers = _store()
 
     await getattr(store, method)(user_id="u1", thread_id="t1", search_terms=NO_KEYWORDS, **options)
 
     (call,) = _calls(containers[container_key])
-    assert call["partition_key"] == ["u1", "t1"]
+    assert call["partition_key"] == ["default", "u1"]
+    assert "c.thread_id = @thread_id" in call["query"]
     assert "FullTextScore" not in call["query"]
     assert "full_text_score_scope" not in call
+
+
+@pytest.mark.parametrize(("method", "container_key", "options"), USER_SEARCHES)
+async def test_a_vector_only_search_of_the_users_threads_keeps_the_owners_partition_key(method, container_key, options):
+    store, containers = _store()
+
+    await getattr(store, method)(user_id="u1", search_terms=NO_KEYWORDS, **options)
+
+    (call,) = _calls(containers[container_key])
+    assert call["partition_key"] == ["default", "u1"]
+    assert "c.thread_id = @thread_id" not in call["query"]
 
 
 @pytest.mark.parametrize(("method", "container_key", "options"), USER_SEARCHES)
@@ -98,7 +112,7 @@ async def test_a_keyword_search_of_the_users_threads_ranks_with_local_statistics
 
     (call,) = _calls(containers[container_key])
     assert "partition_key" not in call
-    assert "c.user_id = @user_id" in call["query"]
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call["query"]
     assert "c.thread_id = @thread_id" not in call["query"]
     assert call["full_text_score_scope"] == "Local"
 
@@ -137,7 +151,7 @@ async def test_a_full_text_query_sent_with_a_partition_key_is_rejected(call):
             f"SELECT TOP 1 c.id FROM c ORDER BY RANK {call}",
             [],
             container_key=ContainerKey.MEMORIES,
-            partition_key=["u1", "t1"],
+            partition_key=["default", "u1"],
         )
     containers[ContainerKey.MEMORIES].query_items.assert_not_called()
 
@@ -149,11 +163,11 @@ async def test_a_query_that_only_names_a_field_like_the_function_keeps_its_parti
         "SELECT TOP 1 c.id FROM c WHERE c.fulltextscore = 1",
         [],
         container_key=ContainerKey.MEMORIES,
-        partition_key=["u1", "t1"],
+        partition_key=["default", "u1"],
     )
 
     (call,) = _calls(containers[ContainerKey.MEMORIES])
-    assert call["partition_key"] == ["u1", "t1"]
+    assert call["partition_key"] == ["default", "u1"]
 
 
 async def test_a_callers_own_full_text_query_keeps_the_default_statistics():

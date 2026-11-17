@@ -13,6 +13,7 @@ import time
 import pytest
 
 from azure.cosmos.agent_memory import CosmosMemoryClient
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters, partition_key_for
 from azure.cosmos.agent_memory.services._procedures import procedure_status
 
 pytestmark = [
@@ -34,6 +35,7 @@ def procedural_memory(
     embedding_deployment_name,
     embedding_dimensions,
     chat_deployment_name,
+    integration_tenant_id,
 ):
     """Live client using AAD for Cosmos and existing containers only."""
     if not cosmos_endpoint or not ai_foundry_endpoint:
@@ -48,6 +50,7 @@ def procedural_memory(
         embedding_dimensions=embedding_dimensions,
         chat_deployment_name=chat_deployment_name,
         use_default_credential=True,
+        tenant_id=integration_tenant_id,
         cadence_thresholds={
             "FACT_EXTRACTION_EVERY_N": 1_000_000,
             "EPISODE_EVAL_EVERY_N": 1_000_000,
@@ -69,29 +72,21 @@ def procedural_memory(
 
 
 def _delete_user_records(mem: CosmosMemoryClient, user_id: str) -> None:
-    query = "SELECT c.id, c.thread_id FROM c WHERE c.user_id = @user_id"
-    params = [{"name": "@user_id", "value": user_id}]
+    partition_key = partition_key_for(mem.tenant_id, user_id)
+    query = f"SELECT c.id FROM c WHERE {OWNER_FILTER}"
+    params = owner_parameters(mem.tenant_id, user_id)
     for container in (
         mem._turns_container_client,
         mem._memories_container_client,
         mem._summaries_container_client,
     ):
         try:
-            docs = list(
-                container.query_items(
-                    query=query,
-                    parameters=params,
-                    enable_cross_partition_query=True,
-                )
-            )
+            docs = list(container.query_items(query=query, parameters=params, partition_key=partition_key))
         except Exception:
             continue
         for doc in docs:
             try:
-                container.delete_item(
-                    item=doc["id"],
-                    partition_key=[user_id, doc.get("thread_id", "")],
-                )
+                container.delete_item(item=doc["id"], partition_key=partition_key)
             except Exception:
                 pass
 

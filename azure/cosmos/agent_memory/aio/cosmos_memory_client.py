@@ -10,6 +10,7 @@ from azure.cosmos.agent_memory import _slots
 from azure.cosmos.agent_memory._base import _BaseMemoryClient
 from azure.cosmos.agent_memory._base.base_client import is_transient_tail_step_error
 from azure.cosmos.agent_memory._container_routing import ContainerKey, container_key_for_type
+from azure.cosmos.agent_memory._partitioning import PARTITION_KEY_PATHS, partition_key_problem
 from azure.cosmos.agent_memory._utils import (
     _build_container_kwargs,
     _container_policies,
@@ -29,6 +30,7 @@ from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor, As
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
+    ConfigurationError,
     CosmosNotConnectedError,
     CosmosOperationError,
     MemoryNotFoundError,
@@ -55,7 +57,11 @@ def _log_auto_trigger_task_failure(task: "asyncio.Task[Any]") -> None:
 
 
 class AsyncCosmosMemoryClient(_BaseMemoryClient):
-    """Async variant of :class:`azure.cosmos.agent_memory.CosmosMemoryClient`."""
+    """Async variant of :class:`azure.cosmos.agent_memory.CosmosMemoryClient`.
+
+    Like it, a client is bound to one tenant (``tenant_id``, ``"default"`` when not given): every record
+    it reads or writes belongs to it.
+    """
 
     def __init__(
         self,
@@ -85,6 +91,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         transcript_metadata_keys: Optional[Iterable[str]] = None,
         cadence_thresholds: Optional[Mapping[str, int]] = None,
         cosmos_preferred_locations: Optional[str | Iterable[str]] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
         self._init_base_config(
             cosmos_endpoint=cosmos_endpoint,
@@ -109,6 +116,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             user_agent=user_agent,
             default_credential_module="azure.identity.aio",
             cosmos_preferred_locations=cosmos_preferred_locations,
+            tenant_id=tenant_id,
         )
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._pipeline_init_error: Exception | None = None
@@ -327,8 +335,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 user_agent=self._cosmos_user_agent,
                 preferred_locations=self._cosmos_preferred_locations,
             )
+            self._cosmos_client = client
             db = await client.create_database_if_not_exists(id=self._cosmos_database)
-            partition_key = PartitionKey(path=["/user_id", "/thread_id"], kind="MultiHash")
+            partition_key = PartitionKey(path=list(PARTITION_KEY_PATHS), kind="MultiHash")
             offer = _cosmos_container_offer_throughput(
                 throughput_mode=self._cosmos_throughput_mode,
                 autoscale_max_ru=self._cosmos_autoscale_max_ru,
@@ -374,6 +383,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             )
             summaries_idx_policy["compositeIndexes"] = [
                 [
+                    {"path": "/tenant_id", "order": "ascending"},
                     {"path": "/user_id", "order": "ascending"},
                     {"path": "/thread_id", "order": "ascending"},
                     {"path": "/version", "order": "descending"},
@@ -395,7 +405,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_database,
                 self._cosmos_summaries_container,
             )
-            await db.create_container_if_not_exists(
+            counter_container = await db.create_container_if_not_exists(
                 **_build_container_kwargs(
                     container_id=self._cosmos_counter_container,
                     partition_key=partition_key,
@@ -403,6 +413,15 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     default_ttl=COUNTER_TTL_SECONDS,
                 )
             )
+            # An existing container keeps the key it was created with, and one keyed differently takes writes
+            # but is read back empty, so it is refused here rather than later.
+            for keyed_container in (
+                self._memories_container_client,
+                self._turns_container_client,
+                self._summaries_container_client,
+                counter_container,
+            ):
+                await self._require_partition_key(keyed_container)
             await db.create_container_if_not_exists(
                 **_build_container_kwargs(
                     container_id=self._cosmos_lease_container,
@@ -410,18 +429,25 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     offer_throughput=offer,
                 )
             )
-            self._cosmos_client = client
             self._init_services()
         except Exception as exc:
+            # The store cannot be used: close the client just opened and forget its containers.
+            try:
+                await self._drain_cosmos_client()
+            except Exception as close_exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to close the Cosmos client after create_memory_store failed: %s",
+                    describe_exception(close_exc),
+                )
             raise CosmosOperationError(f"Failed to create memory store (async): {exc}") from exc
         logger.info("Async created memory store %s/%s", self._cosmos_database, self._cosmos_container)
 
     async def validate_topology(self) -> None:
-        """Verify all three Cosmos containers exist and are reachable.
+        """Verify the Cosmos containers exist, are reachable, and are keyed ``[/tenant_id, /user_id]``.
 
-        Reads container metadata for memories / memories_turns / memories_summaries.
-        Raises ``RuntimeError`` on the first failure with a clear message
-        instructing the customer to redeploy the infrastructure.
+        Reads container metadata for memories / memories_turns / memories_summaries and the counter container.
+        Raises ``RuntimeError`` on the first failure with a clear message: to redeploy the infrastructure when a
+        container is missing, or to recreate it when its partition key is not the one this SDK requires.
 
         Call this after ``connect_cosmos`` or ``create_memory_store`` to
         diagnose topology mismatches before any data is written.
@@ -430,12 +456,16 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
         if self._memories_container_client is None:
             raise RuntimeError("validate_topology: Cosmos client is not connected; call connect_cosmos() first")
-        for key, client in self._containers.items():
+        checks: list[tuple[str, Any]] = [(key.value, client) for key, client in self._containers.items()]
+        counter_client = self._get_counter_container()
+        if counter_client is not None:
+            checks.append((self._cosmos_counter_container, counter_client))
+        for label, client in checks:
             if client is None:
-                raise RuntimeError(f"validate_topology: container for {key.value!r} is not connected")
-            container_id = getattr(client, "id", key.value)
+                raise RuntimeError(f"validate_topology: container for {label!r} is not connected")
+            container_id = getattr(client, "id", label)
             try:
-                await client.read()
+                properties = await client.read()
             except CosmosResourceNotFoundError as exc:
                 raise RuntimeError(
                     f"validate_topology: container {container_id!r} does not exist; "
@@ -445,12 +475,22 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 raise RuntimeError(
                     f"validate_topology: cannot read container {container_id!r}: {type(exc).__name__}: {exc}"
                 ) from exc
+            problem = partition_key_problem(container_id, properties)
+            if problem:
+                raise RuntimeError(f"validate_topology: {problem}")
+
+    @staticmethod
+    async def _require_partition_key(container: Any) -> None:
+        problem = partition_key_problem(getattr(container, "id", None), await container.read())
+        if problem:
+            raise ConfigurationError(problem)
 
     def _build_store(self) -> AsyncMemoryStore:
         return AsyncMemoryStore(
             containers=self._containers,
             embeddings_client=self._embeddings_client,
             enable_turn_embeddings=self._enable_turn_embeddings,
+            tenant_id=self._tenant_id,
         )
 
     def _build_pipeline(self, store: AsyncMemoryStore) -> AsyncPipelineService:
@@ -460,6 +500,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             self._embeddings_client,
             containers=self._containers,
             transcript_metadata_keys=self._transcript_metadata_keys,
+            tenant_id=self._tenant_id,
         )
 
     def _store_uses_current_clients(self) -> bool:
@@ -569,6 +610,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         await maybe_trigger_steps(
             self._get_processor(),
             self._get_counter_container(),
+            self._tenant_id,
             turn_counts,
             thresholds=self._cadence_thresholds,
         )
@@ -694,13 +736,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         memory_id: str,
         *,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         content: Optional[str] = None,
         role: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Update a memory in Cosmos DB.
+        """Update a memory of ``user_id`` in Cosmos DB.
 
         Replaces ``content``, ``role`` and ``metadata`` where given, on the memory in the container
         that holds ``memory_type``, which must be its stored type. Literal credentials are redacted
@@ -711,7 +752,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_store().update(
             memory_id,
             user_id=user_id,
-            thread_id=thread_id,
             memory_type=memory_type,
             content=content,
             role=role,
@@ -723,10 +763,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         memory_id: str,
         *,
         user_id: str,
-        thread_id: str,
         memory_type: str,
     ) -> None:
-        """Delete a memory from Cosmos DB.
+        """Delete a memory of ``user_id`` from Cosmos DB.
 
         Raises ``MemoryNotFoundError`` if it does not exist and ``MemoryTypeMismatchError`` if its
         stored type is not ``memory_type``. Deleting a fact or procedure first deletes the records
@@ -737,16 +776,14 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_store().delete(
             memory_id,
             user_id=user_id,
-            thread_id=thread_id,
             memory_type=memory_type,
         )
 
-    async def delete_turn(self, turn_id: str, *, user_id: str, thread_id: str) -> None:
-        """Delete a single turn document. Raises if it does not exist."""
+    async def delete_turn(self, turn_id: str, *, user_id: str) -> None:
+        """Delete a single turn document of ``user_id``. Raises if it does not exist."""
         return await self.delete_memory(
             turn_id,
             user_id=user_id,
-            thread_id=thread_id,
             memory_type="turn",
         )
 
@@ -760,7 +797,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             await self.delete_memory(
                 f"summary_{user_id}_{thread_id}",
                 user_id=user_id,
-                thread_id=thread_id,
                 memory_type="thread_summary",
             )
             return True
@@ -776,7 +812,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             await self.delete_memory(
                 f"user_summary_{user_id}",
                 user_id=user_id,
-                thread_id="__user_summary__",
                 memory_type="user_summary",
             )
             return True
@@ -804,7 +839,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             if not turn_id:
                 continue
             try:
-                await self.delete_memory(turn_id, user_id=user_id, thread_id=thread_id, memory_type="turn")
+                await self.delete_memory(turn_id, user_id=user_id, memory_type="turn")
                 deleted += 1
             except MemoryNotFoundError:
                 continue
@@ -851,10 +886,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         block, deduped by content (best-effort; a blend fetch failure never
         breaks the base result). Blending, like the slots, needs ``user_id``.
 
-        ``thread_id`` limits facts to that thread; episodes and procedures stay user-wide. A keyword
-        (hybrid) query runs across partitions with ``c.user_id`` (and ``c.thread_id``, when given)
-        in the ``WHERE`` clause, because a partition key breaks full-text ranking (Azure SDK issue
-        #42241). Only a vector-only query with both ids over facts reads one partition.
+        ``thread_id`` limits facts to that thread; episodes and procedures stay user-wide. With ``user_id``, a
+        vector-only query reads that user's partition only. A keyword (hybrid) query runs across partitions with
+        the tenant and user filters in the ``WHERE`` clause, because a partition key breaks full-text ranking
+        (Azure SDK issue #42241).
 
         ``preference_slot`` and ``procedure_slot`` reserve result slots within ``top_k``
         (see ``azure.cosmos.agent_memory._slots``): the user's best-matching preference fact
@@ -986,11 +1021,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 turns = []
             _extend(turns)
 
-        async def query_memories(sql: str, parameters: Any, *, cross_partition: bool = False, **kwargs: Any) -> Any:
-            # The async store reads across partitions whenever no partition key is given.
+        async def query_memories(sql: str, parameters: Any, **kwargs: Any) -> Any:
             return await store.query(sql, parameters, container_key=ContainerKey.MEMORIES, **kwargs)
 
-        return await awith_conflicts(results, query_memories)
+        return await awith_conflicts(results, query_memories, self._tenant_id)
 
     async def _slot_candidates(self, store: Any, search_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         """Candidates for a result slot; a failed slot search leaves the slot to the ranked results."""
@@ -1046,11 +1080,10 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         Searches the turns container directly. Only vector-searchable when
         ``enable_turn_embeddings`` was set when the turns were written.
         ``user_id`` is required and always filters the results. Passing
-        ``thread_id`` as well restricts the results to that thread: a vector-only
-        query targets the thread's partition, while a keyword (hybrid) query runs
-        across partitions with ``user_id`` and ``thread_id`` filters in the WHERE
-        clause (a partition key breaks full-text ranking, Azure SDK issue #42241).
-        Omitting it fans out across the user's partitions.
+        ``thread_id`` as well restricts the results to that thread. A vector-only
+        query reads the user's partition; a keyword (hybrid) query runs across
+        partitions with the tenant, user and thread filters in the WHERE clause
+        (a partition key breaks full-text ranking, Azure SDK issue #42241).
         """
         return await self._get_store().search_turns(
             search_terms=search_terms,
@@ -1069,7 +1102,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self,
         memory_id: str,
         user_id: str,
-        thread_id: Optional[str] = None,
         *,
         max_depth: int = 20,
     ) -> list[dict[str, Any]]:
@@ -1087,7 +1119,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_store().get_memory_history(
             memory_id,
             user_id,
-            thread_id,
             max_depth=max_depth,
         )
 
@@ -1166,7 +1197,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self,
         memory_id: str,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         tags: list[str],
     ) -> None:
@@ -1175,18 +1205,17 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         Tags are lower-cased. A tag that holds a literal credential is dropped, and the memory is
         marked ``sys:secret``.
         """
-        return await self._get_store().add_tags(memory_id, user_id, thread_id, memory_type, tags)
+        return await self._get_store().add_tags(memory_id, user_id, memory_type, tags)
 
     async def remove_tags(
         self,
         memory_id: str,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         tags: list[str],
     ) -> None:
         """Remove tags from an existing fact, episodic or procedural memory."""
-        return await self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
+        return await self._get_store().remove_tags(memory_id, user_id, memory_type, tags)
 
     async def get_procedural_prompt(self, user_id: str) -> Optional[str]:
         """Return the user's standing instructions as a prompt block, or None when there are none.

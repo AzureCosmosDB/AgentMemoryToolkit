@@ -254,6 +254,29 @@ def test_add_condition_without_parameters_or_text():
 
 
 # ---------------------------------------------------------------------------
+# for_tenant
+# ---------------------------------------------------------------------------
+
+
+def test_for_tenant_starts_with_the_tenant_filter():
+    qb = _QueryBuilder.for_tenant("acme")
+    qb.add_filter("c.thread_id", "@thread_id", "t1")
+    assert qb.build_where() == " WHERE c.tenant_id = @tenant_id AND c.thread_id = @thread_id"
+    assert qb.get_parameters() == [{"name": "@tenant_id", "value": "acme"}, {"name": "@thread_id", "value": "t1"}]
+
+
+def test_for_tenant_with_an_owner_filters_on_both_halves_of_the_key():
+    qb = _QueryBuilder.for_tenant("acme", "u1")
+    qb.add_filter("c.type", "@type", "fact")
+    assert qb.build_where() == " WHERE c.tenant_id = @tenant_id AND c.user_id = @user_id AND c.type = @type"
+    assert qb.get_parameters() == [
+        {"name": "@tenant_id", "value": "acme"},
+        {"name": "@user_id", "value": "u1"},
+        {"name": "@type", "value": "fact"},
+    ]
+
+
+# ---------------------------------------------------------------------------
 # add_time_range
 # ---------------------------------------------------------------------------
 

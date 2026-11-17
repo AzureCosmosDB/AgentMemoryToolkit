@@ -142,7 +142,7 @@ az functionapp config appsettings set \
     USER_SUMMARY_EVERY_N="10"
 ```
 
-Set any threshold to `"0"` to disable that processing type.
+Set any threshold to `"0"` to disable that processing type. There is no tenant setting: the Function App processes each turn in the tenant stored on it, which is the `tenant_id` of the client that wrote it (`"default"` unless set).
 
 The `leases` container is provisioned by `create_memory_store()` alongside the other containers, so the Function App should be configured to use that existing lease container.
 
@@ -259,7 +259,7 @@ await memory.connect_cosmos()
 await memory.create_memory_store()
 ```
 
-This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers. The Function App does not read either variable.
+This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. The first four get the hierarchical partition key `/tenant_id`, `/user_id` (`leases` uses `/id`); an existing container keeps its key, so recreate the containers that an earlier version created with `[/user_id, /thread_id]`, and `leases` with them so the change feed starts clean on the recreated turns container. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers. The Function App does not read either variable.
 
 ---
 

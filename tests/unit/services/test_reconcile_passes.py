@@ -21,6 +21,7 @@ from azure.cosmos.agent_memory.services._dedup import dedup_result
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 NEAR = [1.0, 0.0, 0.0]
+TENANT = "acme"
 NO_DEDUP = dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
 RESULT_KEYS = {
     "kept",
@@ -44,6 +45,7 @@ def _dedup_only(monkeypatch):
 def _fact(fid: str, content: str, *, vector=None, ts: int = 1, created_at: str = "2024-01-01T00:00:00+00:00") -> dict:
     doc = {
         "id": fid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "fact",
@@ -89,6 +91,7 @@ class _Store:
 
 def _make_pipeline(store: _Store, replies: list[dict]) -> PipelineService:
     p = PipelineService.__new__(PipelineService)
+    p._tenant_id = TENANT
     p._container = MagicMock()
     p._container.query_items.side_effect = store.query_items
     p._container.read_item.side_effect = CosmosResourceNotFoundError(message="no dedup cursor yet")

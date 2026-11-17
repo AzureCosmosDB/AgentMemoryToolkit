@@ -16,20 +16,26 @@ from azure.cosmos.agent_memory.auto_trigger import maybe_trigger_steps
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.processors import DurableFunctionProcessor, InProcessProcessor
 
+TENANT = "acme"
+
 
 class _FakeCounterContainer:
     """Minimal in-memory stand-in for the Cosmos counter container.
 
     Exercises the REAL increment / watermark-read / watermark-advance helpers
     end-to-end (no mocking of counter math), so a watermark/recent_k regression
-    can't slip through behind constant mocks.
+    can't slip through behind constant mocks. It records the partition each
+    read and patch asks for.
     """
 
     def __init__(self) -> None:
         self.store: dict[str, dict] = {}
+        self.partitions_read: list[list[str]] = []
+        self.partitions_patched: list[list[str]] = []
         self._etag = 0
 
     def read_item(self, *, item, partition_key):
+        self.partitions_read.append(partition_key)
         if item not in self.store:
             raise CosmosResourceNotFoundError(message="404")
         return dict(self.store[item])
@@ -49,14 +55,15 @@ class _FakeCounterContainer:
         return dict(body)
 
     def patch_item(self, *, item, partition_key, patch_operations):
+        self.partitions_patched.append(partition_key)
         doc = self.store.setdefault(item, {"id": item})
         for op in patch_operations:
             doc[op["path"].lstrip("/")] = op["value"]
         return dict(doc)
 
 
-def _connected(processor=None) -> CosmosMemoryClient:
-    client = CosmosMemoryClient(use_default_credential=False, processor=processor)
+def _connected(processor=None, **client_kwargs) -> CosmosMemoryClient:
+    client = CosmosMemoryClient(use_default_credential=False, processor=processor, **client_kwargs)
     client._memories_container_client = MagicMock()
     client._turns_container_client = client._memories_container_client
     client._summaries_container_client = client._memories_container_client
@@ -176,6 +183,7 @@ class TestPerStepAutoTrigger:
         maybe_trigger_steps(
             processor,
             counter_container,
+            TENANT,
             {("u1", "t1"): 1},
             thresholds={
                 "FACT_EXTRACTION_EVERY_N": 0,
@@ -201,10 +209,10 @@ class TestPerStepAutoTrigger:
             "MEMORY_PROCESSOR_OWNER": "inprocess",
         }
 
-        maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 2}, thresholds=thresholds)
+        maybe_trigger_steps(processor, counter_container, TENANT, {("u1", "t1"): 2}, thresholds=thresholds)
         processor.process_extract_episodes.assert_not_called()
 
-        maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 1}, thresholds=thresholds)
+        maybe_trigger_steps(processor, counter_container, TENANT, {("u1", "t1"): 1}, thresholds=thresholds)
 
         processor.process_extract_episodes.assert_called_once_with(user_id="u1", thread_id="t1")
 
@@ -218,6 +226,7 @@ class TestPerStepAutoTrigger:
             maybe_trigger_steps(
                 processor,
                 counter_container,
+                TENANT,
                 {("u1", "t1"): 1},
                 thresholds={
                     "FACT_EXTRACTION_EVERY_N": 0,
@@ -410,3 +419,74 @@ class TestProcessorOwner:
             client.push_to_cosmos()
 
         processor.process_extract_memories.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tenant - every counter the auto-trigger reads, writes or stamps is in the
+# client's tenant, in the partition of the owner it counts.
+# ---------------------------------------------------------------------------
+
+_THREAD_AND_USER_STEPS = {
+    "FACT_EXTRACTION_EVERY_N": 1,
+    "THREAD_SUMMARY_EVERY_N": 0,
+    "EPISODE_EVAL_EVERY_N": 0,
+    "USER_SUMMARY_EVERY_N": 1,
+    "DEDUP_EVERY_N": 0,
+    "MEMORY_PROCESSOR_OWNER": "inprocess",
+}
+
+
+class TestCountersFollowTheTenant:
+    def test_thread_and_user_counters_live_in_the_tenant_and_owner_partition(self):
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(return_value={})
+        processor.process_user_summary = MagicMock()
+        counters = _FakeCounterContainer()
+
+        maybe_trigger_steps(processor, counters, TENANT, {("u1", "t1"): 1}, thresholds=_THREAD_AND_USER_STEPS)
+
+        assert {(doc["tenant_id"], doc["user_id"], doc["thread_id"]) for doc in counters.store.values()} == {
+            (TENANT, "u1", "t1"),
+            (TENANT, "u1", "__counters__"),
+        }
+        assert counters.partitions_read == [[TENANT, "u1"], [TENANT, "u1"]]
+
+    def test_a_failed_step_is_stamped_in_the_tenant_and_owner_partition(self):
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(side_effect=RuntimeError("boom"))
+        processor.process_user_summary = MagicMock(side_effect=RuntimeError("boom"))
+        counters = _FakeCounterContainer()
+
+        maybe_trigger_steps(processor, counters, TENANT, {("u1", "t1"): 1}, thresholds=_THREAD_AND_USER_STEPS)
+
+        assert counters.partitions_patched == [[TENANT, "u1"], [TENANT, "u1"]]
+        assert counters.store["thread:u1:t1"]["last_failure_reason"].startswith("process_extract_memories: ")
+        assert counters.store["user:u1"]["last_failure_reason"].startswith("process_user_summary: ")
+
+    def test_a_client_counts_the_turns_it_pushes_in_its_own_tenant(self, monkeypatch):
+        monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
+        monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_memories = MagicMock(return_value={})
+        client = _connected(processor=processor, tenant_id=TENANT)
+        counters = client._counter_container_client = _FakeCounterContainer()
+
+        client.add_local(user_id="u1", role="user", thread_id="t1", content="hi")
+        client.push_to_cosmos()
+
+        [counter] = counters.store.values()
+        assert (counter["tenant_id"], counter["user_id"], counter["thread_id"]) == (TENANT, "u1", "t1")
+        assert counters.partitions_read == [[TENANT, "u1"]]
+
+    def test_a_client_hands_its_tenant_to_the_trigger(self):
+        client = CosmosMemoryClient(use_default_credential=False, tenant_id=TENANT)
+        processor, counters = MagicMock(), MagicMock()
+        client._get_processor = MagicMock(return_value=processor)
+        client._get_counter_container = MagicMock(return_value=counters)
+
+        with patch("azure.cosmos.agent_memory.cosmos_memory_client.maybe_trigger_steps") as trigger:
+            client._maybe_auto_trigger({("u1", "t1"): 1})
+
+        assert trigger.call_args.args == (processor, counters, TENANT, {("u1", "t1"): 1})

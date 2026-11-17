@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID
 from azure.cosmos.agent_memory.processors.base import (
     ProcessThreadResult,
     UserSummaryResult,
@@ -17,7 +18,11 @@ from azure.cosmos.agent_memory.processors.base import (
 
 
 class AsyncInProcessProcessor:
-    """Async in-process orchestrator over :class:`AsyncPipelineService`."""
+    """Async in-process orchestrator over :class:`AsyncPipelineService`.
+
+    Wraps an existing pipeline, or builds one from the supplied container / LLM / embeddings clients,
+    bound to ``tenant_id`` (``"default"`` when not given).
+    """
 
     def __init__(
         self,
@@ -28,6 +33,7 @@ class AsyncInProcessProcessor:
         summaries_container: Any = None,
         chat_client: Any = None,
         embeddings_client: Any = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> None:
         if pipeline is None:
             if (
@@ -51,8 +57,10 @@ class AsyncInProcessProcessor:
                 ContainerKey.MEMORIES: cosmos_container,
                 ContainerKey.SUMMARIES: summaries_container,
             }
-            store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings_client)
-            pipeline = AsyncPipelineService(store, chat_client, embeddings_client, containers=containers)
+            store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings_client, tenant_id=tenant_id)
+            pipeline = AsyncPipelineService(
+                store, chat_client, embeddings_client, containers=containers, tenant_id=tenant_id
+            )
 
         self._pipeline = pipeline
 

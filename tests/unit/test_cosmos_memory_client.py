@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID, PARTITION_KEY_PATHS
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.exceptions import (
     ConfigurationError,
     CosmosNotConnectedError,
+    CosmosOperationError,
     MemoryNotFoundError,
     ValidationError,
 )
@@ -19,6 +23,14 @@ from azure.cosmos.agent_memory.exceptions import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+EARLIER_KEY = ["/user_id", "/thread_id"]
+
+
+def _keyed_container(paths=PARTITION_KEY_PATHS, container_id="container") -> MagicMock:
+    """A container whose metadata names its partition key, as ``read()`` returns it."""
+    properties = {"id": container_id, "partitionKey": {"paths": list(paths), "kind": "MultiHash", "version": 2}}
+    return MagicMock(id=container_id, read=MagicMock(return_value=properties))
 
 
 def _make_client(**overrides) -> CosmosMemoryClient:
@@ -28,9 +40,9 @@ def _make_client(**overrides) -> CosmosMemoryClient:
     return CosmosMemoryClient(**defaults)
 
 
-def _connected_client() -> tuple[CosmosMemoryClient, MagicMock]:
+def _connected_client(**client_kwargs) -> tuple[CosmosMemoryClient, MagicMock]:
     """Return a client with mocked split containers already wired up."""
-    client = _make_client()
+    client = _make_client(**client_kwargs)
     container = MagicMock()
     turns = MagicMock()
     summaries = MagicMock()
@@ -88,6 +100,42 @@ class TestConstructor:
         mem = _make_client()
         assert mem._cosmos_credential is None
         assert mem._ai_foundry_credential is None
+
+
+# ===================================================================
+# Tenant binding
+# ===================================================================
+
+
+class TestTenant:
+    def test_a_client_is_bound_to_the_default_tenant_unless_given_one(self):
+        assert _make_client().tenant_id == DEFAULT_TENANT_ID
+
+    def test_the_tenant_is_the_constructor_argument(self):
+        assert _make_client(tenant_id="acme").tenant_id == "acme"
+
+    @pytest.mark.parametrize("tenant_id", ["", "a/b", 7])
+    def test_a_tenant_that_cannot_be_stored_is_refused(self, tenant_id):
+        with pytest.raises(ValidationError):
+            _make_client(tenant_id=tenant_id)
+
+    def test_the_tenant_cannot_be_changed_after_construction(self):
+        mem = _make_client(tenant_id="acme")
+
+        with pytest.raises(AttributeError):
+            mem.tenant_id = "globex"
+
+    def test_the_store_and_the_pipeline_are_bound_to_the_clients_tenant(self):
+        mem, _ = _connected_client(tenant_id="acme")
+
+        assert mem._get_store().tenant_id == "acme"
+        assert mem._get_pipeline()._tenant_id == "acme"
+
+    @pytest.mark.parametrize(
+        "method", ["update_cosmos", "delete_memory", "delete_turn", "add_tags", "remove_tags", "get_memory_history"]
+    )
+    def test_a_memory_is_addressed_by_its_owner_not_its_thread(self, method):
+        assert "thread_id" not in inspect.signature(getattr(CosmosMemoryClient, method)).parameters
 
 
 # ===================================================================
@@ -206,14 +254,14 @@ class TestAddLocal:
         with pytest.raises(ValidationError, match="thread_id is required"):
             mem.add_local(user_id="u1", role="user", content="hi")
         # Validation must run BEFORE append - otherwise an orphan turn
-        # with thread_id=None would persist and pollute pk on push.
+        # with no thread_id would be buffered and pushed.
         assert mem.local_memory == []
         assert mem._unflushed_turn_counts == {}
 
     def test_add_local_non_turn_thread_id_optional(self):
         mem = _make_client()
         # Non-turn types (thread_summary, fact, etc.) accept an omitted thread_id;
-        # _make_memory auto-generates a UUID for hierarchical-PK validity.
+        # _make_memory auto-generates a UUID for it.
         mem.add_local(user_id="u1", role="user", content="profile", memory_type="user_summary")
         assert len(mem.local_memory) == 1
 
@@ -416,20 +464,37 @@ class TestPreferredLocations:
 
 
 class TestValidateTopology:
-    def test_validate_topology_succeeds_on_healthy_deploy(self):
+    CONTAINER_ATTRIBUTES = {
+        "memories": "_memories_container_client",
+        "memories_turns": "_turns_container_client",
+        "memories_summaries": "_summaries_container_client",
+        "counter": "_counter_container_client",
+    }
+
+    def _connected(self, earlier=None):
         mem = _make_client()
-        memories = MagicMock(id="memories")
-        turns = MagicMock(id="memories_turns")
-        summaries = MagicMock(id="memories_summaries")
-        mem._memories_container_client = memories
-        mem._turns_container_client = turns
-        mem._summaries_container_client = summaries
+        containers = {
+            name: _keyed_container(EARLIER_KEY if name == earlier else PARTITION_KEY_PATHS, container_id=name)
+            for name in self.CONTAINER_ATTRIBUTES
+        }
+        for name, attribute in self.CONTAINER_ATTRIBUTES.items():
+            setattr(mem, attribute, containers[name])
+        return mem, containers
+
+    def test_validate_topology_succeeds_on_healthy_deploy(self):
+        mem, containers = self._connected()
 
         mem.validate_topology()
 
-        memories.read.assert_called_once()
-        turns.read.assert_called_once()
-        summaries.read.assert_called_once()
+        for container in containers.values():
+            container.read.assert_called_once()
+
+    @pytest.mark.parametrize("earlier", ["memories", "memories_turns", "memories_summaries", "counter"])
+    def test_validate_topology_raises_on_a_container_with_the_earlier_key(self, earlier):
+        mem, _ = self._connected(earlier)
+
+        with pytest.raises(RuntimeError, match=rf"validate_topology: container '{earlier}' has partition key"):
+            mem.validate_topology()
 
     def test_validate_topology_raises_on_missing_container(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -451,6 +516,80 @@ class TestValidateTopology:
 
 
 class TestCreateMemoryStore:
+    @staticmethod
+    def _created_containers() -> list[dict]:
+        """The arguments of the five ``create_container_if_not_exists`` calls ``create_memory_store`` makes."""
+        mock_client = MagicMock()
+        mock_db = mock_client.create_database_if_not_exists.return_value
+        partition_key = MagicMock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=MagicMock(return_value=mock_client),
+                    PartitionKey=partition_key,
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            _make_client().create_memory_store(endpoint="https://fake.documents.azure.com:443/", credential="fake-key")
+        return [call.kwargs for call in mock_db.create_container_if_not_exists.call_args_list]
+
+    def test_the_containers_are_partitioned_by_tenant_and_user(self):
+        memories, turns, summaries, counter, leases = self._created_containers()
+
+        for container in (memories, turns, summaries, counter):
+            assert container["partition_key"].path == ["/tenant_id", "/user_id"]
+            assert container["partition_key"].kind == "MultiHash"
+        assert leases["partition_key"].path == "/id"
+
+    def test_the_summaries_composite_index_starts_with_the_partition_key(self):
+        summaries = self._created_containers()[2]
+
+        assert summaries["indexing_policy"]["compositeIndexes"] == [
+            [
+                {"path": "/tenant_id", "order": "ascending"},
+                {"path": "/user_id", "order": "ascending"},
+                {"path": "/thread_id", "order": "ascending"},
+                {"path": "/version", "order": "descending"},
+            ]
+        ]
+
+    @pytest.mark.parametrize("earlier", ["memories", "memories_turns", "memories_summaries", "counter"])
+    def test_an_existing_container_with_the_earlier_key_is_refused(self, earlier):
+        containers = {
+            name: _keyed_container(container_id=name)
+            for name in ("memories", "memories_turns", "memories_summaries", "counter")
+        }
+        containers[earlier] = _keyed_container(EARLIER_KEY, container_id=earlier)
+        mock_client = MagicMock()
+        mock_client.create_database_if_not_exists.return_value.create_container_if_not_exists.side_effect = [
+            *containers.values(),
+            MagicMock(),
+        ]
+        mem = _make_client()
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.cosmos": MagicMock(
+                    CosmosClient=MagicMock(return_value=mock_client),
+                    PartitionKey=MagicMock(),
+                    ThroughputProperties=MagicMock(),
+                ),
+            },
+        ):
+            with pytest.raises(
+                CosmosOperationError,
+                match=rf"container '{earlier}' has partition key \['/user_id', '/thread_id'\].*recreate the container",
+            ):
+                mem.create_memory_store(endpoint="https://fake.documents.azure.com:443/", credential="fake-key")
+
+        mock_client.close.assert_called_once()
+        assert mem._cosmos_client is None
+        assert mem._memories_container_client is None
+        with pytest.raises(CosmosNotConnectedError):
+            mem._require_cosmos()
+
     def test_create_memory_store_with_custom_dimensions(self):
         """Explicit create_memory_store() call with custom embedding dimensions."""
         mock_cosmos_cls = MagicMock()
@@ -956,18 +1095,19 @@ class TestGetThread:
 
 class TestUpdateCosmos:
     def test_success(self):
-        mem, container = _connected_client()
-        doc = _make_doc(id="m1", type="fact")
+        mem, container = _connected_client(tenant_id="acme")
+        doc = _make_doc(id="m1", type="fact", tenant_id="acme")
         container.read_item = MagicMock(return_value=doc.copy())
         container.replace_item = MagicMock()
 
-        mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
+        mem.update_cosmos(memory_id="m1", user_id="u1", memory_type="fact", content="updated")
 
-        container.read_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+        container.read_item.assert_called_once_with(item="m1", partition_key=["acme", "u1"])
         container.replace_item.assert_called_once()
         body = container.replace_item.call_args.kwargs["body"]
         assert body["content"] == "updated"
         assert body["type"] == "fact"
+        assert body["tenant_id"] == "acme"
         assert "updated_at" in body
 
     def test_not_found(self):
@@ -977,18 +1117,18 @@ class TestUpdateCosmos:
         container.read_item = MagicMock(side_effect=CosmosResourceNotFoundError(message="404"))
 
         with pytest.raises(MemoryNotFoundError):
-            mem.update_cosmos(memory_id="no-such-id", user_id="u1", thread_id="t1", memory_type="fact", content="x")
+            mem.update_cosmos(memory_id="no-such-id", user_id="u1", memory_type="fact", content="x")
 
 
 class TestDeleteCosmos:
     def test_success(self):
-        mem, container = _connected_client()
-        container.read_item = MagicMock(return_value=_make_doc(id="m1", type="fact"))
+        mem, container = _connected_client(tenant_id="acme")
+        container.read_item = MagicMock(return_value=_make_doc(id="m1", type="fact", tenant_id="acme"))
         container.delete_item = MagicMock()
 
-        mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+        mem.delete_memory(memory_id="m1", user_id="u1", memory_type="fact")
 
-        container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+        container.delete_item.assert_called_once_with(item="m1", partition_key=["acme", "u1"])
 
     def test_not_found(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
@@ -998,23 +1138,23 @@ class TestDeleteCosmos:
         container.delete_item = MagicMock()
 
         with pytest.raises(MemoryNotFoundError):
-            mem.delete_memory(memory_id="nope", user_id="u1", thread_id="t1", memory_type="fact")
+            mem.delete_memory(memory_id="nope", user_id="u1", memory_type="fact")
 
         container.delete_item.assert_not_called()
 
 
 class TestGetUserSummary:
     def test_returns_doc_when_present(self):
-        mem, _ = _connected_client()
+        mem, _ = _connected_client(tenant_id="acme")
         summaries = mem._summaries_container_client
-        doc = _make_doc(type="user_summary", id="user_summary_u1")
+        doc = _make_doc(type="user_summary", id="user_summary_u1", tenant_id="acme")
         summaries.read_item.return_value = doc
 
         result = mem.get_user_summary(user_id="u1")
 
         call_kwargs = summaries.read_item.call_args.kwargs
         assert call_kwargs["item"] == "user_summary_u1"
-        assert call_kwargs["partition_key"] == ["u1", "__user_summary__"]
+        assert call_kwargs["partition_key"] == ["acme", "u1"]
         assert result == doc
 
     def test_returns_none_when_absent(self):
@@ -1205,9 +1345,9 @@ class TestCosmosGuard:
         with pytest.raises(CosmosNotConnectedError):
             mem.get_thread(thread_id="t1")
         with pytest.raises(CosmosNotConnectedError):
-            mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+            mem.update_cosmos(memory_id="m1", user_id="u1", memory_type="fact")
         with pytest.raises(CosmosNotConnectedError):
-            mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+            mem.delete_memory(memory_id="m1", user_id="u1", memory_type="fact")
 
 
 # ===================================================================
@@ -1243,14 +1383,16 @@ class TestClose:
 
 
 def test_list_tags_delegates_to_store():
-    mem, container = _connected_client()
+    mem, container = _connected_client(tenant_id="acme")
     container.query_items.return_value = [["topic:python", "sys:fact"]]
 
     assert mem.list_tags("u1") == ["topic:python"]
 
     kwargs = container.query_items.call_args.kwargs
     assert "SELECT VALUE c.tags" in kwargs["query"]
-    assert kwargs["parameters"] == [{"name": "@user_id", "value": "u1"}]
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in kwargs["query"]
+    assert kwargs["parameters"] == [{"name": "@tenant_id", "value": "acme"}, {"name": "@user_id", "value": "u1"}]
+    assert kwargs["partition_key"] == ["acme", "u1"]
 
 
 class TestSyncCadenceThresholdsForwarding:
@@ -1313,29 +1455,25 @@ class TestDeleteHelpers:
     def test_delete_turn_delegates_with_turn_type(self):
         mem = _make_client()
         mem.delete_memory = MagicMock()
-        mem.delete_turn("turn-1", user_id="u1", thread_id="t1")
-        mem.delete_memory.assert_called_once_with("turn-1", user_id="u1", thread_id="t1", memory_type="turn")
+        mem.delete_turn("turn-1", user_id="u1")
+        mem.delete_memory.assert_called_once_with("turn-1", user_id="u1", memory_type="turn")
 
     def test_delete_thread_summary_uses_deterministic_id_and_returns_true(self):
         mem = _make_client()
         mem.delete_memory = MagicMock()
         assert mem.delete_thread_summary("u1", "t1") is True
-        mem.delete_memory.assert_called_once_with(
-            "summary_u1_t1", user_id="u1", thread_id="t1", memory_type="thread_summary"
-        )
+        mem.delete_memory.assert_called_once_with("summary_u1_t1", user_id="u1", memory_type="thread_summary")
 
     def test_delete_thread_summary_missing_returns_false(self):
         mem = _make_client()
-        mem.delete_memory = MagicMock(side_effect=MemoryNotFoundError(memory_id="x", user_id="u1", thread_id="t1"))
+        mem.delete_memory = MagicMock(side_effect=MemoryNotFoundError(memory_id="x", user_id="u1"))
         assert mem.delete_thread_summary("u1", "t1") is False
 
-    def test_delete_user_summary_uses_deterministic_id_and_scope(self):
+    def test_delete_user_summary_uses_deterministic_id(self):
         mem = _make_client()
         mem.delete_memory = MagicMock()
         assert mem.delete_user_summary("u1") is True
-        mem.delete_memory.assert_called_once_with(
-            "user_summary_u1", user_id="u1", thread_id="__user_summary__", memory_type="user_summary"
-        )
+        mem.delete_memory.assert_called_once_with("user_summary_u1", user_id="u1", memory_type="user_summary")
 
     def test_delete_thread_deletes_turns_and_summary_and_counts(self):
         mem = _make_client()
@@ -1360,7 +1498,7 @@ class TestDeleteHelpers:
 
         def _delete(memory_id, **kwargs):
             if memory_id == "turn-1":
-                raise MemoryNotFoundError(memory_id="turn-1", user_id="u1", thread_id="t1")
+                raise MemoryNotFoundError(memory_id="turn-1", user_id="u1")
 
         mem.delete_memory = MagicMock(side_effect=_delete)
         deleted = mem.delete_thread("u1", "t1", include_summary=False)
@@ -1372,3 +1510,95 @@ class TestDeleteHelpers:
             mem.delete_thread("", "t1")
         with pytest.raises(ValidationError):
             mem.delete_thread("u1", "")
+
+
+# ===================================================================
+# Tenant isolation: a client bound to a tenant reads, writes and deletes only inside it
+# ===================================================================
+
+_READS = {
+    "get_memories": lambda mem: mem.get_memories(user_id="u1", thread_id="t1"),
+    "get_memories_of_every_user": lambda mem: mem.get_memories(),
+    "get_thread": lambda mem: mem.get_thread(thread_id="t1", user_id="u1"),
+    "get_thread_of_every_user": lambda mem: mem.get_thread(thread_id="t1"),
+    "get_thread_summary": lambda mem: mem.get_thread_summary("u1", "t1"),
+    "get_episodes": lambda mem: mem.get_episodes("u1"),
+    "list_tags": lambda mem: mem.list_tags("u1"),
+    "get_procedural_memories": lambda mem: mem.get_procedural_memories("u1"),
+    "get_procedural_history": lambda mem: mem.get_procedural_history("u1"),
+    "get_memory_history": lambda mem: mem.get_memory_history("m1", "u1"),
+    "search_cosmos": lambda mem: mem.search_cosmos("weather", user_id="u1"),
+    "search_cosmos_by_keywords_of_every_user": lambda mem: mem.search_cosmos("weather Seattle"),
+    "search_turns": lambda mem: mem.search_turns("weather", user_id="u1", thread_id="t1"),
+    "search_summaries": lambda mem: mem.search_summaries("weather", user_id="u1"),
+    "search_episodic_memories": lambda mem: mem.search_episodic_memories("u1", "weather"),
+    "retrieve_procedures": lambda mem: mem.retrieve_procedures("u1", "weather"),
+}
+
+
+class TestTenantIsolation:
+    @pytest.mark.parametrize("read", _READS.values(), ids=_READS.keys())
+    def test_every_query_a_read_sends_is_confined_to_the_tenant(self, read):
+        mem, _ = _connected_client(tenant_id="acme")
+        mem._embeddings_client = MagicMock()
+        mem._embeddings_client.generate.return_value = [0.1, 0.2, 0.3]
+
+        read(mem)
+
+        sent = [
+            call.kwargs
+            for container in (
+                mem._memories_container_client,
+                mem._turns_container_client,
+                mem._summaries_container_client,
+            )
+            for call in container.query_items.call_args_list
+        ]
+        assert sent
+        for query in sent:
+            assert "c.tenant_id = @tenant_id" in query["query"]
+            assert {"name": "@tenant_id", "value": "acme"} in query["parameters"]
+            assert query.get("partition_key") in (None, ["acme", "u1"])
+
+    def test_a_written_turn_carries_the_tenant(self):
+        mem, _ = _connected_client(tenant_id="acme")
+        mem._maybe_auto_trigger = MagicMock()
+
+        mem.upsert_memory(user_id="u1", role="user", content="hello", thread_id="t1")
+
+        body = mem._turns_container_client.upsert_item.call_args.kwargs["body"]
+        assert (body["tenant_id"], body["user_id"], body["thread_id"]) == ("acme", "u1", "t1")
+
+    def test_pushed_memories_carry_the_tenant(self):
+        mem, memories = _connected_client(tenant_id="acme")
+        mem.add_local(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
+        mem.add_local(user_id="u1", role="user", content="hello", thread_id="t1")
+
+        mem.push_to_cosmos()
+
+        written = [*memories.upsert_item.call_args_list, *mem._turns_container_client.upsert_item.call_args_list]
+        assert [call.kwargs["body"]["tenant_id"] for call in written] == ["acme", "acme"]
+
+    def test_a_record_that_names_another_tenant_is_refused(self):
+        mem, memories = _connected_client(tenant_id="acme")
+        mem.add_local(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
+        mem.local_memory[0]["tenant_id"] = "globex"
+
+        with pytest.raises(ValidationError):
+            mem.push_to_cosmos()
+
+        memories.upsert_item.assert_not_called()
+
+    def test_a_thread_is_deleted_from_the_owners_partition_of_the_tenant(self):
+        mem, _ = _connected_client(tenant_id="acme")
+        turns, summaries = mem._turns_container_client, mem._summaries_container_client
+        turn = _make_doc(id="turn-1", tenant_id="acme")
+        turns.query_items.return_value = [turn]
+        turns.read_item.return_value = turn
+        summaries.read_item.return_value = _make_doc(id="summary_u1_t1", type="thread_summary", tenant_id="acme")
+
+        assert mem.delete_thread("u1", "t1") == 2
+
+        for container in (turns, summaries):
+            container.delete_item.assert_called_once()
+            assert container.delete_item.call_args.kwargs["partition_key"] == ["acme", "u1"]

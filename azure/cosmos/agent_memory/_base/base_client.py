@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._partitioning import resolve_tenant_id
 from azure.cosmos.agent_memory._utils import (
     VALID_ROLES,
     VALID_TYPES,
@@ -54,9 +55,11 @@ class _BaseMemoryClient:
         user_agent: Optional[str] = None,
         default_credential_module: str = "azure.identity",
         cosmos_preferred_locations: Optional[str | Iterable[str]] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
         """Initialize shared local state, config values, and default credentials."""
         configure_logging()
+        self._tenant_id = resolve_tenant_id(tenant_id)
         self.local_memory: list[dict[str, Any]] = []
         self._unflushed_turn_counts: dict[tuple[str, str], int] = {}
         self._warned_owner_skip: bool = False
@@ -116,6 +119,11 @@ class _BaseMemoryClient:
         self._summaries_container_client: Any = None
         self._counter_container_client: Any = None
         self._store: Any = None
+
+    @property
+    def tenant_id(self) -> str:
+        """The tenant this client is bound to: every record it reads or writes belongs to it."""
+        return self._tenant_id
 
     @property
     def _containers(self) -> dict[ContainerKey, Any]:

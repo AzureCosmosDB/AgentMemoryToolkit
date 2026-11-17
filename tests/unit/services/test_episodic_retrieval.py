@@ -36,7 +36,7 @@ def test_get_episodes_returns_user_episodes_newest_first() -> None:
     ]
     memories = MagicMock()
     memories.query_items.return_value = episodes
-    store = MemoryStore(containers=_containers(memories=memories))
+    store = MemoryStore(containers=_containers(memories=memories), tenant_id="acme")
     client = _client_with_store(store)
 
     result = client.get_episodes("u1", recent_k=2)
@@ -44,9 +44,11 @@ def test_get_episodes_returns_user_episodes_newest_first() -> None:
     assert result == episodes
     kwargs = memories.query_items.call_args.kwargs
     assert "c.type = @type" in kwargs["query"]
-    assert "c.user_id = @user_id" in kwargs["query"]
+    assert "c.tenant_id = @tenant_id" in kwargs["query"] and "c.user_id = @user_id" in kwargs["query"]
     assert "ORDER BY c.created_at DESC" in kwargs["query"]
-    assert kwargs["enable_cross_partition_query"] is True
+    assert {"name": "@tenant_id", "value": "acme"} in kwargs["parameters"]
+    assert kwargs["partition_key"] == ["acme", "u1"]
+    assert "enable_cross_partition_query" not in kwargs
 
 
 def test_extract_episodes_routes_to_pipeline_with_flush() -> None:

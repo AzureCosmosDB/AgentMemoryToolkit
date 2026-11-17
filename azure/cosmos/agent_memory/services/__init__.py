@@ -6,7 +6,10 @@ from typing import Any, Optional, Protocol
 
 
 class MemoryStoreProtocol(Protocol):
-    """Persistence primitives consumed by the pipeline service."""
+    """Persistence primitives consumed by the pipeline service.
+
+    A ``partition_key`` is the owner's ``[tenant_id, user_id]``.
+    """
 
     def query(
         self,

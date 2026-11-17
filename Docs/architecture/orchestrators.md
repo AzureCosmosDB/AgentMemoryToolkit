@@ -27,6 +27,8 @@ SynthesizeProceduralOrchestrator
 
 A batch whose model call fails with a retryable error yields no facts and is counted in `deferred_turn_count`. `em_AdvanceExtractWatermark` still moves past its turns, so the Function App does not retry them (the in-process backend does).
 
+Every orchestration input and activity payload carries `tenant_id`, which the change feed trigger reads from the changed turn, and each activity runs the pipeline of that tenant (one per tenant, sharing the Cosmos DB and model clients), so one Function App serves every tenant. An orchestration instance ID is `{kind}:{digest}:{count}`, where `kind` is `extract`, `episode`, `thread_summary`, `user_summary` or `procedural` and `digest` is a fixed-length digest of the tenant, owner and (where there is one) thread, so IDs stay within the 100-character limit and hold no user IDs.
+
 Fact IDs are deterministic from user, thread, and normalized content, and episode IDs from user, thread, the segment's first and last turn and the episode's position in it. Thread and user summaries keep their deterministic summary IDs. Procedure IDs derive from the user, kind and name, and a combined fact's ID from the user and its source IDs, so a retried activity finds the record it already wrote (409) instead of writing a second one.
 
 `UserSummaryOrchestrator` can start before extraction has persisted anything for a new user. `us_Extract` then returns `no_memories_yet` instead of failing, and the orchestrator polls on a durable timer (App Settings `USER_SUMMARY_WAIT_SECONDS`, default `120`, every `USER_SUMMARY_WAIT_INTERVAL_SECONDS`, default `10`) before it skips that cadence; the next user-summary threshold tries again. `USER_SUMMARY_WAIT_SECONDS=0` makes it a single attempt.

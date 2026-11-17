@@ -143,7 +143,7 @@ def test_earlier_turns_of_the_same_session_are_the_ones_written_before_the_windo
 
     start = earliest_created_at(window)
     window_ts = window_write_second(window, start)
-    query, parameters = previous_turns_query("u1", "t1", start, window_ts)
+    query, parameters = previous_turns_query("acme", "u1", "t1", start, window_ts)
 
     assert window_ts == 103
     assert "(c.created_at < @before OR (c.created_at = @before AND c._ts < @before_ts))" in query
@@ -152,8 +152,20 @@ def test_earlier_turns_of_the_same_session_are_the_ones_written_before_the_windo
     rows = [turns[1], turns[0], turns[2]]
     assert [turn["id"] for turn in prior_turns(rows, window)] == ["turn-0", "turn-1", "turn-2"]
     assert window_write_second([{**turns[0], "_ts": None}], session) is None
-    strict, strict_parameters = previous_turns_query("u1", "t1", start)
+    strict, strict_parameters = previous_turns_query("acme", "u1", "t1", start)
     assert "@before_ts" not in strict and all(p["name"] != "@before_ts" for p in strict_parameters)
+
+
+def test_earlier_turns_are_those_of_the_thread_of_the_owner_in_the_tenant() -> None:
+    query, parameters = previous_turns_query("acme", "u1", "t1", "2026-04-10T09:00:00+00:00")
+
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id AND c.thread_id = @thread_id" in query
+    assert {p["name"]: p["value"] for p in parameters} == {
+        "@tenant_id": "acme",
+        "@user_id": "u1",
+        "@thread_id": "t1",
+        "@before": "2026-04-10T09:00:00+00:00",
+    }
 
 
 def test_stored_facts_show_their_date_speaker_assertion_and_keys() -> None:
@@ -188,11 +200,12 @@ def test_stored_facts_show_their_date_speaker_assertion_and_keys() -> None:
 
 
 def test_stored_facts_are_active_and_never_from_after_the_new_turns() -> None:
-    query, parameters = known_facts_query("u1", [0.1], "2026-04-10T09:05:00+00:00", _ACTIVE_DOC_FILTER)
-    unbounded, unbounded_parameters = known_facts_query("u1", [0.1], None, _ACTIVE_DOC_FILTER)
+    query, parameters = known_facts_query("acme", "u1", [0.1], "2026-04-10T09:05:00+00:00", _ACTIVE_DOC_FILTER)
+    unbounded, unbounded_parameters = known_facts_query("acme", "u1", [0.1], None, _ACTIVE_DOC_FILTER)
 
     assert _ACTIVE_DOC_FILTER in query and "c.created_at <= @before" in query
-    assert "c.user_id = @user_id" in query and {"name": "@user_id", "value": "u1"} in parameters
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in query
+    assert {"name": "@tenant_id", "value": "acme"} in parameters and {"name": "@user_id", "value": "u1"} in parameters
     assert {"name": "@before", "value": "2026-04-10T09:05:00+00:00"} in parameters
     assert "@before" not in unbounded and all(p["name"] != "@before" for p in unbounded_parameters)
     assert query.startswith(f"SELECT TOP {context.EXTRACTION_KNOWN_FACTS} ")
@@ -381,6 +394,72 @@ def test_the_extractor_sees_earlier_turns_the_summary_and_stored_facts_from_befo
         "OK, let's do that. And from now on, always show me the migration plan first."
     )
     assert embeddings.calls == [["OK, let's do that. And from now on, always show me the migration plan first."]]
+
+
+def _two_tenants() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """The turns, facts and thread summary of ``u1`` in tenant ``acme``, each beside a record of the same user id in
+    tenant ``other`` that the extractor must never see (the summary shares its id)."""
+    theirs = {
+        "turn": {**_stored_turn(2, "Another tenant's earlier turn."), "tenant_id": "other"},
+        "fact": {**_fact("f-theirs", "Another tenant's fact.", "2026-03-02T10:00:00+00:00"), "tenant_id": "other"},
+        "summary": {**_summary("2026-04-10T09:04:30+00:00"), "user_id": "u1", "tenant_id": "other"},
+    }
+    theirs["summary"]["metadata"] = {"structured_summary": {"overview": "Another tenant's plan."}}
+    ours_summary = {**_summary("2026-04-10T09:04:30+00:00"), "user_id": "u1", "tenant_id": "acme"}
+    return (
+        [*_turns(), theirs["turn"]],
+        [*_memories(), theirs["fact"]],
+        [theirs["summary"], ours_summary],
+    )
+
+
+def _assert_context_read_inside(tenant: str, turns: Any, memories: Any, summaries: Any, message: str) -> None:
+    assert "Another tenant" not in message
+    assert _section(message, "Thread summary").startswith("Overview: Planning the events table migration.")
+    assert len(turns.queries) == 2 and len(memories.queries) == 1, "the new turns, the earlier ones, the stored facts"
+    for store in (turns, memories):
+        for sql, params, partition_key in store.queries:
+            assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+            assert (params["@tenant_id"], params["@user_id"]) == (tenant, "u1")
+            assert partition_key == [tenant, "u1"]
+    assert summaries.reads == [("summary_u1_t1", [tenant, "u1"])]
+
+
+def test_the_extraction_context_is_read_inside_the_tenant() -> None:
+    chat, embeddings = _SyncChat([_v3_response()]), _SyncEmbeddings()
+    turn_docs, fact_docs, summary_docs = _two_tenants()
+    turns, memories, summaries = _Store(turn_docs), _Store(fact_docs), _Store(summary_docs)
+    service = PipelineService(
+        memories,
+        chat,
+        embeddings,
+        containers=_containers_for_store(memories, turns_store=turns, summaries_store=summaries),
+        tenant_id="acme",
+    )
+
+    extracted = service.extract_memories_durable("u1", "t1")
+
+    _assert_context_read_inside("acme", turns, memories, summaries, _user_message(chat))
+    assert extracted["facts"] and {doc["tenant_id"] for doc in extracted["facts"]} == {"acme"}
+
+
+@pytest.mark.asyncio
+async def test_async_the_extraction_context_is_read_inside_the_tenant() -> None:
+    chat, embeddings = _AsyncChat([_v3_response()]), _AsyncEmbeddings()
+    turn_docs, fact_docs, summary_docs = _two_tenants()
+    turns, memories, summaries = _AsyncStore(turn_docs), _AsyncStore(fact_docs), _AsyncStore(summary_docs)
+    service = AsyncPipelineService(
+        memories,
+        chat,
+        embeddings,
+        containers=_async_containers_for_store(memories, turns_store=turns, summaries_store=summaries),
+        tenant_id="acme",
+    )
+
+    extracted = await service.extract_memories_durable("u1", "t1")
+
+    _assert_context_read_inside("acme", turns, memories, summaries, _user_message(chat))
+    assert extracted["facts"] and {doc["tenant_id"] for doc in extracted["facts"]} == {"acme"}
 
 
 def test_a_summary_covering_the_new_turns_is_left_out() -> None:

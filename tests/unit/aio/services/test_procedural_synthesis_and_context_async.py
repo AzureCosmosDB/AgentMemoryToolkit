@@ -22,8 +22,9 @@ from azure.cosmos.agent_memory.services._procedures import (
     procedure_id,
 )
 from tests.unit.services.test_procedural_synthesis_and_context import (
-    PROCEDURAL_PARTITION,
+    OWNER_PARTITION,
     STEPS,
+    TENANT,
     Chat,
     Embeddings,
     Memories,
@@ -58,20 +59,13 @@ class AsyncRows:
 
 
 class AsyncMemories:
-    """The in-memory container behind awaitable methods, as the async Cosmos client exposes it. A query without a
-    partition reads every partition, which the async client does without being asked."""
+    """The in-memory container behind awaitable methods, as the async Cosmos client exposes it."""
 
     def __init__(self, inner: Memories) -> None:
         self.inner = inner
 
     def query_items(self, *, query: str, parameters: Any = None, partition_key: Any = None) -> AsyncRows:
-        rows = self.inner.query_items(
-            query=query,
-            parameters=parameters,
-            partition_key=partition_key,
-            enable_cross_partition_query=partition_key is None,
-        )
-        return AsyncRows(rows)
+        return AsyncRows(self.inner.query_items(query=query, parameters=parameters, partition_key=partition_key))
 
     async def read_item(self, *, item: str, partition_key: Any) -> dict[str, Any]:
         return self.inner.read_item(item=item, partition_key=partition_key)
@@ -98,8 +92,8 @@ def _service(
 ) -> tuple[AsyncPipelineService, AsyncChat]:
     chat, embeddings = AsyncChat(responses), AsyncEmbeddings(vectors)
     containers = containers_for(AsyncMemories(memories))
-    store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings)
-    return AsyncPipelineService(store, chat, embeddings, containers=containers), chat
+    store = AsyncMemoryStore(containers=containers, embeddings_client=embeddings, tenant_id=TENANT)
+    return AsyncPipelineService(store, chat, embeddings, containers=containers, tenant_id=TENANT), chat
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +124,12 @@ async def test_a_taught_instruction_is_active_with_its_support_recorded() -> Non
     )
     assert (created["source_kind"], created["source_authority"]) == ("explicit_user_instruction", "high")
     assert created["id"] == procedure_id("u1", "instruction", "Run targeted tests")
-    assert (created["user_id"], created["thread_id"], created["embedding"]) == ("u1", "__procedural__", [1.0])
+    assert (created["tenant_id"], created["user_id"], created["thread_id"], created["embedding"]) == (
+        TENANT,
+        "u1",
+        "__procedural__",
+        [1.0],
+    )
     assert (created["prompt_id"], created["prompt_version"]) == ("extract_procedure.prompty", "v6")
     assert "Never write a literal secret" in prompt_text(chat, 0)
 
@@ -461,16 +460,51 @@ async def test_the_users_nearest_existing_procedures_are_shown_so_the_model_can_
     assert "Far 1" not in prompt_text(chat, 0)
 
 
-async def test_procedures_and_the_cursor_live_in_the_users_procedural_partition() -> None:
+async def test_procedures_and_the_cursor_live_in_the_owners_partition() -> None:
     memories = Memories([fact(), fact("fact-theirs", "Their rule.", user_id="u2")])
     service, _ = _service(memories, [{"procedures": [answer()]}])
 
     await service.synthesize_procedural("u1")
 
     created = procedures_by_name(memories)["Run targeted tests"]
-    assert memories.read_item(item=created["id"], partition_key=PROCEDURAL_PARTITION)["name"] == created["name"]
-    cursor = memories.read_item(item="procedure_cursor", partition_key=PROCEDURAL_PARTITION)
-    assert (cursor["type"], cursor["user_id"], cursor["thread_id"]) == ("procedure_cursor", "u1", "__procedural__")
+    assert memories.read_item(item=created["id"], partition_key=OWNER_PARTITION)["name"] == created["name"]
+    cursor = memories.read_item(item="procedure_cursor", partition_key=OWNER_PARTITION)
+    assert (cursor["type"], cursor["tenant_id"], cursor["user_id"], cursor["thread_id"]) == (
+        "procedure_cursor",
+        TENANT,
+        "u1",
+        "__procedural__",
+    )
+    assert not any(doc["user_id"] == "u2" and doc.get("type") != "fact" for doc in memories.docs)
+
+
+async def test_every_query_of_the_procedure_pass_filters_on_the_tenant_and_reads_the_owners_partition() -> None:
+    memories = Memories([fact(), episode(), procedure("Existing")])
+    service, _ = _service(memories, [{"procedures": [answer()]}])
+
+    await service.synthesize_procedural("u1")
+
+    assert len(memories.queries) >= 3
+    for sql, params, partition in memories.queries:
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"], partition) == (TENANT, "u1", OWNER_PARTITION)
+
+
+async def test_the_procedure_pass_stays_inside_its_tenant() -> None:
+    theirs = [
+        fact("fact-theirs", "Another tenant's rule for the same user id.", tenant_id="other"),
+        {**procedure("Theirs"), "tenant_id": "other"},
+    ]
+    memories = Memories([fact(), *theirs])
+    service, chat = _service(memories, [{"procedures": [answer()]}])
+
+    await service.synthesize_procedural("u1")
+
+    assert "Another tenant" not in prompt_text(chat, 0) and "Theirs" not in prompt_text(chat, 0)
+    written = [doc for doc in memories.docs if doc["id"] not in {"fact-raw-1", "fact-theirs", theirs[1]["id"]}]
+    assert {doc["type"] for doc in written} == {"procedural", "procedure_cursor"}
+    assert {doc["tenant_id"] for doc in written} == {TENANT}
+    assert [doc for doc in memories.docs if doc["tenant_id"] == "other"] == theirs
 
 
 # ---------------------------------------------------------------------------
@@ -828,6 +862,27 @@ async def test_build_procedural_context_lists_the_standing_rules_in_force() -> N
         "- Repeated rule.",
     ]
     assert await service.build_procedural_context("missing-user") == ""
+
+
+async def test_build_procedural_context_reads_only_its_tenants_rules() -> None:
+    memories = Memories(
+        [rule("Mine"), rule("Reviews", applies="when", embedding=[0.0, 1.0]), {**rule("Theirs"), "tenant_id": "other"}]
+    )
+    service, _ = _service(memories, [], vectors={"review": [0.0, 1.0]})
+
+    context = await service.build_procedural_context("u1", task="review")
+
+    assert context.splitlines() == [
+        STANDING_HEADER,
+        "- Mine rule.",
+        "",
+        SITUATIONAL_HEADER,
+        "- When working on Reviews: Reviews rule.",
+    ]
+    assert len(memories.queries) == 2
+    for sql, params, partition in memories.queries:
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"], partition) == (TENANT, "u1", OWNER_PARTITION)
 
 
 async def test_build_procedural_context_leaves_out_rules_written_before_procedures_were_learned_from_evidence() -> None:

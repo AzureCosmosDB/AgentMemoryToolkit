@@ -122,10 +122,16 @@ def _thread_of(doc: dict) -> str | None:
         return None
 
 
-def _record_key_failure(exc: Exception, key_errors: list[Exception]) -> None:
-    """Log one thread's or owner's failed update and remember it, so the rest of the batch still runs."""
+def _record_key_failure(exc: Exception, key: tuple[str, ...], key_errors: list[Exception]) -> None:
+    """Log one thread's or owner's failed update and remember it, so the rest of the batch still runs.
+
+    The log names the tenant, owner and (for a thread) thread of the counter, which is what an operator needs to know
+    which turns were not counted once the host has used up its retries and dropped the batch.
+    """
+    scope = " ".join(f"{label}={value}" for label, value in zip(("tenant", "user", "thread"), key))
     logger.error(
-        "change-feed: failed to update a counter (exc_type=%s): %s",
+        "change-feed: failed to update the counter of %s (exc_type=%s): %s",
+        scope,
         type(exc).__name__,
         describe_exception(exc, stack=True),
     )
@@ -198,8 +204,9 @@ async def process_changefeed_batch(
     # ---- Step 1: Filter to turns + group by scope ----
     thread_counts: dict[tuple[str, str, str], int] = defaultdict(int)
     user_counts: dict[tuple[str, str], int] = defaultdict(int)
-    thread_max_lsn: dict[tuple[str, str, str], int] = {}
-    user_max_lsn: dict[tuple[str, str], int] = {}
+    # The change-feed LSN of every counted turn: a counter skips the turns it has counted already, by their LSN.
+    thread_lsns: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+    user_lsns: dict[tuple[str, str], list[int]] = defaultdict(list)
 
     # Track which threads contributed to each user counter. The user-summary orchestrator
     # passes them to the pipeline, which only logs how many (``observed_thread_ids``): it
@@ -212,8 +219,9 @@ async def process_changefeed_batch(
             continue
         # Turns are append-only from this trigger's perspective: the Durable
         # backend never mutates a turn doc (episodic segmentation advances a
-        # separate cursor doc; fact extraction is count-based), so each turn is
-        # delivered - and counted - exactly once, at creation.
+        # separate cursor doc; fact extraction is count-based), so a turn
+        # appears in the change feed once, at creation. A redelivered batch
+        # repeats it, and the counters skip it by its LSN.
         tenant_id = _tenant_of(doc)
         user_id = _owner_of(doc)
         thread_id = _thread_of(doc)
@@ -233,8 +241,8 @@ async def process_changefeed_batch(
                 lsn_int = int(lsn)
             except (TypeError, ValueError):
                 continue
-            thread_max_lsn[thread_key] = max(thread_max_lsn.get(thread_key, 0), lsn_int)
-            user_max_lsn[user_key] = max(user_max_lsn.get(user_key, 0), lsn_int)
+            thread_lsns[thread_key].append(lsn_int)
+            user_lsns[user_key].append(lsn_int)
 
     thread_enabled = n_thread > 0 or n_facts > 0 or n_episode > 0
     user_enabled = n_user > 0
@@ -259,7 +267,8 @@ async def process_changefeed_batch(
             try:
                 tenant_id, user_id, thread_id = thread_key
                 cid = thread_counter_id(user_id, thread_id)
-                lsn = thread_max_lsn.get(thread_key)
+                turn_lsns = thread_lsns.get(thread_key, [])
+                lsn = max(turn_lsns, default=None)
                 old_count, new_count = await increment_counter_by(
                     counter_container,
                     tenant_id,
@@ -267,7 +276,7 @@ async def process_changefeed_batch(
                     user_id,
                     thread_id,
                     batch_count,
-                    batch_max_lsn=lsn,
+                    turn_lsns=turn_lsns,
                 )
 
                 if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
@@ -326,7 +335,7 @@ async def process_changefeed_batch(
                         orchestration_errors,
                     )
             except Exception as exc:
-                _record_key_failure(exc, key_errors)
+                _record_key_failure(exc, thread_key, key_errors)
 
     # ---- Step 3: User-scoped counters ----
     if user_enabled:
@@ -334,7 +343,8 @@ async def process_changefeed_batch(
             try:
                 tenant_id, user_id = user_key
                 cid = user_counter_id(user_id)
-                lsn = user_max_lsn.get(user_key)
+                turn_lsns = user_lsns.get(user_key, [])
+                lsn = max(turn_lsns, default=None)
                 old_count, new_count = await increment_counter_by(
                     counter_container,
                     tenant_id,
@@ -342,7 +352,7 @@ async def process_changefeed_batch(
                     user_id,
                     config.USER_COUNTER_THREAD_ID,
                     batch_count,
-                    batch_max_lsn=lsn,
+                    turn_lsns=turn_lsns,
                 )
                 if crosses_threshold(old_count, new_count, n_user):
                     instance_id = orchestration_instance_id(
@@ -361,7 +371,7 @@ async def process_changefeed_batch(
                         orchestration_errors,
                     )
             except Exception as exc:
-                _record_key_failure(exc, key_errors)
+                _record_key_failure(exc, user_key, key_errors)
 
     # Re-raise so the host records the batch as failed and, under the retry policy, runs it again. A retry is safe: a
     # counter skips turns it has already counted, and ``_safe_start`` leaves an instance that exists alone. The host
@@ -390,9 +400,17 @@ async def _safe_start(
 
     A retried or redelivered batch derives the ids of the orchestrations it already started, so an instance that
     exists, in any state, is the run this threshold crossing started and is left as it is. Durable Functions refuses
-    an id only while its instance is still running and starts a finished one again, which is why the status is read
-    first. The 409 it still answers for an instance that is starting or running covers two deliveries racing. A
-    failure of either call is recorded in ``errors``, which fails the batch so the host retries it.
+    an id only while its instance is starting or running and starts a finished one again, which is why the status is
+    read first.
+
+    The status read and the start are not atomic. Of two deliveries of one batch that overlap in time (a lease that
+    moves while the batch runs), the 409 stops the second only while the first run is still starting or running. If
+    the first has finished in the gap between the second's status read and its start, the second starts the id again.
+    That takes a stall as long as an orchestration, and the second run writes nothing twice because record ids are
+    deterministic. Closing the gap would take a claim record and crash recovery, because the Durable client cannot do
+    it: ``start_new`` has no option to refuse a finished id.
+
+    A failure of either call is recorded in ``errors``, which fails the batch so the host retries it.
     """
     try:
         if await starter.get_status(instance_id):
@@ -416,8 +434,8 @@ async def _safe_start(
             client_input=client_input,
         )
     except Exception as exc:
-        # An instance that is starting or running is refused with a 409 Conflict by the Durable client, the second
-        # guard after the status read.
+        # An instance that is starting or running is refused with a 409 Conflict by the Durable client: the second
+        # guard after the status read, for a delivery that overlaps this one (see the docstring for what it misses).
         # The Durable Python SDK currently raises bare ``Exception`` for
         # everything (no typed class for OrchestrationAlreadyExists), so
         # we keep two signals - status_code first, then the canonical

@@ -1095,6 +1095,62 @@ def test_lsns_are_tracked_per_tenant_and_a_replay_counts_nothing_twice():
         assert (globex["count"], globex["last_batch_lsn"]) == (1, 50)
 
 
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "4",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_a_batch_delivered_again_with_newer_turns_counts_each_turn_once():
+    """The host stopped after counting turns 1-3 but before the checkpoint, and turns 4 and 5 were written meanwhile,
+    so the change feed delivers 1-5. Only 4 and 5 are new: the count is 5 (not 8) and the threshold of 4 is crossed
+    once, by the summary of count 5. A further delivery of 1-5 changes nothing."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(process_changefeed_batch([_turn(lsn=n) for n in (1, 2, 3)], starter, counter_container=container))
+    starter.start_new.assert_not_awaited()
+
+    redelivered = [_turn(lsn=n) for n in (1, 2, 3, 4, 5)]
+    asyncio.run(process_changefeed_batch(redelivered, starter, counter_container=container))
+    asyncio.run(process_changefeed_batch(redelivered, starter, counter_container=container))
+
+    assert _counter(container, "thread:u1:t1")["count"] == 5
+    [start] = starter.start_new.await_args_list
+    assert start.kwargs["instance_id"] == _thread_instance_id("thread_summary", 5, lsn=5)
+    assert start.kwargs["client_input"]["count"] == 5
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "100",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "100",
+    },
+    clear=False,
+)
+def test_every_counter_of_a_redelivered_batch_skips_the_turns_it_counted_itself():
+    """Two threads of one owner: each thread's counter and the owner's counter compare the turns of the redelivery
+    with the LSN it stored, so each counts only the turns after it."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    threads = ("t1", "t2", "t1", "t2", "t1")
+    turns = [_turn(thread_id=thread, lsn=lsn) for lsn, thread in enumerate(threads, start=1)]
+
+    asyncio.run(process_changefeed_batch(turns[:3], starter, counter_container=container))
+    asyncio.run(process_changefeed_batch(turns, starter, counter_container=container))
+
+    assert _counter(container, "thread:u1:t1")["count"] == 3
+    assert _counter(container, "thread:u1:t2")["count"] == 2
+    assert _counter(container, "user:u1")["count"] == 5
+
+
 # ---------------------------------------------------------------------------
 # A failing thread or owner does not stop the others in the batch; the batch fails at the end
 # ---------------------------------------------------------------------------
@@ -1135,15 +1191,18 @@ def _batch_of_three_threads() -> list[dict]:
 
 @patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
 @pytest.mark.parametrize(
-    ("failing", "lost_start"),
+    ("failing", "lost_start", "named"),
     [
         pytest.param(
-            (TENANT, "u1", "thread:u1:t1"), _thread_instance_id("thread_summary", 2, thread_id="t1"), id="thread"
+            (TENANT, "u1", "thread:u1:t1"),
+            _thread_instance_id("thread_summary", 2, thread_id="t1"),
+            "tenant=acme user=u1 thread=t1",
+            id="thread",
         ),
-        pytest.param((TENANT, "u1", "user:u1"), _user_instance_id(4), id="owner"),
+        pytest.param((TENANT, "u1", "user:u1"), _user_instance_id(4), "tenant=acme user=u1", id="owner"),
     ],
 )
-def test_a_counter_that_cannot_be_updated_does_not_stop_the_rest_of_the_batch(failing, lost_start, caplog):
+def test_a_counter_that_cannot_be_updated_does_not_stop_the_rest_of_the_batch(failing, lost_start, named, caplog):
     """The first thread, or the first owner, cannot be updated: every other counter is still written and every other
     threshold crossing still starts its orchestration, and only then does the batch fail."""
     caplog.set_level(logging.INFO)
@@ -1159,12 +1218,12 @@ def test_a_counter_that_cannot_be_updated_does_not_stop_the_rest_of_the_batch(fa
         key: count for key, count in _BATCH_COUNTS.items() if key != failing
     }
     assert {c.kwargs["instance_id"] for c in starter.start_new.await_args_list} == _BATCH_START_IDS - {lost_start}
-    # The failure is logged once as its type and code location. Neither the log nor the error the batch raises quotes
-    # the SDK error's text or chains to it.
+    # The failure is logged once, naming the tenant, owner and thread of the counter, as its type and code location.
+    # Neither the log nor the error the batch raises quotes the SDK error's text or chains to it.
     [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert record.exc_info is None
     assert record.getMessage().startswith(
-        "change-feed: failed to update a counter (exc_type=CosmosHttpResponseError): "
+        f"change-feed: failed to update the counter of {named} (exc_type=CosmosHttpResponseError): "
         "azure.cosmos.CosmosHttpResponseError(status=503) at "
     )
     assert (failed.value.__cause__, failed.value.__context__) == (None, None)

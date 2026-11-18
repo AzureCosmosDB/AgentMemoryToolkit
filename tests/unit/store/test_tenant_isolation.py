@@ -436,6 +436,16 @@ async def test_a_read_for_an_invalid_owner_is_refused_rather_than_widened_to_the
     assert not containers[MEMORIES].sent("query_items")
 
 
+@pytest.mark.parametrize("owner", INVALID_OWNERS)
+async def test_get_user_summary_refuses_an_invalid_owner_as_a_validation_error(kind, owner):
+    store, containers = _build(kind)
+
+    with pytest.raises(ValidationError, match="user_id"):
+        await _call(store, "get_user_summary", owner)
+
+    assert not containers[SUMMARIES].sent("read_item")
+
+
 async def test_mark_superseded_keeps_the_tenant_and_refuses_another(kind):
     store, containers = _build(kind, docs={MEMORIES: [_fact(), _fact(OTHER_TENANT)]})
 

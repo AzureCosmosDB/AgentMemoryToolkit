@@ -158,7 +158,10 @@ class TestProcessorTenant:
         )
 
     def test_a_processor_of_another_tenant_is_refused(self):
-        with pytest.raises(ConfigurationError, match=rf"tenant '{DEFAULT_TENANT_ID}'.*tenant 'acme'"):
+        # The way out is the pipeline the processor wraps: its tenant is the one that counts.
+        with pytest.raises(
+            ConfigurationError, match=rf"tenant '{DEFAULT_TENANT_ID}'.*tenant 'acme'.*the pipeline it wraps"
+        ):
             _make_client(tenant_id="acme", processor=self._processor(DEFAULT_TENANT_ID))
 
     def test_a_processor_of_the_clients_tenant_is_used(self):
@@ -303,6 +306,26 @@ class TestAddLocal:
         # _make_memory auto-generates a UUID for it.
         mem.add_local(user_id="u1", role="user", content="profile", memory_type="user_summary")
         assert len(mem.local_memory) == 1
+
+    @pytest.mark.parametrize(
+        ("user_id", "thread_id", "memory_type", "refused"),
+        [
+            ("a/b", "t1", "turn", "user_id"),
+            ("u1 ", "t1", "turn", "user_id"),
+            ("", "t1", "turn", "user_id"),
+            ("u1", "t1 ", "turn", "thread_id"),
+            ("u1", "a/b", "turn", "thread_id"),
+            ("u1", "t\x7f1", "turn", "thread_id"),
+            ("u1", "t1 ", "fact", "thread_id"),
+        ],
+    )
+    def test_add_local_refuses_an_id_that_could_never_be_written(self, user_id, thread_id, memory_type, refused):
+        mem = _make_client()
+        with pytest.raises(ValidationError, match=refused):
+            mem.add_local(user_id=user_id, role="user", content="hi", memory_type=memory_type, thread_id=thread_id)
+        # Nothing is buffered, so a later push does not fail on the same record every time.
+        assert mem.local_memory == []
+        assert mem._unflushed_turn_counts == {}
 
 
 class TestGetLocal:

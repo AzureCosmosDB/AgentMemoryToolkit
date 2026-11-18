@@ -47,6 +47,9 @@ INVALID_IDS = [
     "a ",
     "a\n",
     "a\xa0",
+    # A lone surrogate cannot be encoded as UTF-8: it is refused up front, not left to raise UnicodeEncodeError.
+    "a\ud800b",
+    "\udfff",
 ]
 
 # Joined by zero-width joiners, which are format characters, not controls.

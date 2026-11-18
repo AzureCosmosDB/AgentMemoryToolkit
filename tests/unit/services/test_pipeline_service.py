@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,7 +11,7 @@ from azure.cosmos.exceptions import CosmosResourceExistsError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID
-from azure.cosmos.agent_memory.exceptions import ValidationError
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
@@ -354,6 +355,24 @@ def test_thread_summary_persists_to_summaries_container() -> None:
     with pytest.raises(ValidationError, match="different tenant"):
         service.persist_thread_summary("u1", "t1", {**summary_doc, "tenant_id": "other"})
     summaries_container.upsert_item.assert_called_once()
+
+
+def _pipeline_over(store: Any, **options: Any) -> PipelineService:
+    return PipelineService(store, MagicMock(), MagicMock(), containers=_containers_for_store(FakeStore()), **options)
+
+
+def test_a_pipeline_works_in_the_tenant_of_its_store_unless_given_one() -> None:
+    store = SimpleNamespace(tenant_id="acme")
+
+    assert _pipeline_over(store).tenant_id == "acme"
+    assert _pipeline_over(store, tenant_id="acme").tenant_id == "acme"
+    with pytest.raises(ConfigurationError, match="'globex' differs from the tenant of the store, 'acme'"):
+        _pipeline_over(store, tenant_id="globex")
+
+
+def test_a_pipeline_over_a_store_that_reports_no_tenant_works_in_the_default_tenant() -> None:
+    assert _pipeline_over(SimpleNamespace()).tenant_id == DEFAULT_TENANT_ID
+    assert _pipeline_over(SimpleNamespace(), tenant_id="acme").tenant_id == "acme"
 
 
 def _persist_summary(

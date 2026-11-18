@@ -30,11 +30,10 @@ from pydantic import ValidationError as PydanticValidationError
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._curation import mark_secret, sanitize_record, sanitize_text
 from azure.cosmos.agent_memory._partitioning import (
-    DEFAULT_TENANT_ID,
     OWNER_FILTER,
     owner_parameters,
     partition_key_for,
-    resolve_tenant_id,
+    resolve_pipeline_tenant,
     stamp_scope,
 )
 from azure.cosmos.agent_memory._utils import (
@@ -318,8 +317,9 @@ class _AsyncStoreContainerAdapter:
 class AsyncPipelineService:
     """Async LLM orchestration service over the injected containers, async memory store and model clients.
 
-    The service is bound to one tenant (``tenant_id``): every record it reads or writes is in the partition
-    ``[tenant_id, user_id]`` of its owner, and every query it sends filters on the tenant.
+    The service is bound to one tenant (``tenant_id``, which defaults to the tenant of ``store``): every record it
+    reads or writes is in the partition ``[tenant_id, user_id]`` of its owner, and every query it sends filters on the
+    tenant. A ``store`` that works in another tenant is refused.
     """
 
     def __init__(
@@ -331,9 +331,9 @@ class AsyncPipelineService:
         *,
         containers: dict[ContainerKey, Any],
         transcript_metadata_keys: Optional[Iterable[str]] = None,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        tenant_id: Optional[str] = None,
     ) -> None:
-        self._tenant_id = resolve_tenant_id(tenant_id)
+        self._tenant_id = resolve_pipeline_tenant(store, tenant_id)
         self._store = store
         self._containers = containers
         self._memories_container = containers[ContainerKey.MEMORIES]

@@ -190,7 +190,10 @@ class TestProcessorTenant:
         )
 
     def test_a_processor_of_another_tenant_is_refused(self):
-        with pytest.raises(ConfigurationError, match=rf"tenant '{DEFAULT_TENANT_ID}'.*tenant 'acme'"):
+        # The way out is the pipeline the processor wraps: its tenant is the one that counts.
+        with pytest.raises(
+            ConfigurationError, match=rf"tenant '{DEFAULT_TENANT_ID}'.*tenant 'acme'.*the pipeline it wraps"
+        ):
             _make_client(tenant_id="acme", processor=self._processor(DEFAULT_TENANT_ID))
 
     def test_a_processor_of_the_clients_tenant_is_used(self):

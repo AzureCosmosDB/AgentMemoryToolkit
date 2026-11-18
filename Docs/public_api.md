@@ -21,9 +21,9 @@
 
 ### Memory CRUD
 
-`update_cosmos`, `delete_memory`, `delete_turn`, `add_tags`, `remove_tags` and `get_memory_history` find a record by its owner (`user_id`) and need no `thread_id`: `thread_id` is a plain field, not part of the partition key. A `user_id` or `thread_id` that breaks the identifier rules in [Tenants and Owners](concepts.md#tenants-and-owners) (such as one that ends in whitespace) raises `ValidationError` when the client writes it.
+`update_cosmos`, `delete_memory`, `delete_turn`, `add_tags`, `remove_tags` and `get_memory_history` find a record by its owner (`user_id`) and need no `thread_id`: `thread_id` is a plain field, not part of the partition key. A `user_id` or `thread_id` that breaks the identifier rules in [Tenants and Owners](concepts.md#tenants-and-owners) (such as one that ends in whitespace) raises `ValidationError` when the client buffers or writes it.
 
-- `add_local(user_id, role, content, memory_type='turn', agent_id=None, metadata=None, thread_id=None, tags=None, ttl=None, salience=None) -> None` - append a memory to the local buffer. `thread_id` is required when `memory_type='turn'`.
+- `add_local(user_id, role, content, memory_type='turn', agent_id=None, metadata=None, thread_id=None, tags=None, ttl=None, salience=None) -> None` - append a memory to the local buffer. `thread_id` is required when `memory_type='turn'`. A `user_id` or `thread_id` that breaks the identifier rules raises `ValidationError`, so a record that could never be written is not buffered.
 - `get_local(memory_id=None, user_id=None, role=None, memory_types=None) -> list[dict]` - filter local buffered memories.
 - `update_local(memory_id, content=None, role=None, memory_type=None, metadata=None) -> None` - update a local buffered memory.
 - `delete_local(memory_id) -> None` - remove a local buffered memory.
@@ -106,7 +106,7 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 
 ### Memory CRUD
 
-- `add_local(user_id, role, content, memory_type='turn', agent_id=None, metadata=None, thread_id=None, tags=None, ttl=None, salience=None) -> None` - append a memory to the local buffer. `thread_id` is required when `memory_type='turn'`.
+- `add_local(user_id, role, content, memory_type='turn', agent_id=None, metadata=None, thread_id=None, tags=None, ttl=None, salience=None) -> None` - append a memory to the local buffer. `thread_id` is required when `memory_type='turn'`. A `user_id` or `thread_id` that breaks the identifier rules raises `ValidationError`, so a record that could never be written is not buffered.
 - `get_local(memory_id=None, user_id=None, role=None, memory_types=None) -> list[dict]` - filter local buffered memories.
 - `update_local(memory_id, content=None, role=None, memory_type=None, metadata=None) -> None` - update a local buffered memory.
 - `delete_local(memory_id) -> None` - remove a local buffered memory.
@@ -208,7 +208,7 @@ Credentials without a fixed format, such as `password: hunter2` typed into a cha
 ## Extension Points
 
 - `MemoryStoreProtocol` (`azure.cosmos.agent_memory.services`): persistence primitives (`query`, `read_item`, `upsert_memory`, `mark_superseded`) consumed by `PipelineService`. `AsyncPipelineService` takes an `AsyncMemoryStore`; there is no async protocol.
-- `MemoryProcessor` (`azure.cosmos.agent_memory.processors`) and `AsyncMemoryProcessor` (`azure.cosmos.agent_memory.aio.processors`): the processing backend behind the `processor` argument, with `process_thread`, `process_extract_memories`, `process_extract_episodes`, `process_thread_summary`, `process_user_summary`, `process_reconcile`, `generate_user_summary`, `synthesize_procedural` and `close`. `InProcessProcessor` / `AsyncInProcessProcessor` run the pipeline in your process; `DurableFunctionProcessor` / `AsyncDurableFunctionProcessor` leave it to the Function App, so their methods are no-ops. An in-process processor works in one tenant and exposes it as a read-only `tenant_id`; a client raises `ConfigurationError` when its `processor` works in another tenant than its own `tenant_id`, so build the processor with the same `tenant_id`, or omit `processor` so the client builds its own.
+- `MemoryProcessor` (`azure.cosmos.agent_memory.processors`) and `AsyncMemoryProcessor` (`azure.cosmos.agent_memory.aio.processors`): the processing backend behind the `processor` argument, with `process_thread`, `process_extract_memories`, `process_extract_episodes`, `process_thread_summary`, `process_user_summary`, `process_reconcile`, `generate_user_summary`, `synthesize_procedural` and `close`. `InProcessProcessor` / `AsyncInProcessProcessor` run the pipeline in your process; `DurableFunctionProcessor` / `AsyncDurableFunctionProcessor` leave it to the Function App, so their methods are no-ops. An in-process processor works in one tenant and exposes it as a read-only `tenant_id`; one built over your own `pipeline` keeps the pipeline's tenant, and a different `tenant_id` given with it raises `ConfigurationError`. A client raises `ConfigurationError` when its `processor` works in another tenant than its own `tenant_id`, so build the processor, and the pipeline it wraps, with the same `tenant_id`, or omit `processor` so the client builds its own.
 
 Concrete service classes:
 
@@ -216,4 +216,4 @@ Concrete service classes:
 - Async: `AsyncPipelineService` from `azure.cosmos.agent_memory.aio.services` (sub-module `pipeline`). The async pipeline is a fully-native asyncio implementation - not an `asyncio.to_thread` shim over the sync pipeline.
 - Threshold-driven auto-trigger: `maybe_trigger_steps` from `azure.cosmos.agent_memory.auto_trigger` (sync) and `azure.cosmos.agent_memory.aio.auto_trigger` (async).
 
-`MemoryStore`, `AsyncMemoryStore`, `PipelineService` and `AsyncPipelineService` take the same `tenant_id` argument as the clients (default `"default"`). A store stamps it on every record it writes and refuses a record that names another tenant; a pipeline keys its own reads and writes with it. Give a store and the pipeline that uses it the same value. A `MemoryRecord` you build yourself has `tenant_id=None` until it is written: the client or store stamps its own tenant then, and a record that names a different tenant is still refused.
+`MemoryStore`, `AsyncMemoryStore`, `PipelineService` and `AsyncPipelineService` take the same `tenant_id` argument as the clients (default `"default"`). A store stamps it on every record it writes and refuses a record that names another tenant; a pipeline keys its own reads and writes with it, and its `tenant_id` defaults to the tenant of its store (a store of another tenant raises `ConfigurationError`). A `MemoryRecord` you build yourself has `tenant_id=None` until it is written: the client or store stamps its own tenant then, and a record that names a different tenant is still refused.

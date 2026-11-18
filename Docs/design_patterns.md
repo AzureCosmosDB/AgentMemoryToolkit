@@ -539,7 +539,7 @@ await mem.upsert_memory(
 facts = await mem.search_cosmos("refund limits", user_id=AGENT, memory_types=["fact"], top_k=3)
 ```
 
-Everything an owner knows sits in one partition, and Cosmos DB limits a logical partition to 20 GB of data and 10,000 RU/s. Keep each user's memories under that user's id and put only what belongs to the agent itself under the agent's, so that no single owner, such as an agent shared by many users, outgrows those limits. If one agent id would carry the load of every user, spread it over several ids.
+Everything an owner knows sits in one partition, and Cosmos DB limits a logical partition to 20 GB of data and 10,000 RU/s (5,000 RU/s on a serverless account). Keep each user's memories under that user's id and put only what belongs to the agent itself under the agent's, so that no single owner, such as an agent shared by many users, outgrows those limits. If one agent id would carry the load of every user, spread it over several ids.
 
 ---
 

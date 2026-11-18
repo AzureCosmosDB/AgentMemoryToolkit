@@ -5,6 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from azure.cosmos.agent_memory.exceptions import ConfigurationError
 from azure.cosmos.agent_memory.processors import InProcessProcessor, ProcessThreadResult
 
 
@@ -135,8 +138,8 @@ def test_constructor_requires_all_three_containers_when_no_pipeline():
         )
 
 
-def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
-    built = InProcessProcessor(
+def _acme_processor() -> InProcessProcessor:
+    return InProcessProcessor(
         cosmos_container=MagicMock(),
         turns_container=MagicMock(),
         summaries_container=MagicMock(),
@@ -144,10 +147,21 @@ def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
         embeddings_client=MagicMock(),
         tenant_id="acme",
     )
-    # ``tenant_id=`` applies only to a pipeline the processor builds.
-    wrapped = InProcessProcessor(pipeline=built._pipeline, tenant_id="globex")
 
-    assert built.tenant_id == wrapped.tenant_id == "acme"
+
+def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
+    built = _acme_processor()
+
+    assert built.tenant_id == "acme"
+    assert InProcessProcessor(pipeline=built._pipeline).tenant_id == "acme"
+    assert InProcessProcessor(pipeline=built._pipeline, tenant_id="acme").tenant_id == "acme"
+
+
+def test_a_tenant_that_differs_from_the_one_of_its_pipeline_is_refused():
+    built = _acme_processor()
+
+    with pytest.raises(ConfigurationError, match="'globex' differs from the tenant of the pipeline, 'acme'"):
+        InProcessProcessor(pipeline=built._pipeline, tenant_id="globex")
 
 
 def test_a_pipeline_that_reports_no_tenant_leaves_the_processor_without_one():

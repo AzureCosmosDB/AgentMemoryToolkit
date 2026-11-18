@@ -29,11 +29,10 @@ from azure.cosmos.agent_memory import thresholds as threshold_config
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._curation import mark_secret, sanitize_record, sanitize_text
 from azure.cosmos.agent_memory._partitioning import (
-    DEFAULT_TENANT_ID,
     OWNER_FILTER,
     owner_parameters,
     partition_key_for,
-    resolve_tenant_id,
+    resolve_pipeline_tenant,
     stamp_scope,
 )
 from azure.cosmos.agent_memory._utils import (
@@ -286,8 +285,9 @@ class _StoreContainerAdapter:
 class PipelineService:
     """LLM orchestration service over the injected containers, memory store and model clients.
 
-    The service is bound to one tenant (``tenant_id``): every record it reads or writes is in the partition
-    ``[tenant_id, user_id]`` of its owner, and every query it sends filters on the tenant.
+    The service is bound to one tenant (``tenant_id``, which defaults to the tenant of ``store``): every record it
+    reads or writes is in the partition ``[tenant_id, user_id]`` of its owner, and every query it sends filters on the
+    tenant. A ``store`` that works in another tenant is refused.
     """
 
     def __init__(
@@ -299,9 +299,9 @@ class PipelineService:
         *,
         containers: dict[ContainerKey, Any],
         transcript_metadata_keys: Optional[Iterable[str]] = None,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        tenant_id: Optional[str] = None,
     ) -> None:
-        self._tenant_id = resolve_tenant_id(tenant_id)
+        self._tenant_id = resolve_pipeline_tenant(store, tenant_id)
         self._store = store
         self._containers = containers
         self._memories_container = containers[ContainerKey.MEMORIES]
@@ -1012,7 +1012,7 @@ class PipelineService:
         fail and leave the open segment torn, and it writes to the memories
         container, never the change-feed-monitored turns container. The advance
         is atomic - ETag ``IfNotModified`` with a re-read retry - so a late,
-        out-of-order concurrent ``episode:{u}:{t}:{count}`` orchestration cannot
+        out-of-order concurrent ``episode`` orchestration cannot
         regress the cursor (a regressed cursor would, with topic drift enabled,
         re-segment turns under a new segment key and duplicate episodes).
         """

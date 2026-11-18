@@ -512,6 +512,7 @@ def test_a_turn_with_an_unsupported_owner_is_skipped_like_one_without_a_tenant(o
         pytest.param("a/b", id="slash"),
         pytest.param("t\x7f1", id="control-character"),
         pytest.param("t\u20281", id="line-separator"),
+        pytest.param("t\ud8001", id="lone-surrogate"),
         pytest.param("t" * 257, id="too-long"),
     ],
 )

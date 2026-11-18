@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor, ProcessThreadResult
+from azure.cosmos.agent_memory.exceptions import ConfigurationError
 
 
 @pytest.mark.asyncio
@@ -138,8 +139,8 @@ async def test_process_thread_summary_returns_none_for_non_dict():
     assert result is None
 
 
-def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
-    built = AsyncInProcessProcessor(
+def _acme_processor() -> AsyncInProcessProcessor:
+    return AsyncInProcessProcessor(
         cosmos_container=MagicMock(),
         turns_container=MagicMock(),
         summaries_container=MagicMock(),
@@ -147,10 +148,21 @@ def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
         embeddings_client=MagicMock(),
         tenant_id="acme",
     )
-    # ``tenant_id=`` applies only to a pipeline the processor builds.
-    wrapped = AsyncInProcessProcessor(pipeline=built._pipeline, tenant_id="globex")
 
-    assert built.tenant_id == wrapped.tenant_id == "acme"
+
+def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
+    built = _acme_processor()
+
+    assert built.tenant_id == "acme"
+    assert AsyncInProcessProcessor(pipeline=built._pipeline).tenant_id == "acme"
+    assert AsyncInProcessProcessor(pipeline=built._pipeline, tenant_id="acme").tenant_id == "acme"
+
+
+def test_a_tenant_that_differs_from_the_one_of_its_pipeline_is_refused():
+    built = _acme_processor()
+
+    with pytest.raises(ConfigurationError, match="'globex' differs from the tenant of the pipeline, 'acme'"):
+        AsyncInProcessProcessor(pipeline=built._pipeline, tenant_id="globex")
 
 
 def test_a_pipeline_that_reports_no_tenant_leaves_the_processor_without_one():

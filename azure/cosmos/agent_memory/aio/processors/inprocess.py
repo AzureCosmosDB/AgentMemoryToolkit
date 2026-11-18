@@ -10,7 +10,8 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID
+from azure.cosmos.agent_memory._partitioning import reported_tenant, resolve_tenant_id
+from azure.cosmos.agent_memory.exceptions import ConfigurationError
 from azure.cosmos.agent_memory.processors.base import (
     ProcessThreadResult,
     UserSummaryResult,
@@ -22,7 +23,8 @@ class AsyncInProcessProcessor:
 
     Wraps an existing pipeline, or builds one from the supplied container / LLM / embeddings clients,
     bound to ``tenant_id`` (``"default"`` when not given). A ``pipeline`` you pass keeps its own tenant, which
-    :attr:`tenant_id` reports and ``tenant_id=`` does not change; a client built with another tenant refuses it.
+    :attr:`tenant_id` reports; giving a different ``tenant_id`` as well raises :class:`ConfigurationError`, and so
+    does a client built with another tenant.
     """
 
     def __init__(
@@ -34,7 +36,7 @@ class AsyncInProcessProcessor:
         summaries_container: Any = None,
         chat_client: Any = None,
         embeddings_client: Any = None,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        tenant_id: Optional[str] = None,
     ) -> None:
         if pipeline is None:
             if (
@@ -53,6 +55,7 @@ class AsyncInProcessProcessor:
             from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
             from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 
+            tenant_id = resolve_tenant_id(tenant_id)
             containers = {
                 ContainerKey.TURNS: turns_container,
                 ContainerKey.MEMORIES: cosmos_container,
@@ -62,13 +65,20 @@ class AsyncInProcessProcessor:
             pipeline = AsyncPipelineService(
                 store, chat_client, embeddings_client, containers=containers, tenant_id=tenant_id
             )
+        elif tenant_id is not None:
+            pipeline_tenant = reported_tenant(pipeline)
+            if pipeline_tenant is not None and pipeline_tenant != resolve_tenant_id(tenant_id):
+                raise ConfigurationError(
+                    f"tenant_id {tenant_id!r} differs from the tenant of the pipeline, {pipeline_tenant!r}: "
+                    "build the pipeline with the tenant_id you want"
+                )
 
         self._pipeline = pipeline
 
     @property
     def tenant_id(self) -> Optional[str]:
         """The tenant of the pipeline this processor runs, or ``None`` when that pipeline reports none."""
-        return getattr(self._pipeline, "tenant_id", None)
+        return reported_tenant(self._pipeline)
 
     async def process_thread(
         self,

@@ -17,7 +17,7 @@ from __future__ import annotations
 import unicodedata
 from typing import Any, Mapping, Optional
 
-from azure.cosmos.agent_memory.exceptions import ValidationError
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
 DEFAULT_TENANT_ID = "default"
 
@@ -26,8 +26,9 @@ PARTITION_KEY_PATHS = ["/tenant_id", "/user_id"]
 
 # Ids appear in Cosmos document ids, which cannot hold these characters or end in whitespace.
 _UNSUPPORTED_CHARACTERS = "/\\?#"
-# Control characters (C0, DEL and C1) and the line and paragraph separators.
-_REFUSED_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+# Control characters (C0, DEL and C1), lone surrogates (they cannot be encoded as UTF-8) and the line and paragraph
+# separators.
+_REFUSED_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
 MAX_TENANT_ID_BYTES = 256
 MAX_OWNER_ID_BYTES = 256
 MAX_THREAD_ID_BYTES = 256
@@ -71,6 +72,30 @@ def validate_owner_id(user_id: Any) -> str:
     rules would fail later or share a partition by accident.
     """
     return _checked_identifier(user_id, "user_id", MAX_OWNER_ID_BYTES)
+
+
+def reported_tenant(obj: Any) -> Optional[str]:
+    """The tenant ``obj`` says it works in, or ``None`` when it reports none (a test double, a custom object)."""
+    tenant = getattr(obj, "tenant_id", None)
+    return tenant if isinstance(tenant, str) else None
+
+
+def resolve_pipeline_tenant(store: Any, tenant_id: Optional[str] = None) -> str:
+    """The tenant of a pipeline over ``store``: ``tenant_id`` if given, else the tenant of the store, else the default.
+
+    A pipeline reads in its own tenant and writes through its store, so a store that works in another tenant than the
+    one asked for raises :class:`ConfigurationError` instead of splitting the pipeline between the two.
+    """
+    store_tenant = reported_tenant(store)
+    if tenant_id is None:
+        return resolve_tenant_id(store_tenant)
+    resolved = resolve_tenant_id(tenant_id)
+    if store_tenant is not None and store_tenant != resolved:
+        raise ConfigurationError(
+            f"tenant_id {resolved!r} differs from the tenant of the store, {store_tenant!r}: "
+            "give the pipeline and its store the same tenant_id"
+        )
+    return resolved
 
 
 def validate_thread_id(thread_id: Any) -> str:

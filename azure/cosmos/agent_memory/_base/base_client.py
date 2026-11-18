@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
-from azure.cosmos.agent_memory._partitioning import resolve_tenant_id
+from azure.cosmos.agent_memory._partitioning import (
+    reported_tenant,
+    resolve_tenant_id,
+    validate_owner_id,
+    validate_thread_id,
+)
 from azure.cosmos.agent_memory._utils import (
     VALID_ROLES,
     VALID_TYPES,
@@ -135,12 +140,12 @@ class _BaseMemoryClient:
 
         A processor that reports no tenant, as a custom one may not, is not checked.
         """
-        processor_tenant = getattr(processor, "tenant_id", None)
-        if isinstance(processor_tenant, str) and processor_tenant != self._tenant_id:
+        processor_tenant = reported_tenant(processor)
+        if processor_tenant is not None and processor_tenant != self._tenant_id:
             raise ConfigurationError(
                 f"processor works in tenant {processor_tenant!r} but this client is bound to tenant "
-                f"{self._tenant_id!r}: build the processor with the same tenant_id, or omit it so the client "
-                "builds its own"
+                f"{self._tenant_id!r}: build the processor, and the pipeline it wraps, with the same tenant_id, "
+                "or omit it so the client builds its own"
             )
 
     @property
@@ -170,7 +175,14 @@ class _BaseMemoryClient:
         ttl: Optional[int] = None,
         salience: Optional[float] = None,
     ) -> None:
-        """Add a new memory to the local store."""
+        """Add a new memory to the local store.
+
+        ``user_id`` and ``thread_id`` must be valid ids, so a record that could never be written is refused here and
+        does not make every later push fail.
+        """
+        validate_owner_id(user_id)
+        if thread_id:
+            validate_thread_id(thread_id)
         if memory_type == "turn" and not thread_id:
             raise ValidationError(
                 "thread_id is required for memory_type='turn' so the auto-trigger "

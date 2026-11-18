@@ -33,7 +33,7 @@ Function-app threshold knobs (`THREAD_SUMMARY_EVERY_N`, `FACT_EXTRACTION_EVERY_N
 
 ## Tenants
 
-The tenant is not a setting. A client takes `tenant_id` as a constructor argument (default `"default"`), and the Function App processes each turn in the tenant stored on it, so one deployment serves every tenant of the database. Each owner's partition `[tenant_id, user_id]` can hold up to 20 GB and 10,000 RU/s, so spread one very busy owner, such as one agent id shared by every user, over several ids. See [Tenants and Owners](concepts.md#tenants-and-owners).
+The tenant is not a setting. A client takes `tenant_id` as a constructor argument (default `"default"`), and the Function App processes each turn in the tenant stored on it, so one deployment serves every tenant of the database. Each owner's partition `[tenant_id, user_id]` can hold up to 20 GB and 10,000 RU/s (5,000 RU/s on a serverless account), so spread one very busy owner, such as one agent id shared by every user, over several ids. See [Tenants and Owners](concepts.md#tenants-and-owners).
 
 ## Reconcile, procedure and extraction knobs
 

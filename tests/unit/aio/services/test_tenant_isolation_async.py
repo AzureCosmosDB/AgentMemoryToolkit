@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from types import SimpleNamespace
 from typing import Any, Iterable, NamedTuple
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,7 +23,7 @@ from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNot
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import compute_content_hash
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
-from azure.cosmos.agent_memory.exceptions import ValidationError
+from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 from azure.cosmos.agent_memory.services._dedup import Verdict
 
 TENANT = "acme"
@@ -216,6 +217,22 @@ def test_a_pipeline_refuses_a_tenant_that_cannot_key_a_record(tenant: str) -> No
 
     with pytest.raises(ValidationError):
         AsyncPipelineService(MagicMock(), MagicMock(), _Embeddings(), containers=containers, tenant_id=tenant)
+
+
+def test_a_pipeline_works_in_the_tenant_of_its_store_unless_given_one() -> None:
+    containers = {key: MagicMock() for key in ContainerKey}
+
+    def build(store: Any, **options: Any) -> AsyncPipelineService:
+        return AsyncPipelineService(store, MagicMock(), _Embeddings(), containers=containers, **options)
+
+    store = SimpleNamespace(tenant_id=TENANT)
+    assert build(store).tenant_id == TENANT
+    assert build(store, tenant_id=TENANT).tenant_id == TENANT
+    with pytest.raises(ConfigurationError, match=f"'{OTHER}' differs from the tenant of the store, '{TENANT}'"):
+        build(store, tenant_id=OTHER)
+    # A store that reports no tenant is not checked: the pipeline works in the default tenant unless given one.
+    assert build(SimpleNamespace()).tenant_id == "default"
+    assert build(SimpleNamespace(), tenant_id=TENANT).tenant_id == TENANT
 
 
 # --- extraction -----------------------------------------------------------------------------------------------

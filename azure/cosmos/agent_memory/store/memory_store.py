@@ -790,10 +790,11 @@ class MemoryStore:
         """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
+        partition_key = partition_key_for(self._tenant_id, user_id)
         try:
             return self._summaries_container.read_item(
                 item=f"user_summary_{user_id}",
-                partition_key=partition_key_for(self._tenant_id, user_id),
+                partition_key=partition_key,
             )
         except CosmosResourceNotFoundError:
             return None

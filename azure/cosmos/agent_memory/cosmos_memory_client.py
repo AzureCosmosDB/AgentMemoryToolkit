@@ -104,6 +104,8 @@ class CosmosMemoryClient(_BaseMemoryClient):
             cosmos_preferred_locations=cosmos_preferred_locations,
             tenant_id=tenant_id,
         )
+        if processor is not None:
+            self._require_processor_tenant(processor)
         # Embeddings/chat clients may be injected (e.g. an OpenAI-compatible backend, a
         # caller-configured client, or a deterministic fake for offline tests). When a client
         # is injected the caller owns its lifecycle, so the toolkit does not close it; otherwise
@@ -191,7 +193,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Establish a connection to the Cosmos DB memory containers.
 
         If container overrides are provided, they override the constructor's
-        settings for this connection.
+        settings for this connection. The memories, turns, summaries and counter containers must exist and
+        be keyed ``[/tenant_id, /user_id]``; otherwise this raises :class:`CosmosOperationError` and closes the
+        connection, because a container keyed otherwise takes writes but is read back empty.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
         if credential is not None:
@@ -232,8 +236,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_database,
                 self._cosmos_summaries_container,
             )
+            self._require_keyed_containers()
             self._init_services()
         except Exception as exc:
+            # The connection cannot be used: close the client just opened and forget its containers.
+            self._drain_cosmos_client()
             raise CosmosOperationError(f"Failed to connect to Cosmos DB: {exc}") from exc
         logger.info("Connected to Cosmos DB %s/%s", self._cosmos_database, self._cosmos_container)
 
@@ -444,6 +451,25 @@ class CosmosMemoryClient(_BaseMemoryClient):
         problem = partition_key_problem(getattr(container, "id", None), container.read())
         if problem:
             raise ConfigurationError(problem)
+
+    def _require_keyed_containers(self) -> None:
+        """Refuse a connected container that is missing or not keyed ``[/tenant_id, /user_id]``.
+
+        A container keyed otherwise takes writes but is read back empty, so it is caught here instead of later.
+        """
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        counter_container = self._get_counter_container()
+        for container in (*self._containers.values(), counter_container):
+            if container is None:
+                continue
+            try:
+                self._require_partition_key(container)
+            except CosmosResourceNotFoundError as exc:
+                raise ConfigurationError(
+                    f"container {getattr(container, 'id', None)!r} does not exist: run create_memory_store() or "
+                    "deploy the infrastructure (azd up), and make sure the SDK settings name the same containers"
+                ) from exc
 
     def _build_store(self) -> MemoryStore:
         return MemoryStore(

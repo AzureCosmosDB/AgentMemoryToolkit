@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +15,7 @@ import pytest
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._partitioning import DEFAULT_TENANT_ID, PARTITION_KEY_PATHS
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
     ConfigurationError,
@@ -34,6 +36,23 @@ def _keyed_container(paths=PARTITION_KEY_PATHS, container_id="container") -> Mag
     """A container whose metadata names its partition key, as ``read()`` returns it."""
     properties = {"id": container_id, "partitionKey": {"paths": list(paths), "kind": "MultiHash", "version": 2}}
     return MagicMock(id=container_id, read=AsyncMock(return_value=properties))
+
+
+async def _assert_discarded(mem, cosmos_client) -> None:
+    """A failed connect or store creation closes the Cosmos client it opened and leaves ``mem`` unconnected."""
+    cosmos_client.close.assert_awaited_once()
+    for attribute in (
+        "_cosmos_client",
+        "_memories_container_client",
+        "_turns_container_client",
+        "_summaries_container_client",
+        "_counter_container_client",
+        "_store",
+        "_pipeline",
+    ):
+        assert getattr(mem, attribute) is None, attribute
+    with pytest.raises(CosmosNotConnectedError):
+        await mem._require_cosmos()
 
 
 class AsyncIterator:
@@ -151,6 +170,43 @@ class TestTenant:
     )
     def test_a_memory_is_addressed_by_its_owner_not_its_thread(self, method):
         assert "thread_id" not in inspect.signature(getattr(AsyncCosmosMemoryClient, method)).parameters
+
+
+class _CustomProcessor:
+    """A processor of its own: it reports no tenant."""
+
+
+class TestProcessorTenant:
+    @staticmethod
+    def _processor(tenant_id: str) -> AsyncInProcessProcessor:
+        """A processor over a real pipeline of ``tenant_id``."""
+        return AsyncInProcessProcessor(
+            cosmos_container=MagicMock(),
+            turns_container=MagicMock(),
+            summaries_container=MagicMock(),
+            chat_client=MagicMock(),
+            embeddings_client=MagicMock(),
+            tenant_id=tenant_id,
+        )
+
+    def test_a_processor_of_another_tenant_is_refused(self):
+        with pytest.raises(ConfigurationError, match=rf"tenant '{DEFAULT_TENANT_ID}'.*tenant 'acme'"):
+            _make_client(tenant_id="acme", processor=self._processor(DEFAULT_TENANT_ID))
+
+    def test_a_processor_of_the_clients_tenant_is_used(self):
+        processor = self._processor("acme")
+
+        assert _make_client(tenant_id="acme", processor=processor)._get_processor() is processor
+
+    @pytest.mark.parametrize(
+        "processor",
+        [
+            pytest.param(_CustomProcessor(), id="custom"),
+            pytest.param(AsyncInProcessProcessor(pipeline=MagicMock()), id="pipeline-double"),
+        ],
+    )
+    def test_a_processor_that_reports_no_tenant_is_not_checked(self, processor):
+        assert _make_client(tenant_id="acme", processor=processor)._get_processor() is processor
 
 
 # ===================================================================
@@ -345,6 +401,22 @@ class TestDeleteLocal:
 
 
 class TestConnectCosmos:
+    CONTAINERS = ("memories", "memories_turns", "memories_summaries", "counter")
+
+    @staticmethod
+    @contextmanager
+    def _serving(containers):
+        """Patch ``azure.cosmos.aio`` so ``connect_cosmos`` finds ``containers`` by id; yields the Cosmos client."""
+        cosmos_client = MagicMock(close=AsyncMock())
+        cosmos_client.get_database_client.return_value.get_container_client.side_effect = containers.__getitem__
+        aio = MagicMock(CosmosClient=MagicMock(return_value=cosmos_client))
+        with patch.dict("sys.modules", {"azure.cosmos.aio": aio}):
+            yield cosmos_client
+
+    @staticmethod
+    async def _connect(mem):
+        await mem.connect_cosmos(endpoint="https://fake.documents.azure.com:443/", credential="fake-key")
+
     async def test_connect_cosmos_success(self):
         mem = _make_client(
             cosmos_endpoint="https://fake.documents.azure.com:443/",
@@ -352,7 +424,7 @@ class TestConnectCosmos:
         )
         mock_cosmos_cls = MagicMock()
         mock_db = MagicMock()
-        mock_container = MagicMock()
+        mock_container = _keyed_container()
         mock_cosmos_cls.return_value = mock_cosmos_cls
         mock_cosmos_cls.get_database_client.return_value = mock_db
         mock_db.get_container_client.return_value = mock_container
@@ -365,13 +437,81 @@ class TestConnectCosmos:
 
         assert mem._memories_container_client is mock_container
 
+    @pytest.mark.parametrize("earlier", CONTAINERS)
+    async def test_a_container_with_the_earlier_key_is_refused(self, earlier):
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        containers[earlier] = _keyed_container(EARLIER_KEY, container_id=earlier)
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            with pytest.raises(
+                CosmosOperationError,
+                match=(
+                    rf"Failed to connect to Cosmos DB \(async\): container '{earlier}' has partition key "
+                    r"\['/user_id', '/thread_id'\].*\['/tenant_id', '/user_id'\]"
+                ),
+            ):
+                await self._connect(mem)
+
+        await _assert_discarded(mem, cosmos_client)
+
+    async def test_the_client_is_reset_even_when_closing_it_fails(self):
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        containers["memories_turns"] = _keyed_container(EARLIER_KEY, container_id="memories_turns")
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            cosmos_client.close.side_effect = RuntimeError("close failed")
+            with pytest.raises(
+                CosmosOperationError,
+                match=r"Failed to connect to Cosmos DB \(async\): container 'memories_turns' has partition key",
+            ):
+                await self._connect(mem)
+
+        await _assert_discarded(mem, cosmos_client)
+
+    async def test_a_container_that_does_not_exist_is_refused(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        containers["counter"].read.side_effect = CosmosResourceNotFoundError(message="missing")
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            with pytest.raises(
+                CosmosOperationError,
+                match=r"Failed to connect to Cosmos DB \(async\): container 'counter' does not exist",
+            ):
+                await self._connect(mem)
+
+        await _assert_discarded(mem, cosmos_client)
+
+    async def test_containers_keyed_by_tenant_and_user_connect_after_all_four_are_read(self):
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            await self._connect(mem)
+
+        cosmos_client.close.assert_not_awaited()
+        assert mem._memories_container_client is containers["memories"]
+        assert mem._turns_container_client is containers["memories_turns"]
+        assert mem._summaries_container_client is containers["memories_summaries"]
+        assert mem._counter_container_client is containers["counter"]
+        for container in containers.values():
+            container.read.assert_awaited_once()
+
 
 class TestPreferredLocations:
     @staticmethod
     async def _cosmos_client_kwargs(entry_point: str = "connect_cosmos", **client_kwargs) -> dict:
         mock_cosmos_cls = MagicMock()
-        database = MagicMock(create_container_if_not_exists=AsyncMock())
+        database = MagicMock(
+            create_container_if_not_exists=AsyncMock(),
+            get_container_client=MagicMock(return_value=_keyed_container()),
+        )
         mock_cosmos_cls.return_value.create_database_if_not_exists = AsyncMock(return_value=database)
+        mock_cosmos_cls.return_value.get_database_client.return_value = database
         mem = _make_client(**client_kwargs)
         with patch.dict(
             "sys.modules",
@@ -601,15 +741,18 @@ class TestCreateMemoryStore:
         for call in mock_db.create_container_if_not_exists.await_args_list:
             assert "offer_throughput" not in call.kwargs
 
+    @pytest.mark.parametrize("close_fails", [False, True], ids=["closes", "close-fails"])
     @pytest.mark.parametrize("earlier", ["memories", "memories_turns", "memories_summaries", "counter"])
-    async def test_an_existing_container_with_the_earlier_key_is_refused(self, earlier):
+    async def test_an_existing_container_with_the_earlier_key_is_refused(self, earlier, close_fails):
         containers = {
             name: _keyed_container(container_id=name)
             for name in ("memories", "memories_turns", "memories_summaries", "counter")
         }
         containers[earlier] = _keyed_container(EARLIER_KEY, container_id=earlier)
         mock_cosmos_cls = MagicMock()
-        mock_cosmos_cls.return_value.close = AsyncMock()
+        mock_cosmos_cls.return_value.close = AsyncMock(
+            side_effect=RuntimeError("close failed") if close_fails else None
+        )
         mock_db = AsyncMock()
         mock_db.create_container_if_not_exists = AsyncMock(side_effect=[*containers.values(), MagicMock()])
         mock_cosmos_cls.return_value.create_database_if_not_exists = AsyncMock(return_value=mock_db)
@@ -628,11 +771,7 @@ class TestCreateMemoryStore:
             ):
                 await mem.create_memory_store(endpoint="https://fake.documents.azure.com:443/", credential="fake-key")
 
-        mock_cosmos_cls.return_value.close.assert_awaited_once()
-        assert mem._cosmos_client is None
-        assert mem._memories_container_client is None
-        with pytest.raises(CosmosNotConnectedError):
-            await mem._require_cosmos()
+        await _assert_discarded(mem, mock_cosmos_cls.return_value)
 
     def test_constructor_ignores_autoscale_in_serverless_mode(self):
         # Even an invalid autoscale value is ignored in serverless mode.

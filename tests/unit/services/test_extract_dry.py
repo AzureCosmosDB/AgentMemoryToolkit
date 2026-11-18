@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from azure.cosmos.exceptions import CosmosResourceNotFoundError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
@@ -881,3 +881,41 @@ def test_extracted_facts_carry_the_tenant_and_the_same_fact_in_two_threads_has_t
     assert (second["tenant_id"], second["thread_id"]) == ("acme", "t2")
     assert first["content_hash"] == second["content_hash"]
     assert first["id"] != second["id"], "an owner's threads share one partition, so the thread is part of the id"
+
+
+class _OwnerStore(_Store):
+    """A container keyed by ``[tenant_id, user_id]``: a record is created once per owner and id, as in Cosmos DB."""
+
+    def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        key = (body["tenant_id"], body["user_id"], body["id"])
+        if any((doc["tenant_id"], doc["user_id"], doc["id"]) == key for doc in self.docs):
+            raise CosmosResourceExistsError(message=body["id"])
+        return self.upsert_memory(body)
+
+
+def test_the_same_fact_is_stored_once_per_owner_and_thread() -> None:
+    memories_store = _OwnerStore([])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([_response()] * 4),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store),
+        tenant_id="acme",
+    )
+
+    def extract_and_persist(user_id: str, thread_id: str) -> int:
+        turn = {**_turn(1), "user_id": user_id, "thread_id": thread_id}
+        extracted = service.extract_memories_durable(user_id, thread_id, turns=[turn])
+        return service.persist_extracted_memories(user_id, extracted)["fact_count"]
+
+    created = [
+        extract_and_persist("u1", "t1"),
+        extract_and_persist("u1", "t1"),
+        extract_and_persist("u1", "t2"),
+        extract_and_persist("u2", "t1"),
+    ]
+
+    assert created == [1, 0, 1, 1], "only the same fact from the same thread of the same owner is a replay"
+    ids = {(doc["user_id"], doc["thread_id"]): doc["id"] for doc in memories_store.docs}
+    assert sorted(ids) == [("u1", "t1"), ("u1", "t2"), ("u2", "t1")]
+    assert len(set(ids.values())) == 3, "the owner is part of the id, not only of the partition"

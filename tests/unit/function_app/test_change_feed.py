@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import re
+import traceback
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -131,6 +132,23 @@ def _user_instance_id(count: int, *, tenant_id: str = TENANT, user_id: str = "u1
     return orchestration_instance_id("user_summary", tenant_id, user_id, count=count)
 
 
+def _fail_counter_reads(container: MagicMock, error: BaseException, *counters: tuple[str, str, str]) -> None:
+    """Make reading any of the ``(tenant_id, user_id, counter_id)`` counters raise ``error``, as a failing call would.
+
+    Every other counter is read as before, so the real counter code runs and only the named counters fail.
+    """
+    read_item = container.read_item.side_effect
+    doomed = set(counters)
+
+    async def failing_read_item(*, item, partition_key):
+        tenant_id, user_id = partition_key
+        if (tenant_id, user_id, item) in doomed:
+            raise error
+        return await read_item(item=item, partition_key=partition_key)
+
+    container.read_item = AsyncMock(side_effect=failing_read_item)
+
+
 def _make_topology_db(missing_name: str | None = None, earlier_key_name: str | None = None):
     containers: dict[str, MagicMock] = {}
     for name in (
@@ -220,6 +238,37 @@ def test_ensure_topology_is_idempotent():
 
     assert get_db.await_count == 1
     assert sum(container.read.await_count for container in containers.values()) == 4
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "2",
+    },
+    clear=False,
+)
+def test_a_batch_counts_nothing_when_a_container_has_the_earlier_key(monkeypatch):
+    """The batch checks the topology before it counts: with a container keyed ``[/user_id, /thread_id]`` no counter is
+    read or written and no orchestration starts, though these two turns would cross both thresholds."""
+    monkeypatch.setattr(change_feed_module, "_topology_validated", False)
+    memories = change_feed_module.config.MEMORIES_CONTAINER
+    db, _containers = _make_topology_db(earlier_key_name=memories)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    with patch("shared.cosmos_clients.get_cosmos_database_async", new=AsyncMock(return_value=db)):
+        with pytest.raises(RuntimeError, match=rf"Topology error: container '{re.escape(memories)}' has partition key"):
+            asyncio.run(process_changefeed_batch([_turn(), _turn()], starter, counter_container=container))
+
+    container.read_item.assert_not_called()
+    container.create_item.assert_not_called()
+    container.upsert_item.assert_not_called()
+    starter.start_new.assert_not_awaited()
+    # A failed check is not remembered, so the next batch looks at the containers again.
+    assert change_feed_module._topology_validated is False
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +488,79 @@ def test_a_turn_with_an_unsupported_owner_is_skipped_like_one_without_a_tenant(o
     ]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == ["change-feed: turn doc missing a valid tenant_id, user_id or thread_id, skipping"]
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "1",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "2",
+    },
+    clear=False,
+)
+@pytest.mark.parametrize(
+    "thread_id",
+    [
+        pytest.param(7, id="integer"),
+        pytest.param(["t1"], id="list"),
+        pytest.param(None, id="null"),
+        pytest.param("", id="empty"),
+        pytest.param("t1 ", id="trailing-space"),
+        pytest.param(" t1", id="leading-space"),
+        pytest.param("a/b", id="slash"),
+        pytest.param("t\x7f1", id="control-character"),
+        pytest.param("t\u20281", id="line-separator"),
+        pytest.param("t" * 257, id="too-long"),
+    ],
+)
+def test_a_turn_with_an_unsupported_thread_is_skipped_and_the_batch_still_completes(thread_id, caplog):
+    """A thread id the SDK would refuse is skipped and the batch completes: an integer one used to make the instance
+    id raise, which lost the counts of every tenant in the batch.
+
+    The turn counts nowhere, not even in the counters of its owner, who has valid turns too. The thread summary
+    threshold is 1, so counting the turn would start an orchestration for its thread at once.
+    """
+    caplog.set_level(logging.WARNING)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    # First in the batch, so a failure on it would cost the turns after it.
+    unusable = {"type": "turn", "tenant_id": TENANT, "user_id": "u1", "thread_id": thread_id, "content": "private text"}
+    docs = [unusable, *(_turn(tenant_id=tenant_id) for tenant_id in ("acme", "globex", "acme", "globex"))]
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    assert {key: doc["count"] for key, doc in container._state.items()} == {
+        (tenant_id, "u1", counter_id): 2
+        for tenant_id in ("acme", "globex")
+        for counter_id in ("thread:u1:t1", "user:u1")
+    }
+    started = {c.kwargs["instance_id"]: c.kwargs["client_input"] for c in starter.start_new.await_args_list}
+    assert set(started) == {
+        _thread_instance_id("thread_summary", 2, tenant_id="acme"),
+        _thread_instance_id("thread_summary", 2, tenant_id="globex"),
+        _user_instance_id(2, tenant_id="acme"),
+        _user_instance_id(2, tenant_id="globex"),
+    }
+    assert started[_user_instance_id(2, tenant_id="acme")]["thread_ids"] == ["t1"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["change-feed: turn doc missing a valid tenant_id, user_id or thread_id, skipping"]
+
+
+@pytest.mark.parametrize(
+    ("doc", "expected"),
+    [
+        pytest.param({"thread_id": "t1"}, "t1", id="plain"),
+        pytest.param({"thread_id": "support chat: order 7"}, "support chat: order 7", id="space-and-colon-inside"),
+        pytest.param({"thread_id": "ünï©ødé"}, "ünï©ødé", id="non-ascii"),
+        pytest.param({"thread_id": "é" * 128}, "é" * 128, id="256-bytes"),
+        pytest.param({"thread_id": "é" * 129}, None, id="258-bytes-in-129-characters"),
+        pytest.param({}, None, id="missing"),
+    ],
+)
+def test_thread_of_accepts_the_thread_ids_the_sdk_accepts_and_counts_the_limit_in_bytes(doc, expected):
+    assert change_feed_module._thread_of(doc) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -940,6 +1062,159 @@ def test_lsns_are_tracked_per_tenant_and_a_replay_counts_nothing_twice():
         globex = _counter(container, counter_id, tenant_id="globex")
         assert (acme["count"], acme["last_batch_lsn"]) == (2, 11)
         assert (globex["count"], globex["last_batch_lsn"]) == (1, 50)
+
+
+# ---------------------------------------------------------------------------
+# A failing thread or owner does not stop the others in the batch; the batch fails at the end
+# ---------------------------------------------------------------------------
+
+_EVERY_TWO_TURNS = {
+    "THREAD_SUMMARY_EVERY_N": "2",
+    "FACT_EXTRACTION_EVERY_N": "0",
+    "EPISODE_EVAL_EVERY_N": "0",
+    "USER_SUMMARY_EVERY_N": "2",
+}
+
+# What ``_batch_of_three_threads`` leaves in the counters, and the instance ids of the orchestrations it starts: every
+# thread crosses a threshold of 2, and so does each owner, so each of the five counters starts one orchestration.
+_BATCH_COUNTS = {
+    ("acme", "u1", "thread:u1:t1"): 2,
+    ("acme", "u1", "thread:u1:t2"): 2,
+    ("acme", "u1", "user:u1"): 4,
+    ("globex", "u1", "thread:u1:t1"): 2,
+    ("globex", "u1", "user:u1"): 2,
+}
+_BATCH_START_IDS = {
+    _thread_instance_id("thread_summary", 2, tenant_id="acme", thread_id="t1"),
+    _thread_instance_id("thread_summary", 2, tenant_id="acme", thread_id="t2"),
+    _user_instance_id(4, tenant_id="acme"),
+    _thread_instance_id("thread_summary", 2, tenant_id="globex", thread_id="t1"),
+    _user_instance_id(2, tenant_id="globex"),
+}
+
+
+def _batch_of_three_threads() -> list[dict]:
+    """Two turns each for acme's t1 and t2 and for globex's t1, all of owner u1; acme's thread comes first."""
+    return [
+        _turn(tenant_id=tenant_id, thread_id=thread_id)
+        for tenant_id, thread_id in (("acme", "t1"), ("acme", "t2"), ("globex", "t1"))
+        for _ in range(2)
+    ]
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+@pytest.mark.parametrize(
+    ("failing", "lost_start"),
+    [
+        pytest.param(
+            (TENANT, "u1", "thread:u1:t1"), _thread_instance_id("thread_summary", 2, thread_id="t1"), id="thread"
+        ),
+        pytest.param((TENANT, "u1", "user:u1"), _user_instance_id(4), id="owner"),
+    ],
+)
+def test_a_counter_that_cannot_be_updated_does_not_stop_the_rest_of_the_batch(failing, lost_start, caplog):
+    """The first thread, or the first owner, cannot be updated: every other counter is still written and every other
+    threshold crossing still starts its orchestration, and only then does the batch fail."""
+    caplog.set_level(logging.INFO)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    _fail_counter_reads(container, CosmosHttpResponseError(status_code=503, message="private text"), failing)
+    summary = r"^Failed to update 1 counter\(s\): azure\.cosmos\.CosmosHttpResponseError\(status=503\) at "
+
+    with pytest.raises(RuntimeError, match=summary) as failed:
+        asyncio.run(process_changefeed_batch(_batch_of_three_threads(), starter, counter_container=container))
+
+    assert {key: doc["count"] for key, doc in container._state.items()} == {
+        key: count for key, count in _BATCH_COUNTS.items() if key != failing
+    }
+    assert {c.kwargs["instance_id"] for c in starter.start_new.await_args_list} == _BATCH_START_IDS - {lost_start}
+    # The failure is logged once as its type and code location. Neither the log nor the error the batch raises quotes
+    # the SDK error's text or chains to it.
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.exc_info is None
+    assert record.getMessage().startswith(
+        "change-feed: failed to update a counter (exc_type=CosmosHttpResponseError): "
+        "azure.cosmos.CosmosHttpResponseError(status=503) at "
+    )
+    assert (failed.value.__cause__, failed.value.__context__) == (None, None)
+    assert "private text" not in caplog.text + "".join(traceback.format_exception(failed.value))
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "2",
+        "FACT_EXTRACTION_EVERY_N": "2",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_a_failure_after_a_thread_was_counted_does_not_stop_the_other_threads(monkeypatch):
+    """The whole work of a thread is isolated, not only its counter update: acme's watermark read fails after its
+    counter was written and its summary started, and globex is still extracted."""
+    read_extract_watermark = change_feed_module.read_extract_watermark
+
+    async def failing_for_acme(container, tenant_id, counter_id, user_id):
+        if tenant_id == "acme":
+            raise CosmosHttpResponseError(status_code=503, message="throttled")
+        return await read_extract_watermark(container, tenant_id, counter_id, user_id)
+
+    monkeypatch.setattr(change_feed_module, "read_extract_watermark", failing_for_acme)
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = [_turn(tenant_id=tenant_id) for tenant_id in ("acme", "acme", "globex", "globex")]
+
+    with pytest.raises(RuntimeError, match=r"^Failed to update 1 counter\(s\): "):
+        asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    assert {key: doc["count"] for key, doc in container._state.items()} == {
+        ("acme", "u1", "thread:u1:t1"): 2,
+        ("globex", "u1", "thread:u1:t1"): 2,
+    }
+    assert [(c.args[0], c.kwargs["client_input"]["tenant_id"]) for c in starter.start_new.await_args_list] == [
+        ("ThreadSummaryOrchestrator", "acme"),
+        ("ThreadSummaryOrchestrator", "globex"),
+        ("ExtractMemoriesOrchestrator", "globex"),
+    ]
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+def test_failed_starts_and_failed_counters_of_one_batch_are_reported_in_one_error():
+    starter = _make_starter()
+    starter.start_new.side_effect = ConnectionError("starter unavailable")
+    container = _make_counter_container_starting_at()
+    _fail_counter_reads(
+        container,
+        CosmosHttpResponseError(status_code=503, message="throttled"),
+        (TENANT, "u1", "thread:u1:t1"),
+        ("globex", "u1", "user:u1"),
+    )
+
+    with pytest.raises(RuntimeError) as failed:
+        asyncio.run(process_changefeed_batch(_batch_of_three_threads(), starter, counter_container=container))
+
+    # Of the five orchestrations, three are still attempted (acme's t2 and owner, globex's t1), and none starts.
+    assert starter.start_new.await_count == 3
+    assert re.fullmatch(
+        r"Failed to start 3 orchestration\(s\): ConnectionError at .+; "
+        r"Failed to update 2 counter\(s\): azure\.cosmos\.CosmosHttpResponseError\(status=503\) at .+",
+        str(failed.value),
+    )
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+@pytest.mark.parametrize(
+    "cancelled", [(TENANT, "u1", "thread:u1:t1"), (TENANT, "u1", "user:u1")], ids=["thread", "owner"]
+)
+def test_a_cancellation_during_a_counter_update_is_not_swallowed(cancelled):
+    """Only an ``Exception`` is recorded and isolated per thread and owner: a ``CancelledError`` stops the batch."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    _fail_counter_reads(container, asyncio.CancelledError(), cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(process_changefeed_batch(_batch_of_three_threads(), starter, counter_container=container))
 
 
 # ---------------------------------------------------------------------------

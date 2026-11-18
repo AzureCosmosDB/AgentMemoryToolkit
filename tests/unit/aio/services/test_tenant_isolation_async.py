@@ -129,11 +129,15 @@ class _Container:
 
 
 class _Embeddings:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     async def generate(self, text: str) -> list[float]:
-        del text
+        self.calls.append(text)
         return [1.0, 0.0]
 
     async def generate_batch(self, texts: list[str]) -> list[list[float]]:
+        self.calls.extend(texts)
         return [[1.0, 0.0] for _ in texts]
 
 
@@ -143,6 +147,7 @@ def _service(
     memories: _Container | None = None,
     turns: _Container | None = None,
     summaries: _Container | None = None,
+    embeddings: _Embeddings | None = None,
     replies: Iterable[dict[str, Any]] = (),
 ) -> AsyncPipelineService:
     containers = {
@@ -152,7 +157,9 @@ def _service(
     }
     store = MagicMock()
     store.mark_superseded = AsyncMock(return_value=True)
-    service = AsyncPipelineService(store, MagicMock(), _Embeddings(), containers=containers, tenant_id=tenant)
+    service = AsyncPipelineService(
+        store, MagicMock(), embeddings or _Embeddings(), containers=containers, tenant_id=tenant
+    )
     service._run_prompty = AsyncMock(side_effect=[json.dumps(reply) for reply in replies])
     return service
 
@@ -232,6 +239,29 @@ async def test_extraction_reads_marks_and_writes_only_its_tenants_records(monkey
     _assert_owner_scoped(memories.queries)
     assert len(turns.queries) == 2, "the unextracted turns, then the turns before them"
     assert summaries.reads == [("summary_u1_t1", OWNER)]
+
+
+async def test_the_same_fact_is_stored_once_per_owner_and_thread() -> None:
+    memories = _Container()
+    fact = {"text": "The user likes tea.", "category": "preference", "confidence": 0.9, "salience": 0.8, "tags": []}
+    service = _service(memories=memories, replies=[{"facts": [fact]}] * 4)
+
+    async def extract_and_persist(user_id: str, thread_id: str) -> int:
+        turn = {**_turn("turn-a"), "user_id": user_id, "thread_id": thread_id}
+        extracted = await service.extract_memories_durable(user_id, thread_id, turns=[turn])
+        return (await service.persist_extracted_memories(user_id, extracted))["fact_count"]
+
+    created = [
+        await extract_and_persist("u1", "t1"),
+        await extract_and_persist("u1", "t1"),
+        await extract_and_persist("u1", "t2"),
+        await extract_and_persist("u2", "t1"),
+    ]
+
+    assert created == [1, 0, 1, 1], "only the same fact from the same thread of the same owner is a replay"
+    ids = {(doc["user_id"], doc["thread_id"]): doc["id"] for doc in memories.docs.values()}
+    assert sorted(ids) == [("u1", "t1"), ("u1", "t2"), ("u2", "t1")]
+    assert len(set(ids.values())) == 3, "the owner is part of the id, not only of the partition"
 
 
 async def test_persisting_extracted_memories_stamps_the_tenant_and_refuses_another_tenants_records() -> None:
@@ -359,6 +389,68 @@ async def test_a_summary_naming_another_tenant_is_refused(persist, summary_id: s
     assert summaries.docs == {}
     stored = await persist(service, {key: value for key, value in doc.items() if key != "tenant_id"})
     assert stored["tenant_id"] == TENANT and list(summaries.docs) == [(TENANT, USER, summary_id)]
+
+
+async def _persist_summary(
+    service: AsyncPipelineService, kind: str, doc: dict[str, Any], user_id: str = USER, thread_id: str = "t1"
+) -> dict[str, Any]:
+    if kind == "thread_summary":
+        return await service.persist_thread_summary(user_id, thread_id, doc)
+    return await service.persist_user_summary(user_id, doc)
+
+
+@pytest.mark.parametrize(
+    ("kind", "summary_id", "thread_id"),
+    [("thread_summary", "summary_u1_t1", "t1"), ("user_summary", "user_summary_u1", "__user_summary__")],
+)
+async def test_a_summary_without_an_owner_is_stored_for_the_owner_it_is_persisted_for(
+    kind: str, summary_id: str, thread_id: str
+) -> None:
+    summaries = _Container()
+    service = _service(summaries=summaries)
+    doc = {"type": kind, "content": "Tea.", "metadata": {"thread_ids": ["t1"]}}
+    original = copy.deepcopy(doc)
+
+    stored = await _persist_summary(service, kind, doc)
+
+    assert (stored["tenant_id"], stored["user_id"], stored["thread_id"], stored["id"]) == (
+        TENANT,
+        USER,
+        thread_id,
+        summary_id,
+    )
+    assert list(summaries.docs) == [(TENANT, USER, summary_id)]
+    assert doc == original, "the caller's dict is not rewritten"
+
+
+VALID_IDS = {"user_id": USER, "thread_id": "t1"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "user_id", "thread_id", "fields", "problem"),
+    [
+        # The document names no owner, so the tenant is what is refused.
+        pytest.param("thread_summary", USER, "t1", {"tenant_id": OTHER}, "different tenant", id="thread-tenant"),
+        pytest.param("user_summary", USER, "t1", {"tenant_id": OTHER}, "different tenant", id="user-tenant"),
+        # The document names a valid owner and thread of its own, so what is refused is the argument.
+        pytest.param("thread_summary", "bad/id", "t1", VALID_IDS, "user_id", id="thread-owner"),
+        pytest.param("thread_summary", "u1 ", "t1", VALID_IDS, "user_id", id="thread-owner-space"),
+        pytest.param("thread_summary", USER, "t1 ", VALID_IDS, "thread_id", id="thread-thread-space"),
+        pytest.param("user_summary", "bad/id", "t1", VALID_IDS, "user_id", id="user-owner"),
+        pytest.param("user_summary", "u1 ", "t1", VALID_IDS, "user_id", id="user-owner-space"),
+    ],
+)
+async def test_a_summary_that_cannot_be_stored_is_refused_before_its_content_is_embedded(
+    kind: str, user_id: str, thread_id: str, fields: dict[str, Any], problem: str
+) -> None:
+    summaries, embeddings = _Container(), _Embeddings()
+    service = _service(summaries=summaries, embeddings=embeddings)
+    doc = {"type": kind, "content": "Tea.", "metadata": {"thread_ids": ["t1"]}, **fields}
+
+    with pytest.raises(ValidationError, match=problem):
+        await _persist_summary(service, kind, doc, user_id, thread_id)
+
+    assert embeddings.calls == [] and summaries.docs == {}
 
 
 # --- reconcile ------------------------------------------------------------------------------------------------

@@ -89,7 +89,7 @@ memory = CosmosMemoryClient(
     use_default_credential=True,
     # processor=InProcessProcessor()   # implicit default
 )
-memory.connect_cosmos()  # connects to existing containers; create_memory_store() creates them if missing
+memory.connect_cosmos()  # checks the containers; create_memory_store() creates any that are missing
 
 USER, THREAD = "user-001", str(uuid.uuid4())
 
@@ -113,6 +113,7 @@ print(memory.get_user_summary(user_id=USER))
 > ```python
 > from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 > ```
+> The async constructor does no I/O, so connect with `await memory.connect_cosmos()` or `await memory.create_memory_store()`. The sync constructor already calls `create_memory_store()` when it is given an endpoint.
 
 ### 4. Run a sample
 
@@ -147,7 +148,7 @@ AgentMemoryToolkit uses 3-container Cosmos topology, all partitioned by the hier
 | `memories`           | `fact`, `episodic`, `procedural` documents | vector + full-text retrieval path                                     |
 | `memories_summaries` | thread and user summaries                  | latest-summary point reads; vector + full-text for `search_summaries` |
 
-`tenant_id` says whose memories these are (an app, a customer, an environment); a client is bound to one tenant through its `tenant_id` argument, `"default"` unless you set it. `user_id` is the owner of a memory, a user or an agent. `thread_id` is a plain field, so everything one owner knows sits in one partition. See [Tenants and Owners](Docs/concepts.md#tenants-and-owners).
+`tenant_id` says whose memories these are (an app, a customer, an environment); a client is bound to one tenant through its `tenant_id` argument, `"default"` unless you set it. It keeps data apart inside the same containers but is not an access-control boundary: anyone who can read the account's data can read every tenant, so use separate databases or accounts and Azure RBAC for hard isolation. `user_id` is the owner of a memory, a user or an agent. `thread_id` is a plain field, so everything one owner knows sits in one partition. See [Tenants and Owners](Docs/concepts.md#tenants-and-owners).
 
 `create_memory_store()` also creates a `counter` container (the turn counters behind the auto-trigger, with the same key) and a `leases` container (change feed checkpoints, keyed `/id`).
 
@@ -306,6 +307,8 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 
 `DurableFunctionProcessor` is a thin marker - there is no SDK→Function HTTP call. The SDK just writes turns; the deployed Function app picks them up via the Cosmos change feed. Counter-based trigger configuration and Bicep module reference live in [`infra/README.md`](infra/README.md).
 
+An `InProcessProcessor` (or `AsyncInProcessProcessor`) you build yourself works in one tenant and exposes it as a read-only `tenant_id`. A client raises `ConfigurationError` when its `processor` works in another tenant than the client's own `tenant_id`: build the processor with the same `tenant_id`, or omit `processor` so the client builds its own.
+
 ---
 
 ### Architecture overview
@@ -383,7 +386,15 @@ tests/                  Unit + integration tests (pytest)
 
 ## Migration notes
 
-- **Memories are keyed `[tenant_id, user_id]`, with no migration.** `memories`, `memories_turns`, `memories_summaries` and `counter` were keyed `[user_id, thread_id]`. A partition key cannot change in place, so recreate those containers and `leases`, so the change feed starts clean on the recreated turns container (`create_memory_store()` creates them with the new key, and for `azd` deployments see [`infra/README.md`](infra/README.md)). Existing data is not migrated, and `create_memory_store()` refuses a container that still has the earlier key rather than let it take writes and read back empty. A `user_id` must now be a non-empty string of at most 256 UTF-8 bytes without `/`, `\`, `?`, `#` or control characters. `thread_id` is no longer an argument of `update_cosmos()`, `delete_memory()`, `delete_turn()`, `add_tags()`, `remove_tags()` and `get_memory_history()`, and `MemoryNotFoundError` no longer carries it. Clients take an optional `tenant_id` (default `"default"`). See [CHANGELOG.md](CHANGELOG.md).
+- **Memories are keyed `[tenant_id, user_id]`, with no migration.** `memories`, `memories_turns`, `memories_summaries` and `counter` were keyed `[user_id, thread_id]`. A partition key cannot change in place and existing data is not migrated, so upgrade in this order:
+  1. Stop every writer: all apps that use the SDK, and the Function App.
+  2. Recreate `memories`, `memories_turns`, `memories_summaries` and `counter` with the key `[/tenant_id, /user_id]`, and `leases` too, so the change feed starts clean on the recreated turns container. `create_memory_store()` and the Bicep template create new containers with the new key; for `azd` deployments see [`infra/README.md`](infra/README.md).
+  3. Terminate and purge the in-flight Durable Functions orchestrations: instances started before the upgrade carry no tenant and fail.
+  4. Deploy the new Function App before the upgraded writers start. Its change feed trigger reads only the turns written after it first starts on a fresh `leases` container, so turns written earlier are never counted.
+  5. Upgrade and restart all writers together: a writer still on the old version keeps writing the old shape.
+- **Containers are checked when you connect.** `connect_cosmos()` raises `CosmosOperationError`, naming the container, when `memories`, `memories_turns`, `memories_summaries` or `counter` is missing or not keyed `[/tenant_id, /user_id]`; `create_memory_store()` creates what is missing and then makes the same check. A container still keyed `[/user_id, /thread_id]` would take writes and read back empty, so it is refused. `validate_topology()` remains the explicit check.
+- **Identifiers are validated.** A `tenant_id`, a `user_id` and a `thread_id` must each be a non-empty string of at most 256 UTF-8 bytes that does not start or end with whitespace and has no `/`, `\`, `?`, `#` or control characters, because they appear in document ids and Cosmos DB refuses an id that ends in whitespace. Anything else raises `ValidationError` when the client writes it.
+- **`thread_id` is no longer needed to find a record.** It is no longer an argument of `update_cosmos()`, `delete_memory()`, `delete_turn()`, `add_tags()`, `remove_tags()` and `get_memory_history()`, and `MemoryNotFoundError` no longer carries it. Clients take an optional `tenant_id` (default `"default"`). See [CHANGELOG.md](CHANGELOG.md).
 - **`azure.cosmos.agent_memory.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
 - **New `processor=` kwarg.** Defaults to `InProcessProcessor()` - existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.

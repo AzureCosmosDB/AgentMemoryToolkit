@@ -20,7 +20,12 @@ from azure.cosmos.agent_memory._utils import (
     normalize_ai_foundry_endpoint,
     resolve_cosmos_preferred_locations,
 )
-from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
+from azure.cosmos.agent_memory.exceptions import (
+    ConfigurationError,
+    CosmosNotConnectedError,
+    MemoryNotFoundError,
+    ValidationError,
+)
 from azure.cosmos.agent_memory.logging import configure_logging, get_logger
 from azure.cosmos.agent_memory.thresholds import get_enable_turn_embeddings
 
@@ -124,6 +129,19 @@ class _BaseMemoryClient:
     def tenant_id(self) -> str:
         """The tenant this client is bound to: every record it reads or writes belongs to it."""
         return self._tenant_id
+
+    def _require_processor_tenant(self, processor: Any) -> None:
+        """Refuse a processor that works in another tenant than this client.
+
+        A processor that reports no tenant, as a custom one may not, is not checked.
+        """
+        processor_tenant = getattr(processor, "tenant_id", None)
+        if isinstance(processor_tenant, str) and processor_tenant != self._tenant_id:
+            raise ConfigurationError(
+                f"processor works in tenant {processor_tenant!r} but this client is bound to tenant "
+                f"{self._tenant_id!r}: build the processor with the same tenant_id, or omit it so the client "
+                "builds its own"
+            )
 
     @property
     def _containers(self) -> dict[ContainerKey, Any]:

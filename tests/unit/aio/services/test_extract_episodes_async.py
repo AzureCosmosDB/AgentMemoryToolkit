@@ -254,3 +254,24 @@ async def test_build_episode_docs_keeps_padded_timestamps_and_clamps_scores() ->
     assert docs[0]["ended_at"] == "2025-01-01T00:02:00+00:00"
     assert docs[0]["salience"] == 1.0
     assert docs[0]["confidence"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_the_same_turns_in_two_threads_make_episodes_and_watermarks_with_different_ids(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    memories = _AsyncIdUniqueStore([])
+    turns = _AsyncStore([_turn(1), _turn(2), {**_turn(1), "thread_id": "t2"}, {**_turn(2), "thread_id": "t2"}])
+    service = AsyncPipelineService(
+        memories,
+        _AsyncChat([{"episodes": [_episode()]}, {"episodes": [_episode()]}]),
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(memories, turns_store=turns),
+    )
+
+    assert await service.extract_episodes("u1", "t1", flush=True) == {"episodes": 1}
+    assert await service.extract_episodes("u1", "t2", flush=True) == {"episodes": 1}
+
+    episodes = [doc for doc in memories.docs if doc["type"] == "episodic"]
+    cursors = [doc for doc in memories.docs if doc["type"] == "episode_cursor"]
+    assert {doc["thread_id"] for doc in episodes} == {"t1", "t2"} and len({doc["id"] for doc in episodes}) == 2
+    assert {doc["id"] for doc in cursors} == {"episode_cursor_u1_t1", "episode_cursor_u1_t2"}

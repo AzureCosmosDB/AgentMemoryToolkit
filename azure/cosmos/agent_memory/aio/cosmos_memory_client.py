@@ -118,6 +118,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             cosmos_preferred_locations=cosmos_preferred_locations,
             tenant_id=tenant_id,
         )
+        if processor is not None:
+            self._require_processor_tenant(processor)
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._pipeline_init_error: Exception | None = None
         # Embeddings/chat clients may be injected (e.g. an OpenAI-compatible backend, a
@@ -223,7 +225,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         """Establish an async connection to the Cosmos DB memory containers.
 
         If container overrides are provided, they override the constructor's
-        settings for this connection.
+        settings for this connection. The memories, turns, summaries and counter containers must exist and
+        be keyed ``[/tenant_id, /user_id]``; otherwise this raises :class:`CosmosOperationError` and closes the
+        connection, because a container keyed otherwise takes writes but is read back empty.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
         if credential is not None:
@@ -268,8 +272,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 self._cosmos_database,
                 self._cosmos_summaries_container,
             )
+            await self._require_keyed_containers()
             self._init_services()
         except Exception as exc:
+            # The connection cannot be used: close the client just opened and forget its containers.
+            await self._drain_cosmos_client()
             raise CosmosOperationError(f"Failed to connect to Cosmos DB (async): {exc}") from exc
         logger.info("Async connected to Cosmos DB %s/%s", self._cosmos_database, self._cosmos_container)
 
@@ -432,13 +439,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             self._init_services()
         except Exception as exc:
             # The store cannot be used: close the client just opened and forget its containers.
-            try:
-                await self._drain_cosmos_client()
-            except Exception as close_exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to close the Cosmos client after create_memory_store failed: %s",
-                    describe_exception(close_exc),
-                )
+            await self._drain_cosmos_client()
             raise CosmosOperationError(f"Failed to create memory store (async): {exc}") from exc
         logger.info("Async created memory store %s/%s", self._cosmos_database, self._cosmos_container)
 
@@ -484,6 +485,25 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         problem = partition_key_problem(getattr(container, "id", None), await container.read())
         if problem:
             raise ConfigurationError(problem)
+
+    async def _require_keyed_containers(self) -> None:
+        """Refuse a connected container that is missing or not keyed ``[/tenant_id, /user_id]``.
+
+        A container keyed otherwise takes writes but is read back empty, so it is caught here instead of later.
+        """
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        counter_container = self._get_counter_container()
+        for container in (*self._containers.values(), counter_container):
+            if container is None:
+                continue
+            try:
+                await self._require_partition_key(container)
+            except CosmosResourceNotFoundError as exc:
+                raise ConfigurationError(
+                    f"container {getattr(container, 'id', None)!r} does not exist: run create_memory_store() or "
+                    "deploy the infrastructure (azd up), and make sure the SDK settings name the same containers"
+                ) from exc
 
     def _build_store(self) -> AsyncMemoryStore:
         return AsyncMemoryStore(
@@ -537,7 +557,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         if prior is not None:
             close = getattr(prior, "close", None)
             if callable(close):
-                await close()
+                try:
+                    await close()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to close prior Cosmos client during reconnect: %s", describe_exception(exc, stack=True)
+                    )
         self._cosmos_client = None
         self._memories_container_client = None
         self._turns_container_client = None

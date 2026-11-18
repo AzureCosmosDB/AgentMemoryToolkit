@@ -255,11 +255,11 @@ memory = AsyncCosmosMemoryClient(
     cosmos_credential=AsyncDefaultAzureCredential(),
 )
 
-await memory.connect_cosmos()
 await memory.create_memory_store()
+await memory.connect_cosmos()
 ```
 
-This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. The first four get the hierarchical partition key `/tenant_id`, `/user_id` (`leases` uses `/id`); an existing container keeps its key, so recreate the containers that an earlier version created with `[/user_id, /thread_id]`, and `leases` with them so the change feed starts clean on the recreated turns container. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers. The Function App does not read either variable.
+This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. The first four get the hierarchical partition key `/tenant_id`, `/user_id` (`leases` uses `/id`); an existing container keeps its key, and `create_memory_store()` and `connect_cosmos()` refuse one that is not keyed `[/tenant_id, /user_id]`, so recreate the containers that an earlier version created with `[/user_id, /thread_id]`, and `leases` with them (the README's [migration notes](../README.md#migration-notes) give the steps in order). `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers. The Function App does not read either variable. On a new database, create the store before connecting, because `connect_cosmos()` refuses a container that does not exist.
 
 ---
 

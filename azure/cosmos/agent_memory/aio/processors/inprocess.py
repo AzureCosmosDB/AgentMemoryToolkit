@@ -21,7 +21,8 @@ class AsyncInProcessProcessor:
     """Async in-process orchestrator over :class:`AsyncPipelineService`.
 
     Wraps an existing pipeline, or builds one from the supplied container / LLM / embeddings clients,
-    bound to ``tenant_id`` (``"default"`` when not given).
+    bound to ``tenant_id`` (``"default"`` when not given). A ``pipeline`` you pass keeps its own tenant, which
+    :attr:`tenant_id` reports and ``tenant_id=`` does not change; a client built with another tenant refuses it.
     """
 
     def __init__(
@@ -63,6 +64,11 @@ class AsyncInProcessProcessor:
             )
 
         self._pipeline = pipeline
+
+    @property
+    def tenant_id(self) -> Optional[str]:
+        """The tenant of the pipeline this processor runs, or ``None`` when that pipeline reports none."""
+        return getattr(self._pipeline, "tenant_id", None)
 
     async def process_thread(
         self,

@@ -15,7 +15,8 @@ class InProcessProcessor:
     This is the default backend. Wraps an existing
     :class:`azure.cosmos.agent_memory.services.pipeline.PipelineService` instance,
     or constructs one from the supplied container / LLM / embeddings clients,
-    bound to ``tenant_id`` (``"default"`` when not given).
+    bound to ``tenant_id`` (``"default"`` when not given). A ``pipeline`` you pass keeps its own tenant, which
+    :attr:`tenant_id` reports and ``tenant_id=`` does not change; a client built with another tenant refuses it.
     """
 
     def __init__(
@@ -61,6 +62,11 @@ class InProcessProcessor:
             )
 
         self._pipeline = pipeline
+
+    @property
+    def tenant_id(self) -> Optional[str]:
+        """The tenant of the pipeline this processor runs, or ``None`` when that pipeline reports none."""
+        return getattr(self._pipeline, "tenant_id", None)
 
     def process_thread(
         self,

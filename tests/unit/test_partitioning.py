@@ -8,6 +8,7 @@ from azure.cosmos.agent_memory._partitioning import (
     DEFAULT_TENANT_ID,
     MAX_OWNER_ID_BYTES,
     MAX_TENANT_ID_BYTES,
+    MAX_THREAD_ID_BYTES,
     OWNER_FILTER,
     PARTITION_KEY_PATHS,
     TENANT_FILTER,
@@ -18,6 +19,7 @@ from azure.cosmos.agent_memory._partitioning import (
     stamp_scope,
     tenant_parameters,
     validate_owner_id,
+    validate_thread_id,
 )
 from azure.cosmos.agent_memory.exceptions import ValidationError
 
@@ -32,7 +34,23 @@ INVALID_IDS = [
     "tab\there",
     7,
     b"x",
+    # DEL, two C1 controls (NEL and APC) and the line and paragraph separators. They sit inside the value so that they
+    # are refused as control characters, not as whitespace at an end.
+    "a\x7fb",
+    "a\x85b",
+    "a\x9fb",
+    "a\u2028b",
+    "a\u2029b",
+    # Whitespace at either end: Cosmos DB refuses a document id that ends in it, and these ids appear in the ids of
+    # counters and summaries.
+    " a",
+    "a ",
+    "a\n",
+    "a\xa0",
 ]
+
+# Joined by zero-width joiners, which are format characters, not controls.
+FAMILY_EMOJI = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
 
 
 class TestResolveTenantId:
@@ -40,7 +58,10 @@ class TestResolveTenantId:
         assert resolve_tenant_id() == DEFAULT_TENANT_ID == "default"
         assert resolve_tenant_id(None) == "default"
 
-    @pytest.mark.parametrize("tenant", ["acme", "Acme-Corp_2", "tenant:prod", "t" * MAX_TENANT_ID_BYTES, "société"])
+    @pytest.mark.parametrize(
+        "tenant",
+        ["acme", "Acme-Corp_2", "tenant:prod", "t" * MAX_TENANT_ID_BYTES, "société", "a b", FAMILY_EMOJI],
+    )
     def test_a_valid_tenant_is_returned_as_given(self, tenant: str) -> None:
         assert resolve_tenant_id(tenant) == tenant
 
@@ -57,7 +78,18 @@ class TestResolveTenantId:
 
 class TestValidateOwnerId:
     @pytest.mark.parametrize(
-        "owner", ["alice", "agent:support-bot", "a@b.com", "user.name_1", "o" * MAX_OWNER_ID_BYTES, "société", "用户"]
+        "owner",
+        [
+            "alice",
+            "agent:support-bot",
+            "a@b.com",
+            "user.name_1",
+            "o" * MAX_OWNER_ID_BYTES,
+            "société",
+            "用户",
+            "a b",
+            FAMILY_EMOJI,
+        ],
     )
     def test_a_valid_owner_is_returned_as_given(self, owner: str) -> None:
         assert validate_owner_id(owner) == owner
@@ -71,6 +103,24 @@ class TestValidateOwnerId:
         assert validate_owner_id("é" * (MAX_OWNER_ID_BYTES // 2))
         with pytest.raises(ValidationError):
             validate_owner_id("é" * (MAX_OWNER_ID_BYTES // 2 + 1))
+
+
+class TestValidateThreadId:
+    @pytest.mark.parametrize(
+        "thread", ["t1", "chat:2026-01-01", "société", "a b", FAMILY_EMOJI, "t" * MAX_THREAD_ID_BYTES]
+    )
+    def test_a_valid_thread_is_returned_as_given(self, thread: str) -> None:
+        assert validate_thread_id(thread) == thread
+
+    @pytest.mark.parametrize("thread", [*INVALID_IDS, None, "t" * (MAX_THREAD_ID_BYTES + 1)])
+    def test_an_invalid_thread_is_refused(self, thread: object) -> None:
+        with pytest.raises(ValidationError, match="thread_id"):
+            validate_thread_id(thread)
+
+    @pytest.mark.parametrize("thread", ["t1 ", " t1", "t1\n", "t1\xa0"])
+    def test_a_thread_with_whitespace_at_an_end_is_refused_with_that_reason(self, thread: str) -> None:
+        with pytest.raises(ValidationError, match="thread_id must not start or end with whitespace"):
+            validate_thread_id(thread)
 
 
 class TestTheKey:
@@ -140,6 +190,20 @@ class TestStampScope:
     def test_a_record_with_an_unsupported_owner_is_refused(self) -> None:
         with pytest.raises(ValidationError, match="user_id"):
             stamp_scope({"id": "f1", "user_id": "a/b"}, "acme")
+
+    @pytest.mark.parametrize("thread", ["", "t1 ", "a/b", 7])
+    def test_a_record_with_an_unsupported_thread_is_refused(self, thread: object) -> None:
+        with pytest.raises(ValidationError, match="thread_id"):
+            stamp_scope({"id": "f1", "user_id": "alice", "thread_id": thread}, "acme")
+
+    @pytest.mark.parametrize("fields", [{}, {"thread_id": None}, {"thread_id": "t1"}])
+    def test_a_record_may_have_no_thread_or_a_supported_one(self, fields: dict) -> None:
+        assert stamp_scope({"id": "f1", "user_id": "alice", **fields}, "acme") == {
+            "id": "f1",
+            "user_id": "alice",
+            "tenant_id": "acme",
+            **fields,
+        }
 
 
 class TestPartitionKeyProblem:

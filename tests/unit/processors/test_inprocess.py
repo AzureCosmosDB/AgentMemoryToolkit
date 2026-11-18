@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from azure.cosmos.agent_memory.processors import InProcessProcessor, ProcessThreadResult
@@ -132,3 +133,22 @@ def test_constructor_requires_all_three_containers_when_no_pipeline():
             chat_client=chat,
             embeddings_client=embeddings,
         )
+
+
+def test_the_processor_reports_the_tenant_of_the_pipeline_it_runs():
+    built = InProcessProcessor(
+        cosmos_container=MagicMock(),
+        turns_container=MagicMock(),
+        summaries_container=MagicMock(),
+        chat_client=MagicMock(),
+        embeddings_client=MagicMock(),
+        tenant_id="acme",
+    )
+    # ``tenant_id=`` applies only to a pipeline the processor builds.
+    wrapped = InProcessProcessor(pipeline=built._pipeline, tenant_id="globex")
+
+    assert built.tenant_id == wrapped.tenant_id == "acme"
+
+
+def test_a_pipeline_that_reports_no_tenant_leaves_the_processor_without_one():
+    assert InProcessProcessor(pipeline=SimpleNamespace()).tenant_id is None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,7 @@ from azure.cosmos.agent_memory.exceptions import (
     MemoryNotFoundError,
     ValidationError,
 )
+from azure.cosmos.agent_memory.processors import InProcessProcessor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -136,6 +138,43 @@ class TestTenant:
     )
     def test_a_memory_is_addressed_by_its_owner_not_its_thread(self, method):
         assert "thread_id" not in inspect.signature(getattr(CosmosMemoryClient, method)).parameters
+
+
+class _CustomProcessor:
+    """A processor of its own: it reports no tenant."""
+
+
+class TestProcessorTenant:
+    @staticmethod
+    def _processor(tenant_id: str) -> InProcessProcessor:
+        """A processor over a real pipeline of ``tenant_id``."""
+        return InProcessProcessor(
+            cosmos_container=MagicMock(),
+            turns_container=MagicMock(),
+            summaries_container=MagicMock(),
+            chat_client=MagicMock(),
+            embeddings_client=MagicMock(),
+            tenant_id=tenant_id,
+        )
+
+    def test_a_processor_of_another_tenant_is_refused(self):
+        with pytest.raises(ConfigurationError, match=rf"tenant '{DEFAULT_TENANT_ID}'.*tenant 'acme'"):
+            _make_client(tenant_id="acme", processor=self._processor(DEFAULT_TENANT_ID))
+
+    def test_a_processor_of_the_clients_tenant_is_used(self):
+        processor = self._processor("acme")
+
+        assert _make_client(tenant_id="acme", processor=processor)._get_processor() is processor
+
+    @pytest.mark.parametrize(
+        "processor",
+        [
+            pytest.param(_CustomProcessor(), id="custom"),
+            pytest.param(InProcessProcessor(pipeline=MagicMock()), id="pipeline-double"),
+        ],
+    )
+    def test_a_processor_that_reports_no_tenant_is_not_checked(self, processor):
+        assert _make_client(tenant_id="acme", processor=processor)._get_processor() is processor
 
 
 # ===================================================================
@@ -395,6 +434,90 @@ class TestRequireCosmos:
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
             mem._require_cosmos()
+
+
+class TestConnectCosmos:
+    CONTAINERS = ("memories", "memories_turns", "memories_summaries", "counter")
+
+    @staticmethod
+    @contextmanager
+    def _serving(containers):
+        """Patch ``azure.cosmos`` so ``connect_cosmos`` finds ``containers`` by id; yields the Cosmos client."""
+        cosmos_client = MagicMock()
+        cosmos_client.get_database_client.return_value.get_container_client.side_effect = containers.__getitem__
+        cosmos = MagicMock(CosmosClient=MagicMock(return_value=cosmos_client))
+        with patch.dict("sys.modules", {"azure.cosmos": cosmos}):
+            yield cosmos_client
+
+    @staticmethod
+    def _connect(mem):
+        mem.connect_cosmos(endpoint="https://fake.documents.azure.com:443/", credential="fake-key")
+
+    @staticmethod
+    def _assert_discarded(mem, cosmos_client):
+        """A failed connect closes the Cosmos client it opened and leaves ``mem`` unconnected."""
+        cosmos_client.close.assert_called_once()
+        for attribute in (
+            "_cosmos_client",
+            "_memories_container_client",
+            "_turns_container_client",
+            "_summaries_container_client",
+            "_counter_container_client",
+            "_store",
+            "_pipeline",
+        ):
+            assert getattr(mem, attribute) is None, attribute
+        with pytest.raises(CosmosNotConnectedError):
+            mem._require_cosmos()
+
+    @pytest.mark.parametrize("earlier", CONTAINERS)
+    def test_a_container_with_the_earlier_key_is_refused(self, earlier):
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        containers[earlier] = _keyed_container(EARLIER_KEY, container_id=earlier)
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            with pytest.raises(
+                CosmosOperationError,
+                match=(
+                    rf"Failed to connect to Cosmos DB: container '{earlier}' has partition key "
+                    r"\['/user_id', '/thread_id'\].*\['/tenant_id', '/user_id'\]"
+                ),
+            ):
+                self._connect(mem)
+
+        self._assert_discarded(mem, cosmos_client)
+
+    def test_a_container_that_does_not_exist_is_refused(self):
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        containers["counter"].read.side_effect = CosmosResourceNotFoundError(message="missing")
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            with pytest.raises(
+                CosmosOperationError, match="Failed to connect to Cosmos DB: container 'counter' does not exist"
+            ):
+                self._connect(mem)
+
+        self._assert_discarded(mem, cosmos_client)
+
+    def test_containers_keyed_by_tenant_and_user_connect_after_all_four_are_read(self):
+        containers = {name: _keyed_container(container_id=name) for name in self.CONTAINERS}
+        mem = _make_client()
+
+        with self._serving(containers) as cosmos_client:
+            self._connect(mem)
+
+        cosmos_client.close.assert_not_called()
+        assert mem._memories_container_client is containers["memories"]
+        assert mem._turns_container_client is containers["memories_turns"]
+        assert mem._summaries_container_client is containers["memories_summaries"]
+        assert mem._counter_container_client is containers["counter"]
+        # Each container is read for its key. The memories container is read once more, for its embedding dimensions.
+        for container in containers.values():
+            container.read.assert_called()
 
 
 class TestUserAgent:

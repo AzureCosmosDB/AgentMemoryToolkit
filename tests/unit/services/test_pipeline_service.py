@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 from unittest.mock import MagicMock
@@ -353,6 +354,68 @@ def test_thread_summary_persists_to_summaries_container() -> None:
     with pytest.raises(ValidationError, match="different tenant"):
         service.persist_thread_summary("u1", "t1", {**summary_doc, "tenant_id": "other"})
     summaries_container.upsert_item.assert_called_once()
+
+
+def _persist_summary(
+    service: PipelineService, kind: str, doc: dict[str, Any], user_id: str = "u1", thread_id: str = "t1"
+) -> dict[str, Any]:
+    if kind == "thread_summary":
+        return service.persist_thread_summary(user_id, thread_id, doc)
+    return service.persist_user_summary(user_id, doc)
+
+
+@pytest.mark.parametrize(
+    ("kind", "summary_id", "thread_id"),
+    [("thread_summary", "summary_u1_t1", "t1"), ("user_summary", "user_summary_u1", "__user_summary__")],
+)
+def test_a_summary_without_an_owner_is_stored_for_the_owner_it_is_persisted_for(
+    kind: str, summary_id: str, thread_id: str
+) -> None:
+    summaries_store = FakeStore()
+    service = _pipeline(FakeStore(), FakeLLMService([]), summaries_store=summaries_store, tenant_id="acme")
+    doc = {"type": kind, "content": "Thread discussed retries.", "metadata": {"thread_ids": ["t1"]}}
+    original = copy.deepcopy(doc)
+
+    stored = _persist_summary(service, kind, doc)
+
+    assert (stored["tenant_id"], stored["user_id"], stored["thread_id"], stored["id"]) == (
+        "acme",
+        "u1",
+        thread_id,
+        summary_id,
+    )
+    assert summaries_store.upserts == [stored]
+    assert doc == original, "the caller's dict is not rewritten"
+
+
+VALID_IDS = {"user_id": "u1", "thread_id": "t1"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "user_id", "thread_id", "fields", "problem"),
+    [
+        # The document names no owner, so the tenant is what is refused.
+        pytest.param("thread_summary", "u1", "t1", {"tenant_id": "other"}, "different tenant", id="thread-tenant"),
+        pytest.param("user_summary", "u1", "t1", {"tenant_id": "other"}, "different tenant", id="user-tenant"),
+        # The document names a valid owner and thread of its own, so what is refused is the argument.
+        pytest.param("thread_summary", "bad/id", "t1", VALID_IDS, "user_id", id="thread-owner"),
+        pytest.param("thread_summary", "u1 ", "t1", VALID_IDS, "user_id", id="thread-owner-space"),
+        pytest.param("thread_summary", "u1", "t1 ", VALID_IDS, "thread_id", id="thread-thread-space"),
+        pytest.param("user_summary", "bad/id", "t1", VALID_IDS, "user_id", id="user-owner"),
+        pytest.param("user_summary", "u1 ", "t1", VALID_IDS, "user_id", id="user-owner-space"),
+    ],
+)
+def test_a_summary_that_cannot_be_stored_is_refused_before_its_content_is_embedded(
+    kind: str, user_id: str, thread_id: str, fields: dict[str, Any], problem: str
+) -> None:
+    llm, summaries_store = FakeLLMService([]), FakeStore()
+    service = _pipeline(FakeStore(), llm, summaries_store=summaries_store, tenant_id="acme")
+    doc = {"type": kind, "content": "Thread discussed retries.", "metadata": {"thread_ids": ["t1"]}, **fields}
+
+    with pytest.raises(ValidationError, match=problem):
+        _persist_summary(service, kind, doc, user_id, thread_id)
+
+    assert llm.embed_one_calls == [] and summaries_store.upserts == []
 
 
 def test_generate_thread_and_user_summary_basic_shape() -> None:

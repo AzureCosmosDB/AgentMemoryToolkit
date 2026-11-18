@@ -218,13 +218,13 @@ memory = AsyncCosmosMemoryClient(
     cosmos_credential=AsyncDefaultAzureCredential(),
 )
 
+await memory.create_memory_store()
 await memory.connect_cosmos(
     endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     database=os.getenv("COSMOS_DB_DATABASE"),
     container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER"),
     credential=AsyncDefaultAzureCredential(),
 )
-await memory.create_memory_store()
 
 thread_id = str(uuid.uuid4())
 await memory.upsert_memory(user_id="user-001", role="user", thread_id=thread_id, content="Async Cosmos write")
@@ -235,7 +235,7 @@ for r in results:
 await memory.close()
 ```
 
-`create_memory_store()` creates the database and the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. It configures the hierarchical partition key (`/tenant_id`, `/user_id`) for the first four and `/id` for `leases`, gives a newly created `memories_turns` container a 30-day default TTL and a newly created `counter` container a 90-day one, and applies either serverless or autoscale throughput based on `cosmos_throughput_mode` (set from `COSMOS_DB_THROUGHPUT_MODE` above). An existing container keeps its key, so recreate the containers that an earlier version created with `[/user_id, /thread_id]`, and `leases` with them so the change feed starts clean on the recreated turns container.
+`create_memory_store()` creates the database and the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. It configures the hierarchical partition key (`/tenant_id`, `/user_id`) for the first four and `/id` for `leases`, gives a newly created `memories_turns` container a 30-day default TTL and a newly created `counter` container a 90-day one, and applies either serverless or autoscale throughput based on `cosmos_throughput_mode` (set from `COSMOS_DB_THROUGHPUT_MODE` above). An existing container keeps its key, and `create_memory_store()` and `connect_cosmos()` refuse one that is not keyed `[/tenant_id, /user_id]`, so recreate the containers that an earlier version created with `[/user_id, /thread_id]`, and `leases` with them (the README's [migration notes](../README.md#migration-notes) give the steps in order). On a new database, create the store before connecting, because `connect_cosmos()` refuses a container that does not exist.
 
 ---
 

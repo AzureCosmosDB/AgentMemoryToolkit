@@ -16,7 +16,7 @@ This folder provisions everything the Agent Memory Toolkit needs in a single Azu
   | `leases` | `/id` | Change-feed checkpoints |
   | `counter` | `/tenant_id`, `/user_id` | Atomic counters; 90-day default TTL |
 
-  Everything one owner (a user or an agent) knows in one tenant is in one logical partition; `thread_id` is a plain field. A container's partition key cannot be changed, so a deployment created with the earlier `[user_id, thread_id]` key has to recreate its containers: delete `memories`, `memories_turns`, `memories_summaries`, `counter` and `leases` (their data is lost) and run `azd up`. A container left with the earlier key is refused by `create_memory_store()`, by `validate_topology()` and by the Function App on its first change-feed batch, so the mistake shows up at startup rather than as empty reads.
+  Everything one owner (a user or an agent) knows in one tenant is in one logical partition; `thread_id` is a plain field. A container's partition key cannot be changed, so a deployment created with the earlier `[user_id, thread_id]` key has to recreate its containers: delete `memories`, `memories_turns`, `memories_summaries`, `counter` and `leases` (their data is lost) and run `azd up`; the README's [migration notes](../README.md#migration-notes) give the whole upgrade in order. A container left with the earlier key is refused by `connect_cosmos()`, by `create_memory_store()`, by `validate_topology()` and by the Function App on its first change-feed batch, so the mistake shows up when a client connects or that batch runs, not as empty reads.
 - **AI Foundry** (`Microsoft.CognitiveServices/accounts` with `kind: AIServices`) - with `gpt-4o-mini` and `text-embedding-3-large` deployments
 - **User-assigned managed identity (UAMI)** - used by the Function app
 - **RBAC role assignments** - Cosmos DB Built-in Data Reader + Contributor, Cognitive Services OpenAI User, Storage Blob/Queue/Table data roles, granted to the UAMI and (except the Storage Queue/Table roles) the deploying user (full table in [Identity & RBAC](#identity--rbac))
@@ -89,7 +89,7 @@ When `DEPLOY_FUNCTION_APP=false`, the Bicep template automatically sets `MEMORY_
 azd env set MEMORY_PROCESSOR_OWNER inprocess
 ```
 
-The in-process auto-trigger counts turns in the `counter` container, and the client's `create_memory_store()` also creates `leases`; this mode creates neither. `CosmosMemoryClient(cosmos_endpoint=...)` calls `create_memory_store()` when it is constructed, which creates any missing container. Cosmos DB allows that with key auth but rejects it for Azure AD data-plane roles, so the constructor then raises: create `counter` and `leases` first (settings as in `infra/modules/cosmos.bicep`), or connect once with key auth.
+The in-process auto-trigger counts turns in the `counter` container, and the client's `create_memory_store()` also creates `leases`; this mode creates neither. `CosmosMemoryClient(cosmos_endpoint=...)` calls `create_memory_store()` when it is constructed, which creates any missing container (the async client's constructor does no I/O, so it does this when you `await client.create_memory_store()`). Cosmos DB allows that with key auth but rejects it for Azure AD data-plane roles, so the constructor then raises, and `connect_cosmos()` creates nothing and refuses a missing `counter`. Create `counter` and `leases` first (settings as in `infra/modules/cosmos.bicep`), or connect once with key auth.
 
 ## Model / deployment names
 

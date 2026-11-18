@@ -17,6 +17,7 @@ from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import MemoryNotFoundError, ValidationError
+from azure.cosmos.agent_memory.models import MemoryRecord
 from azure.cosmos.agent_memory.store import MemoryStore
 
 TENANT = "acme"
@@ -342,6 +343,26 @@ async def test_upsert_memory_refuses_a_record_of_another_tenant(kind):
     assert not containers[MEMORIES].sent("upsert_item")
 
 
+async def test_a_built_record_is_stored_in_the_tenant_of_the_store_unless_it_names_another(kind):
+    store, containers = _build(kind)
+    fact = {
+        "memory_type": "fact",
+        "id": "fact_" + "a" * 32,
+        "user_id": USER,
+        "content": "I like tea",
+        "content_hash": "a" * 32,
+        "prompt_id": "extract_memories.prompty",
+        "metadata": {"category": "other"},
+    }
+
+    await _call(store, "upsert_memory", MemoryRecord(**fact).to_cosmos_dict())
+    with pytest.raises(ValidationError, match="different tenant"):
+        await _call(store, "upsert_memory", MemoryRecord(**fact, tenant_id=OTHER_TENANT).to_cosmos_dict())
+
+    (written,) = containers[MEMORIES].sent("upsert_item")
+    assert written["body"]["tenant_id"] == TENANT
+
+
 async def test_push_stamps_every_record_with_the_tenant(kind):
     store, containers = _build(kind)
 
@@ -369,6 +390,16 @@ async def test_add_refuses_an_invalid_owner_before_embedding_or_writing(kind, ow
 
     with pytest.raises(ValidationError, match="user_id"):
         await _call(store, "add", user_id=owner, role="system", content="I like tea", memory_type="fact")
+
+    assert store._embeddings_client.generated == []
+    assert not containers[MEMORIES].sent("upsert_item")
+
+
+async def test_add_refuses_a_thread_ending_in_whitespace_before_embedding_or_writing(kind):
+    store, containers = _build(kind)
+
+    with pytest.raises(ValidationError, match="thread_id"):
+        await _call(store, "add", user_id=USER, role="user", content="x", memory_type="fact", thread_id="t1 ")
 
     assert store._embeddings_client.generated == []
     assert not containers[MEMORIES].sent("upsert_item")

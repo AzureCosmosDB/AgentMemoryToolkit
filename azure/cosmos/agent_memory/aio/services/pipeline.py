@@ -345,6 +345,11 @@ class AsyncPipelineService:
         self._prompty = PromptyLoader(prompts_dir)
         self._transcript_metadata_keys: Optional[tuple[str, ...]] = _normalize_metadata_keys(transcript_metadata_keys)
 
+    @property
+    def tenant_id(self) -> str:
+        """The tenant this service reads and writes."""
+        return self._tenant_id
+
     async def _query_items(self, container: Any, **kwargs: Any) -> list[dict[str, Any]]:
         result = container.query_items(**kwargs)
         if inspect.isawaitable(result):
@@ -1824,10 +1829,8 @@ class AsyncPipelineService:
         if not isinstance(summary_doc, dict):
             raise ValidationError("summary_doc must be a dict")
 
-        doc = stamp_scope(summary_doc, self._tenant_id)
+        doc = stamp_scope({**summary_doc, "user_id": user_id, "thread_id": thread_id}, self._tenant_id)
         doc["id"] = doc.get("id") or f"summary_{user_id}_{thread_id}"
-        doc["user_id"] = user_id
-        doc["thread_id"] = thread_id
         doc.setdefault("prompt_id", "summarize.prompty")
         doc.setdefault("prompt_version", "v1")
         self._redact_for_embedding(doc)
@@ -1985,10 +1988,8 @@ class AsyncPipelineService:
         if not isinstance(user_summary_doc, dict):
             raise ValidationError("user_summary_doc must be a dict")
 
-        doc = stamp_scope(user_summary_doc, self._tenant_id)
+        doc = stamp_scope({**user_summary_doc, "user_id": user_id, "thread_id": "__user_summary__"}, self._tenant_id)
         doc["id"] = doc.get("id") or f"user_summary_{user_id}"
-        doc["user_id"] = user_id
-        doc["thread_id"] = "__user_summary__"
         doc.setdefault("prompt_id", "user_summary.prompty")
         doc.setdefault("prompt_version", "v1")
         structured_summary = doc.get("metadata", {}).get("structured_summary")

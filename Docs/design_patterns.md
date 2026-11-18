@@ -359,7 +359,7 @@ When a new turn is written to the `memories_turns` container, the change feed tr
 2. Checks whether the counter has crossed a configured threshold.
 3. Starts the appropriate Durable Functions orchestration if the threshold is crossed.
 
-The trigger reads `tenant_id` from each changed turn and processes it in that tenant, so one Function App serves every tenant that shares the database, with no tenant setting. A turn without a valid `tenant_id` is skipped with a warning.
+The trigger reads `tenant_id` from each changed turn and processes it in that tenant, so one Function App serves every tenant that shares the database, with no tenant setting. A turn whose tenant, owner or thread id is missing or not valid is skipped with a warning.
 
 ### Configuration
 
@@ -522,7 +522,7 @@ await acme.upsert_memory(user_id="user-1", thread_id="t-1", role="user", content
 await globex.get_thread(thread_id="t-1", user_id="user-1")  # [] - "user-1" at Globex is a different owner
 ```
 
-The tenant is never a per-call argument and has no setting, so a call cannot reach into another tenant. The Function App follows the `tenant_id` stored on each turn.
+The tenant is never a per-call argument and has no setting, so a call cannot reach into another tenant. The Function App follows the `tenant_id` stored on each turn. A tenant keeps data apart but is not an access-control boundary: anyone who can read the account's data can read every tenant (see [Tenants and Owners](concepts.md#tenants-and-owners)).
 
 ### An agent as owner
 
@@ -539,7 +539,7 @@ await mem.upsert_memory(
 facts = await mem.search_cosmos("refund limits", user_id=AGENT, memory_types=["fact"], top_k=3)
 ```
 
-Everything an owner knows sits in one partition, and Cosmos DB limits a logical partition to 20 GB of data and 10,000 RU/s. Keep each user's memories under that user's id and put only what belongs to the agent itself under the agent's, so that no single owner, such as an agent shared by many users, outgrows those limits.
+Everything an owner knows sits in one partition, and Cosmos DB limits a logical partition to 20 GB of data and 10,000 RU/s. Keep each user's memories under that user's id and put only what belongs to the agent itself under the agent's, so that no single owner, such as an agent shared by many users, outgrows those limits. If one agent id would carry the load of every user, spread it over several ids.
 
 ---
 

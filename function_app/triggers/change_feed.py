@@ -5,9 +5,9 @@ counters, then starts the matching orchestrator with a deterministic instance
 ID whenever a configured threshold is crossed.
 
 Every turn names its tenant in ``tenant_id``; a turn without a valid one, or without a valid owner or thread, is
-skipped. Counters, watermarks,
-instance IDs (a hash of the owner, see :mod:`shared.instance_ids`) and orchestrator inputs are per
-``(tenant_id, user_id[, thread_id])``, so one Function App serves every tenant that writes to the containers.
+skipped. Counters, watermarks, instance IDs (a hash of the owner, see :mod:`shared.instance_ids`) and orchestrator
+inputs are per ``(tenant_id, user_id[, thread_id])``, so one Function App serves every tenant that writes to the
+containers. A failure for one thread or owner does not stop the others in the batch; the batch fails at the end.
 
 The trigger is registered as a :class:`df.Blueprint` and wired into the
 top-level :class:`df.DFApp` from ``function_app.py``. The pure-logic entry
@@ -37,7 +37,12 @@ from shared.counters import (
 )
 from shared.instance_ids import orchestration_instance_id
 
-from azure.cosmos.agent_memory._partitioning import partition_key_problem, resolve_tenant_id, validate_owner_id
+from azure.cosmos.agent_memory._partitioning import (
+    partition_key_problem,
+    resolve_tenant_id,
+    validate_owner_id,
+    validate_thread_id,
+)
 from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.logging import describe_exception
 
@@ -104,6 +109,24 @@ def _owner_of(doc: dict) -> str | None:
         return validate_owner_id(doc.get("user_id"))
     except ValidationError:
         return None
+
+
+def _thread_of(doc: dict) -> str | None:
+    """The thread a changed turn names, or ``None`` when it names none or one that is not valid."""
+    try:
+        return validate_thread_id(doc.get("thread_id"))
+    except ValidationError:
+        return None
+
+
+def _record_key_failure(exc: Exception, key_errors: list[Exception]) -> None:
+    """Log one thread's or owner's failed update and remember it, so the rest of the batch still runs."""
+    logger.error(
+        "change-feed: failed to update a counter (exc_type=%s): %s",
+        type(exc).__name__,
+        describe_exception(exc, stack=True),
+    )
+    key_errors.append(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +213,7 @@ async def process_changefeed_batch(
         # delivered - and counted - exactly once, at creation.
         tenant_id = _tenant_of(doc)
         user_id = _owner_of(doc)
-        thread_id = doc.get("thread_id")
+        thread_id = _thread_of(doc)
         if not tenant_id or not user_id or not thread_id:
             logger.warning("change-feed: turn doc missing a valid tenant_id, user_id or thread_id, skipping")
             continue
@@ -222,110 +245,128 @@ async def process_changefeed_batch(
         counter_container = await get_counter_container_async()
 
     orchestration_errors: list[Exception] = []
+    key_errors: list[Exception] = []
+
+    # Each thread and each owner is handled on its own: a failure for one is recorded and the rest of the batch still
+    # runs, so one bad key cannot lose the counts of the other tenants' turns in the same batch.
 
     # ---- Step 2: Thread-scoped counters ----
     if thread_enabled:
         for thread_key, batch_count in thread_counts.items():
-            tenant_id, user_id, thread_id = thread_key
-            cid = thread_counter_id(user_id, thread_id)
-            lsn = thread_max_lsn.get(thread_key)
-            old_count, new_count = await increment_counter_by(
-                counter_container,
-                tenant_id,
-                cid,
-                user_id,
-                thread_id,
-                batch_count,
-                batch_max_lsn=lsn,
-            )
-
-            if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
-                instance_id = orchestration_instance_id(
-                    "thread_summary", tenant_id, user_id, thread_id, count=new_count
-                )
-                await _safe_start(
-                    starter,
-                    "ThreadSummaryOrchestrator",
-                    instance_id,
-                    {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "count": new_count},
-                    orchestration_errors,
+            try:
+                tenant_id, user_id, thread_id = thread_key
+                cid = thread_counter_id(user_id, thread_id)
+                lsn = thread_max_lsn.get(thread_key)
+                old_count, new_count = await increment_counter_by(
+                    counter_container,
+                    tenant_id,
+                    cid,
+                    user_id,
+                    thread_id,
+                    batch_count,
+                    batch_max_lsn=lsn,
                 )
 
-            if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
-                instance_id = orchestration_instance_id("extract", tenant_id, user_id, thread_id, count=new_count)
-                should_reconcile = bool(n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns))
-                watermark = await read_extract_watermark(counter_container, tenant_id, cid, user_id)
-                # Not capped: new_count - watermark is exactly the turns the watermark has
-                # not covered, and the orchestrator advances the watermark to new_count, so
-                # capping would strand the oldest turns (DEDUP_POOL_SIZE is the reconcile
-                # knob, not the extraction window). Bootstrap: with no watermark yet, base=0
-                # so recent_k = new_count covers every turn so far - using only this
-                # batch (new_count - old_count) would strand turns added during earlier
-                # failed extracts once the watermark first advances to new_count.
-                base = watermark if watermark is not None else 0
-                recent_k = max(new_count - base, 1)
-                await _safe_start(
-                    starter,
-                    "ExtractMemoriesOrchestrator",
-                    instance_id,
-                    {
-                        "tenant_id": tenant_id,
-                        "user_id": user_id,
-                        "thread_id": thread_id,
-                        "count": new_count,
-                        "reconcile": should_reconcile,
-                        "recent_k": recent_k,
-                    },
-                    orchestration_errors,
-                )
+                if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
+                    instance_id = orchestration_instance_id(
+                        "thread_summary", tenant_id, user_id, thread_id, count=new_count
+                    )
+                    await _safe_start(
+                        starter,
+                        "ThreadSummaryOrchestrator",
+                        instance_id,
+                        {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "count": new_count},
+                        orchestration_errors,
+                    )
 
-            if n_episode > 0 and crosses_threshold(old_count, new_count, n_episode):
-                instance_id = orchestration_instance_id("episode", tenant_id, user_id, thread_id, count=new_count)
-                await _safe_start(
-                    starter,
-                    "ExtractEpisodesOrchestrator",
-                    instance_id,
-                    {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "count": new_count},
-                    orchestration_errors,
-                )
+                if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
+                    instance_id = orchestration_instance_id("extract", tenant_id, user_id, thread_id, count=new_count)
+                    should_reconcile = bool(
+                        n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
+                    )
+                    watermark = await read_extract_watermark(counter_container, tenant_id, cid, user_id)
+                    # Not capped: new_count - watermark is exactly the turns the watermark has
+                    # not covered, and the orchestrator advances the watermark to new_count, so
+                    # capping would strand the oldest turns (DEDUP_POOL_SIZE is the reconcile
+                    # knob, not the extraction window). Bootstrap: with no watermark yet, base=0
+                    # so recent_k = new_count covers every turn so far - using only this
+                    # batch (new_count - old_count) would strand turns added during earlier
+                    # failed extracts once the watermark first advances to new_count.
+                    base = watermark if watermark is not None else 0
+                    recent_k = max(new_count - base, 1)
+                    await _safe_start(
+                        starter,
+                        "ExtractMemoriesOrchestrator",
+                        instance_id,
+                        {
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "thread_id": thread_id,
+                            "count": new_count,
+                            "reconcile": should_reconcile,
+                            "recent_k": recent_k,
+                        },
+                        orchestration_errors,
+                    )
+
+                if n_episode > 0 and crosses_threshold(old_count, new_count, n_episode):
+                    instance_id = orchestration_instance_id("episode", tenant_id, user_id, thread_id, count=new_count)
+                    await _safe_start(
+                        starter,
+                        "ExtractEpisodesOrchestrator",
+                        instance_id,
+                        {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "count": new_count},
+                        orchestration_errors,
+                    )
+            except Exception as exc:
+                _record_key_failure(exc, key_errors)
 
     # ---- Step 3: User-scoped counters ----
     if user_enabled:
         for user_key, batch_count in user_counts.items():
-            tenant_id, user_id = user_key
-            cid = user_counter_id(user_id)
-            lsn = user_max_lsn.get(user_key)
-            old_count, new_count = await increment_counter_by(
-                counter_container,
-                tenant_id,
-                cid,
-                user_id,
-                config.USER_COUNTER_THREAD_ID,
-                batch_count,
-                batch_max_lsn=lsn,
-            )
-            if crosses_threshold(old_count, new_count, n_user):
-                instance_id = orchestration_instance_id("user_summary", tenant_id, user_id, count=new_count)
-                await _safe_start(
-                    starter,
-                    "UserSummaryOrchestrator",
-                    instance_id,
-                    {
-                        "tenant_id": tenant_id,
-                        "user_id": user_id,
-                        "count": new_count,
-                        "thread_ids": sorted(user_thread_ids.get(user_key, set())),
-                    },
-                    orchestration_errors,
+            try:
+                tenant_id, user_id = user_key
+                cid = user_counter_id(user_id)
+                lsn = user_max_lsn.get(user_key)
+                old_count, new_count = await increment_counter_by(
+                    counter_container,
+                    tenant_id,
+                    cid,
+                    user_id,
+                    config.USER_COUNTER_THREAD_ID,
+                    batch_count,
+                    batch_max_lsn=lsn,
                 )
+                if crosses_threshold(old_count, new_count, n_user):
+                    instance_id = orchestration_instance_id("user_summary", tenant_id, user_id, count=new_count)
+                    await _safe_start(
+                        starter,
+                        "UserSummaryOrchestrator",
+                        instance_id,
+                        {
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "count": new_count,
+                            "thread_ids": sorted(user_thread_ids.get(user_key, set())),
+                        },
+                        orchestration_errors,
+                    )
+            except Exception as exc:
+                _record_key_failure(exc, key_errors)
 
-    # Re-raise so the change-feed batch is retried & thresholds re-fire. The host logs this error and any it was
-    # raised from, so it names the first failure safely instead of chaining the SDK error and its text.
-    if orchestration_errors:
-        raise RuntimeError(
-            f"Failed to start {len(orchestration_errors)} orchestration(s): "
-            f"{describe_exception(orchestration_errors[0])}"
-        )
+    # Re-raise so the host records the batch as failed, and retries it when a retry policy is set: a counter skips
+    # turns it has already counted, so a retry is safe. The host logs this error and any it was raised from, so it
+    # names the first failure safely instead of chaining the SDK error and its text.
+    if orchestration_errors or key_errors:
+        problems: list[str] = []
+        if orchestration_errors:
+            problems.append(
+                f"Failed to start {len(orchestration_errors)} orchestration(s): "
+                f"{describe_exception(orchestration_errors[0])}"
+            )
+        if key_errors:
+            problems.append(f"Failed to update {len(key_errors)} counter(s): {describe_exception(key_errors[0])}")
+        raise RuntimeError("; ".join(problems))
 
 
 async def _safe_start(

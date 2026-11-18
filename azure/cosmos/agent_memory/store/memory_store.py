@@ -26,6 +26,7 @@ from azure.cosmos.agent_memory._partitioning import (
     resolve_tenant_id,
     stamp_scope,
     validate_owner_id,
+    validate_thread_id,
 )
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
@@ -343,6 +344,8 @@ class MemoryStore:
         text that held a credential.
         """
         validate_owner_id(user_id)
+        if thread_id is not None:
+            validate_thread_id(thread_id)
         content, secret_patterns = sanitize_text(content)
         kwargs: dict[str, Any] = {
             "tenant_id": self._tenant_id,

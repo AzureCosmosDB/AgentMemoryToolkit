@@ -755,11 +755,11 @@ class TestSupersession:
 
 
 class TestTenant:
-    def test_a_record_belongs_to_the_default_tenant_unless_it_names_one(self):
+    def test_a_record_belongs_to_no_tenant_until_it_is_written_unless_it_names_one(self):
         record = TurnRecord(user_id="u1", role="user", content="hello")
 
-        assert record.tenant_id == "default"
-        assert record.to_doc()["tenant_id"] == "default"
+        assert record.tenant_id is None
+        assert "tenant_id" not in record.to_doc()
 
     @pytest.mark.parametrize(
         ("memory_type", "kwargs"),

@@ -50,9 +50,35 @@ def _turn(user_id: str = "u1", thread_id: str = "t1", lsn: int | None = None, te
     return doc
 
 
-def _make_starter() -> MagicMock:
+class _Status:
+    """What ``get_status`` returns: falsy for an instance that does not exist, as the Durable client's status is."""
+
+    def __init__(self, exists: bool) -> None:
+        self._exists = exists
+
+    def __bool__(self) -> bool:
+        return self._exists
+
+
+def _make_starter(existing: frozenset[str] | set[str] = frozenset()) -> MagicMock:
+    """A durable client that knows the ``existing`` instance ids and, like the real one, every id it starts.
+
+    ``get_status`` answers a truthy status for an id it knows and a falsy one for any other, so a test can run a batch
+    twice and see the second run find the orchestrations of the first. ``instances`` is the set of ids it knows.
+    """
+    instances = set(existing)
+
+    async def start_new(orchestration_name, instance_id=None, client_input=None):
+        instances.add(instance_id)
+        return instance_id
+
+    async def get_status(instance_id):
+        return _Status(instance_id in instances)
+
     starter = MagicMock()
-    starter.start_new = AsyncMock()
+    starter.start_new = AsyncMock(side_effect=start_new)
+    starter.get_status = AsyncMock(side_effect=get_status)
+    starter.instances = instances
     return starter
 
 
@@ -121,15 +147,21 @@ def _counter(container: MagicMock, counter_id: str, *, tenant_id: str = TENANT, 
 
 
 def _thread_instance_id(
-    kind: str, count: int, *, tenant_id: str = TENANT, user_id: str = "u1", thread_id: str = "t1"
+    kind: str,
+    count: int,
+    *,
+    tenant_id: str = TENANT,
+    user_id: str = "u1",
+    thread_id: str = "t1",
+    lsn: int | None = None,
 ) -> str:
-    """The instance id of a thread-scoped orchestration: a hash of the tenant, user and thread, and the count."""
-    return orchestration_instance_id(kind, tenant_id, user_id, thread_id, count=count)
+    """The instance id of a thread-scoped orchestration: a hash of the tenant, user, thread and LSN, and the count."""
+    return orchestration_instance_id(kind, tenant_id, user_id, thread_id, count=count, lsn=lsn)
 
 
-def _user_instance_id(count: int, *, tenant_id: str = TENANT, user_id: str = "u1") -> str:
-    """The instance id of a user summary: a hash of the tenant and user, and the count."""
-    return orchestration_instance_id("user_summary", tenant_id, user_id, count=count)
+def _user_instance_id(count: int, *, tenant_id: str = TENANT, user_id: str = "u1", lsn: int | None = None) -> str:
+    """The instance id of a user summary: a hash of the tenant, user and batch LSN, and the count."""
+    return orchestration_instance_id("user_summary", tenant_id, user_id, count=count, lsn=lsn)
 
 
 def _fail_counter_reads(container: MagicMock, error: BaseException, *counters: tuple[str, str, str]) -> None:
@@ -1025,14 +1057,12 @@ def test_lsn_replay_does_not_double_increment():
     # Layer 1 (LSN replay dedup): the counter must NOT double-increment.
     assert _counter(container, "thread:u1:t1")["count"] == 4
 
-    # Layer 2 (deterministic instance ID): on replay the counter helper still
-    # reports the same ``(old, new)`` it returned the first time, so the
-    # threshold is "crossed" again - but with the IDENTICAL deterministic
-    # instance id. Azure Durable Functions then dedups the duplicate
-    # ``start_new`` server-side. We assert the determinism here.
+    # Layer 2 (existing instance): on replay the counter helper still reports the same ``(old, new)`` it returned the
+    # first time, so the threshold is "crossed" again - with the IDENTICAL instance id, whose instance the
+    # first run started. The replay finds it and does not start it again.
     summary_starts = [c for c in starter.start_new.await_args_list if c.args[0] == "ThreadSummaryOrchestrator"]
-    assert len(summary_starts) == 2  # same id sent twice - durable dedups
-    assert all(c.kwargs["instance_id"] == _thread_instance_id("thread_summary", 4) for c in summary_starts)
+    assert len(summary_starts) == 1
+    assert summary_starts[0].kwargs["instance_id"] == _thread_instance_id("thread_summary", 4, lsn=13)
 
 
 @patch.dict(
@@ -1216,6 +1246,159 @@ def test_a_cancellation_during_a_counter_update_is_not_swallowed(cancelled):
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(process_changefeed_batch(_batch_of_three_threads(), starter, counter_container=container))
+
+
+# ---------------------------------------------------------------------------
+# A retried batch repeats only what failed
+# ---------------------------------------------------------------------------
+
+
+def _batch_of_three_threads_with_lsns() -> list[dict]:
+    """``_batch_of_three_threads`` with the ``_lsn`` the change feed gives each turn: 100 to 105 in listed order."""
+    docs = _batch_of_three_threads()
+    for lsn, doc in enumerate(docs, start=100):
+        doc["_lsn"] = lsn
+    return docs
+
+
+# The ids of the five orchestrations that batch starts. Each names the highest LSN of the turns it counted.
+_LSN_BATCH_START_IDS = {
+    _thread_instance_id("thread_summary", 2, tenant_id="acme", thread_id="t1", lsn=101),
+    _thread_instance_id("thread_summary", 2, tenant_id="acme", thread_id="t2", lsn=103),
+    _user_instance_id(4, tenant_id="acme", lsn=103),
+    _thread_instance_id("thread_summary", 2, tenant_id="globex", thread_id="t1", lsn=105),
+    _user_instance_id(2, tenant_id="globex", lsn=105),
+}
+
+
+def _counts(container: MagicMock) -> dict[tuple[str, str, str], int]:
+    return {key: doc["count"] for key, doc in container._state.items()}
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+def test_a_replayed_batch_starts_no_orchestration_whose_instance_exists():
+    """The host runs a failed batch again with the same documents. Every counter reports the threshold crossing it
+    reported the first time, and each orchestration it names is found and left alone, although Durable Functions
+    would accept the id of an instance that has finished and run it again."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = _batch_of_three_threads_with_lsns()
+
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    assert starter.start_new.await_count == 5
+    assert starter.instances == _LSN_BATCH_START_IDS
+    assert _counts(container) == _BATCH_COUNTS
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+def test_a_retry_starts_only_the_orchestrations_the_failed_attempt_did_not_start():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+    docs = _batch_of_three_threads_with_lsns()
+    refused = _thread_instance_id("thread_summary", 2, tenant_id="acme", thread_id="t2", lsn=103)
+    start = starter.start_new.side_effect
+
+    async def start_but_refuse_one(orchestration_name, instance_id=None, client_input=None):
+        if instance_id == refused:
+            raise ConnectionError("starter unavailable")
+        return await start(orchestration_name, instance_id=instance_id, client_input=client_input)
+
+    starter.start_new.side_effect = start_but_refuse_one
+    with pytest.raises(RuntimeError, match=r"^Failed to start 1 orchestration\(s\): "):
+        asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+    assert starter.instances == _LSN_BATCH_START_IDS - {refused}
+
+    # The retry: the starter works again.
+    starter.start_new.side_effect = start
+    starter.start_new.reset_mock()
+    asyncio.run(process_changefeed_batch(docs, starter, counter_container=container))
+
+    assert [c.kwargs["instance_id"] for c in starter.start_new.await_args_list] == [refused]
+    assert starter.instances == _LSN_BATCH_START_IDS
+    assert _counts(container) == _BATCH_COUNTS
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "4",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_a_count_reached_again_after_the_counter_expired_starts_a_new_orchestration():
+    """A counter is deleted 90 days after its last turn, so a thread that was idle that long counts from 1 again and
+    reaches the same count in a later batch. The instance of the first time still exists, and the later batch must
+    not take it for its own."""
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(
+        process_changefeed_batch([_turn(lsn=lsn) for lsn in range(10, 14)], starter, counter_container=container)
+    )
+    container._state.clear()
+    asyncio.run(
+        process_changefeed_batch([_turn(lsn=lsn) for lsn in range(500, 504)], starter, counter_container=container)
+    )
+
+    assert [c.kwargs["instance_id"] for c in starter.start_new.await_args_list] == [
+        _thread_instance_id("thread_summary", 4, lsn=13),
+        _thread_instance_id("thread_summary", 4, lsn=503),
+    ]
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+def test_a_status_that_cannot_be_read_fails_the_batch_and_starts_nothing():
+    """An orchestration whose instance cannot be looked up is not started blind, which could run a finished one again:
+    the batch fails, and the host retries it."""
+    starter = _make_starter()
+    starter.get_status.side_effect = ConnectionError("status endpoint unavailable")
+    container = _make_counter_container_starting_at()
+
+    with pytest.raises(RuntimeError, match=r"^Failed to start 5 orchestration\(s\): ConnectionError at "):
+        asyncio.run(process_changefeed_batch(_batch_of_three_threads_with_lsns(), starter, counter_container=container))
+
+    starter.start_new.assert_not_awaited()
+    assert _counts(container) == _BATCH_COUNTS
+
+
+def _conflict_with_a_status_code() -> Exception:
+    conflict = Exception("conflict")
+    conflict.status_code = 409
+    return conflict
+
+
+@patch.dict(os.environ, _EVERY_TWO_TURNS, clear=False)
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        pytest.param(_conflict_with_a_status_code(), id="status-code"),
+        pytest.param(Exception("An Orchestration instance with the status Pending already exists."), id="message"),
+    ],
+)
+def test_an_instance_that_is_starting_is_skipped_not_an_error(conflict):
+    """The status of an instance that has not started running yet reads as missing, and Durable Functions then refuses
+    to start it a second time. That refusal is a skip, not a failed batch."""
+    starter = _make_starter()
+    starter.start_new.side_effect = conflict
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(process_changefeed_batch(_batch_of_three_threads_with_lsns(), starter, counter_container=container))
+
+    assert starter.start_new.await_count == 5
+    assert _counts(container) == _BATCH_COUNTS
+
+
+def test_the_trigger_retries_a_failed_batch_a_bounded_number_of_times():
+    policy = change_feed_module.on_memory_change.retry_policy
+
+    assert policy["strategy"] == "exponential_backoff"
+    # The host takes the count as a string, and -1 would retry for ever.
+    assert 1 <= int(policy["max_retry_count"]) <= 10
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,9 @@
 #### Breaking Changes
 * **The containers use a new partition key.** `memories`, `memories_turns`, `memories_summaries` and `counter` are keyed `[/tenant_id, /user_id]` instead of `[/user_id, /thread_id]` (the Bicep template and `create_memory_store()`). A partition key can't change in place, so recreate those containers and `leases`, in the order given in the [migration notes](README.md#migration-notes) (every writer stopped, in-flight orchestrations purged, the Function App deployed before the upgraded writers); existing data is not migrated. Record ids must now be unique per owner across threads, not per thread. See [PR:#53](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/53)
 
+#### Bugs Fixed
+* **A failed change-feed batch is retried instead of dropped.** The Function App's trigger now retries a batch that fails up to five times, with exponential backoff starting at five seconds, where it used to drop the batch and never count its turns. A retry repeats only what failed: a counter skips the turns it has already counted, and an orchestration whose instance already exists is not started again.
+
 #### Other Changes
 * Orchestration instance ids in the Function App are now `<kind>:<digest>[:<count>]`, where the digest is a fixed-length hash of the tenant, owner and thread. They stay within Durable Functions' 100-character limit and no longer contain user ids. See [PR:#53](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/53)
 

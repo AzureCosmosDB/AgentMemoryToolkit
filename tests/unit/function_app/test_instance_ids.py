@@ -43,6 +43,20 @@ def test_the_count_is_an_optional_suffix_and_zero_is_a_count():
     assert orchestration_instance_id("episode", "acme", "u1", "t1", count=0) == f"{without}:0"
 
 
+def test_the_batch_lsn_joins_the_hash_and_leaves_the_shape_of_the_id_alone():
+    """A replay of a batch has its LSN and so its id; a later batch that reaches the same count gets another id."""
+    first = orchestration_instance_id("extract", "acme", "u1", "t1", count=4, lsn=13)
+
+    assert re.fullmatch(r"extract:[0-9a-f]{32}:4", first)
+    assert first == orchestration_instance_id("extract", "acme", "u1", "t1", count=4, lsn=13)
+    assert first != orchestration_instance_id("extract", "acme", "u1", "t1", count=4, lsn=503)
+    assert first != orchestration_instance_id("extract", "acme", "u1", "t1", count=4)
+    # Without an LSN, which a turn that has none gives, the id is the one it was before the LSN joined the hash.
+    assert orchestration_instance_id("extract", "acme", "u1", "t1", count=4, lsn=None) == (
+        "extract:bdddaa37089972c2babf1b5dda603e63:4"
+    )
+
+
 def test_the_same_inputs_give_the_same_id():
     first = orchestration_instance_id("thread_summary", "acme", "u1", "t1", count=4)
     second = orchestration_instance_id("thread_summary", "".join(["ac", "me"]), "u1", "t" + "1", count=4)
@@ -82,9 +96,10 @@ def test_a_colon_or_a_moved_boundary_cannot_make_two_owners_collide(first, secon
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_the_worst_case_stays_within_the_limit_and_the_allowed_characters(kind):
-    """Tenant, user and thread of 200 characters and a 10-digit count: the id is as long as for one-character ids."""
-    longest = orchestration_instance_id(kind, "t" * 200, "u" * 200, "h" * 200, count=9_999_999_999)
-    shortest = orchestration_instance_id(kind, "t", "u", "h", count=1_000_000_000)
+    """Tenant, user and thread of 200 characters, a 10-digit count and the largest LSN: the id is as long as for
+    one-character ids."""
+    longest = orchestration_instance_id(kind, "t" * 200, "u" * 200, "h" * 200, count=9_999_999_999, lsn=2**63 - 1)
+    shortest = orchestration_instance_id(kind, "t", "u", "h", count=1_000_000_000, lsn=0)
 
     assert len(longest) == len(shortest) == len(kind) + 1 + 32 + 1 + 10
     assert _is_allowed_instance_id(longest)

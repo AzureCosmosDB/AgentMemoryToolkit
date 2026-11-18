@@ -6,6 +6,8 @@ from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 from tests.unit.services.test_extract_dry import _Store, _SyncChat, _SyncEmbeddings
 
+TENANT = "acme"
+
 
 class _PatchTurnsContainer:
     def __init__(self, docs: list[dict[str, Any]]):
@@ -61,6 +63,7 @@ class _ContainerBackedStore(_Store):
 def _turn_doc(**overrides: Any) -> dict[str, Any]:
     doc = {
         "id": "turn-1",
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "turn",
@@ -84,6 +87,7 @@ def _service(turns_container: Any) -> PipelineService:
             ContainerKey.MEMORIES: _StoreContainerAdapter(memories_store, ContainerKey.MEMORIES),
             ContainerKey.SUMMARIES: _StoreContainerAdapter(summaries_store, ContainerKey.SUMMARIES),
         },
+        tenant_id=TENANT,
     )
 
 
@@ -97,7 +101,7 @@ def test_mark_turns_extracted_patches_extracted_at() -> None:
     assert turns_container.patch_calls == [
         {
             "item": "turn-1",
-            "partition_key": ["u1", "t1"],
+            "partition_key": [TENANT, "u1"],
             "patch_operations": [
                 {"op": "set", "path": "/extracted_at", "value": turns_container.docs[0]["extracted_at"]}
             ],
@@ -105,6 +109,15 @@ def test_mark_turns_extracted_patches_extracted_at() -> None:
     ]
     assert turns_container.docs[0]["extracted_at"]
     assert turns_container.upsert_calls == []
+
+
+def test_mark_turns_extracted_only_addresses_the_partition_of_its_own_tenant() -> None:
+    turns_container = _PatchTurnsContainer([_turn_doc(), _turn_doc(id="turn-2", tenant_id="other", thread_id="t2")])
+    service = _service(turns_container)
+
+    service._mark_turns_extracted([_turn_doc(), _turn_doc(id="turn-2", tenant_id="other", thread_id="t2")])
+
+    assert [call["partition_key"] for call in turns_container.patch_calls] == [[TENANT, "u1"], [TENANT, "u1"]]
 
 
 def test_mark_turns_extracted_falls_back_to_read_modify_upsert() -> None:

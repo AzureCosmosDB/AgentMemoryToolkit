@@ -260,9 +260,7 @@ def test_update_without_an_embedder_redacts_new_content_and_metadata_and_keeps_t
     memories.read_item.return_value = _stored_doc(embedding=[9.9], content_hash=compute_content_hash("hello"))
     store = MemoryStore(containers=_containers(memories=memories))
 
-    store.update(
-        "m1", user_id="u1", thread_id="t1", memory_type="fact", content=f"Use {SECRET}", metadata={"note": SECRET}
-    )
+    store.update("m1", user_id="u1", memory_type="fact", content=f"Use {SECRET}", metadata={"note": SECRET})
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert TOKEN not in repr(body)
@@ -286,7 +284,7 @@ def _failing_embedder():
 def test_update_without_an_embedder_keeps_the_previous_vector_when_the_content_changes():
     store, memories = _update_store(_stored_doc(embedding=[9.9]), None)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
+    store.update("m1", user_id="u1", memory_type="fact", content="Prefers Ruff.")
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["content"] == "Prefers Ruff."
@@ -298,7 +296,7 @@ def test_update_rebuilds_the_vector_from_the_redacted_content():
     embeddings = _embedder()
     store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content=f"Use {SECRET}")
+    store.update("m1", user_id="u1", memory_type="fact", content=f"Use {SECRET}")
 
     body = memories.replace_item.call_args.kwargs["body"]
     embeddings.generate.assert_called_once_with(body["content"])
@@ -310,7 +308,7 @@ def test_a_metadata_only_update_rebuilds_the_vector_of_a_record_that_already_hel
     embeddings = _embedder()
     store, memories = _update_store(_stored_doc(content=f"Use {SECRET}", embedding=[9.9]), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", metadata={"note": "rotated"})
+    store.update("m1", user_id="u1", memory_type="fact", metadata={"note": "rotated"})
 
     body = memories.replace_item.call_args.kwargs["body"]
     embeddings.generate.assert_called_once_with(body["content"])
@@ -322,7 +320,7 @@ def test_update_rebuilds_the_vector_when_the_content_changes():
     embeddings = _embedder()
     store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
+    store.update("m1", user_id="u1", memory_type="fact", content="Prefers Ruff.")
 
     embeddings.generate.assert_called_once_with("Prefers Ruff.")
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [0.1, 0.2]
@@ -337,7 +335,7 @@ def test_update_keeps_the_vector_when_the_text_it_encodes_is_unchanged(changes):
     embeddings = _embedder()
     store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", **changes)
+    store.update("m1", user_id="u1", memory_type="fact", **changes)
 
     embeddings.generate.assert_not_called()
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [9.9]
@@ -347,7 +345,7 @@ def test_update_does_not_embed_a_record_that_has_no_vector():
     embeddings = _embedder()
     store, memories = _update_store(_stored_doc(), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content=f"Use {SECRET}")
+    store.update("m1", user_id="u1", memory_type="fact", content=f"Use {SECRET}")
 
     embeddings.generate.assert_not_called()
     assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
@@ -358,7 +356,7 @@ def test_update_drops_the_vector_of_a_record_whose_text_is_emptied_without_embed
     embeddings = _embedder()
     store, memories = _update_store(_stored_doc(embedding=[9.9]), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="")
+    store.update("m1", user_id="u1", memory_type="fact", content="")
 
     embeddings.generate.assert_not_called()
     assert "embedding" not in memories.replace_item.call_args.kwargs["body"]
@@ -370,7 +368,7 @@ def test_update_keeps_a_procedures_vector_when_only_its_content_changes():
     stored = _stored_doc(type="procedural", retrieval_text="deploy the service", embedding=[9.9])
     store, memories = _update_store(stored, embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="procedural", content="Run the deploy script.")
+    store.update("m1", user_id="u1", memory_type="procedural", content="Run the deploy script.")
 
     embeddings.generate.assert_not_called()
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [9.9]
@@ -382,7 +380,7 @@ def test_update_rebuilds_a_procedures_vector_from_its_retrieval_text():
     stored = _stored_doc(type="procedural", retrieval_text="deploy the service", embedding=[9.9])
     store, memories = _update_store(stored, embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="procedural", content=f"Use {SECRET}")
+    store.update("m1", user_id="u1", memory_type="procedural", content=f"Use {SECRET}")
 
     embeddings.generate.assert_called_once_with("deploy the service")
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [0.1, 0.2]
@@ -401,7 +399,7 @@ def test_update_keeps_the_previous_vector_when_embedding_fails(content, caplog):
     caplog.set_level(logging.DEBUG)
     store, memories = _update_store(_stored_doc(embedding=[9.9]), _failing_embedder())
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content=content)
+    store.update("m1", user_id="u1", memory_type="fact", content=content)
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["embedding"] == [9.9]
@@ -424,7 +422,7 @@ def test_update_drops_a_vector_built_from_a_secret_when_it_cannot_be_rebuilt(cha
     embeddings = _failing_embedder() if embedder == "fails" else None
     store, memories = _update_store(_stored_doc(content=f"Use {SECRET}", embedding=[9.9]), embeddings)
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", **changes)
+    store.update("m1", user_id="u1", memory_type="fact", **changes)
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert "embedding" not in body
@@ -443,7 +441,7 @@ def test_update_judges_a_procedures_vector_by_the_text_it_was_built_from(retriev
     stored = _stored_doc(type="procedural", retrieval_text=retrieval_text, content=f"Use {SECRET}", embedding=[9.9])
     store, memories = _update_store(stored, _failing_embedder())
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="procedural", metadata={"note": "rotated"})
+    store.update("m1", user_id="u1", memory_type="procedural", metadata={"note": "rotated"})
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert body.get("embedding") == expected
@@ -461,7 +459,7 @@ def test_an_etag_conflict_retry_keeps_the_vector_it_reads_again_when_embedding_f
     memories.replace_item.side_effect = [CosmosAccessConditionFailedError(message="412", response=None), None]
     store = MemoryStore(containers=_containers(memories=memories), embeddings_client=_failing_embedder())
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
+    store.update("m1", user_id="u1", memory_type="fact", content="Prefers Ruff.")
 
     assert memories.replace_item.call_count == 2
     assert memories.replace_item.call_args.kwargs["body"]["embedding"] == [7.7]
@@ -473,7 +471,7 @@ def test_an_etag_conflict_retry_does_not_embed_the_same_text_again(monkeypatch):
     store, memories = _update_store(_stored_doc(embedding=[9.9], _etag="v1"), embeddings)
     memories.replace_item.side_effect = [CosmosAccessConditionFailedError(message="412", response=None), None]
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="Prefers Ruff.")
+    store.update("m1", user_id="u1", memory_type="fact", content="Prefers Ruff.")
 
     assert memories.replace_item.call_count == 2
     embeddings.generate.assert_called_once_with("Prefers Ruff.")
@@ -489,7 +487,7 @@ def _tagged_store(tags=()):
 def test_add_tags_drops_a_credential_tag_and_flags_the_record():
     store, memories = _tagged_store(["topic:deploy"])
 
-    store.add_tags("m1", "u1", "t1", "fact", [TOKEN, "Release"])
+    store.add_tags("m1", "u1", "fact", [TOKEN, "Release"])
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["tags"] == ["release", "sys:secret", "topic:deploy"]
@@ -502,7 +500,7 @@ def test_add_tags_checks_a_tag_before_it_is_lowercased():
     """An AWS access key id is only recognized in upper case, and tags are stored lower case."""
     store, memories = _tagged_store()
 
-    store.add_tags("m1", "u1", "t1", "fact", ["AKIA" + "IOSFODNN7EXAMPLE"])
+    store.add_tags("m1", "u1", "fact", ["AKIA" + "IOSFODNN7EXAMPLE"])
 
     body = memories.replace_item.call_args.kwargs["body"]
     assert "akiaiosfodnn7example" not in repr(body).lower()
@@ -513,11 +511,11 @@ def test_add_tags_checks_a_tag_before_it_is_lowercased():
 def test_add_tags_leaves_a_clean_record_unflagged_and_remove_tags_never_flags():
     store, memories = _tagged_store(["a", "b"])
 
-    store.add_tags("m1", "u1", "t1", "fact", ["c"])
+    store.add_tags("m1", "u1", "fact", ["c"])
     assert memories.replace_item.call_args.kwargs["body"]["tags"] == ["a", "b", "c"]
     assert "classification" not in memories.replace_item.call_args.kwargs["body"]["metadata"]
 
-    store.remove_tags("m1", "u1", "t1", "fact", [TOKEN, "a"])
+    store.remove_tags("m1", "u1", "fact", [TOKEN, "a"])
     assert memories.replace_item.call_args.kwargs["body"]["tags"] == ["b"]
     assert "classification" not in memories.replace_item.call_args.kwargs["body"]["metadata"]
 
@@ -526,7 +524,7 @@ def test_add_tags_logs_the_formats_found_never_the_tag(caplog):
     caplog.set_level(logging.DEBUG)
     store, _memories = _tagged_store()
 
-    store.add_tags("m1", "u1", "t1", "fact", [TOKEN])
+    store.add_tags("m1", "u1", "fact", [TOKEN])
 
     assert "patterns=['github_token']" in caplog.text
     assert TOKEN not in caplog.text and TOKEN.lower() not in caplog.text

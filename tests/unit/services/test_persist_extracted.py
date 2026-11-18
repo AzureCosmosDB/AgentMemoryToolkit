@@ -10,6 +10,7 @@ from azure.cosmos.exceptions import CosmosResourceExistsError
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import compute_content_hash
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
+from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
@@ -304,3 +305,81 @@ async def test_async_persist_extracted_memories_episodic_creates_not_upserts_and
     assert second["episodic_count"] == 0
     assert container.created_ids == [doc["id"]]
     assert store.upserts == []
+
+
+def test_persist_extracted_memories_creates_every_record_in_its_tenant() -> None:
+    container = _Container()
+    store = _Store(container)
+    service = PipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_Embeddings(),
+        containers=_containers_for_store(store),
+        tenant_id="acme",
+    )
+    fact, episode = _fact_doc(), _episodic_doc()
+
+    service.persist_extracted_memories("u1", {"facts": [fact], "episodic": [episode], "updates": []})
+
+    assert set(container.docs) == {fact["id"], episode["id"]}
+    assert {doc["tenant_id"] for doc in container.docs.values()} == {"acme"}
+    assert "tenant_id" not in fact, "the caller's document is not rewritten"
+
+
+def test_persist_extracted_memories_refuses_a_record_of_another_tenant_and_writes_nothing() -> None:
+    container = _Container()
+    store = _Store(container)
+    service = PipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_Embeddings(),
+        containers=_containers_for_store(store),
+        tenant_id="acme",
+    )
+    ours = _fact_doc("The user prefers dark mode.")
+    theirs = {**_fact_doc("The user prefers concise answers."), "tenant_id": "other"}
+
+    with pytest.raises(ValidationError, match="different tenant"):
+        service.persist_extracted_memories("u1", {"facts": [ours, theirs], "episodic": [], "updates": []})
+
+    assert container.created_ids == []
+
+
+@pytest.mark.asyncio
+async def test_async_persist_extracted_memories_creates_every_record_in_its_tenant() -> None:
+    container = _AsyncContainer()
+    store = _AsyncStore(container)
+    service = AsyncPipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_AsyncEmbeddings(),
+        containers=_async_containers_for_store(store),
+        tenant_id="acme",
+    )
+    fact, episode = _fact_doc(), _episodic_doc()
+
+    await service.persist_extracted_memories("u1", {"facts": [fact], "episodic": [episode], "updates": []})
+
+    assert set(container.docs) == {fact["id"], episode["id"]}
+    assert {doc["tenant_id"] for doc in container.docs.values()} == {"acme"}
+    assert "tenant_id" not in fact
+
+
+@pytest.mark.asyncio
+async def test_async_persist_extracted_memories_refuses_a_record_of_another_tenant_and_writes_nothing() -> None:
+    container = _AsyncContainer()
+    store = _AsyncStore(container)
+    service = AsyncPipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_AsyncEmbeddings(),
+        containers=_async_containers_for_store(store),
+        tenant_id="acme",
+    )
+    ours = _fact_doc("The user prefers dark mode.")
+    theirs = {**_fact_doc("The user prefers concise answers."), "tenant_id": "other"}
+
+    with pytest.raises(ValidationError, match="different tenant"):
+        await service.persist_extracted_memories("u1", {"facts": [ours, theirs], "episodic": [], "updates": []})
+
+    assert container.created_ids == []

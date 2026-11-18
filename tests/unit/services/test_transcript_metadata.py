@@ -276,6 +276,7 @@ class TestClientToPipelineWiring:
 
         client = CosmosMemoryClient.__new__(CosmosMemoryClient)
         client._transcript_metadata_keys = ("agent_id", "timestamp")
+        client._tenant_id = "acme"
         client._turns_container_client = MagicMock()
         client._memories_container_client = MagicMock()
         client._summaries_container_client = MagicMock()
@@ -298,6 +299,7 @@ class TestClientToPipelineWiring:
             mod.PipelineService = original
 
         assert captured.get("transcript_metadata_keys") == ("agent_id", "timestamp")
+        assert captured.get("tenant_id") == "acme"
 
     def test_async_client_threads_kwarg_into_pipeline(self) -> None:
         from unittest.mock import MagicMock
@@ -307,6 +309,7 @@ class TestClientToPipelineWiring:
 
         client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
         client._transcript_metadata_keys = ("agent_id",)
+        client._tenant_id = "acme"
         client._turns_container_client = MagicMock()
         client._memories_container_client = MagicMock()
         client._summaries_container_client = MagicMock()
@@ -327,6 +330,7 @@ class TestClientToPipelineWiring:
             mod.AsyncPipelineService = original
 
         assert captured.get("transcript_metadata_keys") == ("agent_id",)
+        assert captured.get("tenant_id") == "acme"
 
 
 class TestIncludeTimestamp:

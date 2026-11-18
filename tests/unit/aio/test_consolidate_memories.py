@@ -27,6 +27,7 @@ from azure.cosmos.agent_memory.services._dedup import dedup_result, survivor_pat
 NEAR = [1.0, 0.0, 0.0]
 NEAR_ENOUGH = [0.9, 0.3, 0.0]  # cosine 0.95 with NEAR
 TOO_FAR = [0.8, 0.6, 0.0]  # cosine 0.80 with NEAR: below the 0.85 floor
+TENANT = "acme"
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +37,7 @@ def _dedup_only(monkeypatch):
 
 def _make_pipeline() -> AsyncPipelineService:
     p = AsyncPipelineService.__new__(AsyncPipelineService)
+    p._tenant_id = TENANT
     p._embeddings = MagicMock()
     p._commit_fold = AsyncMock(side_effect=lambda survivor, losers, **kwargs: [doc["id"] for doc in losers])
     p._container = MagicMock()
@@ -61,6 +63,7 @@ def _fact(
 ) -> dict:
     doc = {
         "id": fid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "type": "fact",
@@ -156,7 +159,7 @@ class TestWhatAPassChecks:
         p._run_prompty.assert_not_called()
         body = p._container.create_item.call_args.kwargs["body"]
         assert (body["id"], body["type"]) == ("dedup_cursor_u1_fact", "dedup_cursor")
-        assert (body["user_id"], body["thread_id"]) == ("u1", "__dedup__")
+        assert (body["tenant_id"], body["user_id"], body["thread_id"]) == (TENANT, "u1", "__dedup__")
         assert (body["last_ts"], body["ids_at_last_ts"]) == (3, ["f1"])
 
     async def test_a_pass_reads_active_facts_after_its_cursor_and_replaces_it_if_unchanged(self):
@@ -171,14 +174,18 @@ class TestWhatAPassChecks:
 
         _, queries = await _run(p, [_fact("f1", "User likes coffee", ts=6)], cursor=cursor, n=7)
 
-        sql, params, _ = queries[0]
+        sql, params, kwargs = queries[0]
         assert "TOP 7" in sql and "ORDER BY c._ts ASC" in sql and "IS_NULL(c.superseded_by)" in sql
-        assert (params["@user_id"], params["@after_ts"], params["@after_ids"]) == ("u1", 5, ["f0"])
-        assert p._container.read_item.call_args.kwargs["partition_key"] == ["u1", "__dedup__"]
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"]) == (TENANT, "u1")
+        assert (params["@after_ts"], params["@after_ids"]) == (5, ["f0"])
+        assert kwargs["partition_key"] == [TENANT, "u1"]
+        assert p._container.read_item.call_args.kwargs["partition_key"] == [TENANT, "u1"]
         replaced = p._container.replace_item.call_args.kwargs
         assert (replaced["item"], replaced["etag"]) == ("dedup_cursor_u1_fact", "c1")
         assert replaced["match_condition"] == MatchConditions.IfNotModified
         assert (replaced["body"]["last_ts"], replaced["body"]["ids_at_last_ts"]) == (6, ["f1"])
+        assert replaced["body"]["tenant_id"] == TENANT
 
     async def test_only_neighbours_at_or_above_the_similarity_floor_reach_the_model(self):
         p = _make_pipeline()
@@ -188,7 +195,11 @@ class TestWhatAPassChecks:
 
         result, queries = await _run(p, [seed], {"f1": [far, close]}, [[_verdict("related")]])
 
-        assert "ORDER BY VectorDistance(c.embedding, @embedding)" in queries[1][0]
+        sql, params, kwargs = queries[1]
+        assert "ORDER BY VectorDistance(c.embedding, @embedding)" in sql
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert (params["@tenant_id"], params["@user_id"]) == (TENANT, "u1")
+        assert kwargs["partition_key"] == [TENANT, "u1"]
         assert p._run_prompty.call_args.args[0] == "dedup_verify.prompty"
         candidates = json.loads(p._run_prompty.call_args.kwargs["inputs"]["candidates"])
         assert [c["text"] for c in candidates] == ["The user likes coffee"]

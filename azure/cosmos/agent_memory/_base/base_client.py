@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
+from azure.cosmos.agent_memory._partitioning import (
+    reported_tenant,
+    resolve_tenant_id,
+    validate_owner_id,
+    validate_thread_id,
+)
 from azure.cosmos.agent_memory._utils import (
     VALID_ROLES,
     VALID_TYPES,
@@ -19,7 +25,12 @@ from azure.cosmos.agent_memory._utils import (
     normalize_ai_foundry_endpoint,
     resolve_cosmos_preferred_locations,
 )
-from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
+from azure.cosmos.agent_memory.exceptions import (
+    ConfigurationError,
+    CosmosNotConnectedError,
+    MemoryNotFoundError,
+    ValidationError,
+)
 from azure.cosmos.agent_memory.logging import configure_logging, get_logger
 from azure.cosmos.agent_memory.thresholds import get_enable_turn_embeddings
 
@@ -54,9 +65,11 @@ class _BaseMemoryClient:
         user_agent: Optional[str] = None,
         default_credential_module: str = "azure.identity",
         cosmos_preferred_locations: Optional[str | Iterable[str]] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
         """Initialize shared local state, config values, and default credentials."""
         configure_logging()
+        self._tenant_id = resolve_tenant_id(tenant_id)
         self.local_memory: list[dict[str, Any]] = []
         self._unflushed_turn_counts: dict[tuple[str, str], int] = {}
         self._warned_owner_skip: bool = False
@@ -118,6 +131,24 @@ class _BaseMemoryClient:
         self._store: Any = None
 
     @property
+    def tenant_id(self) -> str:
+        """The tenant this client is bound to: every record it reads or writes belongs to it."""
+        return self._tenant_id
+
+    def _require_processor_tenant(self, processor: Any) -> None:
+        """Refuse a processor that works in another tenant than this client.
+
+        A processor that reports no tenant, as a custom one may not, is not checked.
+        """
+        processor_tenant = reported_tenant(processor)
+        if processor_tenant is not None and processor_tenant != self._tenant_id:
+            raise ConfigurationError(
+                f"processor works in tenant {processor_tenant!r} but this client is bound to tenant "
+                f"{self._tenant_id!r}: build the processor, and the pipeline it wraps, with the same tenant_id, "
+                "or omit it so the client builds its own"
+            )
+
+    @property
     def _containers(self) -> dict[ContainerKey, Any]:
         return {
             ContainerKey.TURNS: self._turns_container_client,
@@ -144,7 +175,14 @@ class _BaseMemoryClient:
         ttl: Optional[int] = None,
         salience: Optional[float] = None,
     ) -> None:
-        """Add a new memory to the local store."""
+        """Add a new memory to the local store.
+
+        ``user_id`` and ``thread_id`` must be valid ids, so a record that could never be written is refused here and
+        does not make every later push fail.
+        """
+        validate_owner_id(user_id)
+        if thread_id:
+            validate_thread_id(thread_id)
         if memory_type == "turn" and not thread_id:
             raise ValidationError(
                 "thread_id is required for memory_type='turn' so the auto-trigger "

@@ -50,6 +50,7 @@ FAR = [0.6, 0.8, 0.0]  # cosine 0.60: below both floors
 PLANS = "The user is planning a Christmas Eve dinner for 15 guests"
 START = "The user wants the Christmas Eve dinner to start at 6:30 PM"
 BOTH = "For the user's Christmas Eve dinner, the user is planning for 15 guests and wants it to start at 6:30 PM."
+TENANT = "acme"
 
 
 def _fact(
@@ -64,6 +65,7 @@ def _fact(
 ) -> dict:
     doc = {
         "id": fid,
+        "tenant_id": TENANT,
         "user_id": "u1",
         "thread_id": "t1",
         "role": "system",
@@ -152,6 +154,7 @@ class _Model:
 
 def _make_pipeline() -> PipelineService:
     p = PipelineService.__new__(PipelineService)
+    p._tenant_id = TENANT
     p._embeddings = MagicMock()
     p._embed_one = MagicMock(return_value=[0.1, 0.2, 0.3])
     p._commit_fold = MagicMock(side_effect=lambda survivor, losers, **kwargs: [doc["id"] for doc in losers])
@@ -510,6 +513,7 @@ class TestCommitCombine:
     @staticmethod
     def _build() -> PipelineService:
         p = PipelineService.__new__(PipelineService)
+        p._tenant_id = TENANT
         p._container = MagicMock()
         p._memories_container = p._container
         p._mark_superseded = MagicMock(return_value=True)
@@ -539,7 +543,7 @@ class TestCommitCombine:
         record, members = self._inputs()
 
         assert p._commit_combine(record, members) == ["f1", "f2"]
-        assert p._container.read_item.call_args.kwargs == {"item": record["id"], "partition_key": ["u1", "t1"]}
+        assert p._container.read_item.call_args.kwargs == {"item": record["id"], "partition_key": [TENANT, "u1"]}
 
     @pytest.mark.parametrize(
         "existing",
@@ -889,3 +893,34 @@ class TestWriteResult:
         [record] = [r for r in caplog.records if r.getMessage() == "reconcile.outcome"]
         assert (result["combined"], result["synthesized"], result["combine_groups"]) == (2, 1, 1)
         assert (record.combined, record.synthesized, record.combine_groups, record.combine_failed) == (2, 1, 1, 0)
+
+
+class TestAPassStaysInsideItsTenant:
+    def test_it_filters_on_the_tenant_and_reads_only_the_owners_partition(self):
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        model = _Model(verdicts, [_write(["M1", "M2"], BOTH)], [_holds(2)])
+
+        _run(p, [seed], {seed["id"]: [partner]}, model)
+
+        queries = p._container.query_items.call_args_list
+        assert len(queries) == 2, "the seeds and the seed's neighbours"
+        for call in queries:
+            params = {item["name"]: item["value"] for item in call.kwargs["parameters"]}
+            assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in call.kwargs["query"]
+            assert (params["@tenant_id"], params["@user_id"]) == (TENANT, "u1")
+            assert call.kwargs["partition_key"] == [TENANT, "u1"]
+            assert "enable_cross_partition_query" not in call.kwargs
+        reads = p._container.read_item.call_args_list
+        assert reads and all(call.kwargs["partition_key"] == [TENANT, "u1"] for call in reads)
+
+    def test_the_combined_fact_and_the_cursor_it_writes_carry_the_tenant(self):
+        p = _make_pipeline()
+        seed, partner, verdicts = _pair()
+        model = _Model(verdicts, [_write(["M1", "M2"], BOTH)], [_holds(2)])
+
+        _run(p, [seed], {seed["id"]: [partner]}, model)
+
+        written = [call.kwargs["body"] for call in p._container.create_item.call_args_list]
+        assert {body["type"] for body in written} == {"fact", "dedup_cursor"}
+        assert {body["tenant_id"] for body in written} == {TENANT}

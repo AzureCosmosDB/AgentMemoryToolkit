@@ -154,6 +154,12 @@ def chat_deployment_name():
     return os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini")
 
 
+@pytest.fixture(scope="session")
+def integration_tenant_id():
+    """The tenant the integration tests run in: not the default one, so a hard-coded default tenant fails them."""
+    return "integration-tests"
+
+
 @pytest.fixture
 def unique_user_id():
     """Unique user ID to isolate integration test data."""

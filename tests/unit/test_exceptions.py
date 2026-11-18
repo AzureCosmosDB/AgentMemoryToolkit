@@ -47,24 +47,26 @@ def test_configuration_error_custom_message():
 
 
 def test_memory_not_found_full_context():
-    err = MemoryNotFoundError(memory_id="m1", user_id="u1", thread_id="t1")
+    err = MemoryNotFoundError(memory_id="m1", user_id="u1")
     assert err.memory_id == "m1"
     assert err.user_id == "u1"
-    assert err.thread_id == "t1"
-    msg = str(err)
-    assert "m1" in msg
-    assert "u1" in msg
-    assert "t1" in msg
+    assert str(err) == "Memory not found (memory_id='m1', user_id='u1')"
 
 
 def test_memory_not_found_partial_context():
     err = MemoryNotFoundError(memory_id="m2")
     assert err.memory_id == "m2"
     assert err.user_id is None
-    assert err.thread_id is None
     msg = str(err)
     assert "m2" in msg
     assert "user_id" not in msg
+
+
+def test_memory_not_found_does_not_carry_a_thread():
+    # A record is found by its owner and id; the thread is a plain field of the record.
+    with pytest.raises(TypeError):
+        MemoryNotFoundError(memory_id="m1", user_id="u1", thread_id="t1")
+    assert not hasattr(MemoryNotFoundError(memory_id="m1"), "thread_id")
 
 
 def test_cosmos_not_connected_default_message():

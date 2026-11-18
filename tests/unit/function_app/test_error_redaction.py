@@ -192,9 +192,9 @@ def _run(orchestrator, context, activities):
 def test_a_failed_summary_step_keeps_its_error_text_out_of_the_history_and_the_log(monkeypatch, caplog):
     pipeline = MagicMock()
     pipeline.generate_thread_summary_durable.side_effect = LLMError(f"LLM returned invalid JSON (preview={SECRET!r})")
-    monkeypatch.setattr(ts_mod, "get_pipeline", lambda: pipeline)
+    monkeypatch.setattr(ts_mod, "get_pipeline", lambda tenant_id: pipeline)
     monkeypatch.setattr(ts_mod, "default_retry_options", lambda: "retry")
-    context = _Context({"user_id": "alice", "thread_id": "t1"})
+    context = _Context({"tenant_id": "acme", "user_id": "alice", "thread_id": "t1"})
     activities = {"ts_Extract": ts_mod.ts_Extract, "ts_PersistSummary": ts_mod.ts_PersistSummary}
 
     with caplog.at_level(logging.DEBUG), pytest.raises(ActivityFailedError) as failure:

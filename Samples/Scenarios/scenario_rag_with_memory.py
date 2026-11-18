@@ -260,7 +260,6 @@ def run_demo() -> None:
         mem.delete_memory(
             memory_id=item["id"],
             user_id=user_id,
-            thread_id=item.get("thread_id", thread_id),
             memory_type="turn",
         )
     stored = mem.get_memories(user_id=user_id, thread_id=thread_id)
@@ -268,7 +267,6 @@ def run_demo() -> None:
         mem.delete_memory(
             memory_id=item["id"],
             user_id=user_id,
-            thread_id=item.get("thread_id", thread_id),
             memory_type=item["type"],
         )
     print(f"  Deleted {len(turns) + len(stored)} seeded memories.")

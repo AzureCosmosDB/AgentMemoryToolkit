@@ -7,6 +7,7 @@ from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     MAX_FULLTEXT_TERMS,
     _build_container_kwargs,
+    _build_memory_query_builder,
     _container_policies,
     _make_memory,
     _resolve_distance_function,
@@ -52,6 +53,30 @@ def test_build_container_kwargs_omits_offer_throughput_when_none():
         "id": "leases",
         "partition_key": "/id",
     }
+
+
+# ---------------------------------------------------------------------------
+# _build_memory_query_builder
+# ---------------------------------------------------------------------------
+
+
+def test_memory_query_builder_is_confined_to_the_tenant_and_owner():
+    qb = _build_memory_query_builder(tenant_id="acme", user_id="u1", thread_id="t1", memory_types=["fact"])
+
+    assert qb.build_where().startswith(" WHERE c.tenant_id = @tenant_id AND c.user_id = @user_id AND ")
+    assert qb.get_parameters()[:2] == [{"name": "@tenant_id", "value": "acme"}, {"name": "@user_id", "value": "u1"}]
+
+
+def test_memory_query_builder_without_an_owner_reads_the_whole_tenant_only():
+    qb = _build_memory_query_builder(tenant_id="acme", role="user")
+
+    assert qb.build_where() == " WHERE c.tenant_id = @tenant_id AND c.role = @role"
+    assert "@user_id" not in {p["name"] for p in qb.get_parameters()}
+
+
+def test_memory_query_builder_requires_a_tenant():
+    with pytest.raises(TypeError):
+        _build_memory_query_builder(user_id="u1")  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from azure.cosmos.exceptions import CosmosResourceNotFoundError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
@@ -62,16 +62,34 @@ class _AsyncEmbeddings(_SyncEmbeddings):
         return [1.0]
 
 
+def _in_partition(doc: dict[str, Any], partition_key: Any) -> bool:
+    """Whether ``doc`` sits in the partition ``[tenant_id, user_id]``. A record that names no tenant, or no user, is
+    taken to sit in whichever partition is asked for."""
+    if not isinstance(partition_key, (list, tuple)) or len(partition_key) != 2:
+        return True
+    tenant_id, user_id = partition_key
+    return doc.get("tenant_id", tenant_id) == tenant_id and doc.get("user_id", user_id) == user_id
+
+
 class _Store:
+    """A container as the pipeline sees it. A query that names the tenant (``@tenant_id``) or a partition
+    (``[tenant_id, user_id]``) only answers with the records that sit there, and every query and point read is
+    recorded in ``queries`` and ``reads``."""
+
     def __init__(self, docs: list[dict[str, Any]]):
         self.docs = [dict(doc) for doc in docs]
         self.search_calls: list[dict[str, Any]] = []
         self.search_results: list[dict[str, Any]] = []
+        self.queries: list[tuple[str, dict[str, Any], Any]] = []
+        self.reads: list[tuple[str, Any]] = []
 
     def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
-        del partition_key, cross_partition
+        del cross_partition
         params = {p["name"]: p["value"] for p in (parameters or [])}
-        docs = [dict(doc) for doc in self.docs]
+        self.queries.append((sql, params, partition_key))
+        docs = [dict(doc) for doc in self.docs if _in_partition(doc, partition_key)]
+        if "@tenant_id" in params:
+            docs = [doc for doc in docs if doc.get("tenant_id", params["@tenant_id"]) == params["@tenant_id"]]
         if "@user_id" in params:
             docs = [doc for doc in docs if doc.get("user_id") == params["@user_id"]]
         if "@thread_id" in params:
@@ -132,9 +150,9 @@ class _Store:
         return body
 
     def read_item(self, item_id: str, partition_key: Any):
-        del partition_key
+        self.reads.append((item_id, partition_key))
         for doc in self.docs:
-            if doc.get("id") == item_id:
+            if doc.get("id") == item_id and _in_partition(doc, partition_key):
                 return dict(doc)
         raise CosmosResourceNotFoundError(message=item_id)
 
@@ -843,3 +861,61 @@ def test_extract_memories_durable_clamps_out_of_range_fact_scores() -> None:
     assert len(output["facts"]) == 1
     assert output["facts"][0]["confidence"] == 1.0
     assert output["facts"][0]["salience"] == 0.0
+
+
+def test_extracted_facts_carry_the_tenant_and_the_same_fact_in_two_threads_has_two_ids() -> None:
+    memories_store = _Store([])
+    turns_store = _Store([_turn(1), {**_turn(1), "thread_id": "t2"}])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([_response(), _response()]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+        tenant_id="acme",
+    )
+
+    [first] = service.extract_memories_durable("u1", "t1")["facts"]
+    [second] = service.extract_memories_durable("u1", "t2")["facts"]
+
+    assert (first["tenant_id"], first["user_id"], first["thread_id"]) == ("acme", "u1", "t1")
+    assert (second["tenant_id"], second["thread_id"]) == ("acme", "t2")
+    assert first["content_hash"] == second["content_hash"]
+    assert first["id"] != second["id"], "an owner's threads share one partition, so the thread is part of the id"
+
+
+class _OwnerStore(_Store):
+    """A container keyed by ``[tenant_id, user_id]``: a record is created once per owner and id, as in Cosmos DB."""
+
+    def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        key = (body["tenant_id"], body["user_id"], body["id"])
+        if any((doc["tenant_id"], doc["user_id"], doc["id"]) == key for doc in self.docs):
+            raise CosmosResourceExistsError(message=body["id"])
+        return self.upsert_memory(body)
+
+
+def test_the_same_fact_is_stored_once_per_owner_and_thread() -> None:
+    memories_store = _OwnerStore([])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([_response()] * 4),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store),
+        tenant_id="acme",
+    )
+
+    def extract_and_persist(user_id: str, thread_id: str) -> int:
+        turn = {**_turn(1), "user_id": user_id, "thread_id": thread_id}
+        extracted = service.extract_memories_durable(user_id, thread_id, turns=[turn])
+        return service.persist_extracted_memories(user_id, extracted)["fact_count"]
+
+    created = [
+        extract_and_persist("u1", "t1"),
+        extract_and_persist("u1", "t1"),
+        extract_and_persist("u1", "t2"),
+        extract_and_persist("u2", "t1"),
+    ]
+
+    assert created == [1, 0, 1, 1], "only the same fact from the same thread of the same owner is a replay"
+    ids = {(doc["user_id"], doc["thread_id"]): doc["id"] for doc in memories_store.docs}
+    assert sorted(ids) == [("u1", "t1"), ("u1", "t2"), ("u2", "t1")]
+    assert len(set(ids.values())) == 3, "the owner is part of the id, not only of the partition"

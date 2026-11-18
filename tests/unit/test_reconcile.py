@@ -28,6 +28,7 @@ from azure.cosmos.agent_memory.services._dedup import dedup_result
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 NO_DEDUP = dedup_result(checked=0, retired_seeds=0, merged=0, compared=0, vetoed=0)
+TENANT = "acme"
 
 
 def _make_pipeline() -> PipelineService:
@@ -142,6 +143,7 @@ class TestReconcileMemories:
 class TestExactDedupShortCircuit:
     def _build(self) -> PipelineService:
         p = PipelineService.__new__(PipelineService)
+        p._tenant_id = TENANT
         p._embeddings = MagicMock()
         p._embeddings.generate.return_value = [0.1] * 8
         p._container = MagicMock()
@@ -247,6 +249,7 @@ class TestExactDedupCrossTypeIsolation:
 
     def _build(self) -> PipelineService:
         p = PipelineService.__new__(PipelineService)
+        p._tenant_id = TENANT
         p._embeddings = MagicMock()
         p._embeddings.generate.return_value = [0.1] * 8
         p._embeddings.generate_batch.return_value = [[0.1] * 8]
@@ -308,6 +311,7 @@ class TestExtractEarlyReturnShape:
 
     def test_empty_thread_returns_full_dict_shape(self):
         p = PipelineService.__new__(PipelineService)
+        p._tenant_id = TENANT
         p._container = MagicMock()
         p._memories_container = p._container
         p._turns_container = p._container
@@ -357,6 +361,7 @@ class TestExtractUpdateSelfCollapseGuard:
 
     def _build(self) -> PipelineService:
         p = PipelineService.__new__(PipelineService)
+        p._tenant_id = TENANT
         p._embeddings = MagicMock()
         p._embeddings.generate.return_value = [[0.1] * 8]
         p._upsert_memory = MagicMock(side_effect=lambda doc: doc)

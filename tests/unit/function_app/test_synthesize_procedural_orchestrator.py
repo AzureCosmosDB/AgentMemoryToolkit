@@ -47,27 +47,35 @@ class TestSynthesizeProceduralOrchestrator:
         return _user_function(sp_mod.SynthesizeProceduralOrchestrator)
 
     @patch.object(sp_mod, "default_retry_options", return_value=MagicMock(name="retry"))
-    def test_calls_activity_once_with_user_and_force_and_returns_result(self, _retry):
-        ctx = _make_context({"user_id": "u1", "force": True})
+    def test_calls_activity_once_with_tenant_user_and_force_and_returns_result(self, _retry):
+        ctx = _make_context({"tenant_id": "acme", "user_id": "u1", "force": True})
         gen = self._orchestrator()(ctx)
 
         result, _ = _drive(gen, [{"status": "synthesized", "procedures_created": 2}])
 
         assert [call[0] for call in ctx._yielded_calls] == ["sp_SynthesizeProcedural"]
-        assert ctx._yielded_calls[0][2] == {"user_id": "u1", "force": True}
+        assert ctx._yielded_calls[0][2] == {"tenant_id": "acme", "user_id": "u1", "force": True}
         assert result == {"status": "synthesized", "procedures_created": 2}
+
+    @pytest.mark.parametrize("missing", ["tenant_id", "user_id"])
+    def test_missing_tenant_or_user_id_raises(self, missing):
+        payload = {"tenant_id": "acme", "user_id": "u1"}
+        del payload[missing]
+        with patch.object(sp_mod, "default_retry_options", return_value=MagicMock()):
+            with pytest.raises(KeyError):
+                next(self._orchestrator()(_make_context(payload)))
 
 
 @pytest.mark.parametrize(
     ("payload", "pipeline_result", "expected"),
     [
         (
-            {"user_id": "u1", "force": True},
+            {"tenant_id": "acme", "user_id": "u1", "force": True},
             {"status": "synthesized", "procedures_created": 2, "procedures_updated": 1, "facts_retired": 1},
             {"status": "synthesized", "procedures_created": 2, "facts_retired": 1},
         ),
         (
-            {"user_id": "u2", "force": False},
+            {"tenant_id": "acme", "user_id": "u2", "force": False},
             {"status": "skipped", "procedures_created": None},
             {"status": "skipped", "procedures_created": 0, "facts_retired": 0},
         ),
@@ -75,7 +83,9 @@ class TestSynthesizeProceduralOrchestrator:
     ids=["extra-fields-dropped", "missing-count-is-zero"],
 )
 @patch.object(sp_mod, "get_pipeline")
-def test_activity_calls_pipeline_and_returns_slim_payload(mock_get_pipeline, payload, pipeline_result, expected):
+def test_activity_calls_the_tenants_pipeline_and_returns_slim_payload(
+    mock_get_pipeline, payload, pipeline_result, expected
+):
     """Durable records activity outputs in the job history, so only the status and counts may come back."""
     pipeline = MagicMock()
     pipeline.synthesize_procedural.return_value = pipeline_result
@@ -84,6 +94,7 @@ def test_activity_calls_pipeline_and_returns_slim_payload(mock_get_pipeline, pay
     with patch.object(sp_mod.time, "monotonic", return_value=100.0):
         result = sp_mod.sp_SynthesizeProcedural(payload)
 
+    mock_get_pipeline.assert_called_once_with("acme")
     # The pass stops starting model calls at the activity's time budget (240 s by default).
     pipeline.synthesize_procedural.assert_called_once_with(
         user_id=payload["user_id"], force=payload["force"], deadline=340.0
@@ -100,6 +111,6 @@ def test_activity_deadline_follows_the_configured_time_budget(mock_get_pipeline,
     mock_get_pipeline.return_value = pipeline
 
     with patch.object(sp_mod.time, "monotonic", return_value=100.0):
-        sp_mod.sp_SynthesizeProcedural({"user_id": "u1"})
+        sp_mod.sp_SynthesizeProcedural({"tenant_id": "acme", "user_id": "u1"})
 
     assert pipeline.synthesize_procedural.call_args.kwargs["deadline"] == 190.0

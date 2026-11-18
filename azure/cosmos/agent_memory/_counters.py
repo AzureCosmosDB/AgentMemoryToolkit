@@ -4,17 +4,17 @@ The Function App's change-feed processor (see ``function_app/shared/counters.py`
 uses the same counter container and document shape, so InProcess and Durable
 backends can be swapped without losing per-thread / per-user counts.
 
-Counter document shape::
+Counter documents live in the owner's partition, PK = [tenant_id, user_id]::
 
-    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
-    { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
+    # thread-scoped - id = "thread:{user_id}:{thread_id}"
+    { "id": ..., "tenant_id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "created_at": str, "updated_at": str,
       "last_batch_lsn": int|None, "last_batch_old_count": int,
       "last_extract_count": int,   # only once the Function App has extracted
       "last_failure_at": str|None, "last_failure_reason": str|None,
       "last_owner": str|None }
 
-    # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
+    # user-scoped - id = "user:{user_id}", thread_id = "__counters__"
     { ... same fields, without "last_extract_count" ... }
 
 The counter container's default TTL (``COUNTER_TTL_SECONDS``) expires a counter 90 days after its
@@ -39,6 +39,7 @@ from typing import Any, Optional
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory._partitioning import partition_key_for
 from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +108,7 @@ def _maybe_warn_owner_mismatch(counter_id: str, existing_owner: Optional[str], o
 
 def increment_counter_sync(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
     thread_id: str,
@@ -115,6 +117,9 @@ def increment_counter_sync(
     owner: Optional[str] = None,
 ) -> tuple[int, int]:
     """Atomically increment ``counter_id`` by *count* and return ``(old, new)``.
+
+    The counter lives in the ``[tenant_id, user_id]`` partition; *thread_id* is a plain field of
+    the document (``"__counters__"`` for the user-scoped counter).
 
     Uses ETag-based optimistic concurrency, retrying up to ``MAX_RETRIES``
     times on HTTP 412. Uses ``create_item`` for the first-write path,
@@ -129,7 +134,7 @@ def increment_counter_sync(
     Returns ``(0, 0)`` and logs a warning if the increment fails (the container is unreachable, or
     every retry conflicted) - auto-trigger failures must never block the user's primary write path.
     """
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for(tenant_id, user_id)
 
     for attempt in range(MAX_RETRIES):
         old_count = 0
@@ -148,6 +153,7 @@ def increment_counter_sync(
         new_count = old_count + count
         new_doc = _build_counter_doc(
             counter_id=counter_id,
+            tenant_id=tenant_id,
             user_id=user_id,
             thread_id=thread_id,
             new_count=new_count,
@@ -186,6 +192,7 @@ def increment_counter_sync(
 
 async def increment_counter_async(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
     thread_id: str,
@@ -194,7 +201,7 @@ async def increment_counter_async(
     owner: Optional[str] = None,
 ) -> tuple[int, int]:
     """Async version of :func:`increment_counter_sync`."""
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for(tenant_id, user_id)
 
     for attempt in range(MAX_RETRIES):
         old_count = 0
@@ -213,6 +220,7 @@ async def increment_counter_async(
         new_count = old_count + count
         new_doc = _build_counter_doc(
             counter_id=counter_id,
+            tenant_id=tenant_id,
             user_id=user_id,
             thread_id=thread_id,
             new_count=new_count,
@@ -252,6 +260,7 @@ async def increment_counter_async(
 def _build_counter_doc(
     *,
     counter_id: str,
+    tenant_id: str,
     user_id: str,
     thread_id: str,
     new_count: int,
@@ -263,6 +272,7 @@ def _build_counter_doc(
     now = _utc_now_iso()
     doc: dict[str, Any] = {
         "id": counter_id,
+        "tenant_id": tenant_id,
         "user_id": user_id,
         "thread_id": thread_id,
         "count": new_count,
@@ -305,9 +315,9 @@ def _build_counter_doc(
 
 def stamp_failure_sync(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
-    thread_id: str,
     reason: str,
 ) -> None:
     """Best-effort stamp ``last_failure_at`` / ``last_failure_reason`` on the counter doc.
@@ -318,7 +328,7 @@ def stamp_failure_sync(
     the user's write path. ``reason`` is stored as given, so it must describe
     the failure (``describe_exception``), never quote an exception's text.
     """
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for(tenant_id, user_id)
     patch_ops = [
         {"op": "add", "path": "/last_failure_at", "value": _utc_now_iso()},
         {"op": "add", "path": "/last_failure_reason", "value": (reason or "")[:500]},
@@ -335,13 +345,13 @@ def stamp_failure_sync(
 
 async def stamp_failure_async(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
-    thread_id: str,
     reason: str,
 ) -> None:
     """Async version of :func:`stamp_failure_sync`."""
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for(tenant_id, user_id)
     patch_ops = [
         {"op": "add", "path": "/last_failure_at", "value": _utc_now_iso()},
         {"op": "add", "path": "/last_failure_reason", "value": (reason or "")[:500]},

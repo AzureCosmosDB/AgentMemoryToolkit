@@ -36,6 +36,7 @@ def _containers(*, memories=None):
 def _fact(fact_id, *, superseded_at=None, reason=None):
     return {
         "id": fact_id,
+        "tenant_id": "default",
         "user_id": "u1",
         "thread_id": "t1",
         "type": "fact",
@@ -56,9 +57,12 @@ async def test_async_multi_level_chain_newest_first():
     ]
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    history = await store.get_memory_history("current", user_id="u1", thread_id="t1")
+    history = await store.get_memory_history("current", user_id="u1")
 
     assert [d["id"] for d in history] == ["v2", "v1"]
+    for call in memories.query_items.call_args_list:
+        assert call.kwargs["partition_key"] == ["default", "u1"]
+        assert "c.thread_id" not in call.kwargs["query"].split(" WHERE ", 1)[1]
 
 
 async def test_async_missing_ids_raise():

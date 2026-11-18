@@ -19,6 +19,7 @@ RANKED = [{"id": f"fact_{i}", "content": f"memory {i}"} for i in range(5)]
 PREFERENCE = {"id": "pref_a", "content": "The user prefers pnpm.", "metadata": {"category": "preference"}}
 PROCEDURE = {"id": "proc_a", "content": "Run targeted tests before reporting success.", "type": "procedural"}
 CLIENT_LOGGER = "azure.cosmos.agent_memory.cosmos_memory_client"
+TENANT = "acme"
 # A procedure has no salience or confidence, its role is "system" and its tags are the pipeline's own, so
 # these filters could never match one.
 FACT_ONLY_FILTERS = {
@@ -183,6 +184,7 @@ def _store() -> tuple[MemoryStore, MagicMock, MagicMock]:
     store = MemoryStore(
         containers={key: memories for key in (ContainerKey.TURNS, ContainerKey.MEMORIES, ContainerKey.SUMMARIES)},
         embeddings_client=embeddings,
+        tenant_id=TENANT,
     )
     return store, memories, embeddings
 
@@ -246,8 +248,8 @@ def test_the_procedure_slot_search_is_a_vector_search_of_the_users_situational_p
     assert "ORDER BY VectorDistance" in call["query"] and "FullTextScore" not in call["query"]
     assert "c.applies = @applies" in call["query"]
     assert PROCEDURES_IN_FORCE in call["query"]
-    assert (params["@user_id"], params["@applies"]) == ("u1", "when")
-    assert "partition_key" not in call, "procedures live under a sentinel thread, so a thread cannot key the query"
+    assert (params["@tenant_id"], params["@user_id"], params["@applies"]) == (TENANT, "u1", "when")
+    assert call["partition_key"] == [TENANT, "u1"], "a thread does not key the query: the owner's partition does"
 
 
 def test_the_procedure_slot_query_asks_for_nothing_a_procedure_lacks():

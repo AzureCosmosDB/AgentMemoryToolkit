@@ -8,22 +8,37 @@ from __future__ import annotations
 
 from typing import Any
 
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, TENANT_FILTER, owner_parameters, tenant_parameters
+
 
 class _QueryBuilder:
     """Accumulates optional WHERE conditions and their parameterized values.
 
     Usage::
 
-        qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", some_user_id)
+        qb = _QueryBuilder.for_tenant(tenant_id, user_id)
         qb.add_filter("c.role", "@role", some_role)
-        where = qb.build_where()        # " WHERE c.user_id = @user_id AND c.role = @role"
-        params = qb.get_parameters()     # [{"name": "@user_id", "value": ...}, ...]
+        where = qb.build_where()        # " WHERE c.tenant_id = @tenant_id AND c.user_id = @user_id AND c.role = @role"
+        params = qb.get_parameters()     # [{"name": "@tenant_id", "value": ...}, ...]
     """
 
     def __init__(self) -> None:
         self._conditions: list[str] = []
         self._parameters: list[dict[str, Any]] = []
+
+    @classmethod
+    def for_tenant(cls, tenant_id: str, user_id: str | None = None) -> _QueryBuilder:
+        """A builder that starts with the tenant filter, and the owner's when ``user_id`` is given.
+
+        A filter on ``user_id`` alone would read the same id in every tenant, so every query that reads records starts
+        from here.
+        """
+        qb = cls()
+        if user_id is None:
+            qb.add_condition(TENANT_FILTER, tenant_parameters(tenant_id))
+        else:
+            qb.add_condition(OWNER_FILTER, owner_parameters(tenant_id, user_id))
+        return qb
 
     def add_condition(self, condition: str, parameters: list[dict[str, Any]] | None = None) -> None:
         """Add a pre-built parameterized condition."""

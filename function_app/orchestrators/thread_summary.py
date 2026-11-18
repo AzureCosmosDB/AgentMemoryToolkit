@@ -23,6 +23,7 @@ bp = df.Blueprint()
 @bp.orchestration_trigger(context_name="context")
 def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     retry = default_retry_options()
@@ -30,13 +31,13 @@ def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
     summary = yield context.call_activity_with_retry(
         "ts_Extract",
         retry,
-        {"user_id": user_id, "thread_id": thread_id, "limit": config.get_max_batch_size()},
+        {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "limit": config.get_max_batch_size()},
     )
 
     persisted = yield context.call_activity_with_retry(
         "ts_PersistSummary",
         retry,
-        {"user_id": user_id, "thread_id": thread_id, "summary": summary},
+        {"tenant_id": tenant_id, "user_id": user_id, "thread_id": thread_id, "summary": summary},
     )
 
     return {
@@ -49,14 +50,15 @@ def ThreadSummaryOrchestrator(context: df.DurableOrchestrationContext):
 @redact_errors
 def ts_Extract(payload: dict) -> dict:
     """Generate (or incrementally update) the thread summary body only."""
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
-    summary = get_pipeline().generate_thread_summary_durable(
+    summary = get_pipeline(tenant_id).generate_thread_summary_durable(
         user_id=user_id,
         thread_id=thread_id,
         recent_k=payload.get("limit"),
     )
-    logger.info("ThreadSummary extracted user=%s thread=%s", user_id, thread_id)
+    logger.info("ThreadSummary extracted tenant=%s user=%s thread=%s", tenant_id, user_id, thread_id)
     return summary
 
 
@@ -64,12 +66,15 @@ def ts_Extract(payload: dict) -> dict:
 @redact_errors
 def ts_PersistSummary(payload: dict) -> dict:
     """Compute the embedding and persist the thread summary."""
+    tenant_id = payload["tenant_id"]
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
-    summary = get_pipeline().persist_thread_summary(
+    summary = get_pipeline(tenant_id).persist_thread_summary(
         user_id=user_id,
         thread_id=thread_id,
         summary_doc=payload["summary"],
     )
-    logger.info("ThreadSummary persisted user=%s thread=%s id=%s", user_id, thread_id, summary.get("id"))
+    logger.info(
+        "ThreadSummary persisted tenant=%s user=%s thread=%s id=%s", tenant_id, user_id, thread_id, summary.get("id")
+    )
     return summary

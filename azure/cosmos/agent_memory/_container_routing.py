@@ -2,7 +2,8 @@
 
 Single source of truth for which Cosmos DB container holds which memory
 document type. ``Docs/concepts.md`` ("Required containers") describes the
-layout.
+layout. Every container is keyed ``[/tenant_id, /user_id]`` (see
+``_partitioning``), so a thread is a field of a record, not a partition.
 
 Default container names (each can be changed on the client):
 

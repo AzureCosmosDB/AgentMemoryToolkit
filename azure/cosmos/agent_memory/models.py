@@ -167,6 +167,8 @@ class MemoryRecordBase(BaseModel):
     )
 
     id: str = Field(default_factory=_uuid4_str)
+    # ``None`` until the record is written: the client stamps its own tenant, and refuses a record that names another.
+    tenant_id: Optional[str] = None
     user_id: str
     thread_id: str = Field(default_factory=_uuid4_str)
     role: Optional[MemoryRole] = None
@@ -371,6 +373,7 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
     emitted because callers and Cosmos queries treat them as ever-present.
     """
     drop_when_none = {
+        "tenant_id",
         "embedding",
         "agent_id",
         "updated_at",

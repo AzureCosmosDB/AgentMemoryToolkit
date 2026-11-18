@@ -6,10 +6,10 @@ its labels name a conflict: ``update`` (the same attribute with a different valu
 nothing is retired. The pass links the pair instead, and ``search_cosmos`` returns each fact with the active facts it
 conflicts with (``conflicts_with``), so the agent sees both sides and can ask the user which is right.
 
-A link is one small document in the user's memories container, in the user's ``__conflicts__`` partition. It holds the
-IDs of the two facts and the kind, and no text. Its ID derives from the pair, so judging a pair again rewrites the same
-document. Facts written by the assistant (``sys:agent-fact``) are never linked: they record what the agent said or
-recommended, not what the user holds true.
+A link is one small document in the owner's memories container, in the owner's partition, marked with the thread id
+``__conflicts__``. It holds the IDs of the two facts and the kind, and no text. Its ID derives from the pair, so judging
+a pair again rewrites the same document. Facts written by the assistant (``sys:agent-fact``) are never linked: they
+record what the agent said or recommended, not what the user holds true.
 
 A link names the two facts as they were when it was written, and a later pass can retire either into another fact (a
 fold or a combine). The conflict follows the fact. When the pass that retires one of a pair is the pass that links it,
@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters, partition_key_for
 from azure.cosmos.agent_memory.logging import describe_exception, get_logger
 from azure.cosmos.agent_memory.services._dedup import CONFLICT_RELATIONS, Verdict, is_agent_sourced
 from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP
@@ -103,11 +104,14 @@ def conflict_link_id(user_id: str, pair: ConflictPair) -> str:
     return f"conflict_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
 
-def conflict_link_body(user_id: str, pair: ConflictPair, *, now: Optional[datetime] = None) -> dict[str, Any]:
+def conflict_link_body(
+    tenant_id: str, user_id: str, pair: ConflictPair, *, now: Optional[datetime] = None
+) -> dict[str, Any]:
     """The document that links ``pair`` (written to the memories container, not through the memory store)."""
     return {
         "id": conflict_link_id(user_id, pair),
         "type": CONFLICT_LINK_TYPE,
+        "tenant_id": tenant_id,
         "user_id": user_id,
         "thread_id": CONFLICT_LINK_THREAD_ID,
         "first": pair.first,
@@ -117,28 +121,28 @@ def conflict_link_body(user_id: str, pair: ConflictPair, *, now: Optional[dateti
     }
 
 
-def links_query(user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[str, Any]]]:
-    """The links that touch any of ``fact_ids``; run it in the partition ``[user_id, CONFLICT_LINK_THREAD_ID]``."""
+def links_query(tenant_id: str, user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[str, Any]]]:
+    """The links that touch any of ``fact_ids``; run it in the owner's partition."""
     query = (
-        "SELECT c.first, c.later, c.kind FROM c WHERE c.user_id = @user_id AND c.type = @type "
+        f"SELECT c.first, c.later, c.kind FROM c WHERE {OWNER_FILTER} AND c.type = @type "
         "AND (ARRAY_CONTAINS(@ids, c.first) OR ARRAY_CONTAINS(@ids, c.later))"
     )
     parameters = [
-        {"name": "@user_id", "value": user_id},
+        *owner_parameters(tenant_id, user_id),
         {"name": "@type", "value": CONFLICT_LINK_TYPE},
         {"name": "@ids", "value": list(fact_ids)},
     ]
     return query, parameters
 
 
-def facts_query(user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[str, Any]]]:
+def facts_query(tenant_id: str, user_id: str, fact_ids: Sequence[str]) -> tuple[str, list[dict[str, Any]]]:
     """The facts among ``fact_ids``, active or not, with what a result shows of a conflicting fact and where a retired
-    one went (``superseded_by``); run it across the user's partitions."""
+    one went (``superseded_by``); run it in the owner's partition."""
     query = (
         "SELECT c.id, c.content, c.created_at, c.superseded_by FROM c "
-        "WHERE c.user_id = @user_id AND c.type = 'fact' AND ARRAY_CONTAINS(@ids, c.id)"
+        f"WHERE {OWNER_FILTER} AND c.type = 'fact' AND ARRAY_CONTAINS(@ids, c.id)"
     )
-    parameters = [{"name": "@user_id", "value": user_id}, {"name": "@ids", "value": list(fact_ids)}]
+    parameters = [*owner_parameters(tenant_id, user_id), {"name": "@ids", "value": list(fact_ids)}]
     return query, parameters
 
 
@@ -273,13 +277,14 @@ def _lookup_ids_by_user(docs: Iterable[Mapping[str, Any]]) -> dict[str, list[str
 
 
 def with_conflicts(
-    docs: Sequence[dict[str, Any]], query: Callable[..., Iterable[Mapping[str, Any]]]
+    docs: Sequence[dict[str, Any]], query: Callable[..., Iterable[Mapping[str, Any]]], tenant_id: str
 ) -> list[dict[str, Any]]:
     """``docs`` (search results) with the conflicts of each fact attached (``conflicts_with``).
 
-    ``query(sql, parameters, *, partition_key=None, cross_partition=False)`` runs a query on the memories container and
-    returns its rows. A search with no conflicts costs one query per user; with links, one more reads the facts they
-    name, and one more for each step a linked fact has since been retired through.
+    ``query(sql, parameters, *, partition_key)`` runs a query on the memories container, in that partition, and returns
+    its rows; every query reads one owner's partition, ``[tenant_id, user_id]``. A search with no conflicts costs one
+    query per user; with links, one more reads the facts they name, and one more for each step a linked fact has since
+    been retired through.
     Conflicts are context: a failed lookup is logged and ``docs`` come back as they were.
     """
     ids_by_user = _lookup_ids_by_user(docs)
@@ -289,15 +294,16 @@ def with_conflicts(
         links: list[Mapping[str, Any]] = []
         active: dict[str, Mapping[str, Any]] = {}
         for user_id, fact_ids in ids_by_user.items():
-            sql, parameters = links_query(user_id, fact_ids)
-            found = list(query(sql, parameters, partition_key=[user_id, CONFLICT_LINK_THREAD_ID]))
+            partition_key = partition_key_for(tenant_id, user_id)
+            sql, parameters = links_query(tenant_id, user_id, fact_ids)
+            found = list(query(sql, parameters, partition_key=partition_key))
             if not found:
                 continue
             links.extend(found)
             resolver = EndpointResolver(link_endpoints(found))
             while wanted := resolver.next_ids():
-                sql, parameters = facts_query(user_id, wanted)
-                resolver.add(query(sql, parameters, cross_partition=True))
+                sql, parameters = facts_query(tenant_id, user_id, wanted)
+                resolver.add(query(sql, parameters, partition_key=partition_key))
             active.update(resolver.resolved())
         return attach_conflicts(docs, links, active)
     except Exception as exc:  # noqa: BLE001 - conflicts must never break a search
@@ -308,7 +314,7 @@ def with_conflicts(
 
 
 async def awith_conflicts(
-    docs: Sequence[dict[str, Any]], query: Callable[..., Awaitable[Iterable[Mapping[str, Any]]]]
+    docs: Sequence[dict[str, Any]], query: Callable[..., Awaitable[Iterable[Mapping[str, Any]]]], tenant_id: str
 ) -> list[dict[str, Any]]:
     """:func:`with_conflicts` for an async ``query``."""
     ids_by_user = _lookup_ids_by_user(docs)
@@ -318,15 +324,16 @@ async def awith_conflicts(
         links: list[Mapping[str, Any]] = []
         active: dict[str, Mapping[str, Any]] = {}
         for user_id, fact_ids in ids_by_user.items():
-            sql, parameters = links_query(user_id, fact_ids)
-            found = list(await query(sql, parameters, partition_key=[user_id, CONFLICT_LINK_THREAD_ID]))
+            partition_key = partition_key_for(tenant_id, user_id)
+            sql, parameters = links_query(tenant_id, user_id, fact_ids)
+            found = list(await query(sql, parameters, partition_key=partition_key))
             if not found:
                 continue
             links.extend(found)
             resolver = EndpointResolver(link_endpoints(found))
             while wanted := resolver.next_ids():
-                sql, parameters = facts_query(user_id, wanted)
-                resolver.add(await query(sql, parameters, cross_partition=True))
+                sql, parameters = facts_query(tenant_id, user_id, wanted)
+                resolver.add(await query(sql, parameters, partition_key=partition_key))
             active.update(resolver.resolved())
         return attach_conflicts(docs, links, active)
     except Exception as exc:  # noqa: BLE001 - conflicts must never break a search

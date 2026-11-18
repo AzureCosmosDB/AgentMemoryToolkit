@@ -29,6 +29,7 @@ def main() -> None:
         embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
         chat_deployment_name=os.environ.get("AI_FOUNDRY_CHAT_DEPLOYMENT_NAME", "gpt-4o-mini"),
         use_default_credential=True,
+        # tenant_id="acme",  # optional: keeps apps or customers that share the containers apart (default "default")
     )
 
     # Connect to an existing Cosmos DB container
@@ -49,7 +50,6 @@ def main() -> None:
     mem.update_cosmos(
         memory_id=memory_id,
         user_id="u1",
-        thread_id="t1",
         memory_type="turn",
         content="Updated via quickstart",
     )
@@ -61,7 +61,7 @@ def main() -> None:
     print("Pushed local memories to Cosmos")
 
     # Clean up – delete the memory we updated
-    mem.delete_memory(memory_id=memory_id, user_id="u1", thread_id="t1", memory_type="turn")
+    mem.delete_memory(memory_id=memory_id, user_id="u1", memory_type="turn")
     print(f"Deleted memory {memory_id}")
 
     print("\nQuickstart complete!")

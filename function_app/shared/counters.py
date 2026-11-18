@@ -5,17 +5,17 @@ singleton) so unit tests can mock it cleanly.
 
 Counter document shape::
 
-    # thread-scoped - id = "thread:{user_id}:{thread_id}", PK = [user_id, thread_id]
-    { "id": ..., "user_id": ..., "thread_id": ..., "count": int,
+    # thread-scoped - id = "thread:{user_id}:{thread_id}"
+    { "id": ..., "tenant_id": ..., "user_id": ..., "thread_id": ..., "count": int,
       "last_batch_lsn": int|None, "last_batch_old_count": int }
 
-    # user-scoped - id = "user:{user_id}", PK = [user_id, "__counters__"]
-    { "id": ..., "user_id": ..., "thread_id": "__counters__",
+    # user-scoped - id = "user:{user_id}"
+    { "id": ..., "tenant_id": ..., "user_id": ..., "thread_id": "__counters__",
       "count": int, "last_batch_lsn": int|None, "last_batch_old_count": int }
 
-Both also carry ``created_at``, ``updated_at`` and ``last_owner`` (advisory). A thread counter gains
-``last_extract_count`` (the extraction watermark), and the SDK may add ``last_failure_at`` and
-``last_failure_reason``; an increment keeps all three.
+Both live in the owner's partition, PK = [tenant_id, user_id], and also carry ``created_at``, ``updated_at`` and
+``last_owner`` (advisory). A thread counter gains ``last_extract_count`` (the extraction watermark), and the SDK may
+add ``last_failure_at`` and ``last_failure_reason``; an increment keeps all three.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from typing import Any
 from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory._partitioning import partition_key_for
 from azure.cosmos.agent_memory.logging import describe_exception
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ def user_counter_id(user_id: str) -> str:
 
 async def increment_counter_by(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
     thread_id: str,
@@ -110,7 +112,7 @@ async def increment_counter_by(
     * Stamps ``last_owner=owner`` (advisory) so operators can detect
       double-write configurations across SDK and FA.
     """
-    partition_key = [user_id, thread_id]
+    partition_key = partition_key_for(tenant_id, user_id)
 
     for attempt in range(MAX_RETRIES):
         # ---- Read current counter (or default to 0) ----
@@ -166,6 +168,7 @@ async def increment_counter_by(
         new_count = old_count + count
         new_doc = {
             "id": counter_id,
+            "tenant_id": tenant_id,
             "user_id": user_id,
             "thread_id": thread_id,
             "count": new_count,
@@ -271,9 +274,9 @@ def crosses_threshold(old_count: int, new_count: int, n: int) -> bool:
 
 async def read_extract_watermark(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
-    thread_id: str,
 ) -> int | None:
     """Return the count value at the last successful extract, or ``None``.
 
@@ -284,7 +287,7 @@ async def read_extract_watermark(
     trigger treats as no watermark yet, so it extracts every turn counted so far.
     """
     try:
-        doc = await container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+        doc = await container.read_item(item=counter_id, partition_key=partition_key_for(tenant_id, user_id))
         value = doc.get("last_extract_count")
         return int(value) if value is not None else None
     except Exception as exc:  # pragma: no cover - best-effort
@@ -294,9 +297,9 @@ async def read_extract_watermark(
 
 async def advance_extract_watermark(
     container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
-    thread_id: str,
     count: int,
 ) -> None:
     """Advance ``last_extract_count`` to ``count`` after a successful extract.
@@ -317,7 +320,7 @@ async def advance_extract_watermark(
     try:
         await container.patch_item(
             item=counter_id,
-            partition_key=[user_id, thread_id],
+            partition_key=partition_key_for(tenant_id, user_id),
             patch_operations=patch_ops,
             filter_predicate=(f"FROM c WHERE NOT IS_DEFINED(c.last_extract_count) OR c.last_extract_count < {count}"),
         )

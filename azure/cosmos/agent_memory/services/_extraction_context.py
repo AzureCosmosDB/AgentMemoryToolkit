@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import AbstractSet, Any, Iterable, Mapping, Optional, Sequence
 
 from azure.cosmos.agent_memory._embedding_tokens import count_tokens
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters
 from azure.cosmos.agent_memory.models import FACT_ASSERTIONS, USER_ONLY_ASSERTIONS, FactAssertion
 from azure.cosmos.agent_memory.services._dedup import is_agent_sourced
 from azure.cosmos.agent_memory.services._pipeline_helpers import build_transcript
@@ -96,6 +97,7 @@ def window_write_second(turns: Iterable[Mapping[str, Any]], start: Optional[str]
 
 
 def previous_turns_query(
+    tenant_id: str,
     user_id: str,
     thread_id: str,
     before: str,
@@ -115,11 +117,11 @@ def previous_turns_query(
         earlier = f"({earlier} OR (c.created_at = @before AND c._ts < @before_ts))"
     query = (
         f"SELECT TOP {EXTRACTION_CONTEXT_TURNS} c.id, c.role, c.content, c.created_at, c._ts FROM c "
-        f"WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn' AND {earlier} "
+        f"WHERE {OWNER_FILTER} AND c.thread_id = @thread_id AND c.type = 'turn' AND {earlier} "
         "ORDER BY c.created_at DESC"
     )
     parameters = [
-        {"name": "@user_id", "value": user_id},
+        *owner_parameters(tenant_id, user_id),
         {"name": "@thread_id", "value": thread_id},
         {"name": "@before", "value": before},
     ]
@@ -193,21 +195,22 @@ def query_text(batch: Sequence[Mapping[str, Any]]) -> str:
 
 
 def known_facts_query(
+    tenant_id: str,
     user_id: str,
     vector: list[float],
     before: Optional[str],
     active_filter: str,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """The user's active facts nearest ``vector``, written no later than ``before`` (an event time)."""
+    """The owner's active facts nearest ``vector``, written no later than ``before`` (an event time)."""
     window = " AND c.created_at <= @before" if before else ""
     query = (
         f"SELECT TOP {EXTRACTION_KNOWN_FACTS} c.id, c.content, c.created_at, c.tags, c.metadata.source AS source, "
         "c.assertion, c.subject, c.attribute, c.entities FROM c "
-        f"WHERE c.user_id = @user_id AND c.type = @fact_type AND {active_filter} "
+        f"WHERE {OWNER_FILTER} AND c.type = @fact_type AND {active_filter} "
         f"AND IS_DEFINED(c.embedding){window} ORDER BY VectorDistance(c.embedding, @embedding)"
     )
     parameters = [
-        {"name": "@user_id", "value": user_id},
+        *owner_parameters(tenant_id, user_id),
         {"name": "@fact_type", "value": "fact"},
         {"name": "@embedding", "value": vector},
     ]

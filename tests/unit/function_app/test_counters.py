@@ -4,6 +4,7 @@ Covers:
 * ``crosses_threshold`` boundary semantics (the truth table from the spec).
 * ``increment_counter_by`` first-write path, happy path, ETag retry path,
   ETag exhaustion (skip), and LSN-based replay detection.
+* The counter key: every counter lives in the owner's partition ``[tenant_id, user_id]`` and carries ``tenant_id``.
 
 The Cosmos container is mocked - no Azure dependency is required at test time.
 """
@@ -16,11 +17,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 from shared.counters import (
+    advance_extract_watermark,
     crosses_threshold,
     increment_counter_by,
+    read_extract_watermark,
     thread_counter_id,
     user_counter_id,
 )
+
+TENANT = "acme"
 
 # ---------------------------------------------------------------------------
 # crosses_threshold
@@ -109,7 +114,7 @@ class TestIncrementFirstWrite:
         container = _make_container()
         container.read_item.side_effect = CosmosResourceNotFoundError(message="404")
 
-        old, new = asyncio.run(increment_counter_by(container, "thread:u1:t1", "u1", "t1", 3))
+        old, new = asyncio.run(increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", 3))
 
         assert (old, new) == (0, 3)
         assert container.create_item.await_count == 1
@@ -130,7 +135,7 @@ class TestIncrementFirstWrite:
         ]
         container.create_item.side_effect = [_http_error(409)]
 
-        old, new = asyncio.run(increment_counter_by(container, "thread:u1:t1", "u1", "t1", 2))
+        old, new = asyncio.run(increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", 2))
 
         assert (old, new) == (3, 5)
         assert container.create_item.await_count == 1
@@ -154,6 +159,7 @@ class TestIncrementExisting:
         old, new = asyncio.run(
             increment_counter_by(
                 container,
+                TENANT,
                 "thread:u1:t1",
                 "u1",
                 "t1",
@@ -178,7 +184,7 @@ class TestIncrementExisting:
         ]
         container.upsert_item.side_effect = [_http_error(412), None]
 
-        old, new = asyncio.run(increment_counter_by(container, "thread:u1:t1", "u1", "t1", 2))
+        old, new = asyncio.run(increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", 2))
 
         # We restart from the *latest* read - count went 7 → 9.
         assert (old, new) == (7, 9)
@@ -202,7 +208,7 @@ class TestIncrementExisting:
         container.upsert_item.side_effect = _http_error(412)
 
         with pytest.raises(CosmosHttpResponseError) as exc_info:
-            asyncio.run(increment_counter_by(container, "thread:u1:t1", "u1", "t1", 1))
+            asyncio.run(increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", 1))
 
         assert exc_info.value.status_code == 412
         assert container.upsert_item.await_count == 3  # MAX_RETRIES
@@ -223,6 +229,7 @@ class TestIncrementExisting:
         old, new = asyncio.run(
             increment_counter_by(
                 container,
+                TENANT,
                 "thread:u1:t1",
                 "u1",
                 "t1",
@@ -249,6 +256,7 @@ class TestIncrementExisting:
         old, new = asyncio.run(
             increment_counter_by(
                 container,
+                TENANT,
                 "thread:u1:t1",
                 "u1",
                 "t1",
@@ -279,6 +287,7 @@ class TestIncrementExisting:
         old, new = asyncio.run(
             increment_counter_by(
                 container,
+                TENANT,
                 "thread:u1:t1",
                 "u1",
                 "t1",
@@ -290,3 +299,55 @@ class TestIncrementExisting:
         assert (old, new) == (10, 10)
         assert container.upsert_item.await_count == 0
         assert container.create_item.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# The counter key: the owner's partition [tenant_id, user_id]; thread_id is a plain field
+# ---------------------------------------------------------------------------
+
+
+class TestCounterKey:
+    def test_a_thread_counter_is_read_and_created_in_the_owner_partition(self):
+        container = _make_container()
+        container.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+
+        asyncio.run(increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", 3))
+
+        assert container.read_item.await_args.kwargs == {"item": "thread:u1:t1", "partition_key": [TENANT, "u1"]}
+        body = container.create_item.await_args.kwargs["body"]
+        assert (body["tenant_id"], body["user_id"], body["thread_id"]) == (TENANT, "u1", "t1")
+
+    def test_a_user_counter_shares_the_partition_and_keeps_its_marker_thread_id(self):
+        container = _make_container()
+        container.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+
+        asyncio.run(increment_counter_by(container, TENANT, user_counter_id("u1"), "u1", "__counters__", 3))
+
+        assert container.read_item.await_args.kwargs["partition_key"] == [TENANT, "u1"]
+        body = container.create_item.await_args.kwargs["body"]
+        assert (body["id"], body["tenant_id"], body["user_id"], body["thread_id"]) == (
+            "user:u1",
+            TENANT,
+            "u1",
+            "__counters__",
+        )
+
+    def test_an_increment_keeps_the_tenant_on_the_upserted_counter(self):
+        container = _make_container()
+        container.read_item.return_value = {"id": "thread:u1:t1", "count": 5, "_etag": "etag-A"}
+
+        asyncio.run(increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", 2))
+
+        assert container.read_item.await_args.kwargs["partition_key"] == [TENANT, "u1"]
+        assert container.upsert_item.await_args.kwargs["body"]["tenant_id"] == TENANT
+
+    def test_the_extract_watermark_is_read_and_advanced_in_the_owner_partition(self):
+        container = _make_container()
+        container.read_item.return_value = {"id": "thread:u1:t1", "last_extract_count": 6}
+        container.patch_item = AsyncMock()
+
+        assert asyncio.run(read_extract_watermark(container, TENANT, "thread:u1:t1", "u1")) == 6
+        asyncio.run(advance_extract_watermark(container, TENANT, "thread:u1:t1", "u1", 8))
+
+        assert container.read_item.await_args.kwargs["partition_key"] == [TENANT, "u1"]
+        assert container.patch_item.await_args.kwargs["partition_key"] == [TENANT, "u1"]

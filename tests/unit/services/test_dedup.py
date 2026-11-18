@@ -322,33 +322,40 @@ class TestCursorAndQueries:
     def test_a_cursor_document_is_user_wide_and_keeps_what_it_already_holds(self):
         existing = {"id": "dedup_cursor_u1_fact", "extra": 1, "_etag": "e1", "_ts": 9}
 
-        body = dedup_cursor_body(existing, "u1", "fact", {"ts": 7, "ids": ["a"]})
+        body = dedup_cursor_body("acme", existing, "u1", "fact", {"ts": 7, "ids": ["a"]})
 
         assert (body["id"], body["type"]) == (dedup_cursor_id("u1", "fact"), DEDUP_CURSOR_TYPE)
-        assert (body["user_id"], body["thread_id"]) == ("u1", DEDUP_CURSOR_THREAD_ID)
+        assert (body["tenant_id"], body["user_id"], body["thread_id"]) == ("acme", "u1", DEDUP_CURSOR_THREAD_ID)
         assert (body["last_ts"], body["ids_at_last_ts"], body["extra"]) == (7, ["a"], 1)
         assert not [key for key in body if key.startswith("_")]
 
-    def test_unchecked_facts_are_the_users_active_ones_after_the_cursor_oldest_first(self):
+    def test_unchecked_facts_are_the_owners_active_ones_after_the_cursor_oldest_first(self):
         cursor = {"last_ts": 5, "ids_at_last_ts": ["f0"]}
 
-        sql, params = unchecked_memories_query("u1", "fact", cursor, 7)
+        sql, params = unchecked_memories_query("acme", "u1", "fact", cursor, 7)
 
-        assert "TOP 7" in sql and "ORDER BY c._ts ASC" in sql and "c.user_id = @user_id" in sql
+        assert (
+            "TOP 7" in sql
+            and "ORDER BY c._ts ASC" in sql
+            and "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        )
         assert ACTIVE_FILTER in sql and "c.superseded_by = null" not in sql
         assert {p["name"]: p["value"] for p in params} == {
+            "@tenant_id": "acme",
             "@user_id": "u1",
             "@memory_type": "fact",
             "@after_ts": 5,
             "@after_ids": ["f0"],
         }
 
-    def test_neighbours_are_the_nearest_active_facts_of_the_same_user(self):
-        sql, params = neighbor_query("u1", "fact", {"id": "f1", "embedding": [1.0, 0.0]})
+    def test_neighbours_are_the_nearest_active_facts_of_the_same_owner(self):
+        sql, params = neighbor_query("acme", "u1", "fact", {"id": "f1", "embedding": [1.0, 0.0]})
 
         assert f"TOP {DEDUP_MAX_NEIGHBORS}" in sql and "ORDER BY VectorDistance(c.embedding, @embedding)" in sql
-        assert ACTIVE_FILTER in sql and "c.user_id = @user_id" in sql and "c.id != @seed_id" in sql
+        assert ACTIVE_FILTER in sql and "c.tenant_id = @tenant_id AND c.user_id = @user_id" in sql
+        assert "c.id != @seed_id" in sql
         assert {p["name"]: p["value"] for p in params} == {
+            "@tenant_id": "acme",
             "@user_id": "u1",
             "@memory_type": "fact",
             "@seed_id": "f1",

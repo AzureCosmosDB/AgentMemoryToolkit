@@ -66,19 +66,19 @@ param azureOpenAiApiVersion string = '2024-12-01-preview'
 @description('Embedding output dimensions. Used for the vector policy of the memories, turns and summaries containers and set as AI_FOUNDRY_EMBEDDING_DIMENSIONS on the function app, so they always match; set the same value for the SDK. text-embedding-3-large natively returns 3072; 1536 (the SDK default) is requested instead. A container keeps the dimensions it was created with.')
 param embeddingDimensions int = 1536
 
-@description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
+@description('Run thread-summary orchestration every N turns within a (tenant_id, user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int = 10
 
-@description('Run fact extraction every N turns within a (user_id, thread_id); reconcile and procedure learning run on multiples of it (see dedupEveryN). Default 2 = every 2 turns (the SDK default). 0 = disabled, which disables all three. Bump for cost-sensitive production deployments.')
+@description('Run fact extraction every N turns within a (tenant_id, user_id, thread_id); reconcile and procedure learning run on multiples of it (see dedupEveryN). Default 2 = every 2 turns (the SDK default). 0 = disabled, which disables all three. Bump for cost-sensitive production deployments.')
 param factExtractionEveryN int = 2
 
 @description('Once per N fact extractions, run reconcile (fold duplicates, combine facts, link conflicting facts), then procedure learning unless PROCEDURAL_SYNTHESIS_AUTO is false. Effective cadence = factExtractionEveryN * dedupEveryN turns. 0 = disabled.')
 param dedupEveryN int = 5
 
-@description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
+@description('Run user-summary orchestration every N turns from a given (tenant_id, user_id) across all threads. 0 = disabled.')
 param userSummaryEveryN int = 20
 
-@description('Evaluate an episode boundary every N turns within a (user_id, thread_id). 0 = disabled (no episodic memory).')
+@description('Evaluate an episode boundary every N turns within a (tenant_id, user_id, thread_id). 0 = disabled (no episodic memory).')
 param episodeEvalEveryN int = 4
 
 @description('Idle gap (seconds) between two consecutive turns that closes the open episode.')

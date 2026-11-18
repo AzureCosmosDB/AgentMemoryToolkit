@@ -17,6 +17,7 @@ from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import compute_content_hash
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.services._pipeline_helpers import ID_SEED_SEP
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 from azure.cosmos.agent_memory.store import MemoryStore
@@ -37,6 +38,7 @@ from tests.unit.services.test_extract_dry import (
     _SyncEmbeddings,
     _turn,
 )
+from tests.unit.services.test_procedural_synthesis_and_context import TENANT as PROCEDURE_TENANT
 from tests.unit.services.test_procedural_synthesis_and_context import Chat as ProcedureChat
 from tests.unit.services.test_procedural_synthesis_and_context import Embeddings as ProcedureEmbeddings
 from tests.unit.services.test_procedural_synthesis_and_context import Memories as ProcedureMemories
@@ -265,7 +267,11 @@ def test_a_synthesized_procedure_is_redacted_before_it_is_embedded() -> None:
     chat = ProcedureChat([{"procedures": [procedure_answer(summary=_procedure_summary())]}])
     containers = procedure_containers(memories)
     service = PipelineService(
-        MemoryStore(containers=containers, embeddings_client=embeddings), chat, embeddings, containers=containers
+        MemoryStore(containers=containers, embeddings_client=embeddings, tenant_id=PROCEDURE_TENANT),
+        chat,
+        embeddings,
+        containers=containers,
+        tenant_id=PROCEDURE_TENANT,
     )
 
     assert service.synthesize_procedural("u1")["procedures_created"] == 1
@@ -282,7 +288,11 @@ async def test_async_a_synthesized_procedure_is_redacted_before_it_is_embedded()
     chat = AsyncProcedureChat([{"procedures": [procedure_answer(summary=_procedure_summary())]}])
     containers = procedure_containers(AsyncProcedureMemories(memories))
     service = AsyncPipelineService(
-        AsyncMemoryStore(containers=containers, embeddings_client=embeddings), chat, embeddings, containers=containers
+        AsyncMemoryStore(containers=containers, embeddings_client=embeddings, tenant_id=PROCEDURE_TENANT),
+        chat,
+        embeddings,
+        containers=containers,
+        tenant_id=PROCEDURE_TENANT,
     )
 
     assert (await service.synthesize_procedural("u1"))["procedures_created"] == 1
@@ -318,7 +328,7 @@ def _written_body(containers: dict[ContainerKey, Any], helper: str) -> dict[str,
 def test_direct_pipeline_writes_are_sanitized(helper) -> None:
     """These helpers write straight to the container and never pass through the store."""
     containers = {key: MagicMock() for key in (ContainerKey.TURNS, ContainerKey.MEMORIES, ContainerKey.SUMMARIES)}
-    service = PipelineService(MagicMock(), _SyncChat([]), _SyncEmbeddings(), containers=containers)
+    service = PipelineService(MagicMock(), _SyncChat([]), _SyncEmbeddings(), containers=containers, tenant_id="acme")
     original = _procedural_doc_quoting_a_token()
 
     getattr(service, helper)(original)
@@ -326,16 +336,47 @@ def test_direct_pipeline_writes_are_sanitized(helper) -> None:
     body = _written_body(containers, helper)
     assert TOKEN not in repr(body)
     assert body["metadata"]["classification"] == "secret"
+    assert body["tenant_id"] == "acme", "the service stamps the tenant it is bound to"
     assert TOKEN in repr(original), "the caller's document is not rewritten"
+    assert "tenant_id" not in original
+
+
+@pytest.mark.parametrize("helper", ["_upsert_memory", "_create_memory", "_upsert_summary"])
+def test_direct_pipeline_writes_refuse_a_document_of_another_tenant(helper) -> None:
+    containers = {key: MagicMock() for key in (ContainerKey.TURNS, ContainerKey.MEMORIES, ContainerKey.SUMMARIES)}
+    service = PipelineService(MagicMock(), _SyncChat([]), _SyncEmbeddings(), containers=containers, tenant_id="acme")
+
+    with pytest.raises(ValidationError, match="different tenant"):
+        getattr(service, helper)({**_procedural_doc_quoting_a_token(), "tenant_id": "other"})
+
+    for container in containers.values():
+        assert not container.method_calls
 
 
 @pytest.mark.parametrize("helper", ["_upsert_memory", "_create_memory", "_upsert_summary"])
 async def test_async_direct_pipeline_writes_are_sanitized(helper) -> None:
     containers = {key: AsyncMock() for key in (ContainerKey.TURNS, ContainerKey.MEMORIES, ContainerKey.SUMMARIES)}
-    service = AsyncPipelineService(MagicMock(), _AsyncChat([]), _AsyncEmbeddings(), containers=containers)
+    service = AsyncPipelineService(
+        MagicMock(), _AsyncChat([]), _AsyncEmbeddings(), containers=containers, tenant_id="acme"
+    )
 
     await getattr(service, helper)(_procedural_doc_quoting_a_token())
 
     body = _written_body(containers, helper)
     assert TOKEN not in repr(body)
     assert body["metadata"]["classification"] == "secret"
+    assert body["tenant_id"] == "acme"
+
+
+@pytest.mark.parametrize("helper", ["_upsert_memory", "_create_memory", "_upsert_summary"])
+async def test_async_direct_pipeline_writes_refuse_a_document_of_another_tenant(helper) -> None:
+    containers = {key: AsyncMock() for key in (ContainerKey.TURNS, ContainerKey.MEMORIES, ContainerKey.SUMMARIES)}
+    service = AsyncPipelineService(
+        MagicMock(), _AsyncChat([]), _AsyncEmbeddings(), containers=containers, tenant_id="acme"
+    )
+
+    with pytest.raises(ValidationError, match="different tenant"):
+        await getattr(service, helper)({**_procedural_doc_quoting_a_token(), "tenant_id": "other"})
+
+    for container in containers.values():
+        assert not container.method_calls

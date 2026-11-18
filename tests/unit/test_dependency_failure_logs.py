@@ -36,6 +36,8 @@ from tests.unit.test_chat import _reply
 from tests.unit.test_log_redaction import MEMORY, MODEL, QUERY, _expect, _failure
 from tests.unit.test_process_now import _connected, _patch_get_thread
 
+TENANT = "acme"
+
 
 @pytest.fixture
 def logs(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
@@ -151,7 +153,7 @@ def test_store_failures_log_the_failure_not_the_memory(logs) -> None:
 
     store.add(user_id="u1", role="user", content=MEMORY, memory_type="fact", thread_id="t1")
     store.push([_local_fact()])
-    old = {"id": "fact_1", "type": "fact", "content": MEMORY}
+    old = {"id": "fact_1", "type": "fact", "content": MEMORY, "user_id": "u1"}
     assert MemoryStore(containers=_containers(failing)).mark_superseded(old, "fact_2", reason="dup") is False
     _expect(logs, *_STORE_DIAGNOSTICS)
 
@@ -167,7 +169,7 @@ async def test_async_store_failures_log_the_failure_not_the_memory(logs) -> None
 
     await store.add(user_id="u1", role="user", content=MEMORY, memory_type="fact", thread_id="t1")
     await store.push([_local_fact()])
-    old = {"id": "fact_1", "type": "fact", "content": MEMORY}
+    old = {"id": "fact_1", "type": "fact", "content": MEMORY, "user_id": "u1"}
     superseding = AsyncMemoryStore(containers=_containers(failing, asynchronous=True))
     assert await superseding.mark_superseded(old, "fact_2", reason="dup") is False
     _expect(logs, *_STORE_DIAGNOSTICS)
@@ -231,7 +233,7 @@ async def test_async_search_fallbacks_log_the_failure_not_the_query(logs) -> Non
 def test_counter_and_client_failures_log_the_failure_not_the_text(logs) -> None:
     container = MagicMock()
     container.patch_item.side_effect = _failure(MEMORY, 503)
-    _counters.stamp_failure_sync(container, "thread:u1:t1", "u1", "t1", "process_extract_memories: failed")
+    _counters.stamp_failure_sync(container, TENANT, "thread:u1:t1", "u1", "process_extract_memories: failed")
 
     client = CosmosMemoryClient(use_default_credential=False)
     client._cosmos_client = MagicMock()
@@ -256,7 +258,7 @@ def test_counter_and_client_failures_log_the_failure_not_the_text(logs) -> None:
 async def test_async_counter_and_client_failures_log_the_failure_not_the_text(logs) -> None:
     container = MagicMock()
     container.patch_item = AsyncMock(side_effect=_failure(MEMORY, 503))
-    await _counters.stamp_failure_async(container, "thread:u1:t1", "u1", "t1", "process_extract_memories: failed")
+    await _counters.stamp_failure_async(container, TENANT, "thread:u1:t1", "u1", "process_extract_memories: failed")
 
     client = AsyncCosmosMemoryClient(use_default_credential=False)
     client._cosmos_client = MagicMock()
@@ -322,11 +324,11 @@ def test_in_process_trigger_failures_log_the_failure_not_the_text(logs) -> None:
     counters = _FakeCounterContainer()
 
     sync_trigger._fire_thread_steps(
-        processor, counters, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=True, **_STEPS
+        processor, counters, TENANT, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=True, **_STEPS
     )
-    sync_trigger._trigger_user_steps(processor, counters, {"u1": 4}, n_user=1)
-    sync_trigger._trigger_thread_steps(processor, _FailingCounters(), {("u1", "t1"): 1}, **_THREAD_ARGUMENTS)
-    sync_trigger._trigger_user_steps(processor, _FailingCounters(), {"u1": 4}, n_user=1)
+    sync_trigger._trigger_user_steps(processor, counters, TENANT, {"u1": 4}, n_user=1)
+    sync_trigger._trigger_thread_steps(processor, _FailingCounters(), TENANT, {("u1", "t1"): 1}, **_THREAD_ARGUMENTS)
+    sync_trigger._trigger_user_steps(processor, _FailingCounters(), TENANT, {"u1": 4}, n_user=1)
 
     _expect(logs, *_trigger_diagnostics("Auto-trigger", "Counter", "User counter"))
 
@@ -336,13 +338,13 @@ async def test_async_in_process_trigger_failures_log_the_failure_not_the_text(lo
     counters = _AsyncFakeCounterContainer()
 
     await async_trigger._fire_thread_steps(
-        processor, counters, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=True, **_STEPS
+        processor, counters, TENANT, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=True, **_STEPS
     )
-    await async_trigger._trigger_user_steps(processor, counters, {"u1": 4}, n_user=1)
+    await async_trigger._trigger_user_steps(processor, counters, TENANT, {"u1": 4}, n_user=1)
     await async_trigger._trigger_thread_steps(
-        processor, _AsyncFailingCounters(), {("u1", "t1"): 1}, **_THREAD_ARGUMENTS
+        processor, _AsyncFailingCounters(), TENANT, {("u1", "t1"): 1}, **_THREAD_ARGUMENTS
     )
-    await async_trigger._trigger_user_steps(processor, _AsyncFailingCounters(), {"u1": 4}, n_user=1)
+    await async_trigger._trigger_user_steps(processor, _AsyncFailingCounters(), TENANT, {"u1": 4}, n_user=1)
 
     _expect(logs, *_trigger_diagnostics("Async auto-trigger", "Async counter", "Async user counter"))
 
@@ -365,14 +367,14 @@ def test_a_failed_step_stamps_a_description_of_the_error_on_its_counter() -> Non
     counters = _FakeCounterContainer()
 
     sync_trigger._fire_thread_steps(
-        processor, counters, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=False, **_STEPS
+        processor, counters, TENANT, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=False, **_STEPS
     )
     extract = _reason(counters, "thread:u1:t1")
     sync_trigger._fire_thread_steps(
-        processor, counters, "thread:u1:t1", "u1", "t1", fire_extract=False, fire_summary=True, **_STEPS
+        processor, counters, TENANT, "thread:u1:t1", "u1", "t1", fire_extract=False, fire_summary=True, **_STEPS
     )
     summary = _reason(counters, "thread:u1:t1")
-    sync_trigger._trigger_user_steps(processor, counters, {"u1": 4}, n_user=1)
+    sync_trigger._trigger_user_steps(processor, counters, TENANT, {"u1": 4}, n_user=1)
 
     _assert_reasons_describe_the_errors([extract, summary, _reason(counters, "user:u1")])
 
@@ -382,14 +384,14 @@ async def test_async_failed_step_stamps_a_description_of_the_error_on_its_counte
     counters = _AsyncFakeCounterContainer()
 
     await async_trigger._fire_thread_steps(
-        processor, counters, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=False, **_STEPS
+        processor, counters, TENANT, "thread:u1:t1", "u1", "t1", fire_extract=True, fire_summary=False, **_STEPS
     )
     extract = _reason(counters, "thread:u1:t1")
     await async_trigger._fire_thread_steps(
-        processor, counters, "thread:u1:t1", "u1", "t1", fire_extract=False, fire_summary=True, **_STEPS
+        processor, counters, TENANT, "thread:u1:t1", "u1", "t1", fire_extract=False, fire_summary=True, **_STEPS
     )
     summary = _reason(counters, "thread:u1:t1")
-    await async_trigger._trigger_user_steps(processor, counters, {"u1": 4}, n_user=1)
+    await async_trigger._trigger_user_steps(processor, counters, TENANT, {"u1": 4}, n_user=1)
 
     _assert_reasons_describe_the_errors([extract, summary, _reason(counters, "user:u1")])
 

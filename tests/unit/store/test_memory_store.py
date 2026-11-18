@@ -154,9 +154,9 @@ def test_update_replaces_matching_doc():
     memories.read_item.return_value = _doc(id="m1", type="fact")
     store = MemoryStore(containers=_containers(memories=memories))
 
-    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
+    store.update("m1", user_id="u1", memory_type="fact", content="updated")
 
-    memories.read_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.read_item.assert_called_once_with(item="m1", partition_key=["default", "u1"])
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["content"] == "updated"
     assert body["type"] == "fact"
@@ -170,8 +170,10 @@ def test_update_raises_when_missing():
     memories.read_item.side_effect = CosmosResourceNotFoundError(message="404")
     store = MemoryStore(containers=_containers(memories=memories))
 
-    with pytest.raises(MemoryNotFoundError):
-        store.update("missing", user_id="u1", thread_id="t1", memory_type="fact")
+    with pytest.raises(MemoryNotFoundError) as excinfo:
+        store.update("missing", user_id="u1", memory_type="fact")
+
+    assert (excinfo.value.memory_id, excinfo.value.user_id) == ("missing", "u1")
 
 
 def test_update_raises_on_type_mismatch():
@@ -180,7 +182,7 @@ def test_update_raises_on_type_mismatch():
     store = MemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryTypeMismatchError):
-        store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
+        store.update("m1", user_id="u1", memory_type="episodic", content="x")
 
     memories.replace_item.assert_not_called()
 
@@ -190,9 +192,9 @@ def test_delete_calls_delete_item_directly():
     memories.read_item.return_value = _doc(id="m1", type="fact")
     store = MemoryStore(containers=_containers(memories=memories))
 
-    store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+    store.delete("m1", user_id="u1", memory_type="fact")
 
-    memories.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.delete_item.assert_called_once_with(item="m1", partition_key=["default", "u1"])
 
 
 def test_delete_raises_when_missing():
@@ -203,7 +205,7 @@ def test_delete_raises_when_missing():
     store = MemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryNotFoundError):
-        store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+        store.delete("m1", user_id="u1", memory_type="fact")
 
     memories.delete_item.assert_not_called()
 
@@ -214,7 +216,7 @@ def test_delete_raises_on_type_mismatch():
     store = MemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryTypeMismatchError):
-        store.delete("m1", user_id="u1", thread_id="t1", memory_type="episodic")
+        store.delete("m1", user_id="u1", memory_type="episodic")
 
     memories.delete_item.assert_not_called()
 
@@ -224,11 +226,12 @@ def test_read_and_tag_mutation_use_point_reads():
     memories.read_item.return_value = _doc(type="fact", tags=["old"])
     store = MemoryStore(containers=_containers(memories=memories))
 
-    assert store.read_item("m1", ["u1", "t1"], container_key=ContainerKey.MEMORIES)["id"] == "m1"
-    store.add_tags("m1", "u1", "t1", "fact", ["New"])
-    store.remove_tags("m1", "u1", "t1", "fact", ["old"])
+    assert store.read_item("m1", ["default", "u1"], container_key=ContainerKey.MEMORIES)["id"] == "m1"
+    store.add_tags("m1", "u1", "fact", ["New"])
+    store.remove_tags("m1", "u1", "fact", ["old"])
 
-    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["u1", "t1"]}
+    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["default", "u1"]}
+    assert [call.kwargs["partition_key"] for call in memories.read_item.call_args_list] == [["default", "u1"]] * 3
     assert memories.replace_item.call_count == 2
 
 
@@ -237,7 +240,7 @@ def test_tag_mutation_rejects_non_memories_types():
 
     for bad in ("turn", "thread_summary", "user_summary", "unknown"):
         with pytest.raises(ValueError, match="memory_type for tag mutation"):
-            store.add_tags("m1", "u1", "t1", bad, ["x"])
+            store.add_tags("m1", "u1", bad, ["x"])
 
 
 def test_single_doc_and_simple_query_helpers():
@@ -430,7 +433,7 @@ def test_get_memories_rejects_non_memories_types():
             store.get_memories(memory_types=bad)
 
 
-def test_get_thread_summary_queries_summaries_with_partition_key():
+def test_get_thread_summary_queries_summaries_with_the_owners_partition_key():
     summaries = MagicMock()
     summaries.query_items.return_value = [_doc(type="thread_summary", id="s1")]
     store = MemoryStore(containers=_containers(summaries=summaries))
@@ -439,7 +442,7 @@ def test_get_thread_summary_queries_summaries_with_partition_key():
 
     assert [doc["id"] for doc in results] == ["s1"]
     call_kwargs = summaries.query_items.call_args.kwargs
-    assert call_kwargs["partition_key"] == ["u1", "t1"]
+    assert call_kwargs["partition_key"] == ["default", "u1"]
     assert "c.type = @type" in call_kwargs["query"]
     assert "TOP @recent_k" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
@@ -451,10 +454,9 @@ def test_get_thread_summary_queries_summaries_with_partition_key():
 # ---------------------------------------------------------------------------
 # F-final: read-path translation for user-scoped types (episodic / procedural)
 #
-# Episodic + procedural docs live in sentinel partitions
-# ("__episodic__" / "__procedural__") under each user, not the originating
-# thread's partition. Public read APIs that filter on c.thread_id must OR in
-# an IN (...) clause for those types so they aren't silently excluded.
+# Episodic and procedural memories stay user-wide. Public read APIs that
+# filter on c.thread_id must OR in an IN (...) clause for those types so a
+# thread filter doesn't silently exclude them.
 # ---------------------------------------------------------------------------
 
 
@@ -512,7 +514,7 @@ def test_get_memories_no_memory_types_with_thread_id_emits_or_clause():
     assert sorted(v for k, v in params.items() if k.startswith("@user_scoped_type_")) == ["episodic", "procedural"]
 
 
-def test_search_with_episodic_and_thread_id_forces_cross_partition():
+def test_search_with_episodic_and_thread_id_stays_in_the_owners_partition():
     memories = MagicMock()
     memories.query_items.return_value = []
     embeddings = MagicMock()
@@ -520,18 +522,17 @@ def test_search_with_episodic_and_thread_id_forces_cross_partition():
     store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
 
     store.search(
-        search_terms="hotels",
+        search_terms="hello",
         user_id="u1",
         thread_id="t1",
         memory_types=["episodic"],
     )
 
     call_kwargs = memories.query_items.call_args.kwargs
-    # When user-scoped types are in scope, search must fan out across
-    # partitions instead of confining to [u1, t1] (where no episodic
-    # ever lives - they all use the "__episodic__" sentinel partition).
-    assert call_kwargs.get("enable_cross_partition_query") is True
-    assert "partition_key" not in call_kwargs
+    # The thread filter never forces a fan-out: every record of the owner is in one partition, and the OR clause keeps
+    # the user-wide types reachable.
+    assert call_kwargs["partition_key"] == ["default", "u1"]
+    assert "enable_cross_partition_query" not in call_kwargs
     assert "(c.thread_id = @thread_id OR c.type IN (@user_scoped_type_0))" in call_kwargs["query"]
 
 
@@ -668,7 +669,7 @@ def test_search_summaries_requires_user_id():
         store.search_summaries(search_terms="x")
 
 
-def test_vector_only_search_turns_scopes_to_single_partition_with_thread_id():
+def test_vector_only_search_turns_reads_the_owners_partition_whatever_the_thread():
     turns = MagicMock()
     turns.query_items.return_value = []
     embeddings = MagicMock()
@@ -682,8 +683,9 @@ def test_vector_only_search_turns_scopes_to_single_partition_with_thread_id():
     store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
 
     kwargs = turns.query_items.call_args.kwargs
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "u1"]
     assert "enable_cross_partition_query" not in kwargs
+    assert "c.thread_id = @thread_id" in kwargs["query"]
 
 
 def test_keyword_search_turns_with_thread_id_filters_instead_of_using_partition_key():
@@ -703,23 +705,6 @@ def test_keyword_search_turns_with_thread_id_filters_instead_of_using_partition_
     assert kwargs["enable_cross_partition_query"] is True
     assert "c.user_id = @user_id" in kwargs["query"]
     assert "c.thread_id = @thread_id" in kwargs["query"]
-
-
-def test_search_turns_fans_out_across_partitions_without_thread_id():
-    turns = MagicMock()
-    turns.query_items.return_value = []
-    embeddings = MagicMock()
-    embeddings.generate.return_value = [0.1, 0.2]
-    store = MemoryStore(
-        containers=_containers(turns=turns),
-        embeddings_client=embeddings,
-    )
-
-    store.search_turns(search_terms="hello", user_id="u1")
-
-    kwargs = turns.query_items.call_args.kwargs
-    assert "partition_key" not in kwargs
-    assert kwargs["enable_cross_partition_query"] is True
 
 
 def test_search_turns_requires_user_id():

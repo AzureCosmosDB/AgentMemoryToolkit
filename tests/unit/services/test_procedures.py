@@ -18,18 +18,22 @@ from azure.cosmos.agent_memory.services._procedures import (
     in_force,
     is_user_correction,
     lesson_episodes_query,
+    new_procedure,
     procedural_context,
     procedure_cursor_body,
     procedure_id,
     procedure_status,
     procedure_text,
     rank_related,
+    related_procedure_query,
     rendered_rule,
     retirable_facts,
     revised_procedure,
+    situational_rule_query,
     source_batches,
     sources_input,
     standing_rules,
+    standing_rules_query,
     with_support,
 )
 
@@ -428,7 +432,7 @@ def test_a_source_or_procedure_that_spans_lines_is_shown_on_one_but_stored_and_c
 
 
 def test_the_pass_reads_directives_and_corrections_whatever_their_category_or_salience():
-    query, _ = behavioral_facts_query(ProcedureScope("u1"), None)
+    query, _ = behavioral_facts_query(ProcedureScope("acme", "u1"), None)
 
     assert "c.assertion IN ('directive', 'correction')" in query
 
@@ -595,12 +599,13 @@ def test_the_cursor_advances_to_the_last_memory_read_of_each_kind():
 def test_the_cursor_body_keeps_what_the_stored_one_holds_and_drops_system_fields():
     existing = {"id": "procedure_cursor", "_etag": "e", "_ts": 3, "note": "kept"}
 
-    body = procedure_cursor_body(existing, ProcedureScope("u1"), {"ts": 9, "ids": ["f2"]}, {"ts": 4, "ids": []})
+    body = procedure_cursor_body(existing, ProcedureScope("acme", "u1"), {"ts": 9, "ids": ["f2"]}, {"ts": 4, "ids": []})
 
     assert body["note"] == "kept"
-    assert {key: body[key] for key in ("id", "type", "user_id", "thread_id")} == {
+    assert {key: body[key] for key in ("id", "type", "tenant_id", "user_id", "thread_id")} == {
         "id": "procedure_cursor",
         "type": "procedure_cursor",
+        "tenant_id": "acme",
         "user_id": "u1",
         "thread_id": "__procedural__",
     }
@@ -609,18 +614,43 @@ def test_the_cursor_body_keeps_what_the_stored_one_holds_and_drops_system_fields
     assert not {"_etag", "_ts"} & set(body)
 
 
-def test_the_source_queries_read_after_the_cursor_within_the_users_memories():
+def test_the_source_queries_read_after_the_cursor_within_the_owners_partition():
     cursor = {"facts": {"last_ts": 5, "ids_at_last_ts": ["f1"]}, "episodes": {"last_ts": 8, "ids_at_last_ts": ["e1"]}}
-    scope = ProcedureScope("u1")
+    scope = ProcedureScope("acme", "u1")
 
     fact_query, fact_parameters = behavioral_facts_query(scope, cursor)
     episode_query, episode_parameters = lesson_episodes_query(scope, cursor)
 
-    assert scope.partition_key == ["u1", "__procedural__"]
+    assert scope.partition_key == ["acme", "u1"]
     for query in (fact_query, episode_query):
-        assert "c.user_id = @uid" in query
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in query
         assert query.endswith(AFTER_POSITION), "the window is the one dedup reads its cursor with"
         assert ACTIVE_FILTER in query
     assert {p["name"]: p["value"] for p in fact_parameters}["@after_ts"] == 5
     assert {p["name"]: p["value"] for p in episode_parameters}["@after_ts"] == 8
     assert {p["name"]: p["value"] for p in episode_parameters}["@type"] == "episodic"
+
+
+def test_every_procedure_query_filters_on_the_tenant_and_the_owner():
+    scope = ProcedureScope("acme", "u1")
+    queries = [
+        behavioral_facts_query(scope, None),
+        lesson_episodes_query(scope, None),
+        related_procedure_query(scope, [1.0]),
+        standing_rules_query(scope, "2025-01-01"),
+        situational_rule_query(scope, [1.0], "2025-01-01"),
+    ]
+
+    for query, parameters in queries:
+        assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in query
+        named = {p["name"]: p["value"] for p in parameters}
+        assert (named["@tenant_id"], named["@user_id"]) == ("acme", "u1")
+
+
+def test_a_new_procedure_belongs_to_the_tenant_and_owner_it_is_written_for():
+    answer = ProcedureAnswer("add", "instruction", "taught", "Run tests", (), None, {"summary": "Run the tests."})
+
+    created = new_procedure(answer, tenant_id="acme", user_id="u1", now="2025-01-01T00:00:00+00:00")
+
+    assert (created["tenant_id"], created["user_id"], created["thread_id"]) == ("acme", "u1", "__procedural__")
+    assert created["id"] == procedure_id("u1", "instruction", "Run tests")

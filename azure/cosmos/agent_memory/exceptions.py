@@ -83,8 +83,7 @@ class MemoryNotFoundError(AgentMemoryError):
 
     Attributes:
         memory_id: The ID of the memory that was not found.
-        user_id: The user ID used in the lookup.
-        thread_id: The thread ID used in the lookup.
+        user_id: The owner (``user_id``) used in the lookup.
     """
 
     error_code = "memory_not_found"
@@ -95,11 +94,9 @@ class MemoryNotFoundError(AgentMemoryError):
         *,
         memory_id: str | None = None,
         user_id: str | None = None,
-        thread_id: str | None = None,
     ):
         self.memory_id = memory_id
         self.user_id = user_id
-        self.thread_id = thread_id
         if message is None:
             message = self._build_message()
         super().__init__(message)
@@ -110,8 +107,6 @@ class MemoryNotFoundError(AgentMemoryError):
             parts.append(f"memory_id={self.memory_id!r}")
         if self.user_id:
             parts.append(f"user_id={self.user_id!r}")
-        if self.thread_id:
-            parts.append(f"thread_id={self.thread_id!r}")
         detail = ", ".join(parts)
         if detail:
             return f"Memory not found ({detail})"

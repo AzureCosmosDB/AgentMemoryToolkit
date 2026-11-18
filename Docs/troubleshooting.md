@@ -13,6 +13,9 @@ Use this guide when local memory works but Cosmos DB, embeddings, Durable Functi
 | Cosmos 401 or 403 | Run `az login` and confirm Cosmos DB data-plane RBAC is assigned. |
 | Cosmos operations fail before connecting | Call `create_memory_store()` or `connect_cosmos()` before cloud operations. |
 | Search returns no vector results | Confirm embeddings are generated and `AI_FOUNDRY_EMBEDDING_DIMENSIONS` matches the container vector policy. |
+| A client does not find memories another client wrote | A client reads and writes only its own tenant. Check that both use the same `tenant_id` (default `"default"`). See section 3. |
+| `connect_cosmos()` or `create_memory_store()` raises `CosmosOperationError` naming a container | The container is missing or not keyed `[/tenant_id, /user_id]`. A container with the earlier `[/user_id, /thread_id]` key must be recreated, `leases` included. See section 3. |
+| Reads, updates and deletes find nothing after upgrading | The containers were created with the earlier `[/user_id, /thread_id]` key and must be recreated, `leases` included. See section 3. |
 | A fact, procedure or preference is missing from search results | It may be retired (`superseded_by` is set; pass `include_superseded=True`) or, for a procedure, still a `candidate` or past `valid_until`. See section 4. |
 | Conflicting facts show no `conflicts_with` | Search with `user_id` after a reconcile pass has run; only pairs that pass compared are linked. See section 4. |
 | A stored memory contains `[REDACTED-SECRET]` | The write guard replaced a credential it recognized and tagged the record `sys:secret`; the credential itself is not written to Cosmos DB. See [Secrets](design_patterns.md#11-secrets-and-deleting-memories). |
@@ -99,9 +102,15 @@ Run `create_memory_store()` before relying on cloud operations. It creates the d
 
 The memories container is created with:
 
-- hierarchical partition key on `user_id` and `thread_id`
+- hierarchical partition key on `tenant_id` and `user_id` (`memories_turns`, `memories_summaries` and `counter` use the same key; `leases` uses `/id`)
 - vector index on `/embedding`
 - full-text index on `/content`
+
+A client is bound to one tenant (`tenant_id`, default `"default"`) and reads and writes only inside it, so memories written under another tenant are not visible to it. `client.tenant_id` shows the value in use.
+
+`create_memory_store()` leaves an existing container as it is, but, like `connect_cosmos()`, it refuses one that is not keyed `[/tenant_id, /user_id]`; `connect_cosmos()` also refuses a missing `memories`, `memories_turns`, `memories_summaries` or `counter` container (four metadata reads). Both raise `CosmosOperationError` whose message names the container, for example `container 'memories' has partition key ['/user_id', '/thread_id'] but this SDK requires ['/tenant_id', '/user_id']`. The sync client's constructor calls `create_memory_store()` when it is given an endpoint; the async constructor does no I/O, so an async app sees these errors at `await client.connect_cosmos()` or `await client.create_memory_store()`. `validate_topology()` remains the explicit diagnostic.
+
+A container's partition key is fixed when it is created. Containers created by an earlier version are keyed `[/user_id, /thread_id]`: they take writes, but the current client's reads, updates and deletes by owner do not find the records, so they must be recreated, `leases` with them, and existing data is not migrated. The README's [migration notes](../README.md#migration-notes) give the steps in order.
 
 If vector or full-text search fails after changing dimensions or indexing settings, create a fresh container with the desired configuration. Cosmos container vector policies are creation-time infrastructure choices.
 
@@ -122,7 +131,7 @@ Search always uses hybrid vector/full-text ranking when keyword extraction finds
 
 If search returns documents but scores look poor, check that records have an `embedding` field and that the query uses similar language to the stored memory content.
 
-Keyword searches read across partitions. The Python SDK skips query planning for a query sent with a partition key, so `FullTextScore` ranking is ignored ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241)); a keyword query therefore filters on `c.user_id` (and `c.thread_id`, when given) in the `WHERE` clause instead and sets `full_text_score_scope="Local"`. Results stay confined to the same user and thread (in `search_cosmos`, episodic and procedural memories match on the user alone), but a large container costs more RUs than a single-partition read. A vector-only query with both `user_id` and `thread_id` still reads one partition, except a `search_cosmos` that searches episodic or procedural memories, which always runs across partitions. If a custom query sent with a partition key raises a `ValidationError` that mentions `FullTextScore`, drop the partition key and filter on the partition key fields in the `WHERE` clause.
+Keyword searches read across partitions. The Python SDK skips query planning for a query sent with a partition key, so `FullTextScore` ranking is ignored ([Azure/azure-sdk-for-python#42241](https://github.com/Azure/azure-sdk-for-python/issues/42241); see also [#49289](https://github.com/Azure/azure-sdk-for-python/pull/49289)); a keyword query therefore filters on `c.tenant_id`, `c.user_id` (and `c.thread_id`, when given) in the `WHERE` clause instead and sets `full_text_score_scope="Local"`. Results stay confined to the client's tenant and the same owner (in `search_cosmos`, episodic and procedural memories match on the owner alone), but a large container costs more RUs than a single-partition read. A vector-only query with a `user_id` still reads one partition, whatever the `thread_id`. If a custom query sent with a partition key raises a `ValidationError` that mentions `FullTextScore`, drop the partition key and filter on `c.tenant_id` and `c.user_id` in the `WHERE` clause.
 
 Search hides some records on purpose:
 
@@ -199,9 +208,11 @@ If nothing fires:
 
 - verify the Functions host shows the Cosmos DB trigger
 - confirm the `leases` container exists
-- confirm the `memories`, `memories_turns` and `memories_summaries` containers exist; a missing one fails the batch with `Topology error: container '<name>' does not exist`
+- confirm the `memories`, `memories_turns`, `memories_summaries` and `counter` containers exist and are keyed `[/tenant_id, /user_id]`: the Function App checks them on its first change-feed batch, and a missing or wrongly keyed one fails the batch with a `Topology error` that names the container (for example `Topology error: container '<name>' does not exist`)
 - confirm the `counter` container is writable
 - confirm `MEMORY_PROCESSOR_OWNER=durable` is set on the Function App
+- check the Function App log for warnings about skipped turns: a turn needs a valid `tenant_id`, `user_id` and `thread_id` (the SDK stamps the tenant on every record it writes and refuses an invalid owner or thread id), and the trigger skips one that lacks them
+- if only some threads or owners fire: a failure while counting or starting orchestrations for one thread or owner does not stop the rest of the batch (every other tenant's counters are still updated), but the batch still fails at the end so the host records it
 - insert enough new turn documents to cross the configured threshold
 - check for generated documents where the Cosmos JSON field is `type="thread_summary"`, `type="fact"`, or `type="user_summary"`
 

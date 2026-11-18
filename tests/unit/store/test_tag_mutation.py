@@ -44,7 +44,7 @@ def test_add_tags_retries_once_after_etag_conflict_and_wins():
     container.replace_item.side_effect = [_conflict(), None]
     store = MemoryStore(containers=_containers(memories=container))
 
-    store.add_tags("m1", "u1", "t1", "fact", ["New"])
+    store.add_tags("m1", "u1", "fact", ["New"])
 
     assert container.read_item.call_count == 2
     assert container.replace_item.call_count == 2
@@ -62,7 +62,7 @@ def test_add_tags_raises_memory_conflict_after_max_retries(monkeypatch):
     store = MemoryStore(containers=_containers(memories=container))
 
     with pytest.raises(MemoryConflictError, match="after 5 attempts"):
-        store.add_tags("m1", "u1", "t1", "fact", ["new"])
+        store.add_tags("m1", "u1", "fact", ["new"])
 
     assert container.read_item.call_count == 5
     assert container.replace_item.call_count == 5
@@ -74,7 +74,7 @@ async def test_async_add_tags_retries_once_after_etag_conflict_and_wins():
     container.replace_item = AsyncMock(side_effect=[_conflict(), None])
     store = AsyncMemoryStore(containers=_containers(memories=container))
 
-    await store.add_tags("m1", "u1", "t1", "fact", ["New"])
+    await store.add_tags("m1", "u1", "fact", ["New"])
 
     assert container.read_item.await_count == 2
     assert container.replace_item.await_count == 2
@@ -96,7 +96,7 @@ async def test_async_add_tags_raises_memory_conflict_after_max_retries(monkeypat
     store = AsyncMemoryStore(containers=_containers(memories=container))
 
     with pytest.raises(MemoryConflictError, match="after 5 attempts"):
-        await store.add_tags("m1", "u1", "t1", "fact", ["new"])
+        await store.add_tags("m1", "u1", "fact", ["new"])
 
     assert container.read_item.await_count == 5
     assert container.replace_item.await_count == 5

@@ -1,5 +1,16 @@
 ## Release History
 
+## [Unreleased]
+
+#### Features Added
+* **Memories are keyed by tenant and owner.** Every record lives in the partition `[tenant_id, user_id]`, where `user_id` is the owner of the memory, a user or an agent, and `thread_id` is a plain field. Everything one owner knows now sits in one partition. Pass `tenant_id` to the client (default `"default"`) to keep several apps or customers apart in the same containers; it separates data but is not an access-control boundary. `InProcessProcessor` and `AsyncInProcessProcessor` expose a read-only `tenant_id`, and a client raises `ConfigurationError` when its `processor` works in another tenant. The Function App follows the tenant of each record, and a failure for one thread or owner no longer stops the rest of its batch. See [PR:#53](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/53)
+
+#### Breaking Changes
+* **The containers use a new partition key.** `memories`, `memories_turns`, `memories_summaries` and `counter` are keyed `[/tenant_id, /user_id]` instead of `[/user_id, /thread_id]` (the Bicep template and `create_memory_store()`). A partition key can't change in place, so recreate those containers and `leases`, in the order given in the [migration notes](README.md#migration-notes) (every writer stopped, in-flight orchestrations purged, the Function App deployed before the upgraded writers); existing data is not migrated. Record ids must now be unique per owner across threads, not per thread. See [PR:#53](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/53)
+
+#### Other Changes
+* Orchestration instance ids in the Function App are now `<kind>:<digest>[:<count>]`, where the digest is a fixed-length hash of the tenant, owner and thread. They stay within Durable Functions' 100-character limit and no longer contain user ids. See [PR:#53](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/53)
+
 ## [0.4.0b1] (2026-11-16)
 
 #### Features Added

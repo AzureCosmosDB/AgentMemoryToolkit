@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters
 from azure.cosmos.agent_memory._utils import cosine_similarity
 from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.models import AGENT_FACT_TAG, MAX_TAGS_PER_RECORD, USER_ONLY_ASSERTIONS
@@ -40,7 +41,7 @@ from azure.cosmos.agent_memory.thresholds import DEDUP_MAX_NEIGHBORS, DEDUP_SIMI
 
 DEDUP_PROMPT = "dedup_verify.prompty"
 DEDUP_CURSOR_TYPE = "dedup_cursor"
-# The cursor is user-wide, so it lives under a sentinel thread id like the user summary does.
+# The cursor is user-wide, so it carries a marker thread id like the user summary does.
 DEDUP_CURSOR_THREAD_ID = "__dedup__"
 # A fold is one write per retired fact after its survivor's, and the survivor lists them all in
 # ``merged_from``: bound both for one pass.
@@ -128,13 +129,18 @@ def dedup_cursor_id(user_id: str, memory_type: str) -> str:
 
 
 def dedup_cursor_body(
-    existing: Optional[Mapping[str, Any]], user_id: str, memory_type: str, position: Mapping[str, Any]
+    tenant_id: str,
+    existing: Optional[Mapping[str, Any]],
+    user_id: str,
+    memory_type: str,
+    position: Mapping[str, Any],
 ) -> dict[str, Any]:
     body = without_system_fields(existing)
     body.update(
         {
             "id": dedup_cursor_id(user_id, memory_type),
             "type": DEDUP_CURSOR_TYPE,
+            "tenant_id": tenant_id,
             "user_id": user_id,
             "thread_id": DEDUP_CURSOR_THREAD_ID,
             "last_ts": position["ts"],
@@ -159,30 +165,31 @@ def position_parameters(position: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def unchecked_memories_query(
-    user_id: str, memory_type: str, existing_cursor: Optional[Mapping[str, Any]], top: int
+    tenant_id: str, user_id: str, memory_type: str, existing_cursor: Optional[Mapping[str, Any]], top: int
 ) -> tuple[str, list[dict[str, Any]]]:
-    """The user's active ``memory_type`` memories written after the cursor, oldest first."""
+    """The owner's active ``memory_type`` memories written after the cursor, oldest first."""
     query = (
-        f"SELECT TOP {top} * FROM c WHERE c.user_id = @user_id AND c.type = @memory_type AND {ACTIVE_FILTER}"
-        + AFTER_POSITION
+        f"SELECT TOP {top} * FROM c WHERE {OWNER_FILTER} AND c.type = @memory_type AND {ACTIVE_FILTER}" + AFTER_POSITION
     )
     parameters = [
-        {"name": "@user_id", "value": user_id},
+        *owner_parameters(tenant_id, user_id),
         {"name": "@memory_type", "value": memory_type},
         *position_parameters(checkpoint_position(existing_cursor)),
     ]
     return query, parameters
 
 
-def neighbor_query(user_id: str, memory_type: str, seed: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]]:
-    """The seed's nearest active memories of the same type for the same user."""
+def neighbor_query(
+    tenant_id: str, user_id: str, memory_type: str, seed: Mapping[str, Any]
+) -> tuple[str, list[dict[str, Any]]]:
+    """The seed's nearest active memories of the same type for the same owner."""
     query = (
-        f"SELECT TOP {DEDUP_MAX_NEIGHBORS} * FROM c WHERE c.user_id = @user_id AND c.type = @memory_type "
+        f"SELECT TOP {DEDUP_MAX_NEIGHBORS} * FROM c WHERE {OWNER_FILTER} AND c.type = @memory_type "
         f"AND {ACTIVE_FILTER} AND c.id != @seed_id AND IS_DEFINED(c.embedding) "
         "ORDER BY VectorDistance(c.embedding, @embedding)"
     )
     parameters = [
-        {"name": "@user_id", "value": user_id},
+        *owner_parameters(tenant_id, user_id),
         {"name": "@memory_type", "value": memory_type},
         {"name": "@seed_id", "value": seed["id"]},
         {"name": "@embedding", "value": seed["embedding"]},

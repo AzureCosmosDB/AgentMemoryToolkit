@@ -3,7 +3,7 @@
 This sample demonstrates the *operational* surface of the
 :class:`DurableFunctionProcessor` deployment: the SDK never invokes an LLM
 locally - instead, the sibling Azure Function app reads the Cosmos change
-feed and decides which orchestrator(s) to fire based on per-(user,thread)
+feed and decides which orchestrator(s) to fire based on per-(tenant,user,thread)
 counters.
 
 The orchestrators run independently, each gated on its own threshold:

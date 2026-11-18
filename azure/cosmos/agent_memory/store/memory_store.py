@@ -7,7 +7,6 @@ from typing import Any, Optional
 
 from azure.cosmos.agent_memory._container_routing import (
     _CONTAINER_FOR_TYPE,
-    USER_SCOPED_MEMORIES_TYPES,
     ContainerKey,
     container_key_for_type,
 )
@@ -18,6 +17,16 @@ from azure.cosmos.agent_memory._curation import (
     mark_secret,
     sanitize_record,
     sanitize_text,
+)
+from azure.cosmos.agent_memory._partitioning import (
+    DEFAULT_TENANT_ID,
+    OWNER_FILTER,
+    owner_parameters,
+    partition_key_for,
+    resolve_tenant_id,
+    stamp_scope,
+    validate_owner_id,
+    validate_thread_id,
 )
 from azure.cosmos.agent_memory._query_builder import _QueryBuilder
 from azure.cosmos.agent_memory._utils import (
@@ -65,6 +74,7 @@ _MEMORIES_TYPES: tuple[str, ...] = ("fact", "episodic", "procedural")
 # ``embedding`` to keep the vector off the wire and out of the result.
 _TURN_PROJECTION_FIELDS: tuple[str, ...] = (
     "id",
+    "tenant_id",
     "user_id",
     "thread_id",
     "role",
@@ -97,7 +107,11 @@ def _wrap_cosmos_exception(exc: BaseException, *, message: str) -> CosmosOperati
 
 
 class MemoryStore:
-    """Typed CRUD and query primitives over the Cosmos DB containers."""
+    """Typed CRUD and query primitives over the Cosmos DB containers.
+
+    A store is bound to one tenant: every query it builds filters on it, every point operation addresses the
+    partition ``[tenant_id, user_id]``, and every document it writes carries it.
+    """
 
     def __init__(
         self,
@@ -105,6 +119,7 @@ class MemoryStore:
         containers: dict[ContainerKey, Any],
         embeddings_client: Any = None,
         enable_turn_embeddings: bool = False,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> None:
         self._containers = containers
         self._turns_container = containers[ContainerKey.TURNS]
@@ -112,6 +127,12 @@ class MemoryStore:
         self._summaries_container = containers[ContainerKey.SUMMARIES]
         self._embeddings_client = embeddings_client
         self._enable_turn_embeddings = enable_turn_embeddings
+        self._tenant_id = resolve_tenant_id(tenant_id)
+
+    @property
+    def tenant_id(self) -> str:
+        """The tenant this store reads and writes."""
+        return self._tenant_id
 
     @property
     def container(self) -> Any:
@@ -119,8 +140,11 @@ class MemoryStore:
         return self._memories_container
 
     def _prepare_doc(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Return a write-ready document: literal credentials redacted and type defaults applied."""
-        body = dict(doc)
+        """Return a write-ready document: stamped with the tenant, literal credentials redacted, type defaults applied.
+
+        A document that names another tenant raises :class:`ValidationError`.
+        """
+        body = stamp_scope(doc, self._tenant_id)
         redacted = sanitize_record(body)
         if redacted:
             logger.warning("redacted literal secrets before write id=%s patterns=%s", body.get("id"), redacted)
@@ -221,11 +245,12 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         """Run a query against the explicitly selected split container.
 
-        ``partition_key`` reads one partition; ``cross_partition`` lets the query fan out across
-        partitions. A query that calls ``FullTextScore`` raises ``ValidationError`` when it is sent
-        with a ``partition_key``: the Python SDK skips query planning for such a query, so the
-        ranking would be ignored (Azure/azure-sdk-for-python#42241). Filter on the partition key
-        fields in the ``WHERE`` clause instead (see ``query_scope``). ``full_text_score_scope``
+        ``sql`` runs as given, so it must filter on the tenant (``TENANT_FILTER`` or ``OWNER_FILTER`` of
+        ``_partitioning``) unless it is sent with the owner's ``partition_key``. ``partition_key`` reads one
+        partition; ``cross_partition`` lets the query fan out across partitions. A query that calls
+        ``FullTextScore`` raises ``ValidationError`` when it is sent with a ``partition_key``: the Python SDK skips
+        query planning for such a query, so the ranking would be ignored (Azure/azure-sdk-for-python#42241). Filter
+        on the partition key fields in the ``WHERE`` clause instead (see ``query_scope``). ``full_text_score_scope``
         (``"Local"`` or ``"Global"``) sets where the keyword ranking takes its BM25 statistics from.
         """
         return self._query_items(
@@ -318,8 +343,12 @@ class MemoryStore:
         follow ``enable_turn_embeddings``. A supplied ``embedding`` is kept, unless it was built from
         text that held a credential.
         """
+        validate_owner_id(user_id)
+        if thread_id is not None:
+            validate_thread_id(thread_id)
         content, secret_patterns = sanitize_text(content)
         kwargs: dict[str, Any] = {
+            "tenant_id": self._tenant_id,
             "user_id": user_id,
             "role": role,
             "content": content,
@@ -462,7 +491,10 @@ class MemoryStore:
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve memories from the MEMORIES container with optional filters."""
+        """Retrieve memories from the MEMORIES container with optional filters.
+
+        Reads the store's tenant: one owner's memories when ``user_id`` is given, else every owner's.
+        """
         types = _validated_memories_types(memory_types)
         logger.debug(
             "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s types=%s recent_k=%s",
@@ -475,6 +507,7 @@ class MemoryStore:
         )
 
         qb = _build_memory_query_builder(
+            tenant_id=self._tenant_id,
             memory_id=memory_id,
             user_id=user_id,
             thread_id=thread_id,
@@ -504,10 +537,12 @@ class MemoryStore:
             query = f"SELECT * FROM c{where}"
 
         logger.debug("get_memories query: %s", query)
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id)
         items = self._query_items(
             query=query,
             parameters=parameters or None,
-            cross_partition=True,
+            partition_key=partition_key,
+            cross_partition=cross_partition,
             operation="get_memories query",
             container=self._memories_container,
         )
@@ -525,7 +560,6 @@ class MemoryStore:
         memory_id: str,
         *,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         content: Optional[str] = None,
         role: Optional[str] = None,
@@ -548,14 +582,15 @@ class MemoryStore:
         )
 
         container = self._container_for_type(memory_type)
+        partition_key = partition_key_for(self._tenant_id, user_id)
         max_attempts = 5
         attempts = 0
         vectors: dict[str, list[float]] = {}
         while True:
             try:
-                doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+                doc = container.read_item(item=memory_id, partition_key=partition_key)
             except CosmosResourceNotFoundError as exc:
-                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id) from exc
             except Exception as exc:
                 raise _wrap_cosmos_exception(exc, message=f"update read failed for {memory_id}: {exc}") from exc
 
@@ -601,7 +636,6 @@ class MemoryStore:
         memory_id: str,
         *,
         user_id: str,
-        thread_id: str,
         memory_type: str,
     ) -> None:
         """Delete a memory document from the container for ``memory_type``.
@@ -622,10 +656,11 @@ class MemoryStore:
         )
 
         container = self._container_for_type(memory_type)
+        partition_key = partition_key_for(self._tenant_id, user_id)
         try:
-            doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+            doc = container.read_item(item=memory_id, partition_key=partition_key)
         except CosmosResourceNotFoundError as exc:
-            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id) from exc
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"delete read failed for {memory_id}: {exc}") from exc
 
@@ -636,19 +671,19 @@ class MemoryStore:
         absorbed: list[dict[str, Any]] = []
         if memory_type in ABSORBING_TYPES:
             try:
-                absorbed = delete_absorbed(container, user_id, memory_id)
+                absorbed = delete_absorbed(container, self._tenant_id, user_id, memory_id)
             except Exception as exc:
                 raise _wrap_cosmos_exception(
                     exc, message=f"delete of the records folded into {memory_id} failed: {exc}"
                 ) from exc
 
-        kwargs: dict[str, Any] = {"item": memory_id, "partition_key": [user_id, thread_id]}
+        kwargs: dict[str, Any] = {"item": memory_id, "partition_key": partition_key}
         if etag := doc.get("_etag"):
             kwargs.update(match_condition=MatchConditions.IfNotModified, etag=etag)
         try:
             container.delete_item(**kwargs)
         except CosmosResourceNotFoundError as exc:
-            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+            raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id) from exc
         except CosmosAccessConditionFailedError as exc:
             raise MemoryConflictError(
                 f"delete conflicted for memory_id={memory_id!r} - document was modified after the type check"
@@ -671,9 +706,8 @@ class MemoryStore:
         created_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve an entire thread (turns) sorted oldest first."""
-        qb = _QueryBuilder()
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
-        qb.add_filter("c.user_id", "@user_id", user_id)
         add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
         qb.add_time_range(
             "c.created_at",
@@ -687,10 +721,12 @@ class MemoryStore:
 
         query = f"SELECT {_TURN_PROJECTION} FROM c{qb.build_where()} ORDER BY c.created_at DESC"
         logger.debug("get_thread query: %s", query)
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id)
         items = self._query_items(
             query=query,
             parameters=qb.get_parameters(),
-            cross_partition=True,
+            partition_key=partition_key,
+            cross_partition=cross_partition,
             operation="get_thread query",
             container=self._turns_container,
         )
@@ -706,9 +742,8 @@ class MemoryStore:
         recent_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Retrieve active thread summaries for ``(user_id, thread_id)``, newest first."""
-        qb = _QueryBuilder()
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.type", "@type", "thread_summary")
-        qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         qb.add_is_null_or_undefined("c.superseded_by")
         parameters = qb.get_parameters()
@@ -720,7 +755,7 @@ class MemoryStore:
         return self._query_items(
             query=sql,
             parameters=parameters,
-            partition_key=[user_id, thread_id],
+            partition_key=partition_key_for(self._tenant_id, user_id),
             operation="get_thread_summary query",
             container=self._summaries_container,
         )
@@ -734,9 +769,8 @@ class MemoryStore:
         """Retrieve active episodic memories for ``user_id``, newest first."""
         if not user_id:
             raise ValidationError("user_id is required for get_episodes")
-        qb = _QueryBuilder()
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.type", "@type", "episodic")
-        qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         qb.add_is_null_or_undefined("c.superseded_by")
         parameters = qb.get_parameters()
@@ -745,23 +779,22 @@ class MemoryStore:
             sql = f"SELECT TOP @recent_k * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
         else:
             sql = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
-        partition_key, cross_partition = query_scope(user_id, thread_id)
         return self.query(
             sql,
             parameters,
             container_key=ContainerKey.MEMORIES,
-            partition_key=partition_key,
-            cross_partition=cross_partition,
+            partition_key=partition_key_for(self._tenant_id, user_id),
         )
 
     def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
         """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
+        partition_key = partition_key_for(self._tenant_id, user_id)
         try:
             return self._summaries_container.read_item(
                 item=f"user_summary_{user_id}",
-                partition_key=[user_id, "__user_summary__"],
+                partition_key=partition_key,
             )
         except CosmosResourceNotFoundError:
             return None
@@ -778,8 +811,8 @@ class MemoryStore:
         include_superseded: bool = False,
     ) -> list[str]:
         """Return sorted distinct tags for a user from the MEMORIES container."""
-        query = "SELECT VALUE c.tags FROM c WHERE c.user_id = @user_id AND ARRAY_LENGTH(c.tags) > 0"
-        parameters = [{"name": "@user_id", "value": user_id}]
+        query = f"SELECT VALUE c.tags FROM c WHERE {OWNER_FILTER} AND ARRAY_LENGTH(c.tags) > 0"
+        parameters = owner_parameters(self._tenant_id, user_id)
         if thread_id is not None:
             query += " AND c.thread_id = @thread_id"
             parameters.append({"name": "@thread_id", "value": thread_id})
@@ -787,12 +820,10 @@ class MemoryStore:
             query += " AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
 
         prefix_norm = prefix.strip().lower() if prefix else None
-        partition_key, cross_partition = query_scope(user_id, thread_id)
         rows = self._query_items(
             query=query,
             parameters=parameters,
-            partition_key=partition_key,
-            cross_partition=cross_partition,
+            partition_key=partition_key_for(self._tenant_id, user_id),
             operation="list_tags query",
             container=self._memories_container,
         )
@@ -814,7 +845,6 @@ class MemoryStore:
         self,
         memory_id: str,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         tags: list[str],
         *,
@@ -831,6 +861,7 @@ class MemoryStore:
 
         _validate_taggable_type(memory_type)
         container = self._container_for_type(memory_type)
+        partition_key = partition_key_for(self._tenant_id, user_id)
         secret_patterns: list[str] = []
         if add:
             tags, secret_patterns = drop_secret_tags(tags)
@@ -841,9 +872,9 @@ class MemoryStore:
         attempts = 0
         while True:
             try:
-                doc = container.read_item(item=memory_id, partition_key=[user_id, thread_id])
+                doc = container.read_item(item=memory_id, partition_key=partition_key)
             except CosmosResourceNotFoundError as exc:
-                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id, thread_id=thread_id) from exc
+                raise MemoryNotFoundError(memory_id=memory_id, user_id=user_id) from exc
             mark_secret(doc, secret_patterns)
             existing_tags = set(doc.get("tags", []))
             if add:
@@ -872,7 +903,6 @@ class MemoryStore:
         self,
         memory_id: str,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         tags: list[str],
     ) -> None:
@@ -881,18 +911,17 @@ class MemoryStore:
         Tags are lower-cased. A tag that holds a literal credential is dropped, and the memory is
         marked ``sys:secret``.
         """
-        self._mutate_tags(memory_id, user_id, thread_id, memory_type, tags, add=True)
+        self._mutate_tags(memory_id, user_id, memory_type, tags, add=True)
 
     def remove_tags(
         self,
         memory_id: str,
         user_id: str,
-        thread_id: str,
         memory_type: str,
         tags: list[str],
     ) -> None:
         """Remove tags from an existing fact, episodic or procedural memory."""
-        self._mutate_tags(memory_id, user_id, thread_id, memory_type, tags, add=False)
+        self._mutate_tags(memory_id, user_id, memory_type, tags, add=False)
 
     def mark_superseded(
         self,
@@ -901,7 +930,10 @@ class MemoryStore:
         *,
         reason: str,
     ) -> bool:
-        """Set supersession audit fields using ETag protection when available."""
+        """Set supersession audit fields using ETag protection when available.
+
+        A document that names another tenant raises :class:`ValidationError`.
+        """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import (
             CosmosAccessConditionFailedError,
@@ -909,12 +941,15 @@ class MemoryStore:
         )
 
         etag = old_doc.get("_etag")
-        new_doc = {
-            **old_doc,
-            "superseded_by": superseder_id,
-            "supersede_reason": reason,
-            "superseded_at": datetime.now(timezone.utc).isoformat(),
-        }
+        new_doc = stamp_scope(
+            {
+                **old_doc,
+                "superseded_by": superseder_id,
+                "supersede_reason": reason,
+                "superseded_at": datetime.now(timezone.utc).isoformat(),
+            },
+            self._tenant_id,
+        )
         target_container = self._container_for_type(old_doc.get("type"))
         try:
             if etag:
@@ -953,8 +988,7 @@ class MemoryStore:
         instructions: ``CosmosMemoryClient.get_procedural_prompt`` compiles those from the active
         standing rules.
         """
-        qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
         qb.add_filter("c.type", "@type", "procedural")
         qb.add_is_null_or_undefined("c.superseded_by")
@@ -963,7 +997,7 @@ class MemoryStore:
         items = self._query_items(
             query=query,
             parameters=qb.get_parameters(),
-            cross_partition=True,
+            partition_key=partition_key_for(self._tenant_id, user_id),
             operation="get_procedural_prompt query",
             container=self._memories_container,
         )
@@ -981,8 +1015,7 @@ class MemoryStore:
         if limit <= 0:
             return []
 
-        qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
         qb.add_filter("c.type", "@type", "procedural")
 
@@ -990,7 +1023,7 @@ class MemoryStore:
         items = self._query_items(
             query=query,
             parameters=qb.get_parameters(),
-            cross_partition=True,
+            partition_key=partition_key_for(self._tenant_id, user_id),
             operation="get_procedural_history query",
             container=self._memories_container,
         )
@@ -1023,8 +1056,7 @@ class MemoryStore:
         ``metadata.category`` and ``salience``, which procedures learned by
         ``synthesize_procedural`` do not carry, so setting one leaves them out.
         """
-        qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.thread_id", "@thread_id", "__procedural__")
         qb.add_filter("c.type", "@type", "procedural")
         if not include_superseded:
@@ -1034,7 +1066,7 @@ class MemoryStore:
         items = self._query_items(
             query=query,
             parameters=qb.get_parameters(),
-            cross_partition=True,
+            partition_key=partition_key_for(self._tenant_id, user_id),
             operation="get_procedural_memories query",
             container=self._memories_container,
         )
@@ -1084,10 +1116,9 @@ class MemoryStore:
         ``query_embedding`` is the query's embedding when the caller already has it.
 
         ``thread_id`` limits facts to that thread; episodic and procedural memories stay user-wide.
-        A keyword query, or a thread-scoped search that includes those user-wide types, runs across
-        partitions with ``user_id`` and ``thread_id`` filters in the WHERE clause (keyword queries
-        also set ``full_text_score_scope="Local"``); a vector-only query over facts with both ids
-        reads one partition (see ``query_scope``).
+        The search reads the store's tenant only. A vector-only query that names ``user_id`` reads that owner's
+        partition; a keyword query runs across partitions with the ``tenant_id`` and ``user_id`` filters in the
+        WHERE clause and sets ``full_text_score_scope="Local"`` (see ``query_scope``).
         """
         terms = require_search_terms(search_terms, query)
         top = top_literal(top_k, name="top_k")
@@ -1095,6 +1126,7 @@ class MemoryStore:
         keywords = [] if vector_only else extract_keywords(terms)
 
         qb = _build_memory_query_builder(
+            tenant_id=self._tenant_id,
             memory_id=memory_id,
             user_id=user_id,
             role=role,
@@ -1130,9 +1162,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
-        if thread_id is not None and (not memory_types or set(memory_types) & USER_SCOPED_MEMORIES_TYPES):
-            partition_key, cross_partition = None, True
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id, len(keywords))
         logger.debug("MemoryStore.search query: %s", sql)
         return self.query(
             sql,
@@ -1147,7 +1177,6 @@ class MemoryStore:
         self,
         memory_id: str,
         user_id: str,
-        thread_id: Optional[str] = None,
         *,
         max_depth: int = 20,
     ) -> list[dict[str, Any]]:
@@ -1164,31 +1193,26 @@ class MemoryStore:
         value is everything it superseded, transitively, bounded by *max_depth*
         to guard against cycles. Each entry carries the ``superseded_at`` /
         ``supersede_reason`` audit fields so callers can order and explain the
-        transitions.
+        transitions. The walk stays in the owner's partition, whatever threads the records belong to.
         """
         if not memory_id:
             raise ValidationError("memory_id is required")
         if not user_id:
             raise ValidationError("user_id is required")
-        partition_key, cross_partition = query_scope(user_id, thread_id)
+        partition_key = partition_key_for(self._tenant_id, user_id)
         history: list[dict[str, Any]] = []
         seen: set[str] = {memory_id}
         frontier: list[str] = [memory_id]
         for _ in range(max(1, max_depth)):
             id_params = [{"name": f"@sid{i}", "value": sid} for i, sid in enumerate(frontier)]
             placeholders = ", ".join(param["name"] for param in id_params)
-            parameters: list[dict[str, Any]] = [*id_params, {"name": "@user_id", "value": user_id}]
-            where = f"c.superseded_by IN ({placeholders}) AND c.user_id = @user_id"
-            if thread_id is not None:
-                where += " AND c.thread_id = @thread_id"
-                parameters.append({"name": "@thread_id", "value": thread_id})
-            sql = f"SELECT {MEMORY_PROJECTION} FROM c WHERE {where}"
+            parameters: list[dict[str, Any]] = [*id_params, *owner_parameters(self._tenant_id, user_id)]
+            sql = f"SELECT {MEMORY_PROJECTION} FROM c WHERE c.superseded_by IN ({placeholders}) AND {OWNER_FILTER}"
             rows = self.query(
                 sql,
                 parameters,
                 container_key=ContainerKey.MEMORIES,
                 partition_key=partition_key,
-                cross_partition=cross_partition,
             )
             frontier = []
             for doc in rows:
@@ -1222,13 +1246,11 @@ class MemoryStore:
 
         Only vector-searchable when turn embeddings were enabled at write time
         (see ``enable_turn_embeddings``). ``user_id`` is required and always
-        filters the results. When ``thread_id`` is also supplied the results are
-        restricted to that thread: a vector-only query targets the thread's
-        partition, while a keyword (hybrid) query runs across partitions with
-        ``user_id`` and ``thread_id`` filters in the WHERE clause (a partition key
-        breaks full-text ranking, Azure SDK issue #42241). When it is omitted the
-        query fans out across the user's partitions.
-
+        filters the results, within the store's tenant. ``thread_id`` narrows the
+        results to one thread. A vector-only query reads the owner's partition,
+        while a keyword (hybrid) query runs across partitions with the ``tenant_id``
+        and ``user_id`` filters in the WHERE clause (a partition key breaks
+        full-text ranking, Azure SDK issue #42241).
         """
         if not user_id:
             raise ValidationError("user_id is required for search_turns")
@@ -1237,8 +1259,7 @@ class MemoryStore:
         query_vector = self._embed(terms)
         keywords = extract_keywords(terms)
 
-        qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         qb.add_filter("c.role", "@role", role)
         add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
@@ -1256,7 +1277,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id, len(keywords))
         logger.debug("MemoryStore.search_turns query: %s", sql)
         return self.query(
             sql,
@@ -1287,9 +1308,9 @@ class MemoryStore:
         topic-scoped summary question all surface the right summary. Ranking is
         by vector similarity, with full-text relevance added when the query has
         keywords. ``user_id`` is required. Pass ``thread_id`` to narrow to one
-        thread's summary; as with :meth:`search_turns`, a keyword query then runs
-        across partitions with ``user_id`` and ``thread_id`` filters in the WHERE
-        clause, and a vector-only query targets the thread's partition.
+        thread's summary. As with :meth:`search_turns`, a vector-only query reads
+        the owner's partition and a keyword query runs across partitions with the
+        ``tenant_id`` and ``user_id`` filters in the WHERE clause.
         """
         if not user_id:
             raise ValidationError("user_id is required for search_summaries")
@@ -1298,8 +1319,7 @@ class MemoryStore:
         query_vector = self._embed(terms)
         keywords = extract_keywords(terms)
 
-        qb = _QueryBuilder()
-        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
 
@@ -1309,7 +1329,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id, len(keywords))
         logger.debug("MemoryStore.search_summaries query: %s", sql)
         return self.query(
             sql,
@@ -1349,9 +1369,8 @@ class MemoryStore:
         query_vector = self._embed(terms)
         keywords = extract_keywords(terms)
 
-        qb = _QueryBuilder()
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.type", "@type", "episodic")
-        qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
         add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
         qb.add_time_range(
@@ -1388,7 +1407,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, thread_id, len(keywords))
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id, len(keywords))
         logger.debug("MemoryStore.search_episodic query: %s", sql)
         return self.query(
             sql,
@@ -1429,9 +1448,8 @@ class MemoryStore:
         query_vector = self._embed(terms)
         keywords = extract_keywords(terms)
 
-        qb = _QueryBuilder()
+        qb = _QueryBuilder.for_tenant(self._tenant_id, user_id)
         qb.add_filter("c.type", "@type", "procedural")
-        qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.procedure_kind", "@procedure_kind", procedure_kind)
         qb.add_filter("c.status", "@status", status)
 
@@ -1446,7 +1464,7 @@ class MemoryStore:
         for i, kw in enumerate(keywords):
             parameters.append({"name": f"@kw{i}", "value": kw})
 
-        partition_key, cross_partition = query_scope(user_id, None)
+        partition_key, cross_partition = query_scope(self._tenant_id, user_id, len(keywords))
         logger.debug("MemoryStore.retrieve_procedures query: %s", sql)
         return self.query(
             sql,

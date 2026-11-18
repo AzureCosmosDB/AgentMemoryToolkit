@@ -11,16 +11,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from azure.cosmos.agent_memory.services._conflicts import CONFLICT_LINK_THREAD_ID
 from tests.unit.aio import test_cosmos_memory_client as async_client_tests
 from tests.unit.test_cosmos_memory_client import _connected_client
 
 USER = "u1"
+TENANT = "acme"
 
 
 def fact(fact_id: str, content: str, created_at: str) -> dict[str, Any]:
     return {
         "id": fact_id,
+        "tenant_id": TENANT,
         "user_id": USER,
         "thread_id": "t1",
         "type": "fact",
@@ -75,7 +76,7 @@ class AsyncFakeMemories(FakeMemories):
 
 
 def _sync_client(container: FakeMemories) -> Any:
-    mem, _ = _connected_client()
+    mem, _ = _connected_client(tenant_id=TENANT)
     mem._memories_container_client = container
     mem._embeddings_client = MagicMock()
     mem._embeddings_client.generate.return_value = [0.1, 0.2, 0.3]
@@ -83,7 +84,7 @@ def _sync_client(container: FakeMemories) -> Any:
 
 
 def _async_client(container: AsyncFakeMemories) -> Any:
-    mem, _ = async_client_tests._connected_client()
+    mem, _ = async_client_tests._connected_client(tenant_id=TENANT)
     mem._memories_container_client = container
     mem._embeddings_client = AsyncMock()
     mem._embeddings_client.generate = AsyncMock(return_value=[0.1, 0.2, 0.3])
@@ -108,6 +109,20 @@ def _assert_shown_with_its_conflict(results: list[dict[str, Any]]) -> None:
     ]
 
 
+def _assert_every_query_stays_in_the_tenant(container: FakeMemories) -> None:
+    """Every query names the tenant, and the link and fact lookups read the owner's ``[tenant, user]`` partition."""
+    assert container.calls
+    for call in container.calls:
+        params = {p["name"]: p["value"] for p in call["parameters"]}
+        assert "c.tenant_id = @tenant_id" in call["query"]
+        assert params["@tenant_id"] == TENANT
+    lookups = [call for call in container.calls if "c.type = @type" in call["query"] or "@ids" in call["query"]]
+    assert lookups
+    for call in lookups:
+        assert call["partition_key"] == [TENANT, USER]
+        assert "enable_cross_partition_query" not in call
+
+
 def test_a_fact_is_returned_with_the_fact_it_conflicts_with() -> None:
     container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
 
@@ -115,7 +130,15 @@ def test_a_fact_is_returned_with_the_fact_it_conflicts_with() -> None:
 
     _assert_shown_with_its_conflict(results)
     links_call = next(call for call in container.calls if "c.type = @type" in call["query"])
-    assert links_call["partition_key"] == [USER, CONFLICT_LINK_THREAD_ID]
+    assert links_call["partition_key"] == [TENANT, USER]
+
+
+def test_the_conflict_lookups_stay_inside_the_clients_tenant() -> None:
+    container = FakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
+
+    _sync_client(container).search_cosmos(search_terms="deadline", user_id=USER, top_k=3)
+
+    _assert_every_query_stays_in_the_tenant(container)
 
 
 def test_a_fact_with_no_links_is_returned_as_it_is() -> None:
@@ -205,7 +228,16 @@ async def test_async_a_fact_is_returned_with_the_fact_it_conflicts_with() -> Non
 
     _assert_shown_with_its_conflict(results)
     links_call = next(call for call in container.calls if "c.type = @type" in call["query"])
-    assert links_call["partition_key"] == [USER, CONFLICT_LINK_THREAD_ID]
+    assert links_call["partition_key"] == [TENANT, USER]
+
+
+@pytest.mark.asyncio
+async def test_async_the_conflict_lookups_stay_inside_the_clients_tenant() -> None:
+    container = AsyncFakeMemories(ranked=[dict(RANKED)], links=LINKS, facts=_facts())
+
+    await _async_client(container).search_cosmos(search_terms="deadline", user_id=USER, top_k=3)
+
+    _assert_every_query_stays_in_the_tenant(container)
 
 
 @pytest.mark.asyncio

@@ -79,6 +79,7 @@ def _should_trigger(processor: Any, thresholds: Any) -> bool:
 def maybe_trigger_steps(
     processor: Any,
     counter_container: Any,
+    tenant_id: str,
     turn_counts: dict[tuple[str, str], int],
     *,
     thresholds: Any = default_thresholds,
@@ -92,6 +93,8 @@ def maybe_trigger_steps(
         trigger is skipped for any other processor type (e.g. durable).
     counter_container:
         The Cosmos counter container. ``None`` disables the trigger.
+    tenant_id:
+        The tenant the counters belong to; they live in each owner's ``[tenant_id, user_id]`` partition.
     turn_counts:
         Map of ``(user_id, thread_id) -> turns_pushed_in_this_batch``.
     thresholds:
@@ -116,6 +119,7 @@ def maybe_trigger_steps(
     user_batch_counts = _trigger_thread_steps(
         processor,
         counter_container,
+        tenant_id,
         turn_counts,
         n_facts=n_facts,
         n_summary=n_summary,
@@ -123,12 +127,13 @@ def maybe_trigger_steps(
         n_dedup_turns=n_dedup_turns,
         thresholds=thresholds,
     )
-    _trigger_user_steps(processor, counter_container, user_batch_counts, n_user=n_user)
+    _trigger_user_steps(processor, counter_container, tenant_id, user_batch_counts, n_user=n_user)
 
 
 def _trigger_thread_steps(
     processor: InProcessProcessor,
     counter_container: Any,
+    tenant_id: str,
     turn_counts: dict[tuple[str, str], int],
     *,
     n_facts: int,
@@ -146,6 +151,7 @@ def _trigger_thread_steps(
         try:
             old_count, new_count = _counters.increment_counter_sync(
                 counter_container,
+                tenant_id,
                 counter_id,
                 user_id,
                 thread_id,
@@ -158,6 +164,7 @@ def _trigger_thread_steps(
         _fire_thread_steps(
             processor,
             counter_container,
+            tenant_id,
             counter_id,
             user_id,
             thread_id,
@@ -174,6 +181,7 @@ def _trigger_thread_steps(
 def _fire_thread_steps(
     processor: InProcessProcessor,
     counter_container: Any,
+    tenant_id: str,
     counter_id: str,
     user_id: str,
     thread_id: str,
@@ -200,7 +208,7 @@ def _fire_thread_steps(
             error = describe_exception(exc)
             logger.warning("Auto-trigger process_extract_memories failed for %s/%s: %s", user_id, thread_id, error)
             _counters.stamp_failure_sync(
-                counter_container, counter_id, user_id, thread_id, f"process_extract_memories: {error}"
+                counter_container, tenant_id, counter_id, user_id, f"process_extract_memories: {error}"
             )
     for enabled, label, call in (
         (
@@ -231,12 +239,13 @@ def _fire_thread_steps(
         except Exception as exc:
             error = describe_exception(exc)
             logger.warning("Auto-trigger %s failed for %s/%s: %s", label, user_id, thread_id, error)
-            _counters.stamp_failure_sync(counter_container, counter_id, user_id, thread_id, f"{label}: {error}")
+            _counters.stamp_failure_sync(counter_container, tenant_id, counter_id, user_id, f"{label}: {error}")
 
 
 def _trigger_user_steps(
     processor: InProcessProcessor,
     counter_container: Any,
+    tenant_id: str,
     user_batch_counts: dict[str, int],
     *,
     n_user: int,
@@ -248,6 +257,7 @@ def _trigger_user_steps(
         try:
             old_count, new_count = _counters.increment_counter_sync(
                 counter_container,
+                tenant_id,
                 counter_id,
                 user_id,
                 _counters.USER_COUNTER_THREAD_ID,
@@ -266,9 +276,9 @@ def _trigger_user_steps(
             logger.warning("Auto-trigger process_user_summary failed for %s: %s", user_id, error)
             _counters.stamp_failure_sync(
                 counter_container,
+                tenant_id,
                 counter_id,
                 user_id,
-                _counters.USER_COUNTER_THREAD_ID,
                 f"process_user_summary: {error}",
             )
 

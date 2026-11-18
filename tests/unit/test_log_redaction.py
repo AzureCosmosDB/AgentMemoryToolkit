@@ -285,6 +285,7 @@ def test_a_conflict_link_that_cannot_be_written_is_logged_by_error_type_not_its_
     logs: pytest.LogCaptureFixture,
 ) -> None:
     service = PipelineService.__new__(PipelineService)
+    service._tenant_id = "acme"
     service._memories_container = MagicMock()
     service._memories_container.upsert_item.side_effect = _failure(QUERY, 503)
 
@@ -296,6 +297,7 @@ async def test_async_conflict_link_that_cannot_be_written_is_logged_by_error_typ
     logs: pytest.LogCaptureFixture,
 ) -> None:
     service = AsyncPipelineService.__new__(AsyncPipelineService)
+    service._tenant_id = "acme"
     service._memories_container = MagicMock()
     service._memories_container.upsert_item = AsyncMock(side_effect=_failure(QUERY, 503))
 

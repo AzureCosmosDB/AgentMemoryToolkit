@@ -46,9 +46,9 @@ async def test_watermark_failures_log_the_status_not_the_text(logs) -> None:
         side_effect=[_failure(503), CosmosHttpResponseError(status_code=500, message=MEMORY)]
     )
 
-    assert await read_extract_watermark(container, "thread:u1:t1", "u1", "t1") is None
-    await advance_extract_watermark(container, "thread:u1:t1", "u1", "t1", 4)
-    await advance_extract_watermark(container, "thread:u1:t1", "u1", "t1", 4)
+    assert await read_extract_watermark(container, "acme", "thread:u1:t1", "u1") is None
+    await advance_extract_watermark(container, "acme", "thread:u1:t1", "u1", 4)
+    await advance_extract_watermark(container, "acme", "thread:u1:t1", "u1", 4)
 
     expected = (
         "advance_extract_watermark failed counter_id=thread:u1:t1: azure.cosmos.CosmosHttpResponseError(status=500) at "
@@ -84,7 +84,7 @@ def _user_function(builder):
 
 
 def test_a_failed_sub_orchestration_logs_its_type_not_its_text(logs) -> None:
-    context = _Context({"user_id": "u1", "thread_id": "t1", "reconcile": True})
+    context = _Context({"tenant_id": "acme", "user_id": "u1", "thread_id": "t1", "reconcile": True})
 
     with patch.object(em, "default_retry_options", return_value=MagicMock()):
         generator = _user_function(em.ExtractMemoriesOrchestrator)(context)
@@ -99,7 +99,9 @@ def test_a_failed_sub_orchestration_logs_its_type_not_its_text(logs) -> None:
         record for record in logs.records if record.name == em.logger.name and record.levelno >= logging.WARNING
     ]
     assert record.exc_info is None
-    assert record.getMessage().startswith("SynthesizeProceduralOrchestrator failed user=u1 thread=t1: RuntimeError at ")
+    assert record.getMessage().startswith(
+        "SynthesizeProceduralOrchestrator failed tenant=acme user=u1 thread=t1: RuntimeError at "
+    )
     _assert_no_text(logs)
 
 

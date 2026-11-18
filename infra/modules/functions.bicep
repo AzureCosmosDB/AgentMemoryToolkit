@@ -70,19 +70,19 @@ param azureOpenAiApiVersion string
 // in main.bicep - these module params are declared without defaults so
 // main.bicep stays the single source of truth.
 
-@description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
+@description('Run thread-summary orchestration every N turns within a (tenant_id, user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int
 
-@description('Run fact extraction every N turns within a (user_id, thread_id); reconcile and procedure learning run on multiples of it. 0 = disabled (all three).')
+@description('Run fact extraction every N turns within a (tenant_id, user_id, thread_id); reconcile and procedure learning run on multiples of it. 0 = disabled (all three).')
 param factExtractionEveryN int
 
 @description('Once per N fact extractions, run reconcile, then procedure learning. Effective cadence = factExtractionEveryN * dedupEveryN turns. 0 = disabled.')
 param dedupEveryN int
 
-@description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
+@description('Run user-summary orchestration every N turns from a given (tenant_id, user_id) across all threads. 0 = disabled.')
 param userSummaryEveryN int
 
-@description('Evaluate an episode boundary every N turns within a (user_id, thread_id). 0 = disabled (no episodic memory).')
+@description('Evaluate an episode boundary every N turns within a (tenant_id, user_id, thread_id). 0 = disabled (no episodic memory).')
 param episodeEvalEveryN int
 
 @description('Idle gap (seconds) between two consecutive turns that closes the open episode.')

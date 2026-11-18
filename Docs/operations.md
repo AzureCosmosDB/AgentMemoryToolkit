@@ -31,6 +31,10 @@ Override the turns container default at provision time (it applies to documents 
 
 Function-app threshold knobs (`THREAD_SUMMARY_EVERY_N`, `FACT_EXTRACTION_EVERY_N`, `DEDUP_EVERY_N`, `USER_SUMMARY_EVERY_N`, `MAX_BATCH_SIZE`, `DEDUP_POOL_SIZE`, `ACTIVITY_TIME_BUDGET_SECONDS`, `MEMORY_PROCESSOR_OWNER`) are Bicep parameters, documented in [`infra/README.md` → Counter-based trigger configuration](../infra/README.md#counter-based-trigger-configuration-function-app-only). Change them with `azd env set ...` then `azd up`. `MAX_BATCH_SIZE` must be at least 1; a lower value falls back to `20`.
 
+## Tenants
+
+The tenant is not a setting. A client takes `tenant_id` as a constructor argument (default `"default"`), and the Function App processes each turn in the tenant stored on it, so one deployment serves every tenant of the database. Each owner's partition `[tenant_id, user_id]` can hold up to 20 GB and 10,000 RU/s (5,000 RU/s on a serverless account), so spread one very busy owner, such as one agent id shared by every user, over several ids. See [Tenants and Owners](concepts.md#tenants-and-owners).
+
 ## Reconcile, procedure and extraction knobs
 
 These settings are read from the environment: `.env` for the SDK, App Settings for the Function App. On the Function App, `DEDUP_POOL_SIZE` and `ACTIVITY_TIME_BUDGET_SECONDS` are Bicep parameters (`azd env set DEDUP_POOL_SIZE 100`, then `azd up`); the others below are not, so the code defaults apply unless you set them. Set one on the Function App with `az functionapp config appsettings set`, or add it to `infra/modules/functions.bicep` so `azd up` keeps it.

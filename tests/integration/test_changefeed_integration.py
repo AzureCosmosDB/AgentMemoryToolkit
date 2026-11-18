@@ -13,7 +13,9 @@ A running Azure Functions host (deployed or local ``func start``) with the
 change-feed trigger configured is required, along with the ``turns``,
 ``counter``, and ``leases`` containers. Post container-split, the change-feed
 trigger binds to the ``turns`` container - turn documents must be inserted
-there, not into ``memories``.
+there, not into ``memories``. The Function App reads ``tenant_id`` from each
+changed turn, so the turns carry one, and a counter lives in the
+``[tenant_id, user_id]`` partition of its owner.
 """
 
 import os
@@ -65,9 +67,10 @@ def cosmos_clients():
 
 
 @pytest.fixture
-def unique_ids():
-    """Generate unique user_id and thread_id for test isolation."""
+def unique_ids(integration_tenant_id):
+    """Generate a unique user_id and thread_id for test isolation, in the integration tenant."""
     return {
+        "tenant_id": integration_tenant_id,
         "user_id": f"test-user-{uuid.uuid4().hex[:8]}",
         "thread_id": f"test-thread-{uuid.uuid4().hex[:8]}",
     }
@@ -76,10 +79,11 @@ def unique_ids():
 class TestChangeFeedIntegration:
     """Integration tests for change feed trigger with live Cosmos DB."""
 
-    def _insert_turn(self, turns_container, user_id, thread_id):
+    def _insert_turn(self, turns_container, tenant_id, user_id, thread_id):
         """Insert a single turn document into the turns container."""
         doc = {
             "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
             "user_id": user_id,
             "thread_id": thread_id,
             "role": "user",
@@ -91,12 +95,12 @@ class TestChangeFeedIntegration:
         turns_container.upsert_item(body=doc)
         return doc
 
-    def _read_counter(self, counter_container, counter_id, user_id, thread_id):
+    def _read_counter(self, counter_container, counter_id, tenant_id, user_id):
         """Read a counter document, returning None if not found."""
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         try:
-            return counter_container.read_item(item=counter_id, partition_key=[user_id, thread_id])
+            return counter_container.read_item(item=counter_id, partition_key=[tenant_id, user_id])
         except CosmosResourceNotFoundError:
             return None
 
@@ -108,19 +112,20 @@ class TestChangeFeedIntegration:
         waiting for the change feed to process them.
         """
         turns, counters = cosmos_clients
+        tenant_id = unique_ids["tenant_id"]
         user_id = unique_ids["user_id"]
         thread_id = unique_ids["thread_id"]
         counter_id = f"thread:{user_id}:{thread_id}"
 
         # Insert 3 turn documents
         for _ in range(3):
-            self._insert_turn(turns, user_id, thread_id)
+            self._insert_turn(turns, tenant_id, user_id, thread_id)
 
         # Poll for counter to appear (change feed has latency)
         deadline = time.time() + 60
         counter_doc = None
         while time.time() < deadline:
-            counter_doc = self._read_counter(counters, counter_id, user_id, thread_id)
+            counter_doc = self._read_counter(counters, counter_id, tenant_id, user_id)
             if counter_doc and counter_doc.get("count", 0) >= 3:
                 break
             time.sleep(3)
@@ -128,4 +133,5 @@ class TestChangeFeedIntegration:
         assert counter_doc is not None, (
             f"Counter {counter_id} was not created within 60s. Is the change feed trigger running?"
         )
+        assert counter_doc["tenant_id"] == tenant_id
         assert counter_doc["count"] >= 3, f"Expected counter >= 3, got {counter_doc['count']}"

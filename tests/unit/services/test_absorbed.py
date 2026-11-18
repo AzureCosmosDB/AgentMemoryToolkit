@@ -21,17 +21,19 @@ from azure.cosmos.agent_memory.services._absorbed import (
 )
 from azure.cosmos.agent_memory.services._combine import COMBINE_REASON
 
-# m1 absorbed a and b; a absorbed c; a bad record points c back at a. The records live in different threads.
+# m1 absorbed a and b; a absorbed c; a bad record points c back at a. The records come from different threads, which
+# does not matter: they all sit in the owner's partition.
 FOLDED = {
-    "m1": [{"id": "a", "type": "fact", "thread_id": "t2"}, {"id": "b", "type": "fact", "thread_id": "t1"}],
-    "a": [{"id": "c", "type": "fact", "thread_id": "t3"}],
-    "c": [{"id": "a", "type": "fact", "thread_id": "t2"}],
+    "m1": [{"id": "a", "type": "fact"}, {"id": "b", "type": "fact"}],
+    "a": [{"id": "c", "type": "fact"}],
+    "c": [{"id": "a", "type": "fact"}],
 }
+OWNER_PARTITION = ["acme", "u1"]
 
 
 def _rows(*, query, parameters, **_kwargs):
     params = {p["name"]: p["value"] for p in parameters}
-    assert params["@user_id"] == "u1"
+    assert (params["@tenant_id"], params["@user_id"]) == ("acme", "u1")
     return list(FOLDED.get(params["@memory_id"], []))
 
 
@@ -54,10 +56,11 @@ def _async_container():
 
 
 def test_the_query_names_only_duplicate_combined_and_procedure_retirements():
-    query, parameters = absorbed_query("u1", "m1")
+    query, parameters = absorbed_query("acme", "u1", "m1")
 
     params = {p["name"]: p["value"] for p in parameters}
-    assert "c.user_id = @user_id" in query and params["@user_id"] == "u1"
+    assert "c.tenant_id = @tenant_id AND c.user_id = @user_id" in query
+    assert (params["@tenant_id"], params["@user_id"]) == ("acme", "u1")
     assert "c.superseded_by = @memory_id" in query and params["@memory_id"] == "m1"
     assert sorted(v for k, v in params.items() if k.startswith("@reason_")) == ["combined", "duplicate", "procedure"]
 
@@ -66,21 +69,23 @@ def test_everything_folded_in_is_deleted_once_children_before_parents():
     container = MagicMock()
     container.query_items.side_effect = _rows
 
-    found = delete_absorbed(container, "u1", "m1")
+    found = delete_absorbed(container, "acme", "u1", "m1")
 
     assert sorted(row["id"] for row in found) == ["a", "b", "c"]
     deleted = [call.kwargs["item"] for call in container.delete_item.call_args_list]
     assert sorted(deleted) == ["a", "b", "c"] and deleted.index("c") < deleted.index("a")
 
 
-def test_each_record_is_looked_up_across_partitions_and_deleted_under_its_own_thread():
+def test_every_record_is_looked_up_and_deleted_in_the_owners_partition():
     container = MagicMock()
     container.query_items.side_effect = _rows
 
-    delete_absorbed(container, "u1", "m1")
+    delete_absorbed(container, "acme", "u1", "m1")
 
-    assert all(call.kwargs["enable_cross_partition_query"] for call in container.query_items.call_args_list)
-    assert _deleted(container) == {"a": ["u1", "t2"], "b": ["u1", "t1"], "c": ["u1", "t3"]}
+    queried = [call.kwargs["partition_key"] for call in container.query_items.call_args_list]
+    assert queried and all(key == OWNER_PARTITION for key in queried)
+    assert not any("enable_cross_partition_query" in call.kwargs for call in container.query_items.call_args_list)
+    assert _deleted(container) == {"a": OWNER_PARTITION, "b": OWNER_PARTITION, "c": OWNER_PARTITION}
 
 
 def test_a_record_already_gone_is_skipped_and_other_failures_raise():
@@ -88,18 +93,18 @@ def test_a_record_already_gone_is_skipped_and_other_failures_raise():
     container.query_items.side_effect = _rows
     container.delete_item.side_effect = CosmosResourceNotFoundError(status_code=404, message="not found")
 
-    assert len(delete_absorbed(container, "u1", "m1")) == 3
+    assert len(delete_absorbed(container, "acme", "u1", "m1")) == 3
 
     container.delete_item.side_effect = RuntimeError("throttled")
     with pytest.raises(RuntimeError):
-        delete_absorbed(container, "u1", "m1")
+        delete_absorbed(container, "acme", "u1", "m1")
 
 
 def test_nothing_folded_in_means_nothing_is_deleted():
     container = MagicMock()
     container.query_items.return_value = []
 
-    assert delete_absorbed(container, "u1", "m1") == []
+    assert delete_absorbed(container, "acme", "u1", "m1") == []
     container.delete_item.assert_not_called()
 
 
@@ -133,20 +138,22 @@ def test_the_cascade_follows_exactly_the_retirements_that_leave_a_copy_behind(mo
 async def test_the_async_walk_matches_the_sync_one():
     container = _async_container()
 
-    found = await adelete_absorbed(container, "u1", "m1")
+    found = await adelete_absorbed(container, "acme", "u1", "m1")
 
     assert sorted(row["id"] for row in found) == ["a", "b", "c"]
     deleted = [call.kwargs["item"] for call in container.delete_item.call_args_list]
     assert sorted(deleted) == ["a", "b", "c"] and deleted.index("c") < deleted.index("a")
-    assert _deleted(container) == {"a": ["u1", "t2"], "b": ["u1", "t1"], "c": ["u1", "t3"]}
+    queried = [call.kwargs["partition_key"] for call in container.query_items.call_args_list]
+    assert queried and all(key == OWNER_PARTITION for key in queried)
+    assert _deleted(container) == {"a": OWNER_PARTITION, "b": OWNER_PARTITION, "c": OWNER_PARTITION}
 
 
 async def test_the_async_walk_skips_a_record_already_gone_and_raises_other_failures():
     container = _async_container()
     container.delete_item.side_effect = CosmosResourceNotFoundError(status_code=404, message="not found")
 
-    assert len(await adelete_absorbed(container, "u1", "m1")) == 3
+    assert len(await adelete_absorbed(container, "acme", "u1", "m1")) == 3
 
     container.delete_item.side_effect = RuntimeError("throttled")
     with pytest.raises(RuntimeError):
-        await adelete_absorbed(container, "u1", "m1")
+        await adelete_absorbed(container, "acme", "u1", "m1")

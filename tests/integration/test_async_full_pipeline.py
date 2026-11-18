@@ -25,6 +25,7 @@ import time
 
 import pytest
 
+from azure.cosmos.agent_memory._partitioning import OWNER_FILTER, owner_parameters, partition_key_for
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from tests.conftest import INTEGRATION_ENABLED
 
@@ -68,6 +69,7 @@ async def async_agent_memory(
     embedding_deployment_name,
     embedding_dimensions,
     chat_deployment_name,
+    integration_tenant_id,
 ):
     """A live AsyncCosmosMemoryClient with its containers provisioned/connected."""
     if not cosmos_endpoint or not ai_foundry_endpoint:
@@ -83,6 +85,7 @@ async def async_agent_memory(
         embedding_deployment_name=embedding_deployment_name,
         embedding_dimensions=embedding_dimensions,
         chat_deployment_name=chat_deployment_name,
+        tenant_id=integration_tenant_id,
     )
     # The async client cannot auto-connect in __init__; do it explicitly.
     await client.create_memory_store()
@@ -110,8 +113,9 @@ async def _async_add_turns(
 
 async def _async_cleanup(mem: AsyncCosmosMemoryClient, user_id: str) -> None:
     """Best-effort delete of every document for *user_id* across all containers."""
-    sql = "SELECT c.id, c.thread_id FROM c WHERE c.user_id = @uid"
-    params = [{"name": "@uid", "value": user_id}]
+    partition_key = partition_key_for(mem.tenant_id, user_id)
+    sql = f"SELECT c.id FROM c WHERE {OWNER_FILTER}"
+    params = owner_parameters(mem.tenant_id, user_id)
     for container in (
         mem._turns_container_client,
         mem._memories_container_client,
@@ -120,15 +124,14 @@ async def _async_cleanup(mem: AsyncCosmosMemoryClient, user_id: str) -> None:
         if container is None:
             continue
         try:
-            docs = [doc async for doc in container.query_items(query=sql, parameters=params)]
+            docs = [
+                doc async for doc in container.query_items(query=sql, parameters=params, partition_key=partition_key)
+            ]
         except Exception:
             continue
         for doc in docs:
             try:
-                await container.delete_item(
-                    item=doc["id"],
-                    partition_key=[user_id, doc.get("thread_id", "")],
-                )
+                await container.delete_item(item=doc["id"], partition_key=partition_key)
             except Exception:
                 pass
 
@@ -145,8 +148,9 @@ async def _async_seed_fact_with_embedding(
     sync helper). Retries through transient embedding-service blips so the
     extract-time vector floor always has a neighbour; skips honestly if the
     embedding service is genuinely unavailable."""
-    check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
-    params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
+    check = f"SELECT c.id FROM c WHERE {OWNER_FILTER} AND c.content = @content AND IS_DEFINED(c.embedding)"
+    params = [*owner_parameters(mem.tenant_id, user_id), {"name": "@content", "value": content}]
+    partition_key = partition_key_for(mem.tenant_id, user_id)
     for _ in range(retries):
         await mem.upsert_memory(
             user_id=user_id,
@@ -156,7 +160,12 @@ async def _async_seed_fact_with_embedding(
             thread_id=thread_id,
             salience=0.7,
         )
-        embedded = [doc async for doc in mem._memories_container_client.query_items(query=check, parameters=params)]
+        embedded = [
+            doc
+            async for doc in mem._memories_container_client.query_items(
+                query=check, parameters=params, partition_key=partition_key
+            )
+        ]
         if embedded:
             return
         await asyncio.sleep(1)

@@ -750,6 +750,38 @@ class TestSupersession:
 
 
 # ---------------------------------------------------------------------------
+# Tenant
+# ---------------------------------------------------------------------------
+
+
+class TestTenant:
+    def test_a_record_belongs_to_no_tenant_until_it_is_written_unless_it_names_one(self):
+        record = TurnRecord(user_id="u1", role="user", content="hello")
+
+        assert record.tenant_id is None
+        assert "tenant_id" not in record.to_doc()
+
+    @pytest.mark.parametrize(
+        ("memory_type", "kwargs"),
+        [
+            ("turn", {"user_id": "u1", "role": "user", "content": "hello"}),
+            ("thread_summary", _thread_summary_kwargs()),
+            ("user_summary", _user_summary_kwargs()),
+            ("fact", _fact_kwargs()),
+            ("episodic", _episodic_kwargs()),
+            ("procedural", _procedural_kwargs()),
+        ],
+    )
+    def test_every_record_type_writes_its_tenant_and_reads_it_back(self, memory_type, kwargs):
+        record = MemoryRecord(memory_type=memory_type, tenant_id="acme", **kwargs)
+
+        doc = record.to_doc()
+
+        assert doc["tenant_id"] == "acme"
+        assert MemoryRecord.from_doc(doc).tenant_id == "acme"
+
+
+# ---------------------------------------------------------------------------
 # to_doc / from_doc round-trip & system-field handling
 # ---------------------------------------------------------------------------
 

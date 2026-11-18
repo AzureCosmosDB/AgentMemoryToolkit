@@ -48,6 +48,14 @@ def _install_azure_functions_stubs() -> None:
             def route(self, *args, **kwargs):
                 return lambda fn: fn
 
+            def retry(self, **kwargs):
+                # Keep what a function registered, so a test can see its retry policy.
+                def decorator(fn):
+                    fn.retry_policy = kwargs
+                    return fn
+
+                return decorator
+
             def durable_client_input(self, *args, **kwargs):
                 return lambda fn: fn
 

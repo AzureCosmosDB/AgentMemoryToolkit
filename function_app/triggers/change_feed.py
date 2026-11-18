@@ -9,6 +9,9 @@ skipped. Counters, watermarks, instance IDs (a hash of the owner, see :mod:`shar
 inputs are per ``(tenant_id, user_id[, thread_id])``, so one Function App serves every tenant that writes to the
 containers. A failure for one thread or owner does not stop the others in the batch; the batch fails at the end.
 
+A failed batch is retried by the host (see :data:`_RETRY_POLICY`). A retry only repeats what failed: a counter skips
+the turns it has already counted, and an orchestration whose instance exists is not started again.
+
 The trigger is registered as a :class:`df.Blueprint` and wired into the
 top-level :class:`df.DFApp` from ``function_app.py``. The pure-logic entry
 point :func:`process_changefeed_batch` accepts plain ``dict`` documents and a
@@ -119,10 +122,16 @@ def _thread_of(doc: dict) -> str | None:
         return None
 
 
-def _record_key_failure(exc: Exception, key_errors: list[Exception]) -> None:
-    """Log one thread's or owner's failed update and remember it, so the rest of the batch still runs."""
+def _record_key_failure(exc: Exception, key: tuple[str, ...], key_errors: list[Exception]) -> None:
+    """Log one thread's or owner's failed update and remember it, so the rest of the batch still runs.
+
+    The log names the tenant, owner and (for a thread) thread of the counter, which is what an operator needs to know
+    which turns were not counted once the host has used up its retries and dropped the batch.
+    """
+    scope = " ".join(f"{label}={value}" for label, value in zip(("tenant", "user", "thread"), key))
     logger.error(
-        "change-feed: failed to update a counter (exc_type=%s): %s",
+        "change-feed: failed to update the counter of %s (exc_type=%s): %s",
+        scope,
         type(exc).__name__,
         describe_exception(exc, stack=True),
     )
@@ -195,8 +204,9 @@ async def process_changefeed_batch(
     # ---- Step 1: Filter to turns + group by scope ----
     thread_counts: dict[tuple[str, str, str], int] = defaultdict(int)
     user_counts: dict[tuple[str, str], int] = defaultdict(int)
-    thread_max_lsn: dict[tuple[str, str, str], int] = {}
-    user_max_lsn: dict[tuple[str, str], int] = {}
+    # The change-feed LSN of every counted turn: a counter skips the turns it has counted already, by their LSN.
+    thread_lsns: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+    user_lsns: dict[tuple[str, str], list[int]] = defaultdict(list)
 
     # Track which threads contributed to each user counter. The user-summary orchestrator
     # passes them to the pipeline, which only logs how many (``observed_thread_ids``): it
@@ -209,8 +219,9 @@ async def process_changefeed_batch(
             continue
         # Turns are append-only from this trigger's perspective: the Durable
         # backend never mutates a turn doc (episodic segmentation advances a
-        # separate cursor doc; fact extraction is count-based), so each turn is
-        # delivered - and counted - exactly once, at creation.
+        # separate cursor doc; fact extraction is count-based), so a turn
+        # appears in the change feed once, at creation. A redelivered batch
+        # repeats it, and the counters skip it by its LSN.
         tenant_id = _tenant_of(doc)
         user_id = _owner_of(doc)
         thread_id = _thread_of(doc)
@@ -230,8 +241,8 @@ async def process_changefeed_batch(
                 lsn_int = int(lsn)
             except (TypeError, ValueError):
                 continue
-            thread_max_lsn[thread_key] = max(thread_max_lsn.get(thread_key, 0), lsn_int)
-            user_max_lsn[user_key] = max(user_max_lsn.get(user_key, 0), lsn_int)
+            thread_lsns[thread_key].append(lsn_int)
+            user_lsns[user_key].append(lsn_int)
 
     thread_enabled = n_thread > 0 or n_facts > 0 or n_episode > 0
     user_enabled = n_user > 0
@@ -256,7 +267,8 @@ async def process_changefeed_batch(
             try:
                 tenant_id, user_id, thread_id = thread_key
                 cid = thread_counter_id(user_id, thread_id)
-                lsn = thread_max_lsn.get(thread_key)
+                turn_lsns = thread_lsns.get(thread_key, [])
+                lsn = max(turn_lsns, default=None)
                 old_count, new_count = await increment_counter_by(
                     counter_container,
                     tenant_id,
@@ -264,12 +276,12 @@ async def process_changefeed_batch(
                     user_id,
                     thread_id,
                     batch_count,
-                    batch_max_lsn=lsn,
+                    turn_lsns=turn_lsns,
                 )
 
                 if n_thread > 0 and crosses_threshold(old_count, new_count, n_thread):
                     instance_id = orchestration_instance_id(
-                        "thread_summary", tenant_id, user_id, thread_id, count=new_count
+                        "thread_summary", tenant_id, user_id, thread_id, count=new_count, lsn=lsn
                     )
                     await _safe_start(
                         starter,
@@ -280,7 +292,9 @@ async def process_changefeed_batch(
                     )
 
                 if n_facts > 0 and crosses_threshold(old_count, new_count, n_facts):
-                    instance_id = orchestration_instance_id("extract", tenant_id, user_id, thread_id, count=new_count)
+                    instance_id = orchestration_instance_id(
+                        "extract", tenant_id, user_id, thread_id, count=new_count, lsn=lsn
+                    )
                     should_reconcile = bool(
                         n_dedup_turns > 0 and crosses_threshold(old_count, new_count, n_dedup_turns)
                     )
@@ -310,7 +324,9 @@ async def process_changefeed_batch(
                     )
 
                 if n_episode > 0 and crosses_threshold(old_count, new_count, n_episode):
-                    instance_id = orchestration_instance_id("episode", tenant_id, user_id, thread_id, count=new_count)
+                    instance_id = orchestration_instance_id(
+                        "episode", tenant_id, user_id, thread_id, count=new_count, lsn=lsn
+                    )
                     await _safe_start(
                         starter,
                         "ExtractEpisodesOrchestrator",
@@ -319,7 +335,7 @@ async def process_changefeed_batch(
                         orchestration_errors,
                     )
             except Exception as exc:
-                _record_key_failure(exc, key_errors)
+                _record_key_failure(exc, thread_key, key_errors)
 
     # ---- Step 3: User-scoped counters ----
     if user_enabled:
@@ -327,7 +343,8 @@ async def process_changefeed_batch(
             try:
                 tenant_id, user_id = user_key
                 cid = user_counter_id(user_id)
-                lsn = user_max_lsn.get(user_key)
+                turn_lsns = user_lsns.get(user_key, [])
+                lsn = max(turn_lsns, default=None)
                 old_count, new_count = await increment_counter_by(
                     counter_container,
                     tenant_id,
@@ -335,10 +352,12 @@ async def process_changefeed_batch(
                     user_id,
                     config.USER_COUNTER_THREAD_ID,
                     batch_count,
-                    batch_max_lsn=lsn,
+                    turn_lsns=turn_lsns,
                 )
                 if crosses_threshold(old_count, new_count, n_user):
-                    instance_id = orchestration_instance_id("user_summary", tenant_id, user_id, count=new_count)
+                    instance_id = orchestration_instance_id(
+                        "user_summary", tenant_id, user_id, count=new_count, lsn=lsn
+                    )
                     await _safe_start(
                         starter,
                         "UserSummaryOrchestrator",
@@ -352,11 +371,12 @@ async def process_changefeed_batch(
                         orchestration_errors,
                     )
             except Exception as exc:
-                _record_key_failure(exc, key_errors)
+                _record_key_failure(exc, user_key, key_errors)
 
-    # Re-raise so the host records the batch as failed, and retries it when a retry policy is set: a counter skips
-    # turns it has already counted, so a retry is safe. The host logs this error and any it was raised from, so it
-    # names the first failure safely instead of chaining the SDK error and its text.
+    # Re-raise so the host records the batch as failed and, under the retry policy, runs it again. A retry is safe: a
+    # counter skips turns it has already counted, and ``_safe_start`` leaves an instance that exists alone. The host
+    # logs this error and any it was raised from, so it names the first failure safely instead of chaining the SDK
+    # error and its text.
     if orchestration_errors or key_errors:
         problems: list[str] = []
         if orchestration_errors:
@@ -376,23 +396,46 @@ async def _safe_start(
     client_input: dict,
     errors: list[Exception],
 ) -> None:
-    logger.info(
-        "change-feed: starting %s instance=%s tenant=%s user=%s thread=%s",
-        orchestration_name,
-        instance_id,
-        client_input["tenant_id"],
-        client_input["user_id"],
-        client_input.get("thread_id"),
-    )
+    """Start ``orchestration_name`` as ``instance_id``, unless an instance with that id exists.
+
+    A retried or redelivered batch derives the ids of the orchestrations it already started, so an instance that
+    exists, in any state, is the run this threshold crossing started and is left as it is. Durable Functions refuses
+    an id only while its instance is starting or running and starts a finished one again, which is why the status is
+    read first.
+
+    The status read and the start are not atomic. Of two deliveries of one batch that overlap in time (a lease that
+    moves while the batch runs), the 409 stops the second only while the first run is still starting or running. If
+    the first has finished in the gap between the second's status read and its start, the second starts the id again.
+    That takes a stall as long as an orchestration, and the second run writes nothing twice because record ids are
+    deterministic. Closing the gap would take a claim record and crash recovery, because the Durable client cannot do
+    it: ``start_new`` has no option to refuse a finished id.
+
+    A failure of either call is recorded in ``errors``, which fails the batch so the host retries it.
+    """
     try:
+        if await starter.get_status(instance_id):
+            logger.info(
+                "change-feed: instance %s of %s already exists, skipping",
+                instance_id,
+                orchestration_name,
+            )
+            return
+        logger.info(
+            "change-feed: starting %s instance=%s tenant=%s user=%s thread=%s",
+            orchestration_name,
+            instance_id,
+            client_input["tenant_id"],
+            client_input["user_id"],
+            client_input.get("thread_id"),
+        )
         await starter.start_new(
             orchestration_name,
             instance_id=instance_id,
             client_input=client_input,
         )
     except Exception as exc:
-        # Duplicate-instance-id is the idempotency mechanism for change-feed
-        # retries: it shows up as a 409 Conflict from the Durable client.
+        # An instance that is starting or running is refused with a 409 Conflict by the Durable client: the second
+        # guard after the status read, for a delivery that overlaps this one (see the docstring for what it misses).
         # The Durable Python SDK currently raises bare ``Exception`` for
         # everything (no typed class for OrchestrationAlreadyExists), so
         # we keep two signals - status_code first, then the canonical
@@ -429,6 +472,19 @@ async def _safe_start(
 # Trigger registration
 # ---------------------------------------------------------------------------
 
+# What the host does with a batch that fails: it runs the batch again, with the same documents, after an exponential
+# backoff delay of at least the minimum and at most the maximum. The count is bounded because a failure that does not
+# go away, such as a container with the wrong partition key, must be given up on and not retried forever; once the
+# retries are used up the batch is dropped, as it was before there was a policy. The batch keeps its lease while it is
+# retried, so the changes behind it wait: about a minute and a half when every retry fails. The host takes every value
+# as a string.
+_RETRY_POLICY = {
+    "strategy": "exponential_backoff",
+    "max_retry_count": "5",
+    "minimum_interval": "00:00:05",
+    "maximum_interval": "00:05:00",
+}
+
 
 # Bind directly to the turns container so only turn writes can fire this trigger.
 @bp.cosmos_db_trigger(
@@ -439,6 +495,7 @@ async def _safe_start(
     lease_container_name=config.LEASE_CONTAINER,
     create_lease_container_if_not_exists=True,
 )
+@bp.retry(**_RETRY_POLICY)
 @bp.durable_client_input(client_name="starter")
 async def on_memory_change(documents: func.DocumentList, starter) -> None:
     """Change-feed trigger entry point - delegates to :func:`process_changefeed_batch`."""

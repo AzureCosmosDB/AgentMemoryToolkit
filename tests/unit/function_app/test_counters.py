@@ -164,7 +164,7 @@ class TestIncrementExisting:
                 "u1",
                 "t1",
                 4,
-                batch_max_lsn=42,
+                turn_lsns=[39, 40, 41, 42],
             )
         )
 
@@ -214,9 +214,10 @@ class TestIncrementExisting:
         assert container.upsert_item.await_count == 3  # MAX_RETRIES
 
     def test_lsn_replay_returns_cached_without_writing(self):
-        """When the doc already records ``last_batch_lsn == batch_max_lsn``
-        we treat the change-feed batch as a duplicate delivery: return the
-        cached ``(pre_batch_count, current_count)`` and DO NOT write."""
+        """When every turn is at or below the stored ``last_batch_lsn`` and the
+        highest is the stored one, we treat the change-feed batch as a duplicate
+        delivery: return the cached ``(pre_batch_count, current_count)`` and DO
+        NOT write."""
         container = _make_container()
         container.read_item.return_value = {
             "id": "thread:u1:t1",
@@ -234,7 +235,7 @@ class TestIncrementExisting:
                 "u1",
                 "t1",
                 4,
-                batch_max_lsn=100,
+                turn_lsns=[97, 98, 99, 100],
             )
         )
 
@@ -242,8 +243,8 @@ class TestIncrementExisting:
         assert container.upsert_item.await_count == 0
         assert container.create_item.await_count == 0
 
-    def test_different_lsn_does_not_trigger_replay(self):
-        """A different LSN is treated as a fresh batch and increments normally."""
+    def test_a_newer_lsn_is_a_fresh_batch(self):
+        """Turns above the stored LSN are new and increment normally."""
         container = _make_container()
         container.read_item.return_value = {
             "id": "thread:u1:t1",
@@ -261,7 +262,7 @@ class TestIncrementExisting:
                 "u1",
                 "t1",
                 4,
-                batch_max_lsn=101,
+                turn_lsns=[101, 102, 103, 104],
             )
         )
 
@@ -269,12 +270,11 @@ class TestIncrementExisting:
         assert container.upsert_item.await_count == 1
 
     def test_out_of_order_replay_is_noop(self):
-        """When the redelivered batch's LSN is *less than* the stored LSN
+        """When every turn of the redelivered batch is *below* the stored LSN
         (lease re-balance / host crash redelivering an old batch after a
         newer one already landed), the increment is a no-op - return
         (current, current) so threshold-crossing logic doesn't fire a
-        spurious extract/dedup. We use ``>=`` not
-        ``==`` for replay detection."""
+        spurious extract/dedup."""
         container = _make_container()
         container.read_item.return_value = {
             "id": "thread:u1:t1",
@@ -292,13 +292,112 @@ class TestIncrementExisting:
                 "u1",
                 "t1",
                 5,
-                batch_max_lsn=100,
+                turn_lsns=[96, 97, 98, 99, 100],
             )
         )
 
         assert (old, new) == (10, 10)
         assert container.upsert_item.await_count == 0
         assert container.create_item.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# A batch delivered again with newer turns counts only the new ones
+# ---------------------------------------------------------------------------
+
+
+class TestRedeliveryWithNewerTurns:
+    @staticmethod
+    def _counter_at(count: int, last_batch_lsn: int, last_batch_old_count: int = 0) -> dict:
+        return {
+            "id": "thread:u1:t1",
+            "count": count,
+            "last_batch_lsn": last_batch_lsn,
+            "last_batch_old_count": last_batch_old_count,
+            "_etag": "etag-A",
+        }
+
+    def _increment(self, container, count: int, turn_lsns):
+        return asyncio.run(
+            increment_counter_by(container, TENANT, "thread:u1:t1", "u1", "t1", count, turn_lsns=turn_lsns)
+        )
+
+    def test_the_turns_already_counted_are_not_counted_again(self):
+        """Turns 1-3 were counted but the checkpoint stayed behind; turns 4 and 5 were written, so the change feed
+        now delivers 1-5. Only 4 and 5 are new: the count is 5, not 8."""
+        container = _make_container()
+        container.read_item.return_value = self._counter_at(count=3, last_batch_lsn=3)
+
+        old, new = self._increment(container, 5, [1, 2, 3, 4, 5])
+
+        assert (old, new) == (3, 5)
+        body = container.upsert_item.await_args.kwargs["body"]
+        assert (body["count"], body["last_batch_lsn"], body["last_batch_old_count"]) == (5, 5, 3)
+
+    def test_the_redelivery_that_was_applied_replays_what_the_first_one_returned(self):
+        """After that, a further delivery of 1-5 is a plain replay: it returns the pair the first one did."""
+        container = _make_container()
+        container.read_item.return_value = self._counter_at(count=5, last_batch_lsn=5, last_batch_old_count=3)
+
+        old, new = self._increment(container, 5, [1, 2, 3, 4, 5])
+
+        assert (old, new) == (3, 5)
+        assert container.upsert_item.await_count == 0
+
+    def test_a_turn_at_the_stored_lsn_was_counted_and_one_above_it_was_not(self):
+        container = _make_container()
+        container.read_item.return_value = self._counter_at(count=3, last_batch_lsn=3)
+
+        old, new = self._increment(container, 2, [3, 4])
+
+        assert (old, new) == (3, 4)
+
+    def test_turns_that_share_an_lsn_are_each_counted(self):
+        """Documents written in one transactional batch have one LSN: all of them are new, or none is."""
+        container = _make_container()
+        container.read_item.return_value = self._counter_at(count=3, last_batch_lsn=3)
+
+        old, new = self._increment(container, 4, [9, 9, 9, 9])
+
+        assert (old, new) == (3, 7)
+
+    def test_a_first_write_counts_every_turn(self):
+        container = _make_container()
+        container.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+
+        old, new = self._increment(container, 3, [7, 8, 9])
+
+        assert (old, new) == (0, 3)
+        assert container.create_item.await_args.kwargs["body"]["last_batch_lsn"] == 9
+
+    def test_a_counter_without_an_lsn_counts_every_turn(self):
+        """The SDK's counters carry no ``last_batch_lsn``, so nothing in a batch can be told to be counted."""
+        container = _make_container()
+        container.read_item.return_value = {"id": "thread:u1:t1", "count": 3, "_etag": "etag-A"}
+
+        old, new = self._increment(container, 2, [1, 2])
+
+        assert (old, new) == (3, 5)
+
+    def test_a_batch_with_an_lsn_for_only_some_turns_is_counted_whole(self):
+        """A turn without an LSN cannot be told from a new one, so the batch is not compared turn by turn. Like a
+        batch with no LSNs at all, it leaves none on the counter."""
+        container = _make_container()
+        container.read_item.return_value = self._counter_at(count=3, last_batch_lsn=100)
+
+        old, new = self._increment(container, 3, [90, 91])
+
+        assert (old, new) == (3, 6)
+        assert container.upsert_item.await_args.kwargs["body"]["last_batch_lsn"] is None
+
+    def test_a_batch_without_lsns_is_counted_whole(self):
+        container = _make_container()
+        container.read_item.return_value = self._counter_at(count=3, last_batch_lsn=100)
+
+        old, new = self._increment(container, 2, ())
+
+        assert (old, new) == (3, 5)
+        assert container.upsert_item.await_args.kwargs["body"]["last_batch_lsn"] is None
 
 
 # ---------------------------------------------------------------------------

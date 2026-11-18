@@ -21,6 +21,7 @@ add ``last_failure_at`` and ``last_failure_reason``; an increment keeps all thre
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -88,23 +89,27 @@ async def increment_counter_by(
     thread_id: str,
     count: int,
     *,
-    batch_max_lsn: int | None = None,
+    turn_lsns: Sequence[int] = (),
     owner: str | None = "durable",
 ) -> tuple[int, int]:
-    """Atomically increment ``counter_id`` by *count* and return ``(old, new)``.
+    """Atomically add *count* turns to ``counter_id`` and return ``(old, new)``.
 
     * Uses ETag-based optimistic concurrency, retrying up to ``MAX_RETRIES``
       times on HTTP 412.
     * Uses ``create_item`` for the first-write path, retrying on HTTP 409 in
       case multiple Function workers raced to seed the counter.
-    * If ``batch_max_lsn`` is *less than or equal to* the LSN persisted on the
-      existing doc, this is treated as a change-feed replay (immediate or
-      after a lease re-balance / host crash where checkpoints regressed) and
-      we return without writing. For the equal case we return the cached
-      ``(pre_batch_count, current_count)`` so threshold-crossing semantics
-      hold; for the strict-less case we return ``(current, current)`` (no
-      crossing) because some other batch already advanced the counter past
-      this one.
+    * ``turn_lsns`` holds the change-feed ``_lsn`` of each of the *count* turns.
+      The counter remembers the highest LSN it has counted (``last_batch_lsn``)
+      and a turn at or below it was counted already, so it adds nothing. A batch
+      the change feed delivers again (a host retry, or a lease re-balance or host
+      crash that left the checkpoint behind) is therefore counted once, even when
+      newer turns were written since and ride along in the redelivery. A batch
+      with an LSN for only some of its turns, or for none, is counted whole.
+    * When every turn is at or below the stored LSN the batch is a replay and
+      nothing is written. For the equal case we return the cached
+      ``(pre_batch_count, current_count)`` so threshold-crossing semantics hold;
+      for the strict-less case we return ``(current, current)`` (no crossing)
+      because some other batch already advanced the counter past this one.
     * Preserves SDK-written failure breadcrumbs (``last_failure_at`` /
       ``last_failure_reason``) so monitors don't flap when the FA writes
       after an SDK failure stamp.
@@ -113,6 +118,9 @@ async def increment_counter_by(
       double-write configurations across SDK and FA.
     """
     partition_key = partition_key_for(tenant_id, user_id)
+    # A turn without an LSN cannot be told from a new one, so a turn-by-turn comparison needs one for every turn.
+    lsns = list(turn_lsns) if count > 0 and len(turn_lsns) == count else []
+    batch_max_lsn = max(lsns) if lsns else None
 
     for attempt in range(MAX_RETRIES):
         # ---- Read current counter (or default to 0) ----
@@ -135,20 +143,15 @@ async def increment_counter_by(
             )
 
         # ---- Replay detection via LSN ----
-        # Use ``>=`` not ``==`` so out-of-order redeliveries (lease
-        # re-balance, host crash → checkpoint regression where another
-        # batch landed in between) also short-circuit. For the exact
-        # match we replay the cached result; for the strict-greater case
-        # we return (current, current) - no threshold crossing - because
-        # the batch's effect is already absorbed in a later state we have
-        # no cached pre-batch value for.
-        if (
-            batch_max_lsn is not None
-            and existing_doc is not None
-            and existing_doc.get("last_batch_lsn") is not None
-            and existing_doc["last_batch_lsn"] >= batch_max_lsn
-        ):
-            stored_lsn = existing_doc["last_batch_lsn"]
+        # A turn at or below the stored LSN was counted already. The turns of one delivery can be counted in part:
+        # the checkpoint stayed behind (lease re-balance, host crash, timeout) while newer turns were written, so the
+        # redelivery holds both. Each turn is therefore compared with the stored LSN, not only the batch's highest.
+        # When every turn was counted the batch is a replay: for the exact match we replay the cached result; for the
+        # strict-less case we return (current, current) - no threshold crossing - because the batch's effect is
+        # already absorbed in a later state we have no cached pre-batch value for.
+        stored_lsn = existing_doc.get("last_batch_lsn") if existing_doc is not None else None
+        counted = sum(1 for lsn in lsns if lsn <= stored_lsn) if stored_lsn is not None else 0
+        if lsns and counted == count:
             if stored_lsn == batch_max_lsn:
                 replay_old = existing_doc.get("last_batch_old_count", old_count)
                 logger.info(
@@ -164,8 +167,16 @@ async def increment_counter_by(
                 stored_lsn,
             )
             return (old_count, old_count)
+        if counted:
+            logger.info(
+                "Counter redelivery with newer turns counter_id=%s counted=%d new=%d stored_lsn=%s",
+                counter_id,
+                counted,
+                count - counted,
+                stored_lsn,
+            )
 
-        new_count = old_count + count
+        new_count = old_count + count - counted
         new_doc = {
             "id": counter_id,
             "tenant_id": tenant_id,
